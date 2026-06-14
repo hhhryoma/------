@@ -8,19 +8,41 @@ Attribute VB_Creatable = False
 Attribute VB_PredeclaredId = True
 Attribute VB_Exposed = True
 
+' ==========================================
+' ç­‹ãƒˆãƒ¬è¨˜éŒ² ã‚¨ãƒ³ãƒˆãƒªãƒ¼ãƒã‚¤ãƒ³ãƒˆ
+' ==========================================
+
+Sub ç­‹ãƒˆãƒ¬è¨˜éŒ²()
+  Call WorkoutLog.AddWorkoutEntry
+End Sub
+
+Sub ä»Šæ—¥ã®ãƒˆãƒ¬ãƒ¼ãƒ‹ãƒ³ã‚°ç¢ºèª()
+  Call WorkoutLog.ShowTodaysWorkouts
+End Sub
+
+Sub ç­‹ãƒˆãƒ¬çµ±è¨ˆ()
+  Call WorkoutLog.ShowWorkoutStats
+End Sub
+
+Sub ãƒ­ã‚°ã‚·ãƒ¼ãƒˆåˆæœŸåŒ–()
+  Call WorkoutLog.InitWorkoutSheet
+End Sub
+
+' ==========================================
+
 Sub trimFormat()
-' ‘ÎÛƒtƒHƒ‹ƒ_‚ÌƒpƒX‚ğæ“¾
+' ï¿½ÎÛƒtï¿½Hï¿½ï¿½ï¿½_ï¿½Ìƒpï¿½Xï¿½ï¿½ï¿½æ“¾
   Dim folderPath as String 
   folderPath = getFolderPath()
   if folderPath = "" then exit Sub
   Dim confimReturn as Integer
-  confimReturn = openCofirmMsgBox("‘ÎÛƒtƒ@ƒCƒ‹ƒpƒX [" & folderPath & "]‚ÅOKH") 
+  confimReturn = openCofirmMsgBox("ï¿½ÎÛƒtï¿½@ï¿½Cï¿½ï¿½ï¿½pï¿½X [" & folderPath & "]ï¿½ï¿½OKï¿½H") 
   select case confimReturn
     case vbNo
       exit Sub
   end select
-' ‘ÎÛƒtƒHƒ‹ƒ_‚ÌƒpƒX‚ğg—p‚µ‚ÄA”z‰º‚ÌExcelƒtƒ@ƒCƒ‹‚ÌÄ‹A“I‚É’Tõ
-' Œ©‚Â‚©‚Á‚½Excelƒtƒ@ƒCƒ‹‚É‘Î‚µ‚ÄƒTƒuƒvƒƒV[ƒWƒƒuexecutev‚Ìˆ—‚ğÀs
+' ï¿½ÎÛƒtï¿½Hï¿½ï¿½ï¿½_ï¿½Ìƒpï¿½Xï¿½ï¿½ï¿½gï¿½pï¿½ï¿½ï¿½ÄAï¿½zï¿½ï¿½ï¿½ï¿½Excelï¿½tï¿½@ï¿½Cï¿½ï¿½ï¿½ÌÄ‹Aï¿½Iï¿½É’Tï¿½ï¿½
+' ï¿½ï¿½ï¿½Â‚ï¿½ï¿½ï¿½ï¿½ï¿½Excelï¿½tï¿½@ï¿½Cï¿½ï¿½ï¿½É‘Î‚ï¿½ï¿½ÄƒTï¿½uï¿½vï¿½ï¿½ï¿½Vï¿½[ï¿½Wï¿½ï¿½ï¿½uexecuteï¿½vï¿½Ìï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½s
   Call getFilesRecursive(folderPath)
   
 End Sub
@@ -30,7 +52,7 @@ Sub openMsgBox(msg as String)
 End Sub
 
 Function openCofirmMsgBox(msg as String) as Integer
-  openCofirmMsgBox = MsgBox(msg, vbYesNo + vbQuestion + vbDefaultButton2, "Šm”F")
+  openCofirmMsgBox = MsgBox(msg, vbYesNo + vbQuestion + vbDefaultButton2, "ï¿½mï¿½F")
 End Function
 
 Function getFolderPath() as String
@@ -45,12 +67,12 @@ Sub getFilesRecursive(path As String)
   Dim objFolder As folder
   Dim objFile As file
     
-  ' GetFolder(ƒtƒHƒ‹ƒ_–¼).SubFolders‚ÅƒtƒHƒ‹ƒ_”z‰º‚ÌƒtƒHƒ‹ƒ_ˆê——‚ğæ“¾
+  ' GetFolder(ï¿½tï¿½Hï¿½ï¿½ï¿½_ï¿½ï¿½).SubFoldersï¿½Åƒtï¿½Hï¿½ï¿½ï¿½_ï¿½zï¿½ï¿½ï¿½Ìƒtï¿½Hï¿½ï¿½ï¿½_ï¿½ê——ï¿½ï¿½ï¿½æ“¾
   For Each objFolder In fso.GetFolder(path).SubFolders
     Call getFilesRecursive(objFolder.path)
   Next
     
-  ' GetFolder(ƒtƒHƒ‹ƒ_–¼).Files‚ÅƒtƒHƒ‹ƒ_”z‰º‚Ìƒtƒ@ƒCƒ‹ˆê——‚ğæ“¾
+  ' GetFolder(ï¿½tï¿½Hï¿½ï¿½ï¿½_ï¿½ï¿½).Filesï¿½Åƒtï¿½Hï¿½ï¿½ï¿½_ï¿½zï¿½ï¿½ï¿½Ìƒtï¿½@ï¿½Cï¿½ï¿½ï¿½ê——ï¿½ï¿½ï¿½æ“¾
   For Each objFile In fso.GetFolder(path).Files
     Dim fileExtension as String
     fileExtension = fso.GetExtensionName(objFile.path)
@@ -63,7 +85,7 @@ End Sub
 Sub execute(f As file)
   Debug.Print f.Name
   dim wb as Workbook
-  ' IgnoreReadOnlyRecommended=True ‚Í“Ç‚İæ‚è„§‚Ìƒ_ƒCƒAƒƒO”ñ•\¦
+  ' IgnoreReadOnlyRecommended=True ï¿½Í“Ç‚İï¿½è„ï¿½ï¿½ï¿½Ìƒ_ï¿½Cï¿½Aï¿½ï¿½ï¿½Oï¿½ï¿½\ï¿½ï¿½
   Set wb = Workbooks.open(Filename:=f.path, IgnoreReadOnlyRecommended:=True)
 
   call doFormat(wb.Worksheets)
@@ -74,18 +96,18 @@ End Sub
 
 Sub doFormat(ws as Sheets)
   For Each Sheet In ws
-    'ƒV[ƒg‚ğ‘I‘ğ
+    'ï¿½Vï¿½[ï¿½gï¿½ï¿½Iï¿½ï¿½
     Sheet.Select
-    'ƒAƒNƒeƒBƒuƒZƒ‹‚ğA1‚Ö
+    'ï¿½Aï¿½Nï¿½eï¿½Bï¿½uï¿½Zï¿½ï¿½ï¿½ï¿½A1ï¿½ï¿½
     Sheet.Range("A1").Activate
-    '”{—¦‚ğ100%
+    'ï¿½{ï¿½ï¿½ï¿½ï¿½100%
     Sheet.ActiveWindow.Zoom = 100
-    'ƒXƒNƒ[ƒ‹‚ğÅ¶‚Ö
+    'ï¿½Xï¿½Nï¿½ï¿½ï¿½[ï¿½ï¿½ï¿½ï¿½ï¿½Åï¿½ï¿½ï¿½
     ActiveWindow.ScrollColumn = 1
-    'ƒXƒNƒ[ƒ‹‚ğÅã‚Ö
+    'ï¿½Xï¿½Nï¿½ï¿½ï¿½[ï¿½ï¿½ï¿½ï¿½ï¿½Åï¿½ï¿½
     ActiveWindow.ScrollRow = 1
   Next
-  '¶’[‚ÌƒV[ƒg‚ğƒAƒNƒeƒBƒu‚É‚·‚é
+  'ï¿½ï¿½ï¿½[ï¿½ÌƒVï¿½[ï¿½gï¿½ï¿½ï¿½Aï¿½Nï¿½eï¿½Bï¿½uï¿½É‚ï¿½ï¿½ï¿½
   ws(1).Activate
 
 End Sub
