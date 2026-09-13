@@ -42,6 +42,7 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 | `-SkipExisting` | 既存 PDF が元ファイルより新しければスキップ（差分実行） |
 | `-FitToWidth` | 全シートを横1ページに収める（処理は遅くなる） |
 | `-IncludeHiddenSheets` | 非表示シートも出力（`-PerSheet` 時のみ） |
+| `-OpenMode` | `Workbooks.Open` の呼び出し形式（`Auto` / `Full` / `Simple`）。既定は自動判定 |
 | `-LogPath` | 結果（ページ数を含む）を CSV（UTF-8 BOM 付き）で保存 |
 | `-WhatIf` | 実行せず対象を表示 |
 
@@ -91,6 +92,40 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 - 破損ファイル・非常に大きいブックで Excel が応答しなくなった場合、本スクリプトは待ち続けます。タイムアウトが必要なら1ファイルずつ別プロセス（`Start-Job` 等）で処理してください
 - 260文字を超える長いパスは Excel 側が失敗することがあります
 - 1ファイルあたり数秒かかります。数千ファイルでは数時間規模になるため `-SkipExisting` での差分実行を前提にしてください
+
+## トラブルシューティング
+
+### 「Workbooks クラスの Open プロパティを取得できません」
+
+Excel が `Workbooks.Open` の呼び出しを拒否したときの汎用エラーです。原因は主に次の5つ。
+
+1. **省略可能引数が通らない** — PowerShell 7 系や一部の Excel バージョンでは `[Type]::Missing` での引数省略が拒否されます。本スクリプトは起動時に自作の空ブックで呼び出し形式を判定し、通らない環境では自動的に簡易形式へ切り替えます。それでも出る場合は `-OpenMode Simple` を明示してください
+2. **OneDrive / SharePoint 同期フォルダ** — Excel がクラウド URL で開こうとして失敗します。「ファイルオンデマンド」でダウンロードされていない（雲アイコンの）ファイルも同様。ローカルにコピーしてから実行してください
+3. **パスが 218 文字超** — Excel の制限です（OS の 260 文字より手前）。本スクリプトは事前に検出してメッセージを出します
+4. **拡張子と実体の不一致** — 基幹システムが出力した「.xls」が実際は HTML や CSV というケース。Excel で手動で開くと警告が出ます
+5. **Excel が応答待ち状態** — 前回の異常終了後の「ドキュメントの回復」ウィンドウやアドインのエラーダイアログが裏で開いていると、以降すべての Open が失敗します。`EXCEL.EXE` を全て終了してから再実行してください
+
+切り分けには、呼び出し形式を変えながら同じファイルを開いてみるのが確実です。
+
+```powershell
+$f = 'D:\Docs\失敗したファイル.xlsx'
+$xl = New-Object -ComObject Excel.Application
+$xl.Visible = $false; $xl.DisplayAlerts = $false
+foreach ($n in 1,3,7,15) {
+    try {
+        switch ($n) {
+            1  { $wb = $xl.Workbooks.Open($f) }
+            3  { $wb = $xl.Workbooks.Open($f,0,$true) }
+            7  { $wb = $xl.Workbooks.Open($f,0,$true,[Type]::Missing,'x','x',$true) }
+            15 { $wb = $xl.Workbooks.Open($f,0,$true,[Type]::Missing,'x','x',$true,[Type]::Missing,[Type]::Missing,$false,$false,[Type]::Missing,$false,$true,[Type]::Missing) }
+        }
+        "$n 引数: OK"; $wb.Close($false)
+    } catch { "$n 引数: NG  $($_.Exception.Message)" }
+}
+$xl.Quit()
+```
+
+`15 引数だけ NG` なら原因 1、`全部 NG` なら原因 2〜5 です。
 
 ## Excel が無い環境の代替
 

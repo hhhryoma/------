@@ -35,6 +35,11 @@
 .PARAMETER IncludeHiddenSheets
     非表示シートも出力対象にします（PerSheet 指定時のみ有効）。
 
+.PARAMETER OpenMode
+    Workbooks.Open の呼び出し形式。既定の Auto は起動時に自動判定します。
+    「Workbooks クラスの Open プロパティを取得できません」というエラーが出る場合は
+    Simple を指定してください。
+
 .PARAMETER LogPath
     処理結果（ページ数を含む）を CSV（UTF-8 BOM 付き）で保存します。
 
@@ -64,6 +69,9 @@ param(
     [switch] $SkipExisting,
     [switch] $FitToWidth,
     [switch] $IncludeHiddenSheets,
+
+    [ValidateSet('Auto', 'Full', 'Simple')]
+    [string] $OpenMode = 'Auto',
 
     [string] $LogPath,
 
@@ -168,6 +176,75 @@ function Get-SheetPageCount {
     # PDF から取得できなかった場合の保険。Excel にページ割りを計算させる（遅い）
     param($Sheet)
     try { return [int]$Sheet.PageSetup.Pages.Count } catch { return $null }
+}
+
+$script:WorkbookOpenMode = 'Full'
+
+function Initialize-WorkbookOpenMode {
+    <#
+        Workbooks.Open の呼び出し形式を起動時に決める。
+
+        省略可能引数（[Type]::Missing）の扱いは PowerShell と Excel のバージョンで差があり、
+        環境によっては「Workbooks クラスの Open プロパティを取得できません」で失敗する。
+        自分で作った空ブックで試すので、パスワード入力ダイアログが出る心配はない。
+    #>
+    param($Excel, [string] $Requested)
+
+    if ($Requested -ne 'Auto') {
+        $script:WorkbookOpenMode = $Requested
+        Write-Verbose "Workbooks.Open の形式: $Requested (指定)"
+        return
+    }
+
+    $probe = Join-Path $env:TEMP ('xl2pdf_probe_{0}.xlsx' -f [guid]::NewGuid().ToString('N'))
+    $mode  = 'Full'
+    try {
+        $tmp = $Excel.Workbooks.Add()
+        try { $tmp.SaveAs($probe, 51) } finally { $tmp.Close($false) }
+
+        try {
+            $wb = $Excel.Workbooks.Open($probe, 0, $true, [Type]::Missing, 'x', 'x', $true)
+            $wb.Close($false)
+            $mode = 'Full'
+        }
+        catch {
+            Write-Verbose ("省略可能引数つきの Open が使えません: {0}" -f $_.Exception.Message)
+            $mode = 'Simple'
+        }
+    }
+    catch {
+        Write-Verbose ("Open 形式を判定できなかったため Full を使います: {0}" -f $_.Exception.Message)
+        $mode = 'Full'
+    }
+    finally {
+        if (Test-Path -LiteralPath $probe) {
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $script:WorkbookOpenMode = $mode
+    Write-Verbose "Workbooks.Open の形式: $mode (自動判定)"
+    if ($mode -eq 'Simple') {
+        Write-Warning 'この環境では Workbooks.Open の省略可能引数が使えないため、簡易形式で開きます。パスワード保護されたファイルで入力ダイアログが表示される場合があります。'
+    }
+}
+
+function Open-WorkbookReadOnly {
+    param($Excel, [string] $FilePath)
+
+    # Excel はフルパス 218 文字を超えるブックを開けない（OS の 260 文字より手前で失敗する）
+    if ($FilePath.Length -gt 218) {
+        throw ("パスが長すぎます（{0} 文字）。Excel はフルパス 218 文字までしか開けません。" -f $FilePath.Length)
+    }
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        throw "ファイルが見つかりません（OneDrive のオンライン専用ファイルの可能性があります）: $FilePath"
+    }
+
+    if ($script:WorkbookOpenMode -eq 'Full') {
+        # ダミーのパスワードを渡すことで、保護ファイルは入力待ちにならず例外になる
+        return $Excel.Workbooks.Open($FilePath, 0, $true, [Type]::Missing, 'x', 'x', $true)
+    }
+    return $Excel.Workbooks.Open($FilePath, 0, $true)
 }
 
 function Set-FitToOnePageWide {
@@ -284,7 +361,14 @@ try {
     $excel.AskToUpdateLinks   = $false
     $excel.EnableEvents       = $false
     $excel.ScreenUpdating     = $false
-    $excel.AutomationSecurity = $msoAutomationSecurityForceDisable
+    try {
+        $excel.AutomationSecurity = $msoAutomationSecurityForceDisable
+    }
+    catch {
+        Write-Warning ("AutomationSecurity を設定できませんでした（マクロが無効化されません）: {0}" -f $_.Exception.Message)
+    }
+
+    Initialize-WorkbookOpenMode -Excel $excel -Requested $OpenMode
 
     $index = 0
     foreach ($file in $files) {
@@ -333,11 +417,7 @@ try {
                 continue
             }
 
-            # ダミーのパスワードを渡すことで、保護ファイルは入力待ちにならず例外になる
-            $wb = $excel.Workbooks.Open(
-                $file.FullName, 0, $true, [Type]::Missing, 'x', 'x', $true,
-                [Type]::Missing, [Type]::Missing, $false, $false,
-                [Type]::Missing, $false, $true, [Type]::Missing)
+            $wb = Open-WorkbookReadOnly -Excel $excel -FilePath $file.FullName
 
             if ($FitToWidth) { Set-FitToOnePageWide -Workbook $wb -Excel $excel }
 
