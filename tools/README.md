@@ -43,7 +43,7 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 | `-FitToWidth` | 全シートを横1ページに収める（処理は遅くなる） |
 | `-IncludeHiddenSheets` | 非表示シートも出力（`-PerSheet` 時のみ） |
 | `-IgnoreSmallPages` | 用紙サイズが極端に小さいページをページ数の集計から除外 |
-| `-SmallPageRatio` | 小ページ判定のしきい値。最大ページ面積に対する比率（既定 0.5） |
+| `-SmallPageRatio` | 小ページ判定のしきい値。最大ページ面積に対する比率（既定 0.2） |
 | `-OpenMode` | `Workbooks.Open` の呼び出し形式（`Auto` / `Full` / `Simple`）。既定は自動判定 |
 | `-LogPath` | 結果（ページ数を含む）を CSV（UTF-8 BOM 付き）で保存 |
 | `-WhatIf` | 実行せず対象を表示 |
@@ -77,7 +77,7 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 .\Export-ExcelToPdf.ps1 -Path D:\Docs -IgnoreSmallPages -Verbose
 ```
 
-- PDF の `/MediaBox`（ページの寸法）を読み、**そのPDF内で最大のページ面積の 50% 未満**のページを除外します
+- PDF の `/MediaBox`（ページの寸法）を読み、**そのPDF内で最大のページ面積の 20% 未満**のページを除外します
 - しきい値は `-SmallPageRatio 0.3` のように変更できます（0.01〜1.0）
 - ページ個別に `/MediaBox` が無い場合は、ページツリー側の値を継承して判定します
 - **PDF 自体は変更しません。** 集計から外すだけなので、出力された PDF には該当ページが残ります
@@ -92,7 +92,7 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 
 成功 1 / スキップ 0 / 失敗 0
 合計ページ数 4
-小サイズとして除外したページ 2（最大ページ面積の 50% 未満）
+小サイズとして除外したページ 2（最大ページ面積の 20% 未満）
 ```
 
 なお、PDF がオブジェクトストリームで圧縮されていてページ個別の解析ができない場合は、

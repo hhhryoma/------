@@ -42,7 +42,7 @@
 
 .PARAMETER SmallPageRatio
     「小さいページ」と判定するしきい値。そのPDF内で最大のページ面積に対する比率で、
-    既定は 0.5（最大ページの面積の半分未満なら除外）。-Verbose を付けると
+    既定は 0.2（最大ページの面積の 20% 未満なら除外）。-Verbose を付けると
     除外されたページの寸法が表示されるので、しきい値の調整に使えます。
 
 .PARAMETER OpenMode
@@ -83,7 +83,7 @@ param(
     [switch] $IgnoreSmallPages,
 
     [ValidateRange(0.01, 1.0)]
-    [double] $SmallPageRatio = 0.5,
+    [double] $SmallPageRatio = 0.2,
 
     [ValidateSet('Auto', 'Full', 'Simple')]
     [string] $OpenMode = 'Auto',
@@ -265,7 +265,7 @@ function Measure-PdfPages {
     param(
         [string] $PdfPath,
         [switch] $IgnoreSmall,
-        [double] $SmallRatio = 0.5
+        [double] $SmallRatio = 0.2
     )
 
     $empty = [pscustomobject]@{ Total = $null; Counted = $null; Small = 0 }
