@@ -35,6 +35,16 @@
 .PARAMETER IncludeHiddenSheets
     非表示シートも出力対象にします（PerSheet 指定時のみ有効）。
 
+.PARAMETER IgnoreSmallPages
+    用紙サイズが極端に小さいページをページ数の集計から除外します。
+    ブック内のシートごとに用紙設定が異なり、意図しない小さなページが混ざる場合に使います。
+    PDF 自体は変更せず、集計から外すだけです。
+
+.PARAMETER SmallPageRatio
+    「小さいページ」と判定するしきい値。そのPDF内で最大のページ面積に対する比率で、
+    既定は 0.5（最大ページの面積の半分未満なら除外）。-Verbose を付けると
+    除外されたページの寸法が表示されるので、しきい値の調整に使えます。
+
 .PARAMETER OpenMode
     Workbooks.Open の呼び出し形式。既定の Auto は起動時に自動判定します。
     「Workbooks クラスの Open プロパティを取得できません」というエラーが出る場合は
@@ -69,6 +79,11 @@ param(
     [switch] $SkipExisting,
     [switch] $FitToWidth,
     [switch] $IncludeHiddenSheets,
+
+    [switch] $IgnoreSmallPages,
+
+    [ValidateRange(0.01, 1.0)]
+    [double] $SmallPageRatio = 0.5,
 
     [ValidateSet('Auto', 'Full', 'Simple')]
     [string] $OpenMode = 'Auto',
@@ -133,22 +148,94 @@ function Test-HasPrintableContent {
     }
 }
 
-function Get-PdfPageCount {
+function Get-PdfObjectWindow {
+    # PDF 内の指定位置を含むオブジェクト（N 0 obj ... endobj）の範囲を切り出す
+    param([string] $Text, [int] $Index)
+
+    $start = $Text.LastIndexOf(' obj', $Index)
+    if ($start -lt 0) { $start = [math]::Max(0, $Index - 4000) }
+    $end = $Text.IndexOf('endobj', $Index)
+    if ($end -lt 0) { $end = [math]::Min($Text.Length, $Index + 4000) }
+    if ($end -le $start) { return '' }
+    return $Text.Substring($start, $end - $start)
+}
+
+function Get-PdfMediaBoxSize {
+    # /MediaBox [x1 y1 x2 y2] から用紙サイズ（mm）を求める。PDF の単位は 1/72 インチ
+    param([string] $Text)
+
+    $m = [regex]::Match($Text, '/MediaBox\s*\[\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\]')
+    if (-not $m.Success) { return $null }
+
+    $ci = [System.Globalization.CultureInfo]::InvariantCulture
+    try {
+        $x1 = [double]::Parse($m.Groups[1].Value, $ci)
+        $y1 = [double]::Parse($m.Groups[2].Value, $ci)
+        $x2 = [double]::Parse($m.Groups[3].Value, $ci)
+        $y2 = [double]::Parse($m.Groups[4].Value, $ci)
+    }
+    catch { return $null }
+
+    return [pscustomobject]@{
+        WidthMm  = [math]::Abs($x2 - $x1) / 72.0 * 25.4
+        HeightMm = [math]::Abs($y2 - $y1) / 72.0 * 25.4
+    }
+}
+
+function Get-PdfPageSizes {
     <#
-        生成された PDF のページ数を、外部ツールなしで取得する。
-        1. /Type /Page の出現数を数える（Excel が出力する PDF はこれで取れる）
-        2. 取れない場合はページツリーの /Count を読む
-           （オブジェクトストリームで圧縮された PDF への保険）
-        取得できなければ $null を返す。
+        PDF を解析し、ページごとの用紙サイズ（mm）と面積を返す。
+        ページ個別に /MediaBox が無い場合はページツリー側の値を継承する。
+        解析できなければ $null。
     #>
     param([string] $PdfPath)
 
-    if ([string]::IsNullOrEmpty($PdfPath)) { return $null }
-    if (-not (Test-Path -LiteralPath $PdfPath)) { return $null }
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($PdfPath)
+        $text  = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
+
+        $pageMatches = [regex]::Matches($text, '/Type\s*/Page(?![sA-Za-z])')
+        if ($pageMatches.Count -eq 0) { return $null }
+
+        # 継承元（/Type /Pages 側）の既定サイズ
+        $defaultSize = $null
+        $pagesNode = [regex]::Match($text, '/Type\s*/Pages\b')
+        if ($pagesNode.Success) {
+            $defaultSize = Get-PdfMediaBoxSize -Text (Get-PdfObjectWindow -Text $text -Index $pagesNode.Index)
+        }
+
+        $pages = New-Object System.Collections.Generic.List[object]
+        $no = 0
+        foreach ($m in $pageMatches) {
+            $no++
+            $size = Get-PdfMediaBoxSize -Text (Get-PdfObjectWindow -Text $text -Index $m.Index)
+            if ($null -eq $size) { $size = $defaultSize }
+            if ($null -eq $size) { $size = [pscustomobject]@{ WidthMm = 0.0; HeightMm = 0.0 } }
+
+            $pages.Add([pscustomobject]@{
+                Page   = $no
+                Width  = [math]::Round($size.WidthMm, 1)
+                Height = [math]::Round($size.HeightMm, 1)
+                Area   = $size.WidthMm * $size.HeightMm
+            })
+        }
+        return $pages
+    }
+    catch {
+        Write-Verbose ("ページサイズを解析できませんでした: {0} : {1}" -f $PdfPath, $_.Exception.Message)
+        return $null
+    }
+}
+
+function Get-PdfPageCountFallback {
+    <#
+        ページ個別の解析ができない場合に、総ページ数だけを求める。
+        オブジェクトストリームで圧縮された PDF 向けに、ページツリーの /Count を読む。
+    #>
+    param([string] $PdfPath)
 
     try {
         $bytes = [System.IO.File]::ReadAllBytes($PdfPath)
-        # バイト列を 1 バイト 1 文字として扱う（PDF 構造部は ASCII のため）
         $text  = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
 
         $pageMatches = [regex]::Matches($text, '/Type\s*/Page(?![sA-Za-z])')
@@ -163,12 +250,62 @@ function Get-PdfPageCount {
             }
         }
         if ($max -gt 0) { return $max }
-
         return $null
     }
-    catch {
-        Write-Verbose ("ページ数を取得できませんでした: {0} : {1}" -f $PdfPath, $_.Exception.Message)
-        return $null
+    catch { return $null }
+}
+
+function Measure-PdfPages {
+    <#
+        PDF のページ数を数える。
+        -IgnoreSmall を指定すると、そのPDF内で最大のページ面積に対して
+        -SmallRatio 未満の面積しかないページを集計から除外する。
+        返り値: Total（総ページ数） / Counted（集計対象） / Small（除外数）
+    #>
+    param(
+        [string] $PdfPath,
+        [switch] $IgnoreSmall,
+        [double] $SmallRatio = 0.5
+    )
+
+    $empty = [pscustomobject]@{ Total = $null; Counted = $null; Small = 0 }
+
+    if ([string]::IsNullOrEmpty($PdfPath)) { return $empty }
+    if (-not (Test-Path -LiteralPath $PdfPath)) { return $empty }
+
+    $pages = Get-PdfPageSizes -PdfPath $PdfPath
+
+    if ($null -eq $pages) {
+        # ページ個別の解析ができない場合は総数だけ返す（サイズ判定は不可）
+        $total = Get-PdfPageCountFallback -PdfPath $PdfPath
+        if ($IgnoreSmall -and $null -ne $total) {
+            Write-Verbose ("ページサイズを解析できないため、小サイズ除外は適用されません: {0}" -f $PdfPath)
+        }
+        return [pscustomobject]@{ Total = $total; Counted = $total; Small = 0 }
+    }
+
+    $total = $pages.Count
+    if (-not $IgnoreSmall) {
+        return [pscustomobject]@{ Total = $total; Counted = $total; Small = 0 }
+    }
+
+    $maxArea = ($pages | Measure-Object -Property Area -Maximum).Maximum
+    if ($null -eq $maxArea -or $maxArea -le 0) {
+        return [pscustomobject]@{ Total = $total; Counted = $total; Small = 0 }
+    }
+
+    $threshold = $maxArea * $SmallRatio
+    $small = @($pages | Where-Object { $_.Area -lt $threshold })
+
+    foreach ($sp in $small) {
+        Write-Verbose ("小サイズのため除外: {0} p.{1} {2}x{3}mm" -f
+            [System.IO.Path]::GetFileName($PdfPath), $sp.Page, $sp.Width, $sp.Height)
+    }
+
+    return [pscustomobject]@{
+        Total   = $total
+        Counted = $total - $small.Count
+        Small   = $small.Count
     }
 }
 
@@ -276,12 +413,14 @@ function New-ResultRecord {
         [string] $Status,
         [string] $Detail,
         $PageCount,
+        [int] $SmallPages = 0,
         [double] $Seconds
     )
     return [pscustomobject]@{
         ファイル = $SourcePath
         出力先   = $PdfPath
         ページ数 = $PageCount
+        除外ページ = $SmallPages
         結果     = $Status
         詳細     = $Detail
         秒       = [math]::Round($Seconds, 1)
@@ -403,9 +542,10 @@ try {
                 if ($SkipExisting -and (Test-Path -LiteralPath $pdfPath)) {
                     $pdfItem = Get-Item -LiteralPath $pdfPath
                     if ($pdfItem.LastWriteTime -ge $file.LastWriteTime) {
+                        $pi = Measure-PdfPages -PdfPath $pdfPath -IgnoreSmall:$IgnoreSmallPages -SmallRatio $SmallPageRatio
                         $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath $pdfPath `
                             -Status 'スキップ' -Detail '既存PDFが新しい' `
-                            -PageCount (Get-PdfPageCount -PdfPath $pdfPath) -Seconds 0))
+                            -PageCount $pi.Counted -SmallPages $pi.Small -Seconds 0))
                         continue
                     }
                 }
@@ -435,9 +575,11 @@ try {
                     if ($SkipExisting -and (Test-Path -LiteralPath $sheetPdf)) {
                         $existing = Get-Item -LiteralPath $sheetPdf
                         if ($existing.LastWriteTime -ge $file.LastWriteTime) {
+                            $pi = Measure-PdfPages -PdfPath $sheetPdf -IgnoreSmall:$IgnoreSmallPages -SmallRatio $SmallPageRatio
                             $exported.Add([pscustomobject]@{
-                                Path = $sheetPdf
-                                Pages = (Get-PdfPageCount -PdfPath $sheetPdf)
+                                Path   = $sheetPdf
+                                Pages  = $pi.Counted
+                                Small  = $pi.Small
                                 Status = 'スキップ'
                                 Detail = '既存PDFが新しい'
                             })
@@ -450,11 +592,12 @@ try {
 
                     $sh.ExportAsFixedFormat($xlTypePDF, $sheetPdf, $xlQualityStandard, $true, $false, [Type]::Missing, [Type]::Missing, $false)
 
-                    $pages = Get-PdfPageCount -PdfPath $sheetPdf
+                    $pi = Measure-PdfPages -PdfPath $sheetPdf -IgnoreSmall:$IgnoreSmallPages -SmallRatio $SmallPageRatio
+                    $pages = $pi.Counted
                     if ($null -eq $pages) { $pages = Get-SheetPageCount $sh }
 
                     $exported.Add([pscustomobject]@{
-                        Path = $sheetPdf; Pages = $pages; Status = '成功'; Detail = ''
+                        Path = $sheetPdf; Pages = $pages; Small = $pi.Small; Status = '成功'; Detail = ''
                     })
                 }
 
@@ -467,7 +610,7 @@ try {
                     foreach ($item in $exported) {
                         $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath $item.Path `
                             -Status $item.Status -Detail $item.Detail -PageCount $item.Pages `
-                            -Seconds $sw.Elapsed.TotalSeconds))
+                            -SmallPages $item.Small -Seconds $sw.Elapsed.TotalSeconds))
                     }
                 }
             }
@@ -488,7 +631,8 @@ try {
                 else {
                     $wb.ExportAsFixedFormat($xlTypePDF, $pdfPath, $xlQualityStandard, $true, $false, [Type]::Missing, [Type]::Missing, $false)
 
-                    $pages = Get-PdfPageCount -PdfPath $pdfPath
+                    $pi = Measure-PdfPages -PdfPath $pdfPath -IgnoreSmall:$IgnoreSmallPages -SmallRatio $SmallPageRatio
+                    $pages = $pi.Counted
                     if ($null -eq $pages) {
                         # PDF から読めなかった場合のみ Excel に計算させる
                         $sum = 0
@@ -501,7 +645,8 @@ try {
                     }
 
                     $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath $pdfPath `
-                        -Status '成功' -Detail '' -PageCount $pages -Seconds $sw.Elapsed.TotalSeconds))
+                        -Status '成功' -Detail '' -PageCount $pages -SmallPages $pi.Small `
+                        -Seconds $sw.Elapsed.TotalSeconds))
                 }
             }
         }
@@ -554,15 +699,20 @@ $failed  = @($results | Where-Object { $_.結果 -eq '失敗' }).Count
 
 $pageSum = ($results | Where-Object { $null -ne $_.ページ数 } | Measure-Object -Property ページ数 -Sum).Sum
 if ($null -eq $pageSum) { $pageSum = 0 }
+$smallSum = ($results | Measure-Object -Property 除外ページ -Sum).Sum
+if ($null -eq $smallSum) { $smallSum = 0 }
 $unknownPages = @($results | Where-Object { $_.結果 -eq '成功' -and $null -eq $_.ページ数 }).Count
 
 $view = @(
     @{ Name = 'ファイル'; Expression = { $_.ファイル.Substring($root.Length).TrimStart('\') } },
     @{ Name = '出力PDF';  Expression = { if ($_.出力先) { [System.IO.Path]::GetFileName($_.出力先) } else { '-' } } },
-    @{ Name = 'ページ';   Expression = { if ($null -ne $_.ページ数) { $_.ページ数 } else { '-' } } },
-    '結果',
-    '詳細'
+    @{ Name = 'ページ';   Expression = { if ($null -ne $_.ページ数) { $_.ページ数 } else { '-' } } }
 )
+if ($IgnoreSmallPages) {
+    $view += @{ Name = '除外'; Expression = { if ($_.除外ページ -gt 0) { $_.除外ページ } else { '' } } }
+}
+$view += '結果'
+$view += '詳細'
 
 Write-Host ""
 Write-Host "==== 出力ファイル一覧 ===================================================="
@@ -570,6 +720,12 @@ $results | Select-Object $view | Format-Table -AutoSize | Out-Host
 
 Write-Host ("成功 {0} / スキップ {1} / 失敗 {2}" -f $ok, $skipped, $failed)
 Write-Host ("合計ページ数 {0}" -f $pageSum)
+if ($IgnoreSmallPages) {
+    Write-Host ("小サイズとして除外したページ {0}（最大ページ面積の {1:P0} 未満）" -f $smallSum, $SmallPageRatio)
+    if ($smallSum -eq 0) {
+        Write-Host "※ 除外が0件の場合は -SmallPageRatio を上げるか、-Verbose で各ページの寸法を確認してください"
+    }
+}
 if ($unknownPages -gt 0) {
     Write-Host ("※ うち {0} 件はページ数を取得できませんでした（一覧では - と表示）" -f $unknownPages)
 }
