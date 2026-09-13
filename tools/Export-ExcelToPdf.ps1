@@ -34,6 +34,11 @@
 # .PARAMETER IncludeHiddenSheets
 #     非表示シートも出力対象にします（PerSheet 指定時のみ有効）。
 #
+# .PARAMETER CountOnly
+#     PDF を出力せず、フォルダ配下にある既存の PDF のページ数を数えるだけのモードです。
+#     Excel を起動しないため高速で、Excel がインストールされていない環境でも動作します。
+#     このモードでは Path 配下の *.pdf が対象になります（Excel ファイルは見ません）。
+#
 # .PARAMETER IgnoreSmallPages
 #     用紙サイズが極端に小さいページをページ数の集計から除外します。
 #     ブック内のシートごとに用紙設定が異なり、意図しない小さなページが混ざる場合に使います。
@@ -59,6 +64,10 @@
 #     .\Export-ExcelToPdf.ps1 -Path D:\Docs -PerSheet -FitToWidth
 #
 # .EXAMPLE
+#     # PDF は作らず、既存 PDF のページ数だけ数える
+#     .\Export-ExcelToPdf.ps1 -Path D:\Pdf -CountOnly
+#
+# .EXAMPLE
 #     # 何が出力されるかだけ確認する
 #     .\Export-ExcelToPdf.ps1 -Path D:\Docs -WhatIf
 #
@@ -78,6 +87,8 @@ param(
     [switch] $SkipExisting,
     [switch] $FitToWidth,
     [switch] $IncludeHiddenSheets,
+
+    [switch] $CountOnly,
 
     [switch] $IgnoreSmallPages,
 
@@ -418,6 +429,63 @@ function New-ResultRecord {
     }
 }
 
+# ---------------------------------------------------------------- 結果の表示
+
+function Write-RunSummary {
+    #     処理結果の一覧とサマリを表示し、-LogPath があれば CSV に保存する。
+    #     スクリプトスコープの $results / $root / $CountOnly などを参照する。
+    $ok      = @($results | Where-Object { $_.結果 -eq '成功' }).Count
+    $skipped = @($results | Where-Object { $_.結果 -eq 'スキップ' }).Count
+    $failed  = @($results | Where-Object { $_.結果 -eq '失敗' }).Count
+
+    $pageSum = ($results | Where-Object { $null -ne $_.ページ数 } | Measure-Object -Property ページ数 -Sum).Sum
+    if ($null -eq $pageSum) { $pageSum = 0 }
+    $smallSum = ($results | Measure-Object -Property 除外ページ -Sum).Sum
+    if ($null -eq $smallSum) { $smallSum = 0 }
+    $unknownPages = @($results | Where-Object { $_.結果 -eq '成功' -and $null -eq $_.ページ数 }).Count
+
+    $view = @(
+        @{ Name = 'ファイル'; Expression = { $_.ファイル.Substring($root.Length).TrimStart('\') } }
+    )
+    if (-not $CountOnly) {
+        $view += @{ Name = '出力PDF'; Expression = { if ($_.出力先) { [System.IO.Path]::GetFileName($_.出力先) } else { '-' } } }
+    }
+    $view += @{ Name = 'ページ'; Expression = { if ($null -ne $_.ページ数) { $_.ページ数 } else { '-' } } }
+    if ($IgnoreSmallPages) {
+        $view += @{ Name = '除外'; Expression = { if ($_.除外ページ -gt 0) { $_.除外ページ } else { '' } } }
+    }
+    $view += '結果'
+    $view += '詳細'
+
+    Write-Host ""
+    if ($CountOnly) {
+        Write-Host "==== ページ数一覧 ========================================================"
+    }
+    else {
+        Write-Host "==== 出力ファイル一覧 ===================================================="
+    }
+    $results | Select-Object $view | Format-Table -AutoSize | Out-Host
+
+    Write-Host ("成功 {0} / スキップ {1} / 失敗 {2}" -f $ok, $skipped, $failed)
+    Write-Host ("合計ページ数 {0}" -f $pageSum)
+    if ($IgnoreSmallPages) {
+        Write-Host ("小サイズとして除外したページ {0}（最大ページ面積の {1:P0} 未満）" -f $smallSum, $SmallPageRatio)
+        if ($smallSum -eq 0) {
+            Write-Host "※ 除外が0件の場合は -SmallPageRatio を上げるか、-Verbose で各ページの寸法を確認してください"
+        }
+    }
+    if ($unknownPages -gt 0) {
+        Write-Host ("※ うち {0} 件はページ数を取得できませんでした（一覧では - と表示）" -f $unknownPages)
+    }
+
+    if ($LogPath) {
+        # PowerShell 5.1 の UTF8 は BOM 付き、7 以降は BOM 無しなので明示的に切り替える
+        if ($PSVersionTable.PSVersion.Major -ge 6) { $enc = 'utf8BOM' } else { $enc = 'UTF8' }
+        $results | Export-Csv -LiteralPath $LogPath -NoTypeInformation -Encoding $enc
+        Write-Host ("ログ: {0}" -f $LogPath)
+    }
+}
+
 # ---------------------------------------------------------------- 入力の検証
 
 if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
@@ -437,6 +505,16 @@ if ($OutputRoot) {
 }
 
 # ---------------------------------------------------------------- 対象ファイルの収集
+
+if ($CountOnly) {
+    # PDF を出力せず、既にある PDF のページ数を数えるだけのモード
+    $Extensions = @('.pdf')
+    foreach ($opt in @('OutputRoot', 'PerSheet', 'FitToWidth', 'SkipExisting', 'IncludeHiddenSheets')) {
+        if ($PSBoundParameters.ContainsKey($opt)) {
+            Write-Warning "-CountOnly 指定時、-$opt は無視されます。"
+        }
+    }
+}
 
 $gci = @{
     LiteralPath   = $root
@@ -460,11 +538,46 @@ if ($scanErrors) {
 }
 
 if ($files.Count -eq 0) {
-    Write-Warning "対象ファイルがありません: $root"
+    if ($CountOnly) { Write-Warning "PDF が見つかりません: $root" }
+    else { Write-Warning "対象ファイルがありません: $root" }
     return
 }
 
-Write-Host ("対象 {0} ファイル / 走査元 {1}" -f $files.Count, $root)
+if ($CountOnly) {
+    Write-Host ("対象 {0} PDF / 走査元 {1}" -f $files.Count, $root)
+}
+else {
+    Write-Host ("対象 {0} ファイル / 走査元 {1}" -f $files.Count, $root)
+}
+
+$results = New-Object System.Collections.Generic.List[object]
+
+# ---------------------------------------------------------------- ページ数カウントのみ
+
+if ($CountOnly) {
+    $index = 0
+    foreach ($file in $files) {
+        $index++
+        Write-Progress -Activity 'ページ数カウント' -Status ("{0}/{1}  {2}" -f $index, $files.Count, $file.Name) -PercentComplete ([int](100 * $index / $files.Count))
+
+        $pi = Measure-PdfPages -PdfPath $file.FullName -IgnoreSmall:$IgnoreSmallPages -SmallRatio $SmallPageRatio
+
+        if ($null -eq $pi.Counted) {
+            $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath $file.FullName `
+                -Status '失敗' -Detail 'ページ数を取得できませんでした（破損または未対応の PDF）' `
+                -PageCount $null -SmallPages 0 -Seconds 0))
+        }
+        else {
+            $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath $file.FullName `
+                -Status '成功' -Detail '' -PageCount $pi.Counted -SmallPages $pi.Small -Seconds 0))
+        }
+    }
+    Write-Progress -Activity 'ページ数カウント' -Completed
+
+    Write-RunSummary
+    if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 }
+    return
+}
 
 # ---------------------------------------------------------------- Excel 起動
 
@@ -473,7 +586,6 @@ $pidsBefore = @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue | ForEach-
 
 $excel   = $null
 $ownPids = @()
-$results = New-Object System.Collections.Generic.List[object]
 
 try {
     try {
@@ -682,50 +794,7 @@ finally {
     }
 }
 
-# ---------------------------------------------------------------- 結果の一覧
+# ---------------------------------------------------------------- 結果
 
-$ok      = @($results | Where-Object { $_.結果 -eq '成功' }).Count
-$skipped = @($results | Where-Object { $_.結果 -eq 'スキップ' }).Count
-$failed  = @($results | Where-Object { $_.結果 -eq '失敗' }).Count
-
-$pageSum = ($results | Where-Object { $null -ne $_.ページ数 } | Measure-Object -Property ページ数 -Sum).Sum
-if ($null -eq $pageSum) { $pageSum = 0 }
-$smallSum = ($results | Measure-Object -Property 除外ページ -Sum).Sum
-if ($null -eq $smallSum) { $smallSum = 0 }
-$unknownPages = @($results | Where-Object { $_.結果 -eq '成功' -and $null -eq $_.ページ数 }).Count
-
-$view = @(
-    @{ Name = 'ファイル'; Expression = { $_.ファイル.Substring($root.Length).TrimStart('\') } },
-    @{ Name = '出力PDF';  Expression = { if ($_.出力先) { [System.IO.Path]::GetFileName($_.出力先) } else { '-' } } },
-    @{ Name = 'ページ';   Expression = { if ($null -ne $_.ページ数) { $_.ページ数 } else { '-' } } }
-)
-if ($IgnoreSmallPages) {
-    $view += @{ Name = '除外'; Expression = { if ($_.除外ページ -gt 0) { $_.除外ページ } else { '' } } }
-}
-$view += '結果'
-$view += '詳細'
-
-Write-Host ""
-Write-Host "==== 出力ファイル一覧 ===================================================="
-$results | Select-Object $view | Format-Table -AutoSize | Out-Host
-
-Write-Host ("成功 {0} / スキップ {1} / 失敗 {2}" -f $ok, $skipped, $failed)
-Write-Host ("合計ページ数 {0}" -f $pageSum)
-if ($IgnoreSmallPages) {
-    Write-Host ("小サイズとして除外したページ {0}（最大ページ面積の {1:P0} 未満）" -f $smallSum, $SmallPageRatio)
-    if ($smallSum -eq 0) {
-        Write-Host "※ 除外が0件の場合は -SmallPageRatio を上げるか、-Verbose で各ページの寸法を確認してください"
-    }
-}
-if ($unknownPages -gt 0) {
-    Write-Host ("※ うち {0} 件はページ数を取得できませんでした（一覧では - と表示）" -f $unknownPages)
-}
-
-if ($LogPath) {
-    # PowerShell 5.1 の UTF8 は BOM 付き、7 以降は BOM 無しなので明示的に切り替える
-    if ($PSVersionTable.PSVersion.Major -ge 6) { $enc = 'utf8BOM' } else { $enc = 'UTF8' }
-    $results | Export-Csv -LiteralPath $LogPath -NoTypeInformation -Encoding $enc
-    Write-Host ("ログ: {0}" -f $LogPath)
-}
-
-if ($failed -gt 0) { exit 1 }
+Write-RunSummary
+if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 }

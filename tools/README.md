@@ -42,11 +42,40 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 | `-SkipExisting` | 既存 PDF が元ファイルより新しければスキップ（差分実行） |
 | `-FitToWidth` | 全シートを横1ページに収める（処理は遅くなる） |
 | `-IncludeHiddenSheets` | 非表示シートも出力（`-PerSheet` 時のみ） |
+| `-CountOnly` | PDF を出力せず、既存 PDF のページ数を数えるだけ（Excel を起動しない） |
 | `-IgnoreSmallPages` | 用紙サイズが極端に小さいページをページ数の集計から除外 |
 | `-SmallPageRatio` | 小ページ判定のしきい値。最大ページ面積に対する比率（既定 0.2） |
 | `-OpenMode` | `Workbooks.Open` の呼び出し形式（`Auto` / `Full` / `Simple`）。既定は自動判定 |
 | `-LogPath` | 結果（ページ数を含む）を CSV（UTF-8 BOM 付き）で保存 |
 | `-WhatIf` | 実行せず対象を表示 |
+
+## ページ数を数えるだけのモード
+
+`-CountOnly` を付けると、**PDF を出力せず**、`-Path` 配下にある既存の PDF のページ数を数えるだけになります。
+
+```powershell
+.\Export-ExcelToPdf.ps1 -Path D:\Pdf -CountOnly
+.\Export-ExcelToPdf.ps1 -Path D:\Pdf -CountOnly -IgnoreSmallPages -LogPath D:\count.csv
+```
+
+- 対象は Excel ファイルではなく **`*.pdf`** です（サブフォルダも走査、`-NoRecurse` で抑止）
+- **Excel を一切起動しません。** Excel が入っていない端末でも動作し、大量のファイルでも高速です
+- `-IgnoreSmallPages` / `-SmallPageRatio` / `-LogPath` / `-NoRecurse` はそのまま使えます
+- `-OutputRoot` `-PerSheet` `-FitToWidth` `-SkipExisting` `-IncludeHiddenSheets` は無視され、指定すると警告が出ます
+
+```
+対象 12 PDF / 走査元 D:\Pdf
+
+==== ページ数一覧 ========================================================
+
+ファイル                       ページ 結果 詳細
+--------                       ------ ---- ----
+画面遷移図\BA-03-02-0001.pdf        4 成功
+画面遷移図\BA-03-04-0001.pdf        2 成功
+
+成功 12 / スキップ 0 / 失敗 0
+合計ページ数 48
+```
 
 ## 実行結果の表示
 
