@@ -1,81 +1,4 @@
-﻿# .SYNOPSIS
-#     フォルダ配下の Excel ファイルを PDF に一括出力します。
-#
-# .DESCRIPTION
-#     指定フォルダ（既定でサブフォルダも含む）内の .xls / .xlsx / .xlsm / .xlsb を
-#     Excel COM で開き、ExportAsFixedFormat で PDF に出力します。
-#     処理後に、ファイルごとの出力先とページ数の一覧を表示します。
-#
-#     - マクロは強制無効で開くため、xlsm を安全に処理できます
-#     - 元ファイルは読み取り専用で開き、保存しません
-#     - 既に起動しているユーザーの Excel は操作せず、専用インスタンスを使います
-#     - パスワード保護ファイルは入力待ちで止まらず、エラーとして記録します
-#
-# .PARAMETER Path
-#     走査するフォルダ。
-#
-# .PARAMETER OutputRoot
-#     PDF の出力先ルート。省略時は元ファイルと同じ場所に出力します。
-#     指定した場合は Path 配下のフォルダ構成を再現します。
-#
-# .PARAMETER NoRecurse
-#     サブフォルダを走査しません。
-#
-# .PARAMETER PerSheet
-#     ブック単位ではなくシート単位で出力します（ファイル名_シート名.pdf）。
-#
-# .PARAMETER SkipExisting
-#     出力先 PDF が既に存在し、元ファイルより新しい場合はスキップします。
-#     スキップした場合も、既存 PDF のページ数を一覧に表示します。
-#
-# .PARAMETER FitToWidth
-#     全シートを「横 1 ページに収める」設定にしてから出力します（処理は遅くなります）。
-#
-# .PARAMETER IncludeHiddenSheets
-#     非表示シートも出力対象にします（PerSheet 指定時のみ有効）。
-#
-# .PARAMETER CountOnly
-#     PDF を出力せず、フォルダ配下にある既存の PDF のページ数を数えるだけのモードです。
-#     Excel を起動しないため高速で、Excel がインストールされていない環境でも動作します。
-#     このモードでは Path 配下の *.pdf が対象になります（Excel ファイルは見ません）。
-#
-# .PARAMETER IgnoreSmallPages
-#     用紙サイズが極端に小さいページをページ数の集計から除外します。
-#     ブック内のシートごとに用紙設定が異なり、意図しない小さなページが混ざる場合に使います。
-#     PDF 自体は変更せず、集計から外すだけです。
-#
-# .PARAMETER SmallPageRatio
-#     「小さいページ」と判定するしきい値。そのPDF内で最大のページ面積に対する比率で、
-#     既定は 0.2（最大ページの面積の 20% 未満なら除外）。-Verbose を付けると
-#     除外されたページの寸法が表示されるので、しきい値の調整に使えます。
-#
-# .PARAMETER OpenMode
-#     Workbooks.Open の呼び出し形式。既定の Auto は起動時に自動判定します。
-#     「Workbooks クラスの Open プロパティを取得できません」というエラーが出る場合は
-#     Simple を指定してください。
-#
-# .PARAMETER LogPath
-#     処理結果（ページ数を含む）を CSV（UTF-8 BOM 付き）で保存します。
-#
-# .EXAMPLE
-#     .\Export-ExcelToPdf.ps1 -Path D:\Docs -OutputRoot D:\Pdf -LogPath D:\Pdf\result.csv
-#
-# .EXAMPLE
-#     .\Export-ExcelToPdf.ps1 -Path D:\Docs -PerSheet -FitToWidth
-#
-# .EXAMPLE
-#     # PDF は作らず、既存 PDF のページ数だけ数える
-#     .\Export-ExcelToPdf.ps1 -Path D:\Pdf -CountOnly
-#
-# .EXAMPLE
-#     # 何が出力されるかだけ確認する
-#     .\Export-ExcelToPdf.ps1 -Path D:\Docs -WhatIf
-#
-# .NOTES
-#     要件: Windows + Excel（デスクトップ版）がインストールされていること。
-#           対話的なデスクトップセッションで実行してください。
-
-[CmdletBinding(SupportsShouldProcess = $true)]
+﻿[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string] $Path,
@@ -798,3 +721,84 @@ finally {
 
 Write-RunSummary
 if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 }
+
+# ================================================================
+# 以下はコメントベースヘルプ（Get-Help .\Export-ExcelToPdf.ps1 -Full で表示）
+# スクリプトでは末尾に置いても有効。param() より前には何も置かないこと。
+# ================================================================
+# .SYNOPSIS
+#     フォルダ配下の Excel ファイルを PDF に一括出力します。
+#
+# .DESCRIPTION
+#     指定フォルダ（既定でサブフォルダも含む）内の .xls / .xlsx / .xlsm / .xlsb を
+#     Excel COM で開き、ExportAsFixedFormat で PDF に出力します。
+#     処理後に、ファイルごとの出力先とページ数の一覧を表示します。
+#
+#     - マクロは強制無効で開くため、xlsm を安全に処理できます
+#     - 元ファイルは読み取り専用で開き、保存しません
+#     - 既に起動しているユーザーの Excel は操作せず、専用インスタンスを使います
+#     - パスワード保護ファイルは入力待ちで止まらず、エラーとして記録します
+#
+# .PARAMETER Path
+#     走査するフォルダ。
+#
+# .PARAMETER OutputRoot
+#     PDF の出力先ルート。省略時は元ファイルと同じ場所に出力します。
+#     指定した場合は Path 配下のフォルダ構成を再現します。
+#
+# .PARAMETER NoRecurse
+#     サブフォルダを走査しません。
+#
+# .PARAMETER PerSheet
+#     ブック単位ではなくシート単位で出力します（ファイル名_シート名.pdf）。
+#
+# .PARAMETER SkipExisting
+#     出力先 PDF が既に存在し、元ファイルより新しい場合はスキップします。
+#     スキップした場合も、既存 PDF のページ数を一覧に表示します。
+#
+# .PARAMETER FitToWidth
+#     全シートを「横 1 ページに収める」設定にしてから出力します（処理は遅くなります）。
+#
+# .PARAMETER IncludeHiddenSheets
+#     非表示シートも出力対象にします（PerSheet 指定時のみ有効）。
+#
+# .PARAMETER CountOnly
+#     PDF を出力せず、フォルダ配下にある既存の PDF のページ数を数えるだけのモードです。
+#     Excel を起動しないため高速で、Excel がインストールされていない環境でも動作します。
+#     このモードでは Path 配下の *.pdf が対象になります（Excel ファイルは見ません）。
+#
+# .PARAMETER IgnoreSmallPages
+#     用紙サイズが極端に小さいページをページ数の集計から除外します。
+#     ブック内のシートごとに用紙設定が異なり、意図しない小さなページが混ざる場合に使います。
+#     PDF 自体は変更せず、集計から外すだけです。
+#
+# .PARAMETER SmallPageRatio
+#     「小さいページ」と判定するしきい値。そのPDF内で最大のページ面積に対する比率で、
+#     既定は 0.2（最大ページの面積の 20% 未満なら除外）。-Verbose を付けると
+#     除外されたページの寸法が表示されるので、しきい値の調整に使えます。
+#
+# .PARAMETER OpenMode
+#     Workbooks.Open の呼び出し形式。既定の Auto は起動時に自動判定します。
+#     「Workbooks クラスの Open プロパティを取得できません」というエラーが出る場合は
+#     Simple を指定してください。
+#
+# .PARAMETER LogPath
+#     処理結果（ページ数を含む）を CSV（UTF-8 BOM 付き）で保存します。
+#
+# .EXAMPLE
+#     .\Export-ExcelToPdf.ps1 -Path D:\Docs -OutputRoot D:\Pdf -LogPath D:\Pdf\result.csv
+#
+# .EXAMPLE
+#     .\Export-ExcelToPdf.ps1 -Path D:\Docs -PerSheet -FitToWidth
+#
+# .EXAMPLE
+#     # PDF は作らず、既存 PDF のページ数だけ数える
+#     .\Export-ExcelToPdf.ps1 -Path D:\Pdf -CountOnly
+#
+# .EXAMPLE
+#     # 何が出力されるかだけ確認する
+#     .\Export-ExcelToPdf.ps1 -Path D:\Docs -WhatIf
+#
+# .NOTES
+#     要件: Windows + Excel（デスクトップ版）がインストールされていること。
+#           対話的なデスクトップセッションで実行してください。
