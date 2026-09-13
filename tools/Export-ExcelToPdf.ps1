@@ -11,6 +11,9 @@ param(
     [switch] $FitToWidth,
     [switch] $IncludeHiddenSheets,
 
+    [string] $SheetNamePattern,
+    [string] $SheetNameExclude,
+
     [switch] $CountOnly,
 
     [switch] $IgnoreSmallPages,
@@ -32,6 +35,7 @@ $ErrorActionPreference = 'Stop'
 $xlTypePDF         = 0
 $xlQualityStandard = 0
 $xlSheetVisible    = -1
+$xlSheetHidden     = 0
 $msoAutomationSecurityForceDisable = 3
 
 # ---------------------------------------------------------------- ヘルパー
@@ -63,6 +67,16 @@ function Get-UniquePath {
         if (-not (Test-Path -LiteralPath $try)) { return $try }
     }
     throw "出力先の連番が上限に達しました: $CandidatePath"
+}
+
+function Test-SheetNameMatch {
+    #     シート名が -SheetNamePattern / -SheetNameExclude の条件を満たすか判定する。
+    #     いずれも .NET 正規表現、大文字小文字は区別しない。
+    param([string] $Name)
+
+    if ($SheetNamePattern -and -not [regex]::IsMatch($Name, $SheetNamePattern, 'IgnoreCase')) { return $false }
+    if ($SheetNameExclude -and [regex]::IsMatch($Name, $SheetNameExclude, 'IgnoreCase')) { return $false }
+    return $true
 }
 
 function Test-HasPrintableContent {
@@ -414,6 +428,15 @@ function Write-RunSummary {
 if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
     throw "フォルダが見つかりません: $Path"
 }
+
+# 正規表現は実行前に検証しておく（全ファイル処理してから落ちるのを防ぐ）
+foreach ($item in @(@{ Name = 'SheetNamePattern'; Value = $SheetNamePattern },
+                    @{ Name = 'SheetNameExclude'; Value = $SheetNameExclude })) {
+    if ($item.Value) {
+        try { [void][regex]::IsMatch('', $item.Value) }
+        catch { throw ("-{0} の正規表現が不正です: {1}  ({2})" -f $item.Name, $item.Value, $_.Exception.Message) }
+    }
+}
 $root = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd('\')
 
 if ($OutputRoot) {
@@ -432,7 +455,8 @@ if ($OutputRoot) {
 if ($CountOnly) {
     # PDF を出力せず、既にある PDF のページ数を数えるだけのモード
     $Extensions = @('.pdf')
-    foreach ($opt in @('OutputRoot', 'PerSheet', 'FitToWidth', 'SkipExisting', 'IncludeHiddenSheets')) {
+    foreach ($opt in @('OutputRoot', 'PerSheet', 'FitToWidth', 'SkipExisting', 'IncludeHiddenSheets',
+                       'SheetNamePattern', 'SheetNameExclude')) {
         if ($PSBoundParameters.ContainsKey($opt)) {
             Write-Warning "-CountOnly 指定時、-$opt は無視されます。"
         }
@@ -594,6 +618,7 @@ try {
                         if (-not $IncludeHiddenSheets) { continue }
                         $sh.Visible = $xlSheetVisible   # 非表示シートは出力できないため一時的に表示
                     }
+                    if (-not (Test-SheetNameMatch $sh.Name)) { continue }
                     if (-not (Test-HasPrintableContent $sh)) { continue }
 
                     $sheetPdf = Join-Path $outDir ("{0}_{1}.pdf" -f $file.BaseName, (ConvertTo-SafeFileName $sh.Name))
@@ -629,7 +654,7 @@ try {
 
                 if ($exported.Count -eq 0) {
                     $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath '' `
-                        -Status 'スキップ' -Detail '出力対象シートなし' -PageCount $null `
+                        -Status 'スキップ' -Detail $(if ($SheetNamePattern -or $SheetNameExclude) { '条件に一致する出力対象シートなし' } else { '出力対象シートなし' }) -PageCount $null `
                         -Seconds $sw.Elapsed.TotalSeconds))
                 }
                 else {
@@ -641,17 +666,45 @@ try {
                 }
             }
             else {
+                # シート名で絞る場合、対象外のシートを一時的に非表示にする。
+                # 非表示シートは ExportAsFixedFormat の対象外になるため、
+                # シート選択 API を使わずに出力範囲を限定できる。
+                # 読み取り専用で開いており保存しないので、元ファイルは変更されない。
+                $noSheetMatch = $false
+                if ($SheetNamePattern -or $SheetNameExclude) {
+                    $matched = 0
+                    foreach ($sh in $wb.Sheets) {
+                        if ($sh.Visible -eq $xlSheetVisible -and (Test-SheetNameMatch $sh.Name)) { $matched++ }
+                    }
+
+                    if ($matched -eq 0) {
+                        # 1 枚も一致しない。Excel は全シートを非表示にできないため、
+                        # 非表示化はせずこのブックごとスキップする
+                        $noSheetMatch = $true
+                    }
+                    else {
+                        foreach ($sh in $wb.Sheets) {
+                            if ($sh.Visible -eq $xlSheetVisible -and -not (Test-SheetNameMatch $sh.Name)) {
+                                try { $sh.Visible = $xlSheetHidden }
+                                catch { Write-Verbose ("シートを非表示にできませんでした: {0}" -f $sh.Name) }
+                            }
+                        }
+                    }
+                }
+
                 # 印刷対象が 1 つも無いブックは ExportAsFixedFormat が例外になるため事前に判定する
                 $printableSheets = New-Object System.Collections.Generic.List[object]
-                foreach ($sh in $wb.Sheets) {
-                    if ($sh.Visible -eq $xlSheetVisible -and (Test-HasPrintableContent $sh)) {
-                        $printableSheets.Add($sh)
+                if (-not $noSheetMatch) {
+                    foreach ($sh in $wb.Sheets) {
+                        if ($sh.Visible -eq $xlSheetVisible -and (Test-HasPrintableContent $sh)) {
+                            $printableSheets.Add($sh)
+                        }
                     }
                 }
 
                 if ($printableSheets.Count -eq 0) {
                     $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath '' `
-                        -Status 'スキップ' -Detail '印刷対象なし（空ブック／全シート非表示）' `
+                        -Status 'スキップ' -Detail $(if ($SheetNamePattern -or $SheetNameExclude) { '条件に一致する印刷対象シートなし' } else { '印刷対象なし（空ブック／全シート非表示）' }) `
                         -PageCount $null -Seconds $sw.Elapsed.TotalSeconds))
                 }
                 else {
@@ -762,6 +815,17 @@ if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 
 # .PARAMETER IncludeHiddenSheets
 #     非表示シートも出力対象にします（PerSheet 指定時のみ有効）。
 #
+# .PARAMETER SheetNamePattern
+#     処理対象とするシート名の正規表現（.NET 正規表現、大文字小文字は区別しません）。
+#     指定すると、一致するシートだけを PDF 出力し、ページ数もそのシートのみ数えます。
+#     ブック単位の出力では、対象外のシートを一時的に非表示にして出力範囲から外します
+#     （読み取り専用で開いており保存しないため、元ファイルは変更されません）。
+#     例: -SheetNamePattern '^(画面|帳票)'
+#
+# .PARAMETER SheetNameExclude
+#     除外するシート名の正規表現。SheetNamePattern と併用でき、除外が優先されます。
+#     例: -SheetNameExclude '表紙|改訂履歴|目次'
+#
 # .PARAMETER CountOnly
 #     PDF を出力せず、フォルダ配下にある既存の PDF のページ数を数えるだけのモードです。
 #     Excel を起動しないため高速で、Excel がインストールされていない環境でも動作します。
@@ -790,6 +854,14 @@ if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 
 #
 # .EXAMPLE
 #     .\Export-ExcelToPdf.ps1 -Path D:\Docs -PerSheet -FitToWidth
+#
+# .EXAMPLE
+#     # 「画面」で始まるシートだけを対象にページ数を数える
+#     .\Export-ExcelToPdf.ps1 -Path D:\Docs -SheetNamePattern '^画面'
+#
+# .EXAMPLE
+#     # 表紙・改訂履歴を除いたページ数を数える
+#     .\Export-ExcelToPdf.ps1 -Path D:\Docs -SheetNameExclude '表紙|改訂履歴|目次'
 #
 # .EXAMPLE
 #     # PDF は作らず、既存 PDF のページ数だけ数える

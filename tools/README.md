@@ -42,12 +42,45 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 | `-SkipExisting` | 既存 PDF が元ファイルより新しければスキップ（差分実行） |
 | `-FitToWidth` | 全シートを横1ページに収める（処理は遅くなる） |
 | `-IncludeHiddenSheets` | 非表示シートも出力（`-PerSheet` 時のみ） |
+| `-SheetNamePattern` | 対象とするシート名の正規表現（一致したシートだけを出力・カウント） |
+| `-SheetNameExclude` | 除外するシート名の正規表現（`-SheetNamePattern` より優先） |
 | `-CountOnly` | PDF を出力せず、既存 PDF のページ数を数えるだけ（Excel を起動しない） |
 | `-IgnoreSmallPages` | 用紙サイズが極端に小さいページをページ数の集計から除外 |
 | `-SmallPageRatio` | 小ページ判定のしきい値。最大ページ面積に対する比率（既定 0.2） |
 | `-OpenMode` | `Workbooks.Open` の呼び出し形式（`Auto` / `Full` / `Simple`）。既定は自動判定 |
 | `-LogPath` | 結果（ページ数を含む）を CSV（UTF-8 BOM 付き）で保存 |
 | `-WhatIf` | 実行せず対象を表示 |
+
+## シート名で対象を絞る
+
+`-SheetNamePattern` / `-SheetNameExclude` に .NET 正規表現を渡すと、一致するシートだけを出力・カウントします。**大文字小文字は区別しません。**
+
+```powershell
+# 「画面」で始まるシートだけ
+.\Export-ExcelToPdf.ps1 -Path D:\Docs -SheetNamePattern '^画面'
+
+# 表紙・改訂履歴・目次を除いたページ数を数える
+.\Export-ExcelToPdf.ps1 -Path D:\Docs -SheetNameExclude '表紙|改訂履歴|目次'
+
+# 併用（除外が優先）
+.\Export-ExcelToPdf.ps1 -Path D:\Docs -SheetNamePattern '^(画面|帳票)' -SheetNameExclude '作業用'
+```
+
+| シート名の例 | `-SheetNamePattern '^(画面\|帳票)'` | `-SheetNameExclude '表紙\|改訂履歴\|目次'` |
+| --- | --- | --- |
+| 表紙 | 除外 | 除外 |
+| 改訂履歴 | 除外 | 除外 |
+| 画面遷移図 | **対象** | **対象** |
+| 帳票一覧 | **対象** | **対象** |
+| Sheet1 | 除外 | **対象** |
+
+動作の仕組み:
+
+- **シート単位出力（`-PerSheet`）** … 一致しないシートを単純にスキップします
+- **ブック単位出力（既定）** … 一致しないシートを**一時的に非表示**にしてから出力します。非表示シートは `ExportAsFixedFormat` の対象外になるため、これだけで出力範囲を限定できます。読み取り専用で開いており保存しないので、**元の Excel ファイルは変更されません**
+- 1 枚も一致しないブックは、そのファイルごとスキップして「条件に一致する印刷対象シートなし」と記録します（Excel は全シートを非表示にできないため、非表示化は行いません）
+- 正規表現は**実行前に検証**します。不正なパターンは処理を始める前にエラーで止まります
+- **`-CountOnly` では使えません**（PDF にシート名の情報が残らないため）。指定すると警告が出て無視されます
 
 ## ページ数を数えるだけのモード
 
