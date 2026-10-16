@@ -779,6 +779,7 @@ if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 
 # 以下はコメントベースヘルプ（Get-Help .\Export-ExcelToPdf.ps1 -Full で表示）
 # スクリプトでは末尾に置いても有効。param() より前には何も置かないこと。
 # ================================================================
+
 # .SYNOPSIS
 #     フォルダ配下の Excel ファイルを PDF に一括出力します。
 #
@@ -848,6 +849,9 @@ if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 
 #
 # .PARAMETER LogPath
 #     処理結果（ページ数を含む）を CSV（UTF-8 BOM 付き）で保存します。
+#
+# .PARAMETER Extensions
+#     対象とする拡張子。既定は .xls .xlsx .xlsm .xlsb
 #
 # .EXAMPLE
 #     .\Export-ExcelToPdf.ps1 -Path D:\Docs -OutputRoot D:\Pdf -LogPath D:\Pdf\result.csv
