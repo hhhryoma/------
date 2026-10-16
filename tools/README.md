@@ -38,6 +38,9 @@
 # 数式だけを検索して CSV に保存
 .\Search-Excel.ps1 'VLOOKUP' D:\Docs -Target Formula -OutCsv D:\vlookup.csv
 
+# 結果をリンク付きの Excel ファイルに保存
+.\Search-Excel.ps1 'TODO' D:\Docs -OutXlsx D:\result.xlsx
+
 # 結果をウィンドウで絞り込みながら見る
 .\Search-Excel.ps1 'TODO' D:\Docs | Out-GridView
 
@@ -87,7 +90,25 @@ $hits | Group-Object File | Sort-Object Count -Descending   # ファイルごと
 | `Name` | コメントの作成者、または図形の名前 |
 | `Path` | ファイルのフルパス |
 
-`-OutCsv` の CSV は UTF-8（BOM 付き）で、Excel でそのまま開けます。列名は日本語（ファイル / シート / セル / 種類 / 内容 / 名前 / フルパス）です。
+### 結果をファイルに保存する
+
+| オプション | 形式 | 特徴 |
+| --- | --- | --- |
+| `-OutXlsx` | Excel（.xlsx） | **「場所」列のリンクをクリックすると、該当ファイルのそのセルが開く**。見出し固定・オートフィルター付き |
+| `-OutCsv` | CSV（UTF-8 BOM 付き） | Excel でそのまま開ける。他のツールに渡しやすい |
+
+両方同時に指定できます。どちらも画面にも結果を表示します。
+
+`-OutXlsx` の列は「ファイル / 場所 / シート / セル / 種類 / 内容 / 名前 / フルパス」です。
+
+- Excel がなくても作成できます（xlsx を直接組み立てます）
+- リンク先はフルパスで記録するため、検索したファイルを移動・改名するとリンクは切れます
+- 非表示シートのセルへのリンクは、Excel の仕様で「参照が正しくありません」になります。シートを再表示してから使ってください
+- 出力ファイルが検索フォルダの中にあっても、そのファイル自体は検索しません（再実行しても前回の結果がヒットしない）
+- 同名のファイルを Excel で開いたままだと保存できません（警告が出ます。検索結果は画面に表示されます）
+- 1 シートのリンク数には Excel の上限（65,530 個）があるため、それを超えた行にはリンクを付けません
+
+`-OutCsv` の列名は「ファイル / シート / セル / 種類 / 内容 / 名前 / フルパス」です。
 
 ### 該当セルを Excel で開く
 
@@ -121,6 +142,7 @@ $hits | Group-Object File | Sort-Object Count -Descending   # ファイルごと
 | `-SheetNameExclude` | 除外するシート名の正規表現（`-SheetNamePattern` より優先） |
 | `-NoExcel` | Excel を起動しない（.xls / .xlsb は対象外になる） |
 | `-Open` | 結果を一覧ウィンドウに表示し、選んだ行のセルを Excel で開く |
+| `-OutXlsx` | 結果を xlsx に保存（該当セルへのリンク付き） |
 | `-OutCsv` | 結果を CSV に保存 |
 | `-Extensions` | 対象拡張子（既定 `.xlsx .xlsm .xltx .xltm .xls .xlsb`） |
 
