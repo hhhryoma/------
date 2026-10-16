@@ -40,6 +40,9 @@
 
 # 結果をウィンドウで絞り込みながら見る
 .\Search-Excel.ps1 'TODO' D:\Docs | Out-GridView
+
+# 結果一覧から選んだセルを Excel で開く
+.\Search-Excel.ps1 'TODO' D:\Docs -Open
 ```
 
 実行ポリシーで止まる場合:
@@ -86,6 +89,22 @@ $hits | Group-Object File | Sort-Object Count -Descending   # ファイルごと
 
 `-OutCsv` の CSV は UTF-8（BOM 付き）で、Excel でそのまま開けます。列名は日本語（ファイル / シート / セル / 種類 / 内容 / 名前 / フルパス）です。
 
+### 該当セルを Excel で開く
+
+`-Open` を付けると、検索後に結果が一覧ウィンドウで表示されます。行を選んで **OK** を押すと、そのファイルを Excel で開き、該当セルへジャンプして選択します。
+
+```powershell
+.\Search-Excel.ps1 'TODO' D:\Docs -Open
+```
+
+- ウィンドウ上部のフィルター欄に文字を入れると、結果をさらに絞り込めます
+- Ctrl / Shift で複数行を選ぶと、すべて開きます（最後に選んだ行が前面になります）
+- 図形のヒットは、図形の左上のセルへスクロールしてから図形を選択します。シート名のヒットはそのシートを表示します
+- **起動中の Excel があればそれを使い**、既に開いているブックは開き直さずに切り替えます
+- 読み取り専用ではなく、ダブルクリックで開いたときと同じく通常どおり開きます。マクロの扱いもセキュリティセンターの設定に従います
+- 非表示シートのヒットは、ブックだけを開いて警告を出します（非表示のシートは選択できないため）
+- Windows 専用です（`Out-GridView` を使うため）
+
 ### 主なパラメーター
 
 | パラメーター | 説明 |
@@ -101,6 +120,7 @@ $hits | Group-Object File | Sort-Object Count -Descending   # ファイルごと
 | `-SheetNamePattern` | 検索するシート名の正規表現 |
 | `-SheetNameExclude` | 除外するシート名の正規表現（`-SheetNamePattern` より優先） |
 | `-NoExcel` | Excel を起動しない（.xls / .xlsb は対象外になる） |
+| `-Open` | 結果を一覧ウィンドウに表示し、選んだ行のセルを Excel で開く |
 | `-OutCsv` | 結果を CSV に保存 |
 | `-Extensions` | 対象拡張子（既定 `.xlsx .xlsm .xltx .xltm .xls .xlsb`） |
 

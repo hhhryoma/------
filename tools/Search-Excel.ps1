@@ -21,6 +21,8 @@ param(
 
     [switch] $NoExcel,
 
+    [switch] $Open,
+
     [string] $OutCsv,
 
     [string[]] $Extensions = @('.xlsx', '.xlsm', '.xltx', '.xltm', '.xls', '.xlsb')
@@ -74,6 +76,10 @@ foreach ($p in @($SheetNamePattern, $SheetNameExclude)) {
         try { [void][regex]::new($p) }
         catch { throw "シート名の正規表現が不正です: $p 詳細: $($_.Exception.InnerException.Message)" }
     }
+}
+
+if ($Open -and -not (Get-Command Out-GridView -ErrorAction SilentlyContinue)) {
+    throw 'この環境では Out-GridView が使えないため、-Open は利用できません（Windows で実行してください）。'
 }
 
 $script:XmlSettings = New-Object System.Xml.XmlReaderSettings
@@ -904,6 +910,94 @@ function Search-ComWorkbook {
     }
 }
 
+# ---------------------------------------------------------------- 検索結果を Excel で開く
+
+$msoAutomationSecurityByUI = 2
+
+function Get-RunningExcel {
+    #     起動中の Excel を取得する。無ければ $null。
+    #     Windows PowerShell 5.1 は Marshal.GetActiveObject を使う。
+    #     PowerShell 7（.NET Core）には同メソッドが無いため oleaut32 を直接呼ぶ。
+    try { return [System.Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application') } catch { }
+
+    try {
+        if (-not ('SearchExcel.Ole' -as [type])) {
+            Add-Type -Namespace SearchExcel -Name Ole -MemberDefinition @"
+[DllImport("ole32.dll", PreserveSig = false)]
+public static extern void CLSIDFromProgID([MarshalAs(UnmanagedType.LPWStr)] string progId, out Guid clsid);
+[DllImport("oleaut32.dll", PreserveSig = false)]
+[return: MarshalAs(UnmanagedType.IUnknown)]
+public static extern object GetActiveObject(ref Guid clsid, IntPtr reserved);
+"@
+        }
+        $clsid = [guid]::Empty
+        [SearchExcel.Ole]::CLSIDFromProgID('Excel.Application', [ref]$clsid)
+        return [SearchExcel.Ole]::GetActiveObject([ref]$clsid, [IntPtr]::Zero)
+    }
+    catch { return $null }
+}
+
+function Open-HitInExcel {
+    #     ヒットしたファイルを（読み取り専用ではなく）通常どおり開き、該当セルを選択する。
+    #     起動中の Excel があればそれを使い、既に開いているブックはそのまま切り替える。
+    param($Hit)
+
+    $xl = Get-RunningExcel
+    if ($null -eq $xl) {
+        $xl = New-Object -ComObject Excel.Application
+    }
+    $xl.Visible = $true
+    $xl.UserControl = $true   # スクリプト終了後も Excel を閉じないようにする
+
+    $wb = $null
+    foreach ($w in $xl.Workbooks) {
+        if ([string]::Equals([string]$w.FullName, $Hit.Path, [System.StringComparison]::OrdinalIgnoreCase)) { $wb = $w; break }
+    }
+
+    if ($null -eq $wb) {
+        # 自動化で開いたブックは既定でマクロが有効になるため、
+        # 手で開いたときと同じくセキュリティセンターの設定に従わせる
+        $saved = $xl.AutomationSecurity
+        try {
+            $xl.AutomationSecurity = $msoAutomationSecurityByUI
+            $wb = $xl.Workbooks.Open($Hit.Path)
+        }
+        finally {
+            try { $xl.AutomationSecurity = $saved } catch { }
+        }
+    }
+
+    $wb.Activate()
+    $ws = $wb.Sheets.Item($Hit.Sheet)
+    if ($ws.Visible -ne $xlSheetVisible) {
+        Write-Warning ("シート「{0}」は非表示のため、ブックだけ開きました: {1}" -f $Hit.Sheet, $Hit.File)
+        return
+    }
+    $ws.Activate()
+
+    if ($Hit.Cell) {
+        # Goto の第 2 引数 true で、セルが画面左上に来るようスクロールする
+        $xl.Goto($ws.Range($Hit.Cell), $true)
+    }
+    if ($Hit.Kind -eq '図形' -and $Hit.Name) {
+        try { $ws.Shapes.Item($Hit.Name).Select() } catch { }
+    }
+}
+
+function Show-HitPicker {
+    #     検索結果を一覧ウィンドウに出し、選んだ行を Excel で開く
+    param($Hits)
+
+    $selected = @($Hits |
+        Select-Object File, Sheet, Cell, Kind, Text, Name, Path |
+        Out-GridView -Title 'Excel で開く行を選んで OK を押してください（Ctrl / Shift で複数選択）' -PassThru)
+
+    foreach ($h in $selected) {
+        try { Open-HitInExcel -Hit $h }
+        catch { Write-Warning ("開けませんでした: {0} {1}!{2} : {3}" -f $h.File, $h.Sheet, $h.Cell, $_.Exception.Message) }
+    }
+}
+
 # ---------------------------------------------------------------- 対象ファイルの列挙
 
 function Get-FileSignature {
@@ -1008,7 +1102,10 @@ try {
 
             if ($hits.Count -gt 0) {
                 $hitFiles++
-                foreach ($h in $hits) { $allHits.Add($h); $h }
+                foreach ($h in $hits) {
+                    $allHits.Add($h)
+                    if (-not $Open) { $h }   # -Open 時は一覧ウィンドウに出すのでコンソールには流さない
+                }
             }
         }
         catch {
@@ -1052,6 +1149,8 @@ if ($failures.Count -gt 0) {
     foreach ($f in $failures) { Write-Host ("  {0} : {1}" -f $f.File, $f.Error) -ForegroundColor Yellow }
 }
 if ($OutCsv) { Write-Host "結果を保存しました: $OutCsv" }
+
+if ($Open -and $allHits.Count -gt 0) { Show-HitPicker -Hits $allHits }
 
 # .SYNOPSIS
 #     フォルダ配下の Excel ファイルを横断して文字列を検索します（Excel 版 grep）。
@@ -1103,6 +1202,11 @@ if ($OutCsv) { Write-Host "結果を保存しました: $OutCsv" }
 # .PARAMETER NoExcel
 #     Excel を起動しません。.xls / .xlsb は検索対象から外れます。
 #
+# .PARAMETER Open
+#     検索結果を一覧ウィンドウ（Out-GridView）に表示し、選んだ行のファイルを Excel で開いて
+#     該当セルを選択します。図形のヒットは図形を選択します。複数行を選ぶとすべて開きます。
+#     読み取り専用ではなく通常どおり開きます。Windows 専用です。
+#
 # .PARAMETER OutCsv
 #     結果を CSV（UTF-8 BOM 付き、Excel でそのまま開ける）に保存します。
 #
@@ -1123,6 +1227,10 @@ if ($OutCsv) { Write-Host "結果を保存しました: $OutCsv" }
 # .EXAMPLE
 #     # 結果を一覧ウィンドウで絞り込みながら見る
 #     .\Search-Excel.ps1 'TODO|要確認' D:\Docs | Out-GridView
+#
+# .EXAMPLE
+#     # 結果一覧から選んだセルを Excel で開く
+#     .\Search-Excel.ps1 'TODO' D:\Docs -Open
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xls / .xlsb を検索する場合のみデスクトップ版 Excel が必要です。
