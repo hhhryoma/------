@@ -339,6 +339,59 @@ def make_compare_fixtures():
     book(os.path.join(v2, "追加された.xlsx"), new_rows)
 
 
+def make_compare_format_fixtures(tmp):
+    """Compare-Excel.ps1 -CompareFormat 用（compare/format）。old → new で、先頭に 1 行挿入したうえで
+    太字・塗りつぶし・部分書式・取り消し線を変える。期待値は tests/Compare-Excel.Tests.ps1 を参照。
+    openpyxl は文字列をセルに直接（inlineStr）書くので、LibreOffice で共有文字列にした版も sst に作る"""
+    from openpyxl.cell.rich_text import CellRichText, TextBlock
+    from openpyxl.cell.text import InlineFont
+    from openpyxl.styles import Color, Font, PatternFill
+
+    out = os.path.join(COMPARE, "format")
+    os.makedirs(out, exist_ok=True)
+    red = InlineFont(color="FFFF0000")
+    rows = [["No", "項目名", "説明"], [1, "受注番号", "受注を一意に識別する番号"], [2, "受注日", "受注を受け付けた日付"],
+            [3, "顧客名", None], [4, "顧客区分", None], [5, "備考", "自由記述"], [6, "更新者", "最終更新者"], [7, "更新日時", "最終更新日時"]]
+
+    def book(path, new):
+        wb = openpyxl.Workbook(); ws = wb.active; ws.title = "画面項目"
+        data = [list(r) for r in rows]
+        if new:
+            data.insert(1, [0, "受注ID", "新規に追加した項目"])
+        for r, row in enumerate(data, start=1):
+            for c, v in enumerate(row, start=1):
+                ws.cell(row=r, column=c, value=v)
+        off = 1 if new else 0
+        for c in range(1, 4):
+            ws.cell(row=1, column=c).font = Font(bold=True)
+            ws.cell(row=1, column=c).fill = PatternFill("solid", fgColor="FFD9D9D9")
+        if new:
+            ws.cell(row=2 + off, column=2).font = Font(bold=True)                   # 太字にした
+        else:
+            for c in range(1, 4):
+                ws.cell(row=3, column=c).fill = PatternFill("solid", fgColor="FFFFFF00")   # 塗りつぶしをやめた
+        # 部分書式: 旧は「正式名称」だけ赤、新は書式なし（文字は同じ）
+        ws.cell(row=4 + off, column=3).value = "顧客の正式名称" if new else CellRichText("顧客の", TextBlock(red, "正式名称"))
+        # 文字も部分書式も変えた（部分書式の差分は出さず、値の差分だけになる）
+        ws.cell(row=5 + off, column=3).value = (CellRichText(TextBlock(red, "個人・法人・団体"), "の区分") if new
+                                                else CellRichText(TextBlock(red, "個人・法人"), "の区分"))
+        if not new:
+            ws.cell(row=6, column=2).font = Font(color=Color(theme=1))              # テキスト1 は自動と同じ扱い
+        if new:
+            for r in (7 + off, 8 + off):
+                ws.cell(row=r, column=3).font = Font(strike=True)                 # 取り消し線を付けた
+        wb.properties.creator = None
+        wb.save(path)
+
+    book(os.path.join(out, "old.xlsx"), False)
+    book(os.path.join(out, "new.xlsx"), True)
+    sst = os.path.join(out, "sst")
+    os.makedirs(sst, exist_ok=True)
+    for name in ("old.xlsx", "new.xlsx"):
+        soffice_convert(os.path.join(out, name), "xlsx", tmp)
+        shutil.move(os.path.join(tmp, name), os.path.join(sst, name))
+
+
 def main():
     tmp = tempfile.mkdtemp()
     try:
@@ -348,6 +401,7 @@ def main():
         make_deliverable_fixtures(tmp)
         make_view_fixtures()
         make_compare_fixtures()
+        make_compare_format_fixtures(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("fixtures written to", HERE)

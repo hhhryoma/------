@@ -13,6 +13,18 @@ function Get-DiffKeys {
     return @($Diffs | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.File, $_.Location, $_.Kind, $_.Change } | Sort-Object)
 }
 
+function Read-ZipEntryText {
+    #     xlsx の中の 1 つのパーツを文字列で読む
+    param([string] $Path, [string] $Name)
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Read)
+        $sr = New-Object System.IO.StreamReader($zip.GetEntry($Name).Open())
+        try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+    }
+    finally { $fs.Dispose() }
+}
+
 function New-TableBook {
     #     ExcelTools.psm1 の Export-Workbook で、1 シートの表のブックを作る（テスト用）
     param([string] $Path, [string[]] $Header, $Rows)
@@ -210,6 +222,64 @@ Test-Case 'Compare-Excel: 行の挿入で振り直された No 列は「連番�
     Assert-Equal @('new.xlsx|Data!A6|行|追加', 'new.xlsx|Data!A7|連番|変更', 'new.xlsx|Data!C3|値|変更', 'new.xlsx|Data!C4|値|変更') (Get-DiffKeys $diffs)
     $renum = @($diffs | Where-Object Kind -eq '連番')[0]
     Assert-Equal '連番の振り直し: A7～A12（5～10 → 6～11、6 個）' $renum.Detail
+}
+
+Test-Case 'Compare-Excel: 長い文字列の変更は、変わった部分だけを [-削除-]{+追加+} で示す' {
+    $dir = New-TestDir
+    New-TableBook -Path (Join-Path $dir 'old.xlsx') -Header @('No', '説明') -Rows @(
+        @('1', '受注情報を受注テーブルに登録する。登録時に受注番号を採番し、ステータスを「受付」に設定する。'),
+        @('2', "SELECT ORDER_NO, CUSTOMER_CD FROM T_ORDER WHERE STATUS = '01'"),
+        @('3', '短い'),
+        @('4', 'まったく別の文章に書き換えた場合はどうなるかを確認する'))
+    New-TableBook -Path (Join-Path $dir 'new.xlsx') -Header @('No', '説明') -Rows @(
+        @('1', '受注情報を受注テーブルに更新する。登録時に受注番号を採番し、ステータスを「受付済」に設定する。'),
+        @('2', "SELECT ORDER_NO, CUSTOMER_CD, ORDER_DATE FROM T_ORDER WHERE STATUS = '02'"),
+        @('3', '長い'),
+        @('4', '内容を全面的に見直して、新しい仕様として記述しなおしたもの'))
+    $out = Join-Path $dir 'diff.xlsx'
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx'); OutXlsx = $out }
+    $detail = @{}
+    foreach ($d in $diffs) { $detail[$d.Cell] = $d.Detail }
+    Assert-Equal '値: …情報を受注テーブルに[-登録-]{+更新+}する。登録時に受注番…、ステータスを「受付{+済+}」に設定する。' $detail['B2']
+    # 英数字は語の単位で比べ、空白や区切りは変更の外に出す
+    Assert-Match $detail['B3'] '_CD\{\+, ORDER_DATE\+\} FROM'
+    Assert-Match $detail['B3'] "'\[-01-\]\{\+02\+\}'"
+    Assert-Equal '値: 短い → 長い' $detail['B4'] '短い文字列は全体を示す'
+    Assert-Match $detail['B5'] '^値: まったく別の.* → 内容を全面的に' 'ほとんど書き換えた場合は全体を示す'
+    Assert-Equal '受注情報を受注テーブルに登録する。登録時に受注番号を採番し、ステータスを「受付」に設定する。' (@($diffs | Where-Object Cell -eq 'B2')[0].Old) 'Old は元の文字列のまま'
+
+    # -OutXlsx では、変更前の削除した部分を取り消し線、変更後の追加した部分を太字にする
+    $xml = Read-ZipEntryText $out 'xl/worksheets/sheet1.xml'
+    Assert-Match $xml '<c r="G2"[^>]*><is>(?:(?!</c>).)*<rPr><strike/>(?:(?!</c>).)*<t xml:space="preserve">登録</t>'
+    Assert-Match $xml '<c r="H2"[^>]*><is>(?:(?!</c>).)*<rPr><b/><u/>(?:(?!</c>).)*<t xml:space="preserve">更新</t>'
+    Assert-Equal '受注情報を受注テーブルに更新する。登録時に受注番号を採番し、ステータスを「受付済」に設定する。' (Read-XlsxSheet -Path $out -Index 1).Rows[2]['H'] '文字列としては変更後の全体'
+}
+
+foreach ($variant in @('', 'sst')) {
+    $label = '文字列をセルに直接持つブック'
+    if ($variant) { $label = '共有文字列のブック' }
+    $fmtDir = Join-Path $cmpDir 'format'
+    if ($variant) { $fmtDir = Join-Path $fmtDir $variant }
+    Test-Case "Compare-Excel: -CompareFormat で太字・塗りつぶし・部分書式・取り消し線の変更を、範囲にまとめて出す（$label）" {
+        $diffs = Invoke-Compare @{ Old = (Join-Path $fmtDir 'old.xlsx'); New = (Join-Path $fmtDir 'new.xlsx'); CompareFormat = $true }
+        $got = @($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Kind, $_.Detail })
+        Assert-Equal @(
+            '画面項目!A2|行|行を追加: A:0 | B:受注ID | C:新規に追加した項目',
+            '画面項目!B3|書式|書式: 太字 なし → あり（旧 B2）',
+            '画面項目!A4:C4|書式|書式: 塗りつぶし 黄 → なし（旧 A3:C3）',
+            '画面項目!C5|書式|書式: 部分書式 「正式名称」赤 → なし（旧 C4）',
+            '画面項目!C6|値|値: 個人・法人の区分 → 個人・法人・団体の区分（旧 C5）',
+            '画面項目!C8:C9|書式|書式: 取り消し線 なし → あり（旧 C7:C8）') $got
+        $fill = @($diffs | Where-Object Location -eq '画面項目!A4:C4')[0]
+        Assert-Equal '塗りつぶし 黄' $fill.Old
+        Assert-Equal '標準' $fill.New
+    }
+}
+
+Test-Case 'Compare-Excel: -CompareFormat を付けなければ書式は比べない' {
+    $fmtDir = Join-Path $cmpDir 'format'
+    $diffs = Invoke-Compare @{ Old = (Join-Path $fmtDir 'old.xlsx'); New = (Join-Path $fmtDir 'new.xlsx') }
+    Assert-Equal @('A2|行', 'C6|値') @($diffs | ForEach-Object { '{0}|{1}' -f $_.Cell, $_.Kind })
 }
 
 Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定するとエラー' {
