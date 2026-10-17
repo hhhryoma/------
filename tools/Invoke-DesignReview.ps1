@@ -22,6 +22,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName System.IO.Compression
+Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
 
 $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
 if (-not (Test-Path -LiteralPath $searchScript)) {
@@ -518,140 +519,6 @@ function Resolve-Location {
     return $null
 }
 
-# ---------------------------------------------------------------- xlsx 出力
-
-
-function ConvertTo-XmlText {
-    param([string] $Text)
-    if ($null -eq $Text) { return '' }
-    $Text = [regex]::Replace($Text, '[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]', '')
-    return [System.Security.SecurityElement]::Escape($Text)
-}
-
-function ConvertTo-ColumnName {
-    param([int] $Index)
-    $name = ''
-    while ($Index -gt 0) {
-        $m = ($Index - 1) % 26
-        $name = [string][char](65 + $m) + $name
-        $Index = [int][math]::Floor(($Index - 1) / 26)
-    }
-    return $name
-}
-
-function Export-Workbook {
-    #     複数シートの表を xlsx に書き出す（Excel 不要）。
-    #     Sheets: @{ Name; Columns = @(@{ Header; Width }); Rows = @(@{ Values = @(...); Link = @{ Column; Path; Location } }) }
-    param($Sheets, [string] $FilePath)
-
-    $font = '<sz val="10"/><name val="游ゴシック"/><family val="3"/><charset val="128"/>'
-    $sheetEntries = New-Object System.Collections.Generic.List[object]
-    $definedNames = New-Object System.Text.StringBuilder
-
-    $index = 0
-    foreach ($s in $Sheets) {
-        $index++
-        $colCount = $s.Columns.Count
-        $lastCol  = ConvertTo-ColumnName $colCount
-        $rowCount = $s.Rows.Count + 1
-
-        $xml   = New-Object System.Text.StringBuilder
-        $rels  = New-Object System.Text.StringBuilder
-        $links = New-Object System.Text.StringBuilder
-        [void]$xml.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">')
-        [void]$xml.Append(('<dimension ref="A1:{0}{1}"/>' -f $lastCol, $rowCount))
-        $tab = ''
-        if ($index -eq 1) { $tab = ' tabSelected="1"' }
-        [void]$xml.Append(('<sheetViews><sheetView{0} workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>' -f $tab))
-        [void]$xml.Append('<sheetFormatPr defaultRowHeight="18"/><cols>')
-        for ($i = 0; $i -lt $colCount; $i++) {
-            [void]$xml.Append(('<col min="{0}" max="{0}" width="{1}" customWidth="1"/>' -f ($i + 1), $s.Columns[$i].Width))
-        }
-        [void]$xml.Append('</cols><sheetData><row r="1">')
-        for ($i = 0; $i -lt $colCount; $i++) {
-            [void]$xml.Append(('<c r="{0}1" s="1" t="inlineStr"><is><t>{1}</t></is></c>' -f (ConvertTo-ColumnName ($i + 1)), (ConvertTo-XmlText $s.Columns[$i].Header)))
-        }
-        [void]$xml.Append('</row>')
-        [void]$rels.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">')
-
-        $r = 1; $linkCount = 0
-        foreach ($row in $s.Rows) {
-            $r++
-            [void]$xml.Append(('<row r="{0}">' -f $r))
-            for ($i = 0; $i -lt $colCount; $i++) {
-                $raw = $row.Values[$i]
-                if ($raw -is [int] -or $raw -is [long] -or $raw -is [double]) {
-                    # 数値は数値のセルとして書く（文字列にすると Excel で「数値が文字列として保存」の警告が出る）
-                    [void]$xml.Append(('<c r="{0}{1}" s="2"><v>{2}</v></c>' -f (ConvertTo-ColumnName ($i + 1)), $r, ([double]$raw).ToString('R', $invariant)))
-                    continue
-                }
-                $v = [string]$raw
-                if ($v.Length -eq 0) { continue }
-                if ($v.Length -gt 32767) { $v = $v.Substring(0, 32767) }
-                $style = 2
-                if ($row.Link -and $row.Link.Column -eq $i) { $style = 3 }
-                [void]$xml.Append(('<c r="{0}{1}" s="{2}" t="inlineStr"><is><t xml:space="preserve">{3}</t></is></c>' -f (ConvertTo-ColumnName ($i + 1)), $r, $style, (ConvertTo-XmlText $v)))
-            }
-            [void]$xml.Append('</row>')
-
-            if ($row.Link -and $linkCount -lt 65530) {
-                $linkCount++
-                $target = $row.Link.Path
-                if ($target.StartsWith('/')) { $target = 'file://' + $target } else { $target = 'file:///' + $target }
-                [void]$rels.Append(('<Relationship Id="rIdL{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{1}" TargetMode="External"/>' -f $linkCount, (ConvertTo-XmlText $target)))
-                [void]$links.Append(('<hyperlink ref="{0}{1}" r:id="rIdL{2}" location="{3}"/>' -f (ConvertTo-ColumnName ($row.Link.Column + 1)), $r, $linkCount, (ConvertTo-XmlText $row.Link.Location)))
-            }
-        }
-        [void]$xml.Append('</sheetData>')
-        [void]$xml.Append(('<autoFilter ref="A1:{0}{1}"/>' -f $lastCol, $rowCount))
-        if ($linkCount -gt 0) { [void]$xml.Append('<hyperlinks>').Append($links.ToString()).Append('</hyperlinks>') }
-        [void]$xml.Append('<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="landscape"/></worksheet>')
-        [void]$rels.Append('</Relationships>')
-
-        $sheetEntries.Add([pscustomobject]@{ Name = $s.Name; Xml = $xml.ToString(); Rels = $rels.ToString(); HasLinks = ($linkCount -gt 0) })
-        [void]$definedNames.Append(('<definedName name="_xlnm._FilterDatabase" localSheetId="{0}" hidden="1">''{1}''!$A$1:${2}${3}</definedName>' -f ($index - 1), (ConvertTo-XmlText $s.Name.Replace("'", "''")), $lastCol, $rowCount))
-    }
-
-    $ct = New-Object System.Text.StringBuilder
-    [void]$ct.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>')
-    $wbSheets = New-Object System.Text.StringBuilder
-    $wbRels = New-Object System.Text.StringBuilder
-    [void]$wbRels.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">')
-    for ($i = 1; $i -le $sheetEntries.Count; $i++) {
-        [void]$ct.Append(('<Override PartName="/xl/worksheets/sheet{0}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' -f $i))
-        [void]$wbSheets.Append(('<sheet name="{0}" sheetId="{1}" r:id="rId{1}"/>' -f (ConvertTo-XmlText $sheetEntries[$i - 1].Name), $i))
-        [void]$wbRels.Append(('<Relationship Id="rId{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{0}.xml"/>' -f $i))
-    }
-    [void]$ct.Append('</Types>')
-    [void]$wbRels.Append(('<Relationship Id="rId{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>' -f ($sheetEntries.Count + 1)))
-
-    $parts = [ordered]@{
-        '[Content_Types].xml' = $ct.ToString()
-        '_rels/.rels' = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'
-        'xl/workbook.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets>{0}</sheets><definedNames>{1}</definedNames></workbook>' -f $wbSheets.ToString(), $definedNames.ToString())
-        'xl/_rels/workbook.xml.rels' = $wbRels.ToString()
-        # スタイル 0:標準 1:見出し 2:折り返し・上詰め 3:リンク
-        'xl/styles.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font>{0}</font><font><b/>{0}</font><font><u/><sz val="10"/><color rgb="FF0563C1"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFBFBFBF"/></left><right style="thin"><color rgb="FFBFBFBF"/></right><top style="thin"><color rgb="FFBFBFBF"/></top><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf></cellXfs><cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles></styleSheet>' -f $font)
-    }
-    for ($i = 1; $i -le $sheetEntries.Count; $i++) {
-        $parts["xl/worksheets/sheet$i.xml"] = $sheetEntries[$i - 1].Xml
-        if ($sheetEntries[$i - 1].HasLinks) { $parts["xl/worksheets/_rels/sheet$i.xml.rels"] = $sheetEntries[$i - 1].Rels }
-    }
-
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    $stream = New-Object System.IO.FileStream($FilePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-    try {
-        $zip = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Create, $true)
-        try {
-            foreach ($name in $parts.Keys) {
-                $writer = New-Object System.IO.StreamWriter($zip.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal).Open(), $utf8)
-                try { $writer.Write($parts[$name]) } finally { $writer.Dispose() }
-            }
-        }
-        finally { $zip.Dispose() }
-    }
-    finally { $stream.Dispose() }
-}
 
 # ---------------------------------------------------------------- 依頼（プロンプト）の作成
 
