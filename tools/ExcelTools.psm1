@@ -51,6 +51,16 @@ function ConvertTo-XmlText {
     return [System.Security.SecurityElement]::Escape($Text)
 }
 
+function Read-TextFile {
+    #     テキストファイル（CSV など）を読む。BOM 付き・BOM なしの UTF-8 と、Excel が日本語の Windows で保存する Shift_JIS に対応する
+    param([string] $Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { return [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3) }
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { return [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2) }
+    try { return (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes) }
+    catch { return [System.Text.Encoding]::GetEncoding(932).GetString($bytes) }
+}
+
 # ---------------------------------------------------------------- 読み取り（xlsx / xlsm の ZIP パッケージ）
 
 function Open-ZipPackage {

@@ -7,7 +7,8 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | ツール | できること | Excel |
 | --- | --- | --- |
 | [Search-Excel.ps1](tools/README.md#search-excelps1) | フォルダ配下の Excel を横断検索（値・数式・コメント・図形・シート名）。結果から該当セルを開ける | 不要 ※1 |
-| [Replace-Excel.ps1](tools/README.md#replace-excelps1) | 複数の Excel の文字を一括置換（値・コメント・図形、数式も可）。確認してから書き換え、部分ごとの書式は保つ | 不要 |
+| [Replace-Excel.ps1](tools/README.md#replace-excelps1) | 複数の Excel の文字を一括置換（値・コメント・図形、数式も可）。置換リストでまとめて置換もできる。確認してから書き換え、部分ごとの書式は保つ | 不要 |
+| [Test-ExcelTerms.ps1](tools/README.md#test-exceltermsps1) | 表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を用語集と自動の検出で見つけ、置換リストを作る | 不要 ※1 |
 | [Test-ExcelDeliverable.ps1](tools/README.md#test-exceldeliverableps1) | 提出前チェック（体裁・消し忘れ・情報漏れ・壊れた箇所） | 不要 |
 | [Reset-ExcelView.ps1](tools/README.md#reset-excelviewps1) | 開いたときに先頭シートの A1 が表示される状態に一括で直す | 不要 |
 | [Compare-Excel.ps1](tools/README.md#compare-excelps1) | 2 つのブック・フォルダのセル単位の差分（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認もできる） | 不要 ※1 |

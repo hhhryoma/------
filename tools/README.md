@@ -4,6 +4,7 @@
 | --- | --- |
 | [Search-Excel.ps1](#search-excelps1) | フォルダ配下の Excel を横断して文字列を検索する（Excel 版 grep） |
 | [Replace-Excel.ps1](#replace-excelps1) | 複数の Excel の文字を一括で置換する（Excel 不要。置換する箇所を確認してから書き換える） |
+| [Test-ExcelTerms.ps1](#test-exceltermsps1) | 複数の Excel の表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を見つけ、Replace-Excel 用の置換リストを作る |
 | [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所をまとめて確認する |
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認もできる） |
@@ -11,7 +12,7 @@
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
-`Test-ExcelDeliverable.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
 
 ## Search-Excel.ps1
 
@@ -254,6 +255,71 @@ $hits | Group-Object File | Sort-Object Count -Descending   # ファイルごと
 - 図形の文字は段落ごとに置換します（改行をまたぐ文字は置換しません）
 - 空の文字列に一致するパターン（`^` だけなど）は置換しません
 - `-IgnoreWidth`（全角・半角を区別しない検索）には対応していません
+
+### 置換リストでまとめて置換する（`-ListPath`）
+
+複数の置換をまとめて行う場合は、CSV の置換リストを渡します（`Test-ExcelTerms.ps1 -OutCsv` で作ったものをそのまま使えます）。
+
+```csv
+置換前,置換後,正規表現
+ユーザ,ユーザー,
+サーバ,サーバー,
+(変更|削除)出来る,$1できる,○
+```
+
+- 「置換前」「置換後」の列が必要です。「正規表現」の列が ○ / 1 / true の行は正規表現、それ以外はそのままの文字として扱います
+- UTF-8（BOM の有無を問わない）と、Excel で保存した Shift_JIS の CSV を読めます
+- 置換は上の行から順に行います
+- **置換後の文字の一部として一致した箇所は置換しません**。「ユーザ」→「ユーザー」を「ユーザー管理」に当てて「ユーザーー管理」にすることはなく、何度実行しても同じ結果になります（`-Pattern` での置換も同じ）
+
+## Test-ExcelTerms.ps1
+
+複数の Excel ファイルの**表記ゆれ**を見つけます。見つけた揺れは、置換リストにして `Replace-Excel.ps1` でまとめて直せます。Excel は不要です。
+
+```powershell
+.\Test-ExcelTerms.ps1 D:\設計書                                              # 自動で見つける
+.\Test-ExcelTerms.ps1 D:\設計書 -Glossary .\term-lists\用語集_サンプル.csv -OutCsv D:\置換リスト.csv
+.\Replace-Excel.ps1 -ListPath D:\置換リスト.csv -Path D:\設計書 -WhatIf        # 確認してから直す
+```
+
+```
+Preferred        Variant        Count PreferredCount Kind
+---------        -------        ----- -------------- ----
+できる           出来る             3              12 用語集
+ユーザー         ユーザ             5              40 用語集
+ID               ＩＤ               2              31 全角・半角
+インターフェース インタフェース     4               9 長音（ー）
+サーバー         サーバ             1               6 長音（ー）
+ユーザー         ﾕｰｻﾞｰ              1              40 全角・半角
+
+12 ファイルを調べました: 表記ゆれ 6 種類（16 か所）
+```
+
+`Preferred` が推奨の表記、`Variant` が揺れの表記、`Count` が揺れの件数、`PreferredCount` が推奨の表記の件数です。
+
+### 見つけ方
+
+| 種類 | 内容 |
+| --- | --- |
+| 用語集 | `-Glossary` の CSV の「正しい表記」と「揺れ」（`/` や `、` で区切って複数可）に沿って、揺れの表記を数える。揺れが正しい表記の一部になっている箇所（「ユーザー」の中の「ユーザ」）は数えない |
+| 長音（ー） | カタカナの語で、長音の有無だけが違うもの（サーバ／サーバー、インタフェース／インターフェース） |
+| 全角・半角 | 全角・半角だけが違うもの（ＩＤ／ID、ﾕｰｻﾞｰ／ユーザー）。英字を含む語とカタカナが対象（数字だけの語は対象外）。大文字・小文字の違いは対象外 |
+
+- 推奨の表記は、用語集の正しい表記があればそれ、無ければ多く使われている表記です（同じ数なら、カタカナは長音のある方、英数字は半角の方。半角カタカナは推奨にしません）
+- 自動の検出（長音・全角半角）は「どちらかに統一したほうがよい」候補です。意味の違う語が混ざることもあるので、置換リストを確認・修正してから置換してください（`-NoAuto` で用語集だけにできます）
+- `tools/term-lists/用語集_サンプル.csv` は、外来語の長音・補助動詞のひらがな書きなどの例です。社内の表記ルールに合わせて直して使ってください
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 対象のファイル・フォルダ（複数可・ワイルドカード可、既定はカレント） |
+| `-Glossary` | 用語集の CSV（「正しい表記」「揺れ」の列。UTF-8 / Shift_JIS） |
+| `-NoAuto` | 自動の検出をせず、用語集だけで確かめる |
+| `-Target` | 調べる対象（Value / Comment / Shape / SheetName。既定は Value, Comment, Shape） |
+| `-OutCsv` | 置換リスト（置換前・置換後・種類・件数・例）を保存する。`Replace-Excel.ps1 -ListPath` で使える |
+| `-OutXlsx` | 表記ゆれの一覧と、出現箇所へのリンク付きの一覧を保存する |
+| `-NoRecurse` / `-NoExcel` | サブフォルダを見ない／Excel を起動しない（.xls / .xlsb は調べない） |
 
 ## Test-ExcelDeliverable.ps1
 

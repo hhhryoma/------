@@ -1,11 +1,13 @@
 ﻿[CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(Position = 0)]
     [string] $Pattern,
 
-    [Parameter(Mandatory = $true, Position = 1)]
+    [Parameter(Position = 1)]
     [AllowEmptyString()]
     [string] $Replacement,
+
+    [string] $ListPath,
 
     [Parameter(Position = 2)]
     [string[]] $Path = @('.'),
@@ -42,10 +44,45 @@ $wantShape   = $Target -contains 'Shape'
 
 $regexOptions = [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
 if (-not $CaseSensitive) { $regexOptions = $regexOptions -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase }
-$patternText = $Pattern
-if ($SimpleMatch) { $patternText = [regex]::Escape($Pattern) }
-try { $script:Rx = New-Object System.Text.RegularExpressions.Regex($patternText, $regexOptions) }
-catch { throw "検索パターンが正規表現として不正です: $Pattern （文字列として探すなら -SimpleMatch を付けてください） 詳細: $($_.Exception.InnerException.Message)" }
+
+function New-ReplaceRule {
+    #     置換の規則。Protect は置換後の文字（$1 などを使わない場合）で、その一部として一致した箇所は置換しない
+    #     （「ユーザ」→「ユーザー」を「ユーザー」に当てて「ユーザーー」にしない。何度実行しても同じ結果になる）
+    param([string] $Find, [string] $To, [bool] $Literal)
+    $text = $Find
+    if ($Literal) { $text = [regex]::Escape($Find) }
+    try { $rx = New-Object System.Text.RegularExpressions.Regex($text, $regexOptions) }
+    catch { throw "検索パターンが正規表現として不正です: $Find （文字列として探すなら -SimpleMatch を付けてください） 詳細: $($_.Exception.InnerException.Message)" }
+    $protect = $null
+    if ($To -and ($Literal -or $To.IndexOf('$') -lt 0)) {
+        $protect = New-Object System.Text.RegularExpressions.Regex([regex]::Escape($To), $regexOptions)
+    }
+    return [pscustomobject]@{ Find = $Find; Rx = $rx; To = $To; Literal = $Literal; Protect = $protect }
+}
+
+# 置換の規則: -Pattern / -Replacement の 1 つ、または -ListPath の CSV（置換前・置換後・正規表現）の行
+$script:Rules = New-Object System.Collections.Generic.List[object]
+if ($ListPath) {
+    if ($PSBoundParameters.ContainsKey('Pattern')) { throw '-Pattern と -ListPath は同時に指定できません。' }
+    $ListPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ListPath)
+    if (-not (Test-Path -LiteralPath $ListPath)) { throw "置換リストが見つかりません: $ListPath" }
+    $line = 1
+    foreach ($row in @(Read-TextFile $ListPath | ConvertFrom-Csv)) {
+        $line++
+        $names = @($row.PSObject.Properties | ForEach-Object { $_.Name })
+        if ($names -notcontains '置換前' -or $names -notcontains '置換後') { throw "置換リストには「置換前」「置換後」の列が必要です: $ListPath" }
+        if (-not $row.'置換前') { continue }
+        $isRegex = $names -contains '正規表現' -and @('○', '〇', '1', 'true', 'yes', 'はい') -contains ([string]$row.'正規表現').Trim().ToLowerInvariant()
+        try { $script:Rules.Add((New-ReplaceRule $row.'置換前' ([string]$row.'置換後') (-not $isRegex))) }
+        catch { throw ("置換リストの {0} 行目: {1}" -f $line, $_.Exception.Message) }
+    }
+    if ($script:Rules.Count -eq 0) { throw "置換リストに置換の規則がありません: $ListPath" }
+}
+else {
+    if (-not $Pattern) { throw '置換する文字（-Pattern）と置換後の文字（-Replacement）、または置換リスト（-ListPath）を指定してください。' }
+    if (-not $PSBoundParameters.ContainsKey('Replacement')) { throw '置換後の文字（-Replacement）を指定してください（削除するなら空文字 '''' を指定）。' }
+    $script:Rules.Add((New-ReplaceRule $Pattern $Replacement ([bool]$SimpleMatch)))
+}
 foreach ($p in @($SheetNamePattern, $SheetNameExclude)) {
     if ($p) {
         try { [void][regex]::new($p) }
@@ -69,17 +106,47 @@ $afterCalcPr = 'oleSize|customWorkbookViews|pivotCaches|smartTagPr|smartTagTypes
 
 
 function Invoke-TextReplace {
-    #     文字の部分（<t> 要素）の並びをつなげた文字列で置換し、置換後の文字を元の部分に配り直す。
-    #     置換した文字は一致した箇所の先頭がある部分に入れるので、ほかの文字の書式（部分ごとの太字・色など）は変わらない。
-    #     返り値: 置換したら @(置換前, 置換後)、一致しなければ $null。空文字に一致した箇所は置換しない
+    #     文字の部分（<t> 要素）の並びに、置換の規則を順に当てる。
+    #     返り値: 置換したら @(置換前, 置換後)、一致しなければ $null
     param($TextNodes, [switch] $PreserveSpace)
 
     $nodes = @($TextNodes)
     if ($nodes.Count -eq 0) { return $null }
+    $before = -join @($nodes | ForEach-Object { $_.InnerText })
+    $changed = $false
+    foreach ($rule in $script:Rules) {
+        if (Invoke-RuleReplace $nodes $rule -PreserveSpace:$PreserveSpace) { $changed = $true }
+    }
+    if (-not $changed) { return $null }
+    $after = -join @($nodes | ForEach-Object { $_.InnerText })
+    if ($after -ceq $before) { return $null }
+    return @($before, $after)
+}
+
+function Test-AnyRuleMatch {
+    param([string] $Text)
+    foreach ($rule in $script:Rules) { if ($rule.Rx.IsMatch($Text)) { return $true } }
+    return $false
+}
+
+function Invoke-RuleReplace {
+    #     文字の部分（<t> 要素）の並びをつなげた文字列で 1 つの規則の置換をし、置換後の文字を元の部分に配り直す。
+    #     置換した文字は一致した箇所の先頭がある部分に入れるので、ほかの文字の書式（部分ごとの太字・色など）は変わらない。
+    #     空文字に一致した箇所と、置換後の文字の一部として一致した箇所は置換しない。返り値: 置換したか
+    param($TextNodes, $Rule, [switch] $PreserveSpace)
+
+    $nodes = @($TextNodes)
     $texts = @($nodes | ForEach-Object { $_.InnerText })
     $full = -join $texts
-    $matches_ = @($script:Rx.Matches($full) | Where-Object { $_.Length -gt 0 })
-    if ($matches_.Count -eq 0) { return $null }
+    $protected = @()
+    if ($Rule.Protect) { $protected = @($Rule.Protect.Matches($full)) }
+    $matches_ = @($Rule.Rx.Matches($full) | Where-Object {
+        $m = $_
+        $inside = $false
+        foreach ($p in $protected) { if ($m.Index -ge $p.Index -and $m.Index + $m.Length -le $p.Index + $p.Length) { $inside = $true; break } }
+        $m.Length -gt 0 -and -not $inside
+    })
+    if ($matches_.Count -eq 0) { return $false }
 
     $starts = New-Object 'int[]' ($nodes.Count + 1)
     for ($k = 0; $k -lt $nodes.Count; $k++) { $starts[$k + 1] = $starts[$k] + $texts[$k].Length }
@@ -94,8 +161,8 @@ function Invoke-TextReplace {
     $pos = 0
     foreach ($m in $matches_) {
         & $copy $pos $m.Index
-        $rep = $Replacement
-        if (-not $SimpleMatch) { $rep = $m.Result($Replacement) }
+        $rep = $Rule.To
+        if (-not $Rule.Literal) { $rep = $m.Result($Rule.To) }
         $owner = $nodes.Count - 1
         for ($k = 0; $k -lt $nodes.Count; $k++) { if ($m.Index -ge $starts[$k] -and $m.Index -lt $starts[$k + 1]) { $owner = $k; break } }
         [void]$out[$owner].Append($rep)
@@ -104,7 +171,7 @@ function Invoke-TextReplace {
     & $copy $pos $full.Length
 
     $after = -join @($out | ForEach-Object { $_.ToString() })
-    if ($after -ceq $full) { return $null }
+    if ($after -ceq $full) { return $false }
     for ($k = 0; $k -lt $nodes.Count; $k++) {
         $t = $out[$k].ToString()
         if ($t -ceq $texts[$k]) { continue }
@@ -112,7 +179,7 @@ function Invoke-TextReplace {
         # 先頭・末尾の空白や改行を保つ
         if ($PreserveSpace -and $t -ne $t.Trim()) { [void]$nodes[$k].SetAttribute('space', $xmlNs, 'preserve') }
     }
-    return @($full, $after)
+    return $true
 }
 
 function Invoke-RichTextReplace {
@@ -299,7 +366,7 @@ function Get-ReplacePlan {
                         if ($wantValue -and $c.GetAttribute('t') -eq 'inlineStr') {
                             $is = $c.SelectSingleNode("*[local-name()='is']")
                             if ($is -and $sh.Headers.ContainsKey($ref)) {
-                                if ($script:Rx.IsMatch($is.InnerText)) { $skippedHeaders.Add(('{0}!{1}' -f $sh.Name, $ref)) }
+                                if (Test-AnyRuleMatch $is.InnerText) { $skippedHeaders.Add(('{0}!{1}' -f $sh.Name, $ref)) }
                             }
                             elseif ($is) {
                                 $res = Invoke-RichTextReplace $is
@@ -525,6 +592,7 @@ if ($total -eq 0) {
 }
 
 # ---- 置換する箇所を見せてから、まとめて確認する
+if ($ListPath) { Write-Host ("置換リスト: {0}（{1} 件）" -f $ListPath, $script:Rules.Count) }
 Write-Host ("{0} ファイル・{1} か所を置換します。" -f $plans.Count, $total)
 $shown = 0
 foreach ($p in $plans) {
@@ -613,6 +681,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 #     まず全ファイルを調べて置換する箇所を表示し、確認してから書き換えます（-WhatIf なら表示だけ、-Force なら確認なし）。
 #     文字列の一部だけに付けた書式（赤字・太字など）は、置換していない文字ではそのまま保ちます。
+#     置換後の文字の一部として一致した箇所は置換しません（「ユーザ」→「ユーザー」を何度実行しても「ユーザーー」にならない）。
+#     -ListPath で、CSV の置換リストに沿って複数の置換をまとめて行えます。
 #     書き換えるのは置換した文字を含むパーツだけで、ほかの部分はそのままです。
 #
 #     読み取り専用のファイル、パスワード付きのファイルは書き換えません。Excel で開いているファイルは失敗として知らせます。
@@ -622,6 +692,11 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER Replacement
 #     置換後の文字。正規表現のときは $1 などで一致した部分を使えます（-SimpleMatch のときはそのままの文字）。空文字なら削除します。
+#
+# .PARAMETER ListPath
+#     置換リストの CSV。複数の置換をまとめて行います（-Pattern / -Replacement の代わり）。
+#     「置換前」「置換後」の列が必要で、「正規表現」の列が ○ / 1 / true の行は正規表現として扱います（UTF-8 / Shift_JIS）。
+#     Test-ExcelTerms.ps1 -OutCsv で作った置換リストをそのまま使えます。
 #
 # .PARAMETER Path
 #     対象のファイルまたはフォルダ（複数可・ワイルドカード可）。既定はカレントフォルダ。
@@ -664,6 +739,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .EXAMPLE
 #     # 確認してから置換し、元のファイルを残す
 #     .\Replace-Excel.ps1 '受注管理システム' '販売管理システム' D:\設計書 -SimpleMatch -BackupDir D:\置換前
+#
+# .EXAMPLE
+#     # 置換リスト（Test-ExcelTerms.ps1 -OutCsv で作ったものなど）でまとめて置換する
+#     .\Replace-Excel.ps1 -ListPath D:\置換リスト.csv -Path D:\設計書 -WhatIf
 #
 # .EXAMPLE
 #     # 正規表現: 「第1.0版」→「第1.1版」のように版数だけを書き換える（表紙シートだけ）
