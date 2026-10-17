@@ -340,8 +340,13 @@ function Get-ColumnMapping {
     $dp = New-Object 'double[,]' ($n + 1), ($m + 1)
     for ($i = $n - 1; $i -ge 0; $i--) {
         for ($j = $m - 1; $j -ge 0; $j--) {
-            $best = [math]::Max($dp[($i + 1), $j], $dp[$i, ($j + 1)])
-            if ($sim[$i, $j] -ge 0.5) { $best = [math]::Max($best, $dp[($i + 1), ($j + 1)] + $sim[$i, $j]) }
+            # Windows PowerShell 5.1 はメソッドの引数の中の 2 次元の添字（$a[$i, $j]）を解釈できないため、いったん変数に入れる
+            $down = $dp[($i + 1), $j]; $right = $dp[$i, ($j + 1)]
+            $best = [math]::Max($down, $right)
+            if ($sim[$i, $j] -ge 0.5) {
+                $match = $dp[($i + 1), ($j + 1)] + $sim[$i, $j]
+                $best = [math]::Max($best, $match)
+            }
             $dp[$i, $j] = $best
         }
     }
