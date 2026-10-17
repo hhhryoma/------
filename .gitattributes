@@ -1,0 +1,5 @@
+# テスト用の PDF は ASCII だけで書かれているため、改行の自動変換で壊れないようにバイナリとして扱う
+*.pdf  binary
+*.xlsx binary
+*.xlsm binary
+*.xls  binary
