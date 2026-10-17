@@ -103,6 +103,41 @@ function Read-PartXml {
     }
 }
 
+function Read-PartXmlForEdit {
+    #     書き換えるパーツを読む。空白やコメントも含めてそのまま保つ（書き戻したときに、変えていない文字列が変わらないように）
+    param($Package, [string] $PartName)
+
+    $entry = Get-PackageEntry -Package $Package -PartName $PartName
+    if ($null -eq $entry) { return $null }
+    $settings = New-Object System.Xml.XmlReaderSettings
+    $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null
+    $settings.CloseInput = $true
+    $reader = [System.Xml.XmlReader]::Create($entry.Open(), $settings)
+    try {
+        $doc = New-Object System.Xml.XmlDocument
+        $doc.XmlResolver = $null
+        $doc.PreserveWhitespace = $true
+        $doc.Load($reader)
+        return $doc
+    }
+    finally { $reader.Dispose() }
+}
+
+function ConvertTo-XmlString {
+    #     XmlDocument を、UTF-8 の宣言付きの文字列にする（字下げや改行は足さない）
+    param([System.Xml.XmlDocument] $Document)
+
+    $settings = New-Object System.Xml.XmlWriterSettings
+    $settings.Encoding = New-Object System.Text.UTF8Encoding($false)
+    $settings.Indent = $false
+    $settings.NewLineHandling = [System.Xml.NewLineHandling]::None
+    $ms = New-Object System.IO.MemoryStream
+    $writer = [System.Xml.XmlWriter]::Create($ms, $settings)
+    try { $Document.Save($writer) } finally { $writer.Dispose() }
+    return [System.Text.Encoding]::UTF8.GetString($ms.ToArray())
+}
+
 function Resolve-PartName {
     # リレーションの Target（相対パス）をパッケージ内の絶対パーツ名にする
     param([string] $SourcePart, [string] $TargetPath)
@@ -158,6 +193,85 @@ function Get-RelationshipIdAttribute {
         if ($a.LocalName -eq 'id' -and $a.NamespaceURI -like '*relationships') { return $a.Value }
     }
     return $null
+}
+
+# ---------------------------------------------------------------- 書き換え（xlsx / xlsm の一部のパーツだけ）
+
+
+function Save-ZipPackage {
+    #     ZIP パッケージの一部のパーツだけを書き換えて保存する。変更しないパーツは同じ名前・日時・中身で書き直す
+    #     （ZipArchive は圧縮済みのままコピーできないため展開して書き直す）。
+    #     Changes: パーツ名（小文字）→ 新しい内容。NewParts: 足すパーツ名 → 内容（末尾に足す）。
+    #     OutPath を省略すると元のファイルに上書きする。その際、NTFS の代替データストリーム（インターネットから取得した
+    #     ファイルの印 Zone.Identifier など）やアクセス権・作成日時を失わないよう、元のファイルを開いて中身だけを書き換える
+    param([string] $FilePath, [hashtable] $Changes, $NewParts, [string] $OutPath)
+
+    $target = $OutPath
+    if (-not $target) { $target = $FilePath + '.~tmp' + [guid]::NewGuid().ToString('N').Substring(0, 8) }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $src = New-Object System.IO.FileStream($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    try {
+        $inZip = New-Object System.IO.Compression.ZipArchive($src, [System.IO.Compression.ZipArchiveMode]::Read)
+        $mode = [System.IO.FileMode]::Create
+        if (-not $OutPath) { $mode = [System.IO.FileMode]::CreateNew }
+        $dst = New-Object System.IO.FileStream($target, $mode, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $outZip = New-Object System.IO.Compression.ZipArchive($dst, [System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach ($e in $inZip.Entries) {
+                    $o = $outZip.CreateEntry($e.FullName, [System.IO.Compression.CompressionLevel]::Optimal)
+                    $o.LastWriteTime = $e.LastWriteTime
+                    $os = $o.Open()
+                    try {
+                        $key = $e.FullName.ToLowerInvariant()
+                        if ($Changes -and $Changes.ContainsKey($key)) {
+                            $bytes = $utf8.GetBytes($Changes[$key])
+                            $os.Write($bytes, 0, $bytes.Length)
+                        }
+                        else {
+                            $is = $e.Open()
+                            try { $is.CopyTo($os) } finally { $is.Dispose() }
+                        }
+                    }
+                    finally { $os.Dispose() }
+                }
+                if ($NewParts) {
+                    foreach ($name in $NewParts.Keys) {
+                        $writer = New-Object System.IO.StreamWriter($outZip.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal).Open(), $utf8)
+                        try { $writer.Write($NewParts[$name]) } finally { $writer.Dispose() }
+                    }
+                }
+            }
+            finally { $outZip.Dispose() }
+        }
+        finally { $dst.Dispose() }
+    }
+    finally { $src.Dispose() }
+    if ($OutPath) { return }
+
+    # 元のファイルに上書きする
+    $written = $false
+    try {
+        $in = [System.IO.File]::OpenRead($target)
+        try {
+            $out = New-Object System.IO.FileStream($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try {
+                $out.SetLength(0)
+                $in.CopyTo($out)
+                $written = $true
+            }
+            finally { $out.Dispose() }
+        }
+        finally { $in.Dispose() }
+    }
+    catch {
+        if (-not $written) {
+            # 途中で失敗した場合は、書き換え後の内容で置き換えて壊れた状態を残さない
+            try { [System.IO.File]::Copy($target, $FilePath, $true); $written = $true } catch { }
+        }
+        if (-not $written) { throw ("書き換えに失敗しました。書き換え後の内容が {0} に残っています: {1}" -f $target, $_.Exception.Message) }
+    }
+    Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------- 書き出し（xlsx）

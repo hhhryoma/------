@@ -1952,35 +1952,7 @@ function Export-MarkedCopy {
     # ---- 書き出す。変更しないパーツは同じ名前・日時・中身で書き直す
     $dir = [System.IO.Path]::GetDirectoryName($OutPath)
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    $src = New-Object System.IO.FileStream($SourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
-    try {
-        $inZip = New-Object System.IO.Compression.ZipArchive($src, [System.IO.Compression.ZipArchiveMode]::Read)
-        $dst = New-Object System.IO.FileStream($OutPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        try {
-            $outZip = New-Object System.IO.Compression.ZipArchive($dst, [System.IO.Compression.ZipArchiveMode]::Create)
-            try {
-                foreach ($e in $inZip.Entries) {
-                    $o = $outZip.CreateEntry($e.FullName, [System.IO.Compression.CompressionLevel]::Optimal)
-                    $o.LastWriteTime = $e.LastWriteTime
-                    $os = $o.Open()
-                    try {
-                        $key = $e.FullName.ToLowerInvariant()
-                        if ($changes.ContainsKey($key)) { $bytes = $utf8.GetBytes($changes[$key]); $os.Write($bytes, 0, $bytes.Length) }
-                        else { $is = $e.Open(); try { $is.CopyTo($os) } finally { $is.Dispose() } }
-                    }
-                    finally { $os.Dispose() }
-                }
-                foreach ($name in $newParts.Keys) {
-                    $writer = New-Object System.IO.StreamWriter($outZip.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal).Open(), $utf8)
-                    try { $writer.Write($newParts[$name]) } finally { $writer.Dispose() }
-                }
-            }
-            finally { $outZip.Dispose() }
-        }
-        finally { $dst.Dispose() }
-    }
-    finally { $src.Dispose() }
+    Save-ZipPackage -FilePath $SourcePath -Changes $changes -NewParts $newParts -OutPath $OutPath
 }
 
 function Get-ExcelFiles {
