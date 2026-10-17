@@ -166,10 +166,18 @@ function Export-Workbook {
     #     複数シートの表を xlsx に書き出す（Excel 不要）。各シートは見出し行の固定とオートフィルター付き。
     #     Sheets: @(@{ Name; Columns = @(@{ Header; Width }); Rows = @(@{ Values = @(...); Link = @{ Column; Path; Location; Tooltip } }) })
     #       Values の数値（int / long / double）は数値のセルとして書く
+    #       Values に @{ Runs = @(@{ Text; Style }) } を渡すと、部分ごとに書式を付けた文字列にする（Style: Deleted / Inserted / なし）
     #       Link は Values の Column 番目（0 始まり）のセルに付ける外部リンク。Path のファイルの Location（'シート'!セル）を開く
     param($Sheets, [string] $FilePath)
 
     $font = '<sz val="10"/><name val="游ゴシック"/><family val="3"/><charset val="128"/>'
+    # 部分ごとに書式を付けた文字列のフォント（削除は赤の取り消し線、追加は赤の太字・下線）
+    $runFont = '<sz val="10"/>{0}<rFont val="游ゴシック"/><family val="3"/><charset val="128"/>'
+    $richFonts = @{
+        ''         = $runFont -f ''
+        'Deleted'  = '<strike/>' + ($runFont -f '<color rgb="FFC00000"/>')
+        'Inserted' = '<b/><u/>' + ($runFont -f '<color rgb="FFC00000"/>')
+    }
     $sheetEntries = New-Object System.Collections.Generic.List[object]
     $definedNames = New-Object System.Text.StringBuilder
 
@@ -205,6 +213,24 @@ function Export-Workbook {
             [void]$xml.Append(('<row r="{0}">' -f $r))
             for ($i = 0; $i -lt $colCount; $i++) {
                 $raw = $row.Values[$i]
+                if ($raw -is [System.Collections.IDictionary] -and $raw.Contains('Runs')) {
+                    # 書式が同じ隣どうしの部分はつなげる
+                    $parts = New-Object System.Collections.Generic.List[object]
+                    foreach ($run in $raw.Runs) {
+                        $t = [string]$run.Text
+                        if ($t.Length -eq 0) { continue }
+                        $st = [string]$run.Style
+                        if (-not $richFonts.ContainsKey($st)) { $st = '' }
+                        if ($parts.Count -gt 0 -and $parts[$parts.Count - 1][0] -eq $st) { $parts[$parts.Count - 1][1] += $t }
+                        else { $parts.Add(@($st, $t)) }
+                    }
+                    $rich = New-Object System.Text.StringBuilder
+                    foreach ($part in $parts) {
+                        [void]$rich.Append('<r><rPr>').Append($richFonts[$part[0]]).Append('</rPr><t xml:space="preserve">').Append((ConvertTo-XmlText $part[1])).Append('</t></r>')
+                    }
+                    if ($rich.Length -gt 0) { [void]$xml.Append(('<c r="{0}{1}" s="2" t="inlineStr"><is>{2}</is></c>' -f (ConvertTo-ColumnName ($i + 1)), $r, $rich.ToString())) }
+                    continue
+                }
                 if ($raw -is [int] -or $raw -is [long] -or $raw -is [double]) {
                     # 数値は数値のセルとして書く（文字列にすると Excel で「数値が文字列として保存」の警告が出る）
                     [void]$xml.Append(('<c r="{0}{1}" s="2"><v>{2}</v></c>' -f (ConvertTo-ColumnName ($i + 1)), $r, ([double]$raw).ToString('R', $invariant)))
