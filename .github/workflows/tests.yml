@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows PowerShell 5.1
+            os: windows-latest
+            shell: powershell
+          - name: PowerShell 7 (Windows)
+            os: windows-latest
+            shell: pwsh
+          - name: PowerShell 7 (Linux)
+            os: ubuntu-latest
+            shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests (Windows PowerShell 5.1)
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion
+          & .\tests\Invoke-Tests.ps1
+          exit $LASTEXITCODE
+
+      - name: Run tests (PowerShell 7)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          & ./tests/Invoke-Tests.ps1
+          exit $LASTEXITCODE

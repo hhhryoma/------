@@ -382,7 +382,7 @@ function Write-RunSummary {
     $unknownPages = @($results | Where-Object { $_.結果 -eq '成功' -and $null -eq $_.ページ数 }).Count
 
     $view = @(
-        @{ Name = 'ファイル'; Expression = { $_.ファイル.Substring($root.Length).TrimStart('\') } }
+        @{ Name = 'ファイル'; Expression = { $_.ファイル.Substring($root.Length).TrimStart('\', '/') } }
     )
     if (-not $CountOnly) {
         $view += @{ Name = '出力PDF'; Expression = { if ($_.出力先) { [System.IO.Path]::GetFileName($_.出力先) } else { '-' } } }
@@ -567,7 +567,7 @@ try {
         # 出力先フォルダを決める
         if ($OutputRoot) {
             $srcDir = [System.IO.Path]::GetDirectoryName($file.FullName)
-            $relDir = $srcDir.Substring($root.Length).TrimStart('\')
+            $relDir = $srcDir.Substring($root.Length).TrimStart('\', '/')
             if ([string]::IsNullOrEmpty($relDir)) { $outDir = $OutputRoot }
             else { $outDir = Join-Path $OutputRoot $relDir }
         }
