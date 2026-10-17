@@ -219,9 +219,10 @@ Test-Case 'Compare-Excel: 行の挿入で振り直された No 列は「連番�
     New-TableBook -Path (Join-Path $dir 'old.xlsx') -Header @('No', '項目', '金額') -Rows $old
     New-TableBook -Path (Join-Path $dir 'new.xlsx') -Header @('No', '項目', '金額') -Rows $new
     $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx') }
-    Assert-Equal @('new.xlsx|Data!A6|行|追加', 'new.xlsx|Data!A7|連番|変更', 'new.xlsx|Data!C3|値|変更', 'new.xlsx|Data!C4|値|変更') (Get-DiffKeys $diffs)
+    Assert-Equal @('new.xlsx|Data!A6|行|追加', 'new.xlsx|Data!A7:A12|連番|変更', 'new.xlsx|Data!C3|値|変更', 'new.xlsx|Data!C4|値|変更') (Get-DiffKeys $diffs)
     $renum = @($diffs | Where-Object Kind -eq '連番')[0]
-    Assert-Equal '連番の振り直し: A7～A12（5～10 → 6～11、6 個）' $renum.Detail
+    Assert-Equal '連番の振り直し: 5～10 → 6～11（6 個）' $renum.Detail
+    Assert-Equal 'Data!A6:A11' $renum.OldLocation '旧の場所は旧の範囲'
 }
 
 Test-Case 'Compare-Excel: 長い文字列の変更は、変わった部分だけを [-削除-]{+追加+} で示す' {
@@ -280,6 +281,111 @@ Test-Case 'Compare-Excel: -CompareFormat を付けなければ書式は比べな
     $fmtDir = Join-Path $cmpDir 'format'
     $diffs = Invoke-Compare @{ Old = (Join-Path $fmtDir 'old.xlsx'); New = (Join-Path $fmtDir 'new.xlsx') }
     Assert-Equal @('A2|行', 'C6|値') @($diffs | ForEach-Object { '{0}|{1}' -f $_.Cell, $_.Kind })
+}
+
+function Get-XlsxCellFill {
+    #     xlsx のセルの塗りつぶしの色（rgb）を返す（塗りつぶしなしは ''）
+    param([string] $Path, [string] $SheetPart, [string] $Ref)
+    $sheet = Read-ZipEntryText $Path $SheetPart
+    $m = [regex]::Match($sheet, ('<c r="{0}"[^>]*>' -f $Ref))
+    if (-not $m.Success) { $m = [regex]::Match($sheet, ('<c r="{0}"[^>]*/>' -f $Ref)) }
+    if (-not $m.Success) { return $null }
+    $s = 0
+    $sm = [regex]::Match($m.Value, '\ss="(\d+)"')
+    if ($sm.Success) { $s = [int]$sm.Groups[1].Value }
+    $styles = [xml](Read-ZipEntryText $Path 'xl/styles.xml')
+    $ns = New-Object System.Xml.XmlNamespaceManager($styles.NameTable)
+    $ns.AddNamespace('x', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main')
+    $xf = $styles.SelectNodes('//x:cellXfs/x:xf', $ns)[$s]
+    $fill = $styles.SelectNodes('//x:fills/x:fill', $ns)[[int]$xf.GetAttribute('fillId')]
+    $fg = $fill.SelectSingleNode('x:patternFill/x:fgColor', $ns)
+    if ($fg) { return $fg.GetAttribute('rgb') }
+    return ''
+}
+
+function Test-XlsxWellFormed {
+    #     xlsx の中の XML がすべて読めることを確かめる
+    param([string] $Path)
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Read)
+        foreach ($e in $zip.Entries) {
+            if ($e.FullName -notmatch '\.(xml|rels)$') { continue }
+            $sr = New-Object System.IO.StreamReader($e.Open())
+            try { $null = [xml]$sr.ReadToEnd() } catch { throw "$($e.FullName) が XML として読めません: $($_.Exception.Message)" } finally { $sr.Dispose() }
+        }
+    }
+    finally { $fs.Dispose() }
+}
+
+Test-Case 'Compare-Excel: -OutMarkedDir で、新のブックの写しの差分のセルに色とメッセージを付け、差分一覧を足す' {
+    $outDir = Join-Path (New-TestDir) 'marked'
+    $newPath = Join-Path $cmpDir 'v2/項目定義.xlsx'
+    $hash = (Get-FileHash -LiteralPath $newPath).Hash
+    $null = Invoke-Compare @{ Old = (Join-Path $cmpDir 'v1'); New = (Join-Path $cmpDir 'v2'); OutMarkedDir = $outDir }
+    Assert-Equal @('項目定義.xlsx') @(Get-ChildItem -LiteralPath $outDir -File | ForEach-Object { $_.Name }) '差分のあったファイルだけ'
+    Assert-Equal $hash (Get-FileHash -LiteralPath $newPath).Hash '元のファイルは変えない'
+    $marked = Join-Path $outDir '項目定義.xlsx'
+    Test-XlsxWellFormed $marked
+
+    # 中身は新のブックと同じで、差分一覧のシートが増えただけ
+    $diffs = Invoke-Compare @{ Old = $newPath; New = $marked }
+    Assert-Equal @('項目定義.xlsx|差分一覧|シート|追加') (Get-DiffKeys $diffs)
+
+    # 色: 変更は黄、追加した行は緑、変わっていないセルはそのまま
+    Assert-Equal 'FFFFEB9C' (Get-XlsxCellFill $marked 'xl/worksheets/sheet1.xml' 'C3') '変更した値'
+    Assert-Equal 'FFFFEB9C' (Get-XlsxCellFill $marked 'xl/worksheets/sheet1.xml' 'C6') '変更した数式'
+    foreach ($ref in @('A4', 'B4', 'C4')) { Assert-Equal 'FFC6EFCE' (Get-XlsxCellFill $marked 'xl/worksheets/sheet1.xml' $ref) "追加した行 $ref" }
+    Assert-Equal '' (Get-XlsxCellFill $marked 'xl/worksheets/sheet1.xml' 'C2') '変わっていないセル'
+
+    # セルを選ぶと変更前の値が出る（入力時メッセージ）
+    $sheet = Read-ZipEntryText $marked 'xl/worksheets/sheet1.xml'
+    Assert-Match $sheet '<dataValidation [^>]*promptTitle="変更" prompt="変更前の値: 8" sqref="C3"/>'
+    Assert-Match $sheet '<dataValidation [^>]*prompt="追加した行" sqref="A4:C4"/>'
+    Assert-Match $sheet '</sheetData><dataValidations count="3">.*</dataValidations><pageMargins' '入力規則はスキーマの順序どおりの位置'
+
+    # 差分一覧: この写しの中のセルへのリンク。削除した行は旧の場所を示し、リンクにしない
+    $list = Read-XlsxSheet -Path $marked -Index 3
+    Assert-Equal '差分一覧' $list.Sheets[2]
+    $byLoc = @{}
+    foreach ($r in 2..$list.Rows.Count) { $byLoc[$list.Rows[$r]['A']] = $r }
+    Assert-True ($byLoc.ContainsKey('旧: 項目定義!A5')) '削除した行は「旧: 」を付ける'
+    $link = @($list.Links | Where-Object { $_.Ref -eq "A$($byLoc['項目定義!C3'])" })[0]
+    Assert-Equal "'項目定義'!C3" $link.Location
+    Assert-Equal 0 @($list.Links | Where-Object { $_.Ref -eq "A$($byLoc['旧: 項目定義!A5'])" }).Count '削除した行はリンクなし'
+}
+
+Test-Case 'Compare-Excel: -OutMarkedDir で、値を消したセルは空のセルを作って印を付け、既存の入力規則とは重ねない' {
+    $dir = New-TestDir
+    New-TableBook -Path (Join-Path $dir 'old.xlsx') -Header @('ID', '名前', '備考') -Rows @(@('1', '受注', 'メモ1'), @('2', '顧客', 'メモ2'), @('3', '商品', 'メモ3'))
+    New-TableBook -Path (Join-Path $dir 'new.xlsx') -Header @('ID', '名前', '備考') -Rows @(@('1', '受注（改）', 'メモ1'), @('2', '顧客', ''), @('3', '商品', 'メモ3'))
+    # 新のブックの B2:B3 に、既存の入力規則（リスト）を付けておく
+    $newPath = Join-Path $dir 'new.xlsx'
+    $fs = [System.IO.File]::Open($newPath, [System.IO.FileMode]::Open)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Update)
+        $entry = $zip.GetEntry('xl/worksheets/sheet1.xml')
+        $sr = New-Object System.IO.StreamReader($entry.Open())
+        $xml = $sr.ReadToEnd(); $sr.Dispose()
+        $xml = $xml.Replace('<pageMargins', '<dataValidations count="1"><dataValidation type="list" allowBlank="1" sqref="B2:B3"><formula1>"受注,顧客"</formula1></dataValidation></dataValidations><pageMargins')
+        $entry.Delete()
+        $sw = New-Object System.IO.StreamWriter($zip.CreateEntry('xl/worksheets/sheet1.xml').Open())
+        $sw.Write($xml); $sw.Dispose()
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+
+    $outDir = Join-Path $dir 'marked'
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = $newPath; OutMarkedDir = $outDir }
+    Assert-Equal @('new.xlsx|Data!B2|値|変更', 'new.xlsx|Data!C3|値|削除') (Get-DiffKeys $diffs)
+    $marked = Join-Path $outDir 'new.xlsx'
+    Test-XlsxWellFormed $marked
+    $sheet = Read-ZipEntryText $marked 'xl/worksheets/sheet1.xml'
+    # 値を消したセル C3 は XML に無いので作る（B3 の後ろ）
+    Assert-Match $sheet '<c r="B3"[^>]*>(?:(?!</row>).)*</c><c r="C3" s="\d+"/></row>'
+    Assert-Equal 'FFFFC7CE' (Get-XlsxCellFill $marked 'xl/worksheets/sheet1.xml' 'C3') '値を消したセルは赤'
+    Assert-Equal 'FFFFEB9C' (Get-XlsxCellFill $marked 'xl/worksheets/sheet1.xml' 'B2') '既存の入力規則のあるセルも色は付ける'
+    Assert-Match $sheet '<dataValidations count="2"><dataValidation type="list"[^>]*sqref="B2:B3">.*</dataValidation><dataValidation [^>]*prompt="削除した値: メモ2" sqref="C3"/></dataValidations>' '既存の入力規則のあるセル（B2）にはメッセージを付けない'
 }
 
 Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定するとエラー' {

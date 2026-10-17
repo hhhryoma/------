@@ -18,7 +18,9 @@ param(
 
     [switch] $NoExcel,
 
-    [string] $OutXlsx
+    [string] $OutXlsx,
+
+    [string] $OutMarkedDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,6 +36,7 @@ if ($OutXlsx) {
     $OutXlsx = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutXlsx)
     if ([System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw "-OutXlsx の拡張子は .xlsx にしてください: $OutXlsx" }
 }
+if ($OutMarkedDir) { $OutMarkedDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutMarkedDir) }
 
 Update-TypeData -TypeName 'CompareExcel.Diff' -DefaultDisplayPropertySet File, Location, Change, Detail -Force -WhatIf:$false
 
@@ -1245,12 +1248,18 @@ function Merge-Renumbering {
     foreach ($run in $runs) {
         $first = $run[0].Diff; $last = $run[$run.Count - 1].Diff
         foreach ($x in $run) { $drop[$x.Index] = $true }
+        # 場所は範囲（A20:A26）で表す。旧の場所は、行がずれている場合だけ
+        $range = '{0}:{1}' -f $first.Cell, $last.Cell
+        $oldCell = { param($d) if ($d.OldLocation) { $d.OldLocation.Substring($d.OldLocation.LastIndexOf('!') + 1) } else { $d.Cell } }
+        $oldRange = '{0}:{1}' -f (& $oldCell $first), (& $oldCell $last)
+        $oldLocation = ''
+        if ($oldRange -ne $range -or $first.OldSheet -ne $first.Sheet) { $oldLocation = '{0}!{1}' -f $first.OldSheet, $oldRange }
         $summary = [pscustomobject]@{
-            File = $first.File; Location = $first.Location; Sheet = $first.Sheet; Cell = $first.Cell
-            OldLocation = $first.OldLocation; OldSheet = $first.OldSheet; Kind = '連番'; Change = '変更'
+            File = $first.File; Location = ('{0}!{1}' -f $first.Sheet, $range); Sheet = $first.Sheet; Cell = $range
+            OldLocation = $oldLocation; OldSheet = $first.OldSheet; Kind = '連番'; Change = '変更'
             Old = '{0}～{1}' -f $first.Old, $last.Old; New = '{0}～{1}' -f $first.New, $last.New
-            Detail = '連番の振り直し: {0}～{1}（{2}～{3} → {4}～{5}、{6} 個）' -f $first.Cell, $last.Cell, $first.Old, $last.Old, $first.New, $last.New, $run.Count
-            Path = $first.Path; OldPath = $first.OldPath
+            Detail = '連番の振り直し: {0}～{1} → {2}～{3}（{4} 個）' -f $first.Old, $last.Old, $first.New, $last.New, $run.Count
+            Path = $first.Path; OldPath = $first.OldPath; Segments = $null
         }
         $summary.PSObject.TypeNames.Insert(0, 'CompareExcel.Diff')
         $summaryAt[(@($run | Sort-Object Index)[0].Index)] = $summary
@@ -1327,6 +1336,513 @@ function Compare-Book {
 # ---------------------------------------------------------------- 比べるファイルの組み合わせ
 
 
+# ---------------------------------------------------------------- 差分の印を付けた写し（-OutMarkedDir）
+
+
+# 印の塗りつぶしの色（Excel のセルのスタイル「どちらでもない」「良い」「悪い」と同じ色）と、入力時メッセージの見出し
+$script:MarkKinds = [ordered]@{
+    Changed = @{ Color = 'FFFFEB9C'; Title = '変更' }
+    Added   = @{ Color = 'FFC6EFCE'; Title = '追加' }
+    Deleted = @{ Color = 'FFFFC7CE'; Title = '削除' }
+    Moved   = @{ Color = 'FFDDEBF7'; Title = '移動' }
+}
+# ワークシートの子要素のうち、dataValidations より後ろに置くもの（スキーマで順序が決まっている）
+$script:AfterDataValidations = 'hyperlinks|printOptions|pageMargins|pageSetup|headerFooter|rowBreaks|colBreaks|customProperties|cellWatches|ignoredErrors|smartTags|drawing|legacyDrawing|legacyDrawingHF|picture|oleObjects|controls|webPublishItems|tableParts|extLst'
+
+function Get-DiffMarks {
+    #     差分から、新のブックのシートごとに印を付けるセル・行・列と、セルを選んだときに出すメッセージを決める。
+    #     返り値: シート名 → @{ Cells = 番地 →印; Rows = 行番号 → 印; Cols = 列 → 印 }（印: @{ Kind; Lines }）
+    param($Diffs)
+
+    $marks = @{}
+    foreach ($d in $Diffs) {
+        if (-not $d.Sheet -or -not $d.Cell) { continue }
+        if (-not $marks.ContainsKey($d.Sheet)) { $marks[$d.Sheet] = @{ Cells = @{}; Rows = @{}; Cols = @{} } }
+        $m = $marks[$d.Sheet]
+        $table = $null; $keys = @(); $kind = $null; $line = $null
+        switch ($d.Kind) {
+            { $_ -eq '値' -or $_ -eq '数式' } {
+                $table = $m.Cells; $keys = @($d.Cell)
+                switch ($d.Change) {
+                    '変更' { $kind = 'Changed'; $line = '変更前の{0}: {1}' -f $d.Kind, $d.Old }
+                    '追加' { $kind = 'Added'; $line = '{0}を追加' -f $d.Kind }
+                    '削除' { $kind = 'Deleted'; $line = '削除した{0}: {1}' -f $d.Kind, $d.Old }
+                }
+            }
+            '行' {
+                $table = $m.Rows; $keys = @([regex]::Match($d.Cell, '\d+').Value)
+                if ($d.Change -eq '追加') { $kind = 'Added'; $line = '追加した行' }
+                elseif ($d.Change -eq '移動') { $kind = 'Moved'; $line = '移動した行（旧 {0} 行目）' -f [regex]::Match($d.OldLocation, '\d+$').Value }
+            }
+            '列' {
+                $table = $m.Cols; $keys = @([regex]::Match($d.Cell, '^[A-Z]+').Value)
+                if ($d.Change -eq '追加') { $kind = 'Added'; $line = '追加した列' }
+            }
+            '連番' {
+                $mm = [regex]::Match($d.Cell, '^([A-Z]+)(\d+):[A-Z]+(\d+)$')
+                if ($mm.Success) {
+                    $table = $m.Cells; $kind = 'Changed'; $line = $d.Detail
+                    $keys = @([int]$mm.Groups[2].Value..[int]$mm.Groups[3].Value | ForEach-Object { $mm.Groups[1].Value + $_ })
+                }
+            }
+        }
+        if (-not $kind) { continue }
+        foreach ($k in $keys) {
+            if (-not $table.ContainsKey($k)) { $table[$k] = @{ Kind = $kind; Lines = New-Object System.Collections.Generic.List[string] } }
+            elseif ($table[$k].Kind -ne $kind) { $table[$k].Kind = 'Changed' }   # 追加と削除が重なったセルなどは「変更」
+            $table[$k].Lines.Add($line)
+        }
+    }
+    return $marks
+}
+
+function Set-TagAttribute {
+    #     要素の開始タグ（文字列の先頭のタグ）の属性を設定する。無ければ足す
+    param([string] $Element, [string] $Name, [string] $Value)
+    $end = $Element.IndexOf('>')
+    $tag = $Element.Substring(0, $end + 1)
+    $rest = $Element.Substring($end + 1)
+    $rx = New-Object System.Text.RegularExpressions.Regex(('\s{0}="[^"]*"' -f [regex]::Escape($Name)))
+    if ($rx.IsMatch($tag)) { $tag = $rx.Replace($tag, (' {0}="{1}"' -f $Name, $Value), 1) }
+    elseif ($tag.EndsWith('/>')) { $tag = $tag.Substring(0, $tag.Length - 2) + (' {0}="{1}"/>' -f $Name, $Value) }
+    else { $tag = $tag.Substring(0, $tag.Length - 1) + (' {0}="{1}">' -f $Name, $Value) }
+    return $tag + $rest
+}
+
+function Get-TagAttribute {
+    param([string] $Element, [string] $Name)
+    $end = $Element.IndexOf('>')
+    $m = [regex]::Match($Element.Substring(0, $end + 1), ('\s{0}="([^"]*)"' -f [regex]::Escape($Name)))
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $null
+}
+
+function Add-CountedChildren {
+    #     <fills count="2">…</fills> のような要素の末尾に子要素を足し、count を直す。返り値: @(新しい XML, 足す前の子要素の数)
+    param([string] $Xml, [string] $Prefix, [string] $Name, [string] $Child, [string[]] $NewItems)
+
+    $rx = New-Object System.Text.RegularExpressions.Regex(('<{0}{1}\b[^>]*?(?:/>|>(.*?)</{0}{1}>)' -f $Prefix, $Name), [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    $m = $rx.Match($Xml)
+    if (-not $m.Success) { throw "styles.xml に $Name がありません" }
+    $count = ([regex]::Matches($m.Groups[1].Value, ('<{0}{1}\b' -f $Prefix, $Child))).Count
+    $element = $m.Value
+    if ($element.EndsWith('/>') -and $m.Groups[1].Length -eq 0 -and -not $element.Contains('</')) {
+        $element = $element.Substring(0, $element.Length - 2) + ('></{0}{1}>' -f $Prefix, $Name)
+    }
+    $close = '</{0}{1}>' -f $Prefix, $Name
+    $element = $element.Substring(0, $element.Length - $close.Length) + ($NewItems -join '') + $close
+    $element = Set-TagAttribute $element 'count' ($count + $NewItems.Count)
+    return @(($Xml.Substring(0, $m.Index) + $element + $Xml.Substring($m.Index + $m.Length)), $count)
+}
+
+function ConvertTo-Sqref {
+    #     セルの番地の一覧を、同じ行で隣り合うものを範囲にまとめた sqref（"A5:F5 H5"）にする
+    param($Refs)
+    $cells = @($Refs | ForEach-Object {
+        $m = [regex]::Match($_, '^([A-Z]+)(\d+)$')
+        [pscustomobject]@{ Row = [int]$m.Groups[2].Value; Col = (Get-ColumnIndex $m.Groups[1].Value) }
+    } | Sort-Object Row, Col)
+    $parts = @()
+    $i = 0
+    while ($i -lt $cells.Count) {
+        $j = $i
+        while ($j + 1 -lt $cells.Count -and $cells[$j + 1].Row -eq $cells[$i].Row -and $cells[$j + 1].Col -eq $cells[$j].Col + 1) { $j++ }
+        $ref = (ConvertTo-ColumnName $cells[$i].Col) + $cells[$i].Row
+        if ($j -gt $i) { $ref += ':' + (ConvertTo-ColumnName $cells[$j].Col) + $cells[$j].Row }
+        $parts += $ref
+        $i = $j + 1
+    }
+    return ($parts -join ' ')
+}
+
+function Get-SqrefAreas {
+    #     sqref（"A1:B5 D7"）を、行・列の範囲の一覧にする
+    param([string] $Sqref)
+    $areas = @()
+    foreach ($part in ($Sqref -split '\s+')) {
+        $m = [regex]::Match($part, '^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$')
+        if (-not $m.Success) { continue }
+        $c0 = Get-ColumnIndex $m.Groups[1].Value; $r0 = [int]$m.Groups[2].Value
+        $c1 = $c0; $r1 = $r0
+        if ($m.Groups[3].Success) { $c1 = Get-ColumnIndex $m.Groups[3].Value; $r1 = [int]$m.Groups[4].Value }
+        $areas += , @([math]::Min($r0, $r1), [math]::Max($r0, $r1), [math]::Min($c0, $c1), [math]::Max($c0, $c1))
+    }
+    return , $areas
+}
+
+function Get-MarkStyle {
+    #     元のスタイル番号と印の種類から、印を付けたスタイルの番号を返す（無ければ割り当てる）
+    param($State, [int] $Style, [string] $Kind)
+    $key = '{0}|{1}' -f $Style, $Kind
+    if (-not $State.Map.ContainsKey($key)) {
+        $State.Map[$key] = $State.Next
+        $State.Order.Add(@($Style, $Kind))
+        $State.Next++
+    }
+    return $State.Map[$key]
+}
+
+function Add-SheetMarks {
+    #     シートの XML のセルに印のスタイルを付け、印のメッセージを入力時メッセージ（データの入力規則）として足す。
+    #     印を付けるセルが XML に無ければ、空のセルとして作る（値を削除したセルなど）
+    param([string] $Xml, $Marks, $State)
+
+    $px = [regex]::Match($Xml, '<(\w+:)?worksheet\b').Groups[1].Value
+    $sd = [regex]::Match($Xml, ('<{0}sheetData\b[^>]*?(?:/>|>(.*?)</{0}sheetData>)' -f $px), [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    if (-not $sd.Success) { return $Xml }
+
+    $cellsByRow = @{}
+    foreach ($ref in $Marks.Cells.Keys) {
+        $row = [regex]::Match($ref, '\d+$').Value
+        if (-not $cellsByRow.ContainsKey($row)) { $cellsByRow[$row] = New-Object System.Collections.Generic.List[string] }
+        $cellsByRow[$row].Add($ref)
+    }
+    $messages = @{}         # 番地 → 印（メッセージを出すセル）
+    $seenRows = @{}
+    $cellRx = New-Object System.Text.RegularExpressions.Regex(('<{0}c\b[^>]*?(?:/>|>.*?</{0}c>)' -f $px), [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    $rowRx = New-Object System.Text.RegularExpressions.Regex(('<{0}row\b[^>]*?(?:/>|>.*?</{0}row>)' -f $px), [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
+    $markCell = {
+        param([string] $Cell, [string] $Ref, $Mark)
+        $s = 0
+        [void][int]::TryParse((Get-TagAttribute $Cell 's'), [ref]$s)
+        $messages[$Ref] = $Mark
+        return (Set-TagAttribute $Cell 's' (Get-MarkStyle $State $s $Mark.Kind))
+    }
+    $newCell = {
+        param([string] $Ref, $Mark)
+        $messages[$Ref] = $Mark
+        return ('<{0}c r="{1}" s="{2}"/>' -f $px, $Ref, (Get-MarkStyle $State 0 $Mark.Kind))
+    }
+
+    $inner = $sd.Groups[1].Value
+    $rowsXml = New-Object System.Collections.Generic.List[object]
+    $allRows = $Marks.Cols.Count -gt 0
+    foreach ($rm in $rowRx.Matches($inner)) {
+        $rowXml = $rm.Value
+        $r = Get-TagAttribute $rowXml 'r'
+        if (-not $r) { return $Xml }   # 行番号を省略したシートは、位置が確かでないので印を付けない
+        $seenRows[$r] = $true
+        $rowMark = $Marks.Rows[$r]
+        if (-not $allRows -and -not $rowMark -and -not $cellsByRow.ContainsKey($r)) {
+            # 印を付けない行はそのまま（作る行を正しい位置に入れるため、位置だけ覚えておく）
+            $rowsXml.Add([pscustomobject]@{ Row = [int]$r; Xml = $rowXml; Index = $rm.Index; Length = $rm.Length })
+            continue
+        }
+        $found = @{}
+        $endTag = $rowXml.IndexOf('>')
+        if (-not $rowXml.Substring(0, $endTag + 1).EndsWith('/>')) {
+            $rowXml = $cellRx.Replace($rowXml, {
+                param($cm)
+                $ref = Get-TagAttribute $cm.Value 'r'
+                if (-not $ref) { return $cm.Value }
+                $found[$ref] = $true
+                $mark = $Marks.Cells[$ref]
+                if (-not $mark) { $mark = $rowMark }
+                if (-not $mark) { $mark = $Marks.Cols[[regex]::Match($ref, '^[A-Z]+').Value] }
+                if (-not $mark) { return $cm.Value }
+                return (& $markCell $cm.Value $ref $mark)
+            })
+        }
+        # 印を付けるセルが無ければ作り、列の順に入れる
+        $missing = @()
+        if ($cellsByRow.ContainsKey($r)) { $missing = @($cellsByRow[$r] | Where-Object { -not $found.ContainsKey($_) }) }
+        if ($missing.Count -gt 0) {
+            $rowXml = [regex]::Replace($rowXml, '\sspans="[^"]*"', '')
+            $tagEnd = $rowXml.IndexOf('>')
+            if ($rowXml.Substring(0, $tagEnd + 1).EndsWith('/>')) {
+                $rowXml = $rowXml.Substring(0, $tagEnd - 1) + ('></{0}row>' -f $px)
+                $tagEnd = $rowXml.IndexOf('>')
+            }
+            $startTag = $rowXml.Substring(0, $tagEnd + 1)
+            $close = '</{0}row>' -f $px
+            $cells = New-Object System.Collections.Generic.List[object]
+            foreach ($cm in $cellRx.Matches($rowXml)) { $cells.Add([pscustomobject]@{ Col = (Get-ColumnIndex (Get-TagAttribute $cm.Value 'r')); Xml = $cm.Value }) }
+            foreach ($ref in $missing) { $cells.Add([pscustomobject]@{ Col = (Get-ColumnIndex $ref); Xml = (& $newCell $ref $Marks.Cells[$ref]) }) }
+            $rowXml = $startTag + (($cells | Sort-Object Col | ForEach-Object { $_.Xml }) -join '') + $close
+        }
+        $rowsXml.Add([pscustomobject]@{ Row = [int]$r; Xml = $rowXml; Index = $rm.Index; Length = $rm.Length })
+    }
+
+    # 行そのものが無ければ作る
+    $newRows = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $cellsByRow.Keys) {
+        if ($seenRows.ContainsKey($r)) { continue }
+        $cells = @($cellsByRow[$r] | Sort-Object { Get-ColumnIndex $_ } | ForEach-Object { & $newCell $_ $Marks.Cells[$_] })
+        $newRows.Add([pscustomobject]@{ Row = [int]$r; Xml = ('<{0}row r="{1}">{2}</{0}row>' -f $px, $r, ($cells -join '')) })
+    }
+    # 書き換えた行を戻し、作った行を行番号の順に入れる（行と行の間の文字はそのまま残す）
+    $sb = New-Object System.Text.StringBuilder
+    $pos = 0
+    $pending = @($newRows | Sort-Object Row)
+    $p = 0
+    foreach ($row in $rowsXml) {
+        [void]$sb.Append($inner.Substring($pos, $row.Index - $pos))
+        while ($p -lt $pending.Count -and $pending[$p].Row -lt $row.Row) { [void]$sb.Append($pending[$p].Xml); $p++ }
+        [void]$sb.Append($row.Xml)
+        $pos = $row.Index + $row.Length
+    }
+    [void]$sb.Append($inner.Substring($pos))
+    while ($p -lt $pending.Count) { [void]$sb.Append($pending[$p].Xml); $p++ }
+    $sheetData = '<{0}sheetData>{1}</{0}sheetData>' -f $px, $sb.ToString()
+    $xmlOut = $Xml.Substring(0, $sd.Index) + $sheetData + $Xml.Substring($sd.Index + $sd.Length)
+
+    # ---- 入力時メッセージ。既に入力規則のあるセルには付けない（重なると Excel が修復を求めるため）
+    if ($messages.Count -eq 0) { return $xmlOut }
+    $taken = @()
+    foreach ($m in [regex]::Matches($xmlOut, '<(?:\w+:)?dataValidation\b[^>]*\ssqref="([^"]*)"')) { $taken += Get-SqrefAreas $m.Groups[1].Value }
+    foreach ($m in [regex]::Matches($xmlOut, '<(?:\w+:)?sqref>([^<]*)</(?:\w+:)?sqref>')) { $taken += Get-SqrefAreas $m.Groups[1].Value }
+    $groups = [ordered]@{}   # 見出しとメッセージ → 番地の一覧
+    foreach ($ref in $messages.Keys) {
+        $cm = [regex]::Match($ref, '^([A-Z]+)(\d+)$')
+        $row = [int]$cm.Groups[2].Value; $col = Get-ColumnIndex $cm.Groups[1].Value
+        $covered = $false
+        foreach ($a in $taken) { if ($row -ge $a[0] -and $row -le $a[1] -and $col -ge $a[2] -and $col -le $a[3]) { $covered = $true; break } }
+        if ($covered) { continue }
+        $mark = $messages[$ref]
+        $title = $script:MarkKinds[$mark.Kind].Title
+        $prompt = (@($mark.Lines | Select-Object -Unique) -join "`n")
+        if ($prompt.Length -gt 255) { $prompt = $prompt.Substring(0, 254) + '…' }
+        $key = $title + "`t" + $prompt
+        if (-not $groups.Contains($key)) { $groups[$key] = New-Object System.Collections.Generic.List[string] }
+        $groups[$key].Add($ref)
+    }
+    if ($groups.Count -eq 0) { return $xmlOut }
+    $items = @()
+    foreach ($key in $groups.Keys) {
+        $title, $prompt = $key -split "`t", 2
+        $items += ('<{0}dataValidation allowBlank="1" showInputMessage="1" promptTitle="{1}" prompt="{2}" sqref="{3}"/>' -f $px, (ConvertTo-XmlText $title), ((ConvertTo-XmlText $prompt).Replace("`n", '&#10;')), (ConvertTo-Sqref $groups[$key]))
+    }
+    $dv = [regex]::Match($xmlOut, ('<{0}dataValidations\b[^>]*>.*?</{0}dataValidations>' -f $px), [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    if ($dv.Success) {
+        $count = ([regex]::Matches($dv.Value, ('<{0}dataValidation\b' -f $px))).Count
+        $close = '</{0}dataValidations>' -f $px
+        $element = $dv.Value.Substring(0, $dv.Value.Length - $close.Length) + ($items -join '') + $close
+        $element = Set-TagAttribute $element 'count' ($count + $items.Count)
+        return $xmlOut.Substring(0, $dv.Index) + $element + $xmlOut.Substring($dv.Index + $dv.Length)
+    }
+    $element = '<{0}dataValidations count="{1}">{2}</{0}dataValidations>' -f $px, $items.Count, ($items -join '')
+    $sdEnd = $xmlOut.IndexOf(('</{0}sheetData>' -f $px)) + ('</{0}sheetData>' -f $px).Length
+    $after = [regex]::Match($xmlOut.Substring($sdEnd), ('<{0}(?:{1})\b' -f $px, $script:AfterDataValidations))
+    if ($after.Success) { $at = $sdEnd + $after.Index }
+    else { $at = $xmlOut.LastIndexOf(('</{0}worksheet>' -f $px)) }
+    return $xmlOut.Substring(0, $at) + $element + $xmlOut.Substring($at)
+}
+
+function New-DiffListSheetXml {
+    #     差分一覧のシートの XML を作る。場所のセルは、この写しの中の該当セルへのリンクにする
+    param($Diffs, [string] $Namespace, [int] $HeaderStyle, [int] $BodyStyle, [int] $LinkStyle)
+
+    $columns = @(@('場所', 24), @('種類', 9), @('変更', 8), @('内容', 50), @('変更前', 40), @('変更後', 40), @('旧の場所', 18))
+    $sb = New-Object System.Text.StringBuilder
+    $links = New-Object System.Text.StringBuilder
+    [void]$sb.Append(('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="{0}">' -f $Namespace))
+    [void]$sb.Append(('<dimension ref="A1:G{0}"/>' -f ($Diffs.Count + 1)))
+    [void]$sb.Append('<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>')
+    [void]$sb.Append('<sheetFormatPr defaultRowHeight="18"/><cols>')
+    for ($i = 0; $i -lt $columns.Count; $i++) { [void]$sb.Append(('<col min="{0}" max="{0}" width="{1}" customWidth="1"/>' -f ($i + 1), $columns[$i][1])) }
+    [void]$sb.Append('</cols><sheetData><row r="1">')
+    for ($i = 0; $i -lt $columns.Count; $i++) {
+        [void]$sb.Append(('<c r="{0}1" s="{1}" t="inlineStr"><is><t>{2}</t></is></c>' -f (ConvertTo-ColumnName ($i + 1)), $HeaderStyle, $columns[$i][0]))
+    }
+    [void]$sb.Append('</row>')
+    $r = 1
+    foreach ($d in $Diffs) {
+        $r++
+        $oldValue = $d.Old; $newValue = $d.New
+        if ($d.Segments) {
+            $oldValue = @{ Runs = @($d.Segments | Where-Object { $_.Op -ne '+' } | ForEach-Object { @{ Text = $_.Text; Style = $(if ($_.Op -eq '-') { 'Deleted' } else { '' }) } }) }
+            $newValue = @{ Runs = @($d.Segments | Where-Object { $_.Op -ne '-' } | ForEach-Object { @{ Text = $_.Text; Style = $(if ($_.Op -eq '+') { 'Inserted' } else { '' }) } }) }
+        }
+        # この写しにある場所だけリンクにする（削除した行・列・シート・コメント・図形は旧のブックにしかない）
+        $hasNew = $d.Change -ne '削除' -or $d.Kind -eq '値' -or $d.Kind -eq '数式'
+        $location = $d.Location
+        if (-not $hasNew) { $location = '旧: ' + $location }
+        $values = @($location, $d.Kind, $d.Change, $d.Detail, $oldValue, $newValue, $d.OldLocation)
+        $target = ''
+        if ($hasNew -and $d.Sheet) {
+            $cell = $d.Cell
+            if (-not $cell) { $cell = 'A1' }
+            $target = "'{0}'!{1}" -f $d.Sheet.Replace("'", "''"), $cell
+        }
+        [void]$sb.Append(('<row r="{0}">' -f $r))
+        for ($i = 0; $i -lt $values.Count; $i++) {
+            $content = ConvertTo-InlineStringXml $values[$i]
+            if (-not $content) { continue }
+            $style = $BodyStyle
+            if ($i -eq 0 -and $target) { $style = $LinkStyle }
+            [void]$sb.Append(('<c r="{0}{1}" s="{2}" t="inlineStr">{3}</c>' -f (ConvertTo-ColumnName ($i + 1)), $r, $style, $content))
+        }
+        [void]$sb.Append('</row>')
+        if ($target) { [void]$links.Append(('<hyperlink ref="A{0}" location="{1}" display="{2}"/>' -f $r, (ConvertTo-XmlText $target), (ConvertTo-XmlText $location))) }
+    }
+    [void]$sb.Append('</sheetData>')
+    [void]$sb.Append(('<autoFilter ref="A1:G{0}"/>' -f $r))
+    if ($links.Length -gt 0) { [void]$sb.Append('<hyperlinks>').Append($links.ToString()).Append('</hyperlinks>') }
+    [void]$sb.Append('<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/></worksheet>')
+    return $sb.ToString()
+}
+
+function Export-MarkedCopy {
+    #     新のブックの写しを作り、差分のあったセルに色と入力時メッセージ（変更前の値など）を付け、末尾に差分一覧のシートを足す。
+    #     元のブックのパーツは、印を付けるシート・styles.xml・ブックの構成を表すパーツ以外は 1 バイトも変えない
+    param([string] $SourcePath, [string] $OutPath, $Diffs)
+
+    $marks = Get-DiffMarks $Diffs
+    $changes = @{}       # パーツ名（小文字）→ 新しい内容
+    $newParts = [ordered]@{}
+    $pkg = Open-ZipPackage -FilePath $SourcePath
+    try {
+        $read = {
+            param([string] $Part)
+            $e = Get-PackageEntry -Package $pkg -PartName $Part
+            if ($null -eq $e) { return $null }
+            $sr = New-Object System.IO.StreamReader($e.Open(), (New-Object System.Text.UTF8Encoding($false)), $true)
+            try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+        }
+        $wbPart = 'xl/workbook.xml'
+        foreach ($rel in (Get-PartRelationships -Package $pkg -PartName '')) { if ($rel.Kind -eq 'officeDocument') { $wbPart = $rel.Target; break } }
+        $wbDoc = Read-PartXml -Package $pkg -PartName $wbPart
+        $relById = @{}
+        $stylesPart = $null
+        foreach ($rel in (Get-PartRelationships -Package $pkg -PartName $wbPart)) {
+            $relById[$rel.Id] = $rel
+            if ($rel.Kind -eq 'styles') { $stylesPart = $rel.Target }
+        }
+        if (-not $stylesPart) { throw 'styles.xml がありません' }
+        $sheetPart = @{}
+        $sheetNames = @()
+        foreach ($s in $wbDoc.SelectNodes("//*[local-name()='sheets']/*[local-name()='sheet']")) {
+            $sheetNames += $s.GetAttribute('name')
+            $rel = $relById[(Get-RelationshipIdAttribute $s)]
+            if ($rel -and $rel.Kind -eq 'worksheet') { $sheetPart[$s.GetAttribute('name')] = $rel.Target }
+        }
+
+        # ---- styles.xml の現在のスタイル数を数え、シートに印を付けながら必要なスタイルを割り当てる
+        $styles = & $read $stylesPart
+        $spx = [regex]::Match($styles, '<(\w+:)?styleSheet\b').Groups[1].Value
+        $xfsMatch = [regex]::Match($styles, ('<{0}cellXfs\b[^>]*>(.*?)</{0}cellXfs>' -f $spx), [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        if (-not $xfsMatch.Success) { throw 'styles.xml に cellXfs がありません' }
+        $xfs = @([regex]::Matches($xfsMatch.Groups[1].Value, ('<{0}xf\b[^>]*?(?:/>|>.*?</{0}xf>)' -f $spx), [System.Text.RegularExpressions.RegexOptions]::Singleline) | ForEach-Object { $_.Value })
+        $state = @{ Map = @{}; Order = New-Object System.Collections.Generic.List[object]; Next = $xfs.Count }
+
+        foreach ($sheet in $marks.Keys) {
+            if (-not $sheetPart.ContainsKey($sheet)) { continue }
+            $xml = & $read $sheetPart[$sheet]
+            if ($null -eq $xml) { continue }
+            $new = Add-SheetMarks -Xml $xml -Marks $marks[$sheet] -State $state
+            if ($new -cne $xml) { $changes[$sheetPart[$sheet].ToLowerInvariant()] = $new }
+        }
+
+        # ---- 塗りつぶし・フォント・スタイルを足す
+        $fillXml = @($script:MarkKinds.Keys | ForEach-Object { '<{0}fill><{0}patternFill patternType="solid"><{0}fgColor rgb="{1}"/><{0}bgColor indexed="64"/></{0}patternFill></{0}fill>' -f $spx, $script:MarkKinds[$_].Color })
+        $fillXml += '<{0}fill><{0}patternFill patternType="solid"><{0}fgColor rgb="FFD9E1F2"/><{0}bgColor indexed="64"/></{0}patternFill></{0}fill>' -f $spx
+        $res = Add-CountedChildren $styles $spx 'fills' 'fill' $fillXml
+        $styles = $res[0]; $fillBase = $res[1]
+        $fillOf = @{}
+        $k = 0
+        foreach ($kind in $script:MarkKinds.Keys) { $fillOf[$kind] = $fillBase + $k; $k++ }
+        $headerFill = $fillBase + $k
+
+        $fontXml = @(
+            '<{0}font><{0}b/><{0}sz val="10"/><{0}name val="游ゴシック"/><{0}family val="3"/><{0}charset val="128"/></{0}font>' -f $spx,
+            '<{0}font><{0}sz val="10"/><{0}name val="游ゴシック"/><{0}family val="3"/><{0}charset val="128"/></{0}font>' -f $spx,
+            '<{0}font><{0}u/><{0}sz val="10"/><{0}color rgb="FF0563C1"/><{0}name val="游ゴシック"/><{0}family val="3"/><{0}charset val="128"/></{0}font>' -f $spx)
+        $res = Add-CountedChildren $styles $spx 'fonts' 'font' $fontXml
+        $styles = $res[0]; $fontBase = $res[1]
+
+        $newXfs = @()
+        foreach ($o in $state.Order) {
+            $x = $xfs[0]
+            if ($o[0] -lt $xfs.Count) { $x = $xfs[$o[0]] }
+            $x = Set-TagAttribute $x 'fillId' $fillOf[$o[1]]
+            $newXfs += Set-TagAttribute $x 'applyFill' '1'
+        }
+        $listBase = $state.Next
+        $newXfs += '<{0}xf numFmtId="0" fontId="{1}" fillId="{2}" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><{0}alignment vertical="center" wrapText="1"/></{0}xf>' -f $spx, $fontBase, $headerFill
+        $newXfs += '<{0}xf numFmtId="0" fontId="{1}" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><{0}alignment vertical="top" wrapText="1"/></{0}xf>' -f $spx, ($fontBase + 1)
+        $newXfs += '<{0}xf numFmtId="0" fontId="{1}" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><{0}alignment vertical="top" wrapText="1"/></{0}xf>' -f $spx, ($fontBase + 2)
+        $res = Add-CountedChildren $styles $spx 'cellXfs' 'xf' $newXfs
+        $changes[$stylesPart.ToLowerInvariant()] = $res[0]
+
+        # ---- 差分一覧のシートを末尾に足す（シート名・パーツ名・リレーション ID は既存と重ならないようにする）
+        $listName = '差分一覧'
+        $n = 2
+        while (@($sheetNames | Where-Object { $_ -ieq $listName }).Count -gt 0) { $listName = '差分一覧 ({0})' -f $n; $n++ }
+        $wbDir = ''
+        if ($wbPart.Contains('/')) { $wbDir = $wbPart.Substring(0, $wbPart.LastIndexOf('/') + 1) }
+        $n = 1
+        while ($pkg.Entries.ContainsKey(('{0}worksheets/sheet{1}.xml' -f $wbDir, $n).ToLowerInvariant())) { $n++ }
+        $listPart = '{0}worksheets/sheet{1}.xml' -f $wbDir, $n
+
+        $wbXml = & $read $wbPart
+        $mainNs = [regex]::Match($wbXml, '<(?:\w+:)?workbook\b[^>]*\sxmlns(?::\w+)?="([^"]*spreadsheetml[^"]*)"').Groups[1].Value
+        if (-not $mainNs) { $mainNs = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main' }
+        $newParts[$listPart] = New-DiffListSheetXml -Diffs $Diffs -Namespace $mainNs -HeaderStyle $listBase -BodyStyle ($listBase + 1) -LinkStyle ($listBase + 2)
+
+        $relsPart = '{0}_rels/{1}.rels' -f $wbDir, $wbPart.Substring($wbDir.Length)
+        $relsXml = & $read $relsPart
+        $ids = @{}
+        foreach ($m in [regex]::Matches($relsXml, '\sId="([^"]*)"')) { $ids[$m.Groups[1].Value] = $true }
+        $n = $ids.Count + 1
+        while ($ids.ContainsKey("rId$n")) { $n++ }
+        $rid = "rId$n"
+        $wsType = [regex]::Match($relsXml, 'Type="([^"]*/worksheet)"').Groups[1].Value
+        if (-not $wsType) { $wsType = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' }
+        $at = $relsXml.LastIndexOf('</Relationships>')
+        $changes[$relsPart.ToLowerInvariant()] = $relsXml.Substring(0, $at) + ('<Relationship Id="{0}" Type="{1}" Target="{2}"/>' -f $rid, $wsType, $listPart.Substring($wbDir.Length)) + $relsXml.Substring($at)
+
+        $wpx = [regex]::Match($wbXml, '<(\w+:)?workbook\b').Groups[1].Value
+        # r:id の接頭辞は、ルート要素で宣言されているものだけ使う（無ければ sheet 要素で宣言する）
+        $rootTag = [regex]::Match($wbXml, '<(?:\w+:)?workbook\b[^>]*>').Value
+        $rPrefix = [regex]::Match($rootTag, 'xmlns:(\w+)="[^"]*/relationships"').Groups[1].Value
+        $maxId = 0
+        foreach ($m in [regex]::Matches($wbXml, '\ssheetId="(\d+)"')) { $maxId = [math]::Max($maxId, [int]$m.Groups[1].Value) }
+        if ($rPrefix) { $sheetEl = '<{0}sheet name="{1}" sheetId="{2}" {3}:id="{4}"/>' -f $wpx, (ConvertTo-XmlText $listName), ($maxId + 1), $rPrefix, $rid }
+        else { $sheetEl = '<{0}sheet name="{1}" sheetId="{2}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{3}"/>' -f $wpx, (ConvertTo-XmlText $listName), ($maxId + 1), $rid }
+        $at = $wbXml.IndexOf(('</{0}sheets>' -f $wpx))
+        $changes[$wbPart.ToLowerInvariant()] = $wbXml.Substring(0, $at) + $sheetEl + $wbXml.Substring($at)
+
+        $ct = & $read '[Content_Types].xml'
+        $at = $ct.LastIndexOf('</Types>')
+        $changes['[content_types].xml'] = $ct.Substring(0, $at) + ('<Override PartName="/{0}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' -f $listPart) + $ct.Substring($at)
+    }
+    finally { $pkg.Zip.Dispose() }
+
+    # ---- 書き出す。変更しないパーツは同じ名前・日時・中身で書き直す
+    $dir = [System.IO.Path]::GetDirectoryName($OutPath)
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $src = New-Object System.IO.FileStream($SourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    try {
+        $inZip = New-Object System.IO.Compression.ZipArchive($src, [System.IO.Compression.ZipArchiveMode]::Read)
+        $dst = New-Object System.IO.FileStream($OutPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $outZip = New-Object System.IO.Compression.ZipArchive($dst, [System.IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach ($e in $inZip.Entries) {
+                    $o = $outZip.CreateEntry($e.FullName, [System.IO.Compression.CompressionLevel]::Optimal)
+                    $o.LastWriteTime = $e.LastWriteTime
+                    $os = $o.Open()
+                    try {
+                        $key = $e.FullName.ToLowerInvariant()
+                        if ($changes.ContainsKey($key)) { $bytes = $utf8.GetBytes($changes[$key]); $os.Write($bytes, 0, $bytes.Length) }
+                        else { $is = $e.Open(); try { $is.CopyTo($os) } finally { $is.Dispose() } }
+                    }
+                    finally { $os.Dispose() }
+                }
+                foreach ($name in $newParts.Keys) {
+                    $writer = New-Object System.IO.StreamWriter($outZip.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal).Open(), $utf8)
+                    try { $writer.Write($newParts[$name]) } finally { $writer.Dispose() }
+                }
+            }
+            finally { $outZip.Dispose() }
+        }
+        finally { $dst.Dispose() }
+    }
+    finally { $src.Dispose() }
+}
+
 function Get-ExcelFiles {
     param([string] $Dir)
     $map = [ordered]@{}
@@ -1366,6 +1882,7 @@ else {
 
 $summary = New-Object System.Collections.Generic.List[object]
 $index = 0
+$markedCount = 0
 foreach ($p in $pairs) {
     $index++
     Write-Progress -Activity 'Excel を比較中' -Status ("{0}/{1}  {2}" -f $index, $pairs.Count, $p.Relative) -PercentComplete ([int](100 * $index / $pairs.Count))
@@ -1385,6 +1902,22 @@ foreach ($p in $pairs) {
     catch {
         $state = '失敗'
         Write-Warning ("{0}: 比較できませんでした: {1}" -f $p.Relative, $_.Exception.Message)
+    }
+    if ($OutMarkedDir -and $state -eq '差分あり') {
+        $markedPath = [System.IO.Path]::GetFullPath((Join-Path $OutMarkedDir $p.Relative))
+        if (@('.xlsx', '.xlsm') -notcontains [System.IO.Path]::GetExtension($p.New).ToLowerInvariant()) {
+            Write-Warning ("{0}: 印を付けた写しは .xlsx / .xlsm だけ作れます" -f $p.Relative)
+        }
+        elseif ($markedPath -ieq [System.IO.Path]::GetFullPath($p.New) -or $markedPath -ieq [System.IO.Path]::GetFullPath($p.Old)) {
+            Write-Warning ("{0}: 印を付けた写しの保存先が比べたファイルと同じため、作りません: {1}" -f $p.Relative, $markedPath)
+        }
+        else {
+            try {
+                Export-MarkedCopy -SourcePath $p.New -OutPath $markedPath -Diffs $script:Diffs.GetRange($before, $script:Diffs.Count - $before).ToArray()
+                $markedCount++
+            }
+            catch { Write-Warning ("{0}: 印を付けた写しを作れませんでした（同名のファイルを Excel で開いていませんか）: {1}" -f $p.Relative, $_.Exception.Message) }
+        }
     }
     $summary.Add([pscustomobject]@{ File = $p.Relative; State = $state; Count = $script:Diffs.Count - $before; Old = $p.Old; New = $p.New })
 }
@@ -1448,6 +1981,7 @@ Write-Host ''
 $states = $summary | Group-Object State | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
 Write-Host ("{0} ファイル: {1} / 差分 {2} 件" -f $summary.Count, ($states -join ' / '), $script:Diffs.Count)
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
+if ($markedCount -gt 0) { Write-Host ("差分の印を付けた写しを保存しました: {0}（{1} ファイル）" -f $OutMarkedDir, $markedCount) }
 
 # .SYNOPSIS
 #     2 つの Excel ファイル（またはフォルダ）を比べ、セル単位の差分を一覧にします（Excel 不要）。
@@ -1463,6 +1997,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 #     フォルダどうしを指定すると、同じ相対パスのファイルを比べ、片方にしかないファイルは追加・削除として出力します。
 #     結果は 1 差分 1 行のオブジェクトで出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
+#     -OutMarkedDir を付けると、新のブックの写しに差分の印（セルの色と、選んだときに出る変更前の値）を付けて保存します。
 #
 # .PARAMETER Old
 #     比較元（変更前）のファイルまたはフォルダ。
@@ -1497,6 +2032,12 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     結果を xlsx に保存します（差分一覧・ファイル別。場所をクリックすると該当セルが開きます）。
 #     長い文字列の変更は、変更前の削除した部分を赤の取り消し線、変更後の追加した部分を赤の太字で示します。
 #
+# .PARAMETER OutMarkedDir
+#     差分のあった新のブック（.xlsx / .xlsm）の写しを、このフォルダーに同じ名前（フォルダーどうしなら同じ相対パス）で保存し、
+#     差分の印を付けます。変更したセルは黄、追加したセル・行・列は緑、値を消したセルは赤、移動した行は青で塗り、
+#     セルを選ぶと変更前の値などが出るようにします（データの入力規則の入力時メッセージ。既に入力規則のあるセルには付けません）。
+#     末尾に、各セルへのリンク付きの「差分一覧」シートを足します。元のブックは変更しません。
+#
 # .EXAMPLE
 #     .\Compare-Excel.ps1 .\v1.0\テーブル定義書.xlsx .\v1.1\テーブル定義書.xlsx
 #
@@ -1511,6 +2052,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .EXAMPLE
 #     # 書式（赤字・取り消し線・塗りつぶしなど）の変更も比べる
 #     .\Compare-Excel.ps1 .\v1.0\画面設計書.xlsx .\v1.1\画面設計書.xlsx -CompareFormat
+#
+# .EXAMPLE
+#     # 新の版の写しに差分の印を付けて、レビュー用に保存する
+#     .\Compare-Excel.ps1 D:\納品\v1.0 D:\納品\v1.1 -OutMarkedDir D:\差分レビュー
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに ExcelTools.psm1 と Search-Excel.ps1 が必要です。
