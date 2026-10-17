@@ -38,7 +38,7 @@ if ($OutXlsx) {
     if ([System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw "-OutXlsx の拡張子は .xlsx にしてください: $OutXlsx" }
 }
 
-Update-TypeData -TypeName 'ExcelDeliverable.Issue' -DefaultDisplayPropertySet File, Location, Level, Detail -Force
+Update-TypeData -TypeName 'ExcelDeliverable.Issue' -DefaultDisplayPropertySet File, Location, Level, Detail -Force -WhatIf:$false
 
 $checkSet = @{}
 foreach ($c in $Check) { $checkSet[$c] = $true }

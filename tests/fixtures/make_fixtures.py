@@ -281,6 +281,32 @@ def make_deliverable_fixtures(tmp):
     shutil.copy(os.path.join(GREP, "sub", "legacy.xls"), os.path.join(DELIVERABLE, "legacy.xls"))
 
 
+VIEW = os.path.join(HERE, "view")
+
+
+def make_view_fixtures():
+    """Reset-ExcelView.ps1 用。見出し（1 行目・A 列）を固定したまま、下へスクロールして D60 を選択した状態"""
+    shutil.rmtree(VIEW, ignore_errors=True)
+    os.makedirs(VIEW)
+    wb = openpyxl.Workbook()
+    ws = wb.active; ws.title = "一覧"
+    for r in range(1, 101):
+        ws.cell(row=r, column=1, value=r)
+        ws.cell(row=r, column=4, value="値{0}".format(r))
+    ws.freeze_panes = "B2"
+    wb.properties.creator = None
+    path = os.path.join(VIEW, "frozen.xlsx")
+    wb.save(path)
+    files = read_zip(path)
+    sheet = files["xl/worksheets/sheet1.xml"].decode()
+    sheet = sheet.replace('topLeftCell="B2" activePane="bottomRight"', 'topLeftCell="B50" activePane="bottomRight"')
+    sheet = sheet.replace('<selection pane="bottomRight" activeCell="A1" sqref="A1"/>', '<selection pane="bottomRight" activeCell="D60" sqref="D60"/>')
+    sheet = sheet.replace('<selection pane="topRight"/>', '<selection pane="topRight" activeCell="D1" sqref="D1"/>')
+    assert 'B50' in sheet and 'D60' in sheet
+    files["xl/worksheets/sheet1.xml"] = sheet.encode()
+    rewrite_zip(path, files)
+
+
 def main():
     tmp = tempfile.mkdtemp()
     try:
@@ -288,6 +314,7 @@ def main():
         make_pdf_fixtures()
         make_review_fixtures()
         make_deliverable_fixtures(tmp)
+        make_view_fixtures()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("fixtures written to", HERE)
