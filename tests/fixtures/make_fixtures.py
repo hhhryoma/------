@@ -325,7 +325,7 @@ def make_compare_fixtures():
         if comment:
             ws["B2"].comment = Comment(comment, "x")
         if extra_sheet:
-            wb.create_sheet(extra_sheet)["A1"] = "追加シートの内容"
+            wb.create_sheet(extra_sheet)["A1"] = "{0}の内容".format(extra_sheet)
         wb.properties.creator = None
         wb.save(path)
 
