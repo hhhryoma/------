@@ -438,6 +438,30 @@ def make_replace_fixtures(tmp):
     wb.save(os.path.join(REPLACE, "table.xlsx"))
 
 
+TERMS = os.path.join(HERE, "terms")
+
+
+def make_terms_fixtures():
+    """Test-ExcelTerms.ps1 と Replace-Excel.ps1 -ListPath 用（terms）。期待値は tests/Test-ExcelTerms.Tests.ps1 を参照"""
+    shutil.rmtree(TERMS, ignore_errors=True)
+    os.makedirs(TERMS)
+
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "機能"
+    ws["A1"] = "ユーザー管理"; ws["A2"] = "ユーザ登録"; ws["A3"] = "サーバー構成"; ws["A4"] = "ＩＤで検索"
+    ws["A5"] = "ﾕｰｻﾞｰ一覧"; ws["A6"] = "インターフェース仕様"; ws["A7"] = "Id は対象外（大文字・小文字の違い）"
+    wb.properties.creator = None
+    wb.save(os.path.join(TERMS, "a.xlsx"))
+
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "画面"
+    ws["A1"] = "ユーザーIDを入力"; ws["A2"] = "サーバに接続"; ws["A3"] = "インタフェース"
+    ws["A4"] = "変更出来る"; ws["A5"] = "削除できる"; ws["A6"] = "Id"
+    wb.properties.creator = None
+    wb.save(os.path.join(TERMS, "b.xlsx"))
+
+    with open(os.path.join(TERMS, "用語集.csv"), "w", encoding="utf-8-sig", newline="") as f:
+        f.write("正しい表記,揺れ,備考\r\nユーザー,ユーザ,外来語の長音\r\nできる,出来る/出来ます,ひらがなで書く\r\n")
+
+
 PRINT = os.path.join(HERE, "print")
 
 
@@ -522,6 +546,7 @@ def main():
         make_compare_fixtures()
         make_compare_format_fixtures(tmp)
         make_replace_fixtures(tmp)
+        make_terms_fixtures()
         make_print_fixtures()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
