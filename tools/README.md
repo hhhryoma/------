@@ -8,11 +8,12 @@
 | [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違いをまとめて確認する |
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認もできる） |
+| [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
 
 ## Search-Excel.ps1
 
@@ -604,6 +605,89 @@ Location        Kind Detail
 - 書式は `-CompareFormat` を付けたときだけ比べ、罫線・フォントの種類と大きさ・表示形式は比べません
 - 内容がまったく同じ行が何度も出てくる表で行を入れ替えた場合、対応付けが直感と違うことがあります
 - 値の少ない列（ほとんど空の列など）は、列の挿入・削除を見つけにくいことがあります
+
+## Measure-DesignSize.ps1
+
+設計書のフォルダから**規模を数え**、係数表で**工数の目安**と **FP（ファンクションポイント）** を出します。見積もりの根拠づくりに使えます。Excel は不要です。
+
+```powershell
+.\Measure-DesignSize.ps1 D:\設計書
+.\Measure-DesignSize.ps1 D:\設計書 -Coefficients .\係数表.csv -ExternalTables '^M_CUSTOMER' -OutXlsx D:\規模.xlsx
+```
+
+```
+Kind     Name                   Measures                Level Days EI EQ EO
+画面     SCR001 受注一覧        項目数 17・イベント数 6 普通  5.00  0  2  0
+画面     SCR002 受注登録        項目数 19・イベント数 7 普通  5.00  1  2  0
+テーブル T_ORDER 受注           カラム数 14             簡易  0.50  0  0  0
+IF       IF001 出荷指示データ   項目数 12               簡易  2.00  0  0  1
+…
+
+種類       難易度 数 規模 工数（人日）
+画面       普通    3   57           15
+テーブル   簡易    4   49            2
+IF         簡易    1   12            2
+メッセージ         1   16          0.8
+コード             1   15          0.3
+合計 20.1 人日（1.01 人月、1 人月 = 20 人日）
+FP（NESMA 概算法）140 = 35 × ILF 4 + 15 × EIF 0
+FP（NESMA 試算法）61 = 7 × ILF 4 + 5 × EIF 0 + 4 × EI 2 + 5 × EO 1 + 4 × EQ 5
+```
+
+### 数え方（`tools\estimate\規模の数え方.csv`）
+
+| 種類 | 設計書（ファイル名） | 数えるもの |
+| --- | --- | --- |
+| 画面 | 画面設計書 | 1 ファイル = 1 画面。項目定義の項目数と、イベント定義のイベント数 |
+| テーブル | テーブル定義書 | カラム定義のあるシート = 1 テーブル。カラム数 |
+| IF | IF 定義書 | 1 ファイル = 1 IF。レコード定義の項目数 |
+| 帳票 / バッチ | 帳票設計書 / バッチ設計書 | 1 ファイル = 1 つ。項目数 / ステップ数 |
+| メッセージ / コード | メッセージ一覧 / コード定義書 | 一覧の行数 |
+
+- 表は、**見出し（「項目名」「項目ID」など）がそろっている行**を探し、その下で「数える列」に値のある行を、次の節（「■」で始まる行）まで数えます
+- 名前は、帳票のヘッダの「画面名」「テーブル名」などの見出しの右の値から取ります
+- 社内の設計書の書式（シート名・見出しの文字）が違う場合は、この CSV を直すか、`-Rules` で別の CSV を指定します
+- **見出しが見つからない設計書・0 件の表は警告**します（規模を数えられない設計書の見つけ出しにも使えます）
+
+### 係数表（`tools\estimate\係数表_サンプル.csv`）
+
+```csv
+種類,難易度,基準,上限,工数,単位
+画面,簡易,項目数,15,3,
+画面,普通,項目数,40,5,
+画面,複雑,項目数,,8,
+メッセージ,,件数,,0.05,件
+```
+
+種類ごとに上から順に「基準の値（項目数など）が上限以下」の行を探し、その難易度と工数（人日）を使います。上限が空の行はそれより大きいすべてです。単位が「件」の行は、件数 × 工数です。
+**サンプルの数値は例です。** 社内の標準工数や過去の実績に合わせて直し、`-Coefficients` で指定してください。
+
+### FP（NESMA）
+
+| 機能 | 数え方 |
+| --- | --- |
+| ILF（内部論理ファイル） | テーブル定義書のテーブル |
+| EIF（外部インターフェースファイル） | テーブルのうち、`-ExternalTables` に一致する（ほかのシステムが管理する）もの |
+| EI（外部入力） | 画面のイベントのうち、使用テーブルに C（登録）・U（更新）・D（削除）があるもの。受信の IF |
+| EO（外部出力） | 送信の IF、帳票 |
+| EQ（外部照会） | 画面のイベントのうち、使用テーブルが R（参照）だけのもの |
+
+- 概算法 = 35 × ILF + 15 × EIF、試算法 = 7 × ILF + 5 × EIF + 4 × EI + 5 × EO + 4 × EQ（NESMA の簡易な計測法）
+- 使用テーブルは「M_CUSTOMER(R)」「T_ORDER(C,U)」のように、テーブルの後ろの括弧に CRUD を書いた形を読みます
+- IF の向きは「送受信区分」などの見出しの値（受信・送信）、無ければ「送信元」がこのシステム（システム名）かどうかで決めます
+- どちらも見積もりの目安です。正式な FP 計測の代わりにはなりません
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 設計書のフォルダ・ファイル（複数可） |
+| `-Rules` | 規模の数え方の CSV（既定は `tools\estimate\規模の数え方.csv`） |
+| `-Coefficients` | 係数表の CSV（既定は `tools\estimate\係数表_サンプル.csv`） |
+| `-ExternalTables` | ほかのシステムが管理するテーブル（FP の EIF）の ID・名前の正規表現 |
+| `-DaysPerMonth` | 1 人月の日数（既定 20） |
+| `-Summary` | 一覧の代わりに、集計（合計の人日・人月、FP、種類・難易度ごとの数と工数）を出力する |
+| `-OutXlsx` | 集計・規模一覧（設計書の表へのリンク付き）・使った係数表を保存する |
 
 ## Export-ExcelToPdf.ps1
 
