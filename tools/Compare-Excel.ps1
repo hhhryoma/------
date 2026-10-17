@@ -6,7 +6,11 @@ param(
     [Parameter(Mandatory = $true, Position = 1)]
     [string] $New,
 
+    [string[]] $KeyColumn,
+
     [switch] $NoRowAlign,
+
+    [switch] $NoColumnAlign,
 
     [switch] $NoRecurse,
 
@@ -225,13 +229,18 @@ function Add-Diff {
     if (-not $cell) { $cell = $OldCell }
     $location = $Sheet
     if ($cell) { $location = '{0}!{1}' -f $Sheet, $cell }
+    # シート名を変更した場合、旧の場所は旧のシート名で表す
+    $oldSheet = $script:OldSheetName
+    if (-not $oldSheet) { $oldSheet = $Sheet }
     $oldLocation = ''
-    if ($OldCell -and $OldCell -ne $NewCell) { $oldLocation = '{0}!{1}' -f $Sheet, $OldCell }
+    if ($OldCell -and ($OldCell -ne $NewCell -or $oldSheet -ne $Sheet)) { $oldLocation = '{0}!{1}' -f $oldSheet, $OldCell }
 
     switch ($Change) {
         '変更' { $detail = '{0}: {1} → {2}' -f $Kind, (Get-Short $OldText), (Get-Short $NewText) }
         '追加' { $detail = '{0}を追加: {1}' -f $Kind, (Get-Short $NewText) }
         '削除' { $detail = '{0}を削除: {1}' -f $Kind, (Get-Short $OldText) }
+        '移動' { $detail = '{0}を移動: {1}' -f $Kind, (Get-Short $NewText) }
+        '名前変更' { $detail = 'シート名を変更: {0} → {1}' -f $OldText, $NewText }
     }
     if ($oldLocation -and $NewCell) { $detail += "（旧 $OldCell）" }
 
@@ -241,6 +250,7 @@ function Add-Diff {
         Sheet       = $Sheet
         Cell        = $cell
         OldLocation = $oldLocation
+        OldSheet    = $oldSheet
         Kind        = $Kind
         Change      = $Change
         Old         = $OldText
@@ -268,44 +278,296 @@ function Format-RowContent {
     return ($parts -join ' | ')
 }
 
+function Get-ColumnProfile {
+    #     列ごとの「値の出現回数」を数える（列の対応付けに使う）。数式は値と区別するため先頭に = を付ける
+    param($Sheet)
+    $prof = @{}
+    foreach ($r in $Sheet.Rows.Values) {
+        foreach ($c in $r.V.Keys) {
+            if (-not $prof.ContainsKey($c)) { $prof[$c] = @{} }
+            $prof[$c]['v' + $r.V[$c]] = 1 + [int]$prof[$c]['v' + $r.V[$c]]
+        }
+        foreach ($c in $r.F.Keys) {
+            if (-not $prof.ContainsKey($c)) { $prof[$c] = @{} }
+            $prof[$c]['f' + $r.F[$c]] = 1 + [int]$prof[$c]['f' + $r.F[$c]]
+        }
+    }
+    return $prof
+}
+
+function Get-BagSimilarity {
+    #     2 つの「値 → 出現回数」の似ている度合い（重複を数える Jaccard 係数、0〜1）
+    param($A, $B)
+    $inter = 0; $union = 0
+    foreach ($k in $A.Keys) {
+        # 変数名は大文字小文字を区別しないため、引数の $A / $B と別の名前にする
+        $countA = $A[$k]; $countB = [int]$B[$k]
+        $inter += [math]::Min($countA, $countB); $union += [math]::Max($countA, $countB)
+    }
+    foreach ($k in $B.Keys) { if (-not $A.ContainsKey($k)) { $union += $B[$k] } }
+    if ($union -eq 0) { return 1.0 }
+    return $inter / $union
+}
+
+function Get-ColumnMapping {
+    #     列の挿入・削除を見つける。列ごとの値の集まりが似ている列どうしを、順序を保って対応付ける。
+    #     同じ列番地どうしの対応より明らかに良い（類似度の合計が 0.5 以上高い）場合だけ採用し、$null なら対応付けなし
+    param($OldSheet, $NewSheet)
+
+    $po = Get-ColumnProfile $OldSheet
+    $pn = Get-ColumnProfile $NewSheet
+    $oc = @($po.Keys | Sort-Object { Get-ColumnIndex $_ })
+    $nc = @($pn.Keys | Sort-Object { Get-ColumnIndex $_ })
+    if ($oc.Count -eq 0 -or $nc.Count -eq 0) { return $null }
+
+    # 同じ列番地どうしの類似度。列の並びが同じで、どの列もよく似ていれば対応付けは不要
+    $identity = 0.0
+    $allSimilar = ($oc.Count -eq $nc.Count)
+    foreach ($c in $oc) {
+        if ($pn.ContainsKey($c)) {
+            $sim = Get-BagSimilarity $po[$c] $pn[$c]
+            $identity += $sim
+            if ($sim -lt 0.8) { $allSimilar = $false }
+        }
+        else { $allSimilar = $false }
+    }
+    if ($allSimilar) { return $null }
+
+    $n = $oc.Count; $m = $nc.Count
+    $sim = New-Object 'double[,]' $n, $m
+    for ($i = 0; $i -lt $n; $i++) { for ($j = 0; $j -lt $m; $j++) { $sim[$i, $j] = Get-BagSimilarity $po[$oc[$i]] $pn[$nc[$j]] } }
+    # 類似度 0.5 以上の組だけを一致とみなし、合計が最大になる順序どおりの対応付けを求める
+    $dp = New-Object 'double[,]' ($n + 1), ($m + 1)
+    for ($i = $n - 1; $i -ge 0; $i--) {
+        for ($j = $m - 1; $j -ge 0; $j--) {
+            $best = [math]::Max($dp[($i + 1), $j], $dp[$i, ($j + 1)])
+            if ($sim[$i, $j] -ge 0.5) { $best = [math]::Max($best, $dp[($i + 1), ($j + 1)] + $sim[$i, $j]) }
+            $dp[$i, $j] = $best
+        }
+    }
+    if ($dp[0, 0] -le $identity + 0.5) { return $null }
+
+    $newToOld = @{}
+    $i = 0; $j = 0
+    while ($i -lt $n -and $j -lt $m) {
+        if ($sim[$i, $j] -ge 0.5 -and $dp[$i, $j] -eq $dp[($i + 1), ($j + 1)] + $sim[$i, $j]) { $newToOld[$nc[$j]] = $oc[$i]; $i++; $j++ }
+        elseif ($dp[$i, $j] -eq $dp[($i + 1), $j]) { $i++ }
+        else { $j++ }
+    }
+    $identityMap = $true
+    foreach ($k in $newToOld.Keys) { if ($k -ne $newToOld[$k]) { $identityMap = $false } }
+    if ($identityMap) { return $null }
+
+    $mappedOld = @{}
+    foreach ($v in $newToOld.Values) { $mappedOld[$v] = $true }
+    return [pscustomobject]@{
+        NewToOld    = $newToOld
+        AddedCols   = @($nc | Where-Object { -not $newToOld.ContainsKey($_) })
+        RemovedCols = @($oc | Where-Object { -not $mappedOld.ContainsKey($_) })
+    }
+}
+
+function Convert-SheetColumns {
+    #     シートの列番地を読み替えた写しを作る。Map に無い列は取り除く
+    param($Sheet, $Map)
+    $rows = @{}
+    foreach ($r in $Sheet.Rows.Keys) {
+        $v = @{}; $f = @{}
+        foreach ($c in $Sheet.Rows[$r].V.Keys) { if ($Map.ContainsKey($c)) { $v[$Map[$c]] = $Sheet.Rows[$r].V[$c] } }
+        foreach ($c in $Sheet.Rows[$r].F.Keys) { if ($Map.ContainsKey($c)) { $f[$Map[$c]] = $Sheet.Rows[$r].F[$c] } }
+        if ($v.Count -gt 0 -or $f.Count -gt 0) { $rows[$r] = @{ V = $v; F = $f } }
+    }
+    return [pscustomobject]@{ Rows = $rows; Comments = $Sheet.Comments; Shapes = $Sheet.Shapes }
+}
+
+function Get-KeyRegions {
+    #     キー列の見出し（-KeyColumn の文字と一致するセル）を探し、その下の「キー列に値がある行」を表の範囲とする。
+    #     返り値: 見出しの文字と出現順ごとの範囲（行の一覧と、行 → キーの値）
+    param($Sheet, [string[]] $Keys)
+
+    $regions = New-Object System.Collections.Generic.List[object]
+    $rows = @($Sheet.Rows.Keys | Sort-Object { [int]$_ })
+    $seenCount = @{}
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $r = $Sheet.Rows[$rows[$i]]
+        foreach ($c in ($r.V.Keys | Sort-Object { Get-ColumnIndex $_ })) {
+            $text = ([string]$r.V[$c]).Trim()
+            if ($Keys -notcontains $text) { continue }
+            $seenCount[$text] = 1 + [int]$seenCount[$text]
+            $region = [pscustomobject]@{ Name = '{0}#{1}' -f $text, $seenCount[$text]; Rows = New-Object System.Collections.Generic.List[string]; KeyOf = @{}; Duplicate = $false }
+            $values = @{}
+            # 見出しの次の行から、キー列が空の行（または空行）が出るまで
+            for ($k = $i + 1; $k -lt $rows.Count; $k++) {
+                if ([int]$rows[$k] -ne [int]$rows[$k - 1] + 1) { break }
+                $key = ([string]$Sheet.Rows[$rows[$k]].V[$c]).Trim()
+                if (-not $key) { break }
+                if ($values.ContainsKey($key)) { $region.Duplicate = $true }
+                $values[$key] = $true
+                $region.Rows.Add($rows[$k])
+                $region.KeyOf[$rows[$k]] = $key
+            }
+            if ($region.Rows.Count -gt 0) { $regions.Add($region) }
+        }
+    }
+    return $regions
+}
+
+function Get-LisIndexes {
+    #     数列の最長増加部分列に含まれる要素の位置（0 始まり）を返す
+    param([int[]] $Values)
+    $tails = New-Object System.Collections.Generic.List[int]
+    $prev = New-Object int[] $Values.Count
+    for ($k = 0; $k -lt $Values.Count; $k++) {
+        $lo = 0; $hi = $tails.Count
+        while ($lo -lt $hi) { $mid = [int][math]::Floor(($lo + $hi) / 2); if ($Values[$tails[$mid]] -lt $Values[$k]) { $lo = $mid + 1 } else { $hi = $mid } }
+        if ($lo -gt 0) { $prev[$k] = $tails[$lo - 1] } else { $prev[$k] = -1 }
+        if ($lo -eq $tails.Count) { $tails.Add($k) } else { $tails[$lo] = $k }
+    }
+    $result = @{}
+    if ($tails.Count -gt 0) { $k = $tails[$tails.Count - 1]; while ($k -ge 0) { $result[$k] = $true; $k = $prev[$k] } }
+    return $result
+}
+
+function Get-SheetSimilarity {
+    #     2 つのシートの中身がどれだけ似ているか（行の内容の集まりの Jaccard 係数）。シート名の変更の判定に使う
+    param($A, $B)
+    $ba = @{}; $bb = @{}
+    foreach ($r in $A.Rows.Values) { $s = Get-RowSignature $r; $ba[$s] = 1 + [int]$ba[$s] }
+    foreach ($r in $B.Rows.Values) { $s = Get-RowSignature $r; $bb[$s] = 1 + [int]$bb[$s] }
+    if ($ba.Count -eq 0 -and $bb.Count -eq 0) { return 0.0 }
+    return Get-BagSimilarity $ba $bb
+}
+
 function Compare-Sheet {
-    param([string] $Sheet, $OldSheet, $NewSheet)
+    param([string] $Sheet, $OldSheet, $NewSheet, [string] $OldName)
 
-    $oldRows = @($OldSheet.Rows.Keys | Sort-Object { [int]$_ })
-    $newRows = @($NewSheet.Rows.Keys | Sort-Object { [int]$_ })
-    $map = Get-RowMapping -OldRows $oldRows -NewRows $newRows -OldBook $OldSheet -NewBook $NewSheet
+    $script:OldSheetName = $OldName
+    if (-not $script:OldSheetName) { $script:OldSheetName = $Sheet }
+    $firstDiff = $script:Diffs.Count
 
+    # ---- 列の挿入・削除: 新の列を旧の列番地に読み替えて比べ、出力は新の列番地に戻す
+    $toNew = @{}
+    $oldView = $OldSheet; $newView = $NewSheet
+    $cm = $null
+    if (-not $NoColumnAlign -and -not $NoRowAlign) { $cm = Get-ColumnMapping $OldSheet $NewSheet }
+    if ($cm) {
+        foreach ($k in $cm.NewToOld.Keys) { $toNew[$cm.NewToOld[$k]] = $k }
+        $keepOld = @{}
+        foreach ($v in $cm.NewToOld.Values) { $keepOld[$v] = $v }
+        $newView = Convert-SheetColumns $NewSheet $cm.NewToOld
+        $oldView = Convert-SheetColumns $OldSheet $keepOld
+        foreach ($c in $cm.AddedCols) {
+            $cells = @($NewSheet.Rows.Keys | Where-Object { $NewSheet.Rows[$_].V.ContainsKey($c) -or $NewSheet.Rows[$_].F.ContainsKey($c) } | Sort-Object { [int]$_ })
+            $sample = @($cells | Select-Object -First 3 | ForEach-Object { $NewSheet.Rows[$_].V[$c] }) -join ', '
+            Add-Diff $Sheet "$c$($cells[0])" $null '列' '追加' $null ("{0} 列（{1} 個: {2}）" -f $c, $cells.Count, $sample)
+        }
+        foreach ($c in $cm.RemovedCols) {
+            $cells = @($OldSheet.Rows.Keys | Where-Object { $OldSheet.Rows[$_].V.ContainsKey($c) -or $OldSheet.Rows[$_].F.ContainsKey($c) } | Sort-Object { [int]$_ })
+            $sample = @($cells | Select-Object -First 3 | ForEach-Object { $OldSheet.Rows[$_].V[$c] }) -join ', '
+            Add-Diff $Sheet $null "$c$($cells[0])" '列' '削除' ("{0} 列（{1} 個: {2}）" -f $c, $cells.Count, $sample) $null
+        }
+    }
+    $L = { param($c) if ($toNew.ContainsKey($c)) { $toNew[$c] } else { $c } }
+
+    $oldRows = @($oldView.Rows.Keys | Sort-Object { [int]$_ })
+    $newRows = @($newView.Rows.Keys | Sort-Object { [int]$_ })
+
+    # ---- キー列のある表は、キーの値で行を対応付ける
+    $pairs = New-Object System.Collections.Generic.List[object]
+    $added = New-Object System.Collections.Generic.List[string]
+    $removed = New-Object System.Collections.Generic.List[string]
+    $moved = New-Object System.Collections.Generic.List[object]
+    $keyedOld = @{}; $keyedNew = @{}
+    if ($KeyColumn -and -not $NoRowAlign) {
+        $ro = Get-KeyRegions $oldView $KeyColumn
+        $rn = Get-KeyRegions $newView $KeyColumn
+        foreach ($regionNew in $rn) {
+            $regionOld = @($ro | Where-Object { $_.Name -eq $regionNew.Name })[0]
+            if (-not $regionOld) { continue }
+            if ($regionOld.Duplicate -or $regionNew.Duplicate) {
+                Write-Warning ("{0}: キー列「{1}」の値が重複しているため、この表はキーで対応付けません" -f $Sheet, $regionNew.Name.Split('#')[0])
+                continue
+            }
+            $byKeyOld = @{}
+            foreach ($r in $regionOld.Rows) { $byKeyOld[$regionOld.KeyOf[$r]] = $r; $keyedOld[$r] = $true }
+            $seq = New-Object System.Collections.Generic.List[object]
+            foreach ($r in $regionNew.Rows) {
+                $keyedNew[$r] = $true
+                $key = $regionNew.KeyOf[$r]
+                if ($byKeyOld.ContainsKey($key)) { $seq.Add(@($byKeyOld[$key], $r)); $byKeyOld.Remove($key) }
+                else { $added.Add($r) }
+            }
+            foreach ($k in $byKeyOld.Keys) { $removed.Add($byKeyOld[$k]) }
+            # 順番が入れ替わった行（旧の順に並べたとき、新の位置の最長増加部分列に入らない行）
+            $ordered = @($seq | Sort-Object { [int]$_[0] })
+            $lis = Get-LisIndexes ([int[]]@($ordered | ForEach-Object { [int]$_[1] }))
+            for ($k = 0; $k -lt $ordered.Count; $k++) {
+                $pairs.Add($ordered[$k])
+                if (-not $lis.ContainsKey($k)) { $moved.Add($ordered[$k]) }
+            }
+        }
+    }
+
+    # ---- 残りの行は内容で対応付ける
+    $restOld = @($oldRows | Where-Object { -not $keyedOld.ContainsKey($_) })
+    $restNew = @($newRows | Where-Object { -not $keyedNew.ContainsKey($_) })
+    $map = Get-RowMapping -OldRows $restOld -NewRows $restNew -OldBook $oldView -NewBook $newView
+    foreach ($p in $map.Pairs) { $pairs.Add($p) }
+
+    # 削除と追加に同じ内容の行があれば、行の移動とみなす
+    $addedBySig = @{}
+    foreach ($r in $map.Added) {
+        $sig = Get-RowSignature $newView.Rows[$r]
+        if (-not $addedBySig.ContainsKey($sig)) { $addedBySig[$sig] = New-Object System.Collections.Generic.List[string] }
+        $addedBySig[$sig].Add($r)
+    }
+    $movedNew = @{}
+    foreach ($r in $map.Removed) {
+        $sig = Get-RowSignature $oldView.Rows[$r]
+        if ($addedBySig.ContainsKey($sig) -and $addedBySig[$sig].Count -gt 0) {
+            $to = $addedBySig[$sig][0]; $addedBySig[$sig].RemoveAt(0)
+            $moved.Add(@($r, $to)); $movedNew[$to] = $true
+            $pairs.Add(@($r, $to))
+        }
+        else { $removed.Add($r) }
+    }
+    foreach ($r in $map.Added) { if (-not $movedNew.ContainsKey($r)) { $added.Add($r) } }
+
+    # ---- 対応付けた行のセルを比べる
     $rowMap = @{}
-    foreach ($p in $map.Pairs) {
+    foreach ($p in $pairs) {
         $rowMap[$p[0]] = $p[1]
-        $o = $OldSheet.Rows[$p[0]]; $n = $NewSheet.Rows[$p[1]]
+        $o = $oldView.Rows[$p[0]]; $n = $newView.Rows[$p[1]]
         foreach ($kind in @(@('V', '値'), @('F', '数式'))) {
             $cols = @{}
             foreach ($c in @($o[$kind[0]].Keys) + @($n[$kind[0]].Keys)) { $cols[$c] = $true }
             foreach ($c in ($cols.Keys | Sort-Object { (Get-ColumnIndex $_) })) {
                 $ov = $o[$kind[0]][$c]; $nv = $n[$kind[0]][$c]
                 if ($ov -ceq $nv) { continue }
-                $newCell = "$c$($p[1])"; $oldCell = "$c$($p[0])"
+                $newCell = (& $L $c) + $p[1]; $oldCell = "$c$($p[0])"
                 if ($null -eq $ov) { Add-Diff $Sheet $newCell $oldCell $kind[1] '追加' $null $nv }
                 elseif ($null -eq $nv) { Add-Diff $Sheet $newCell $oldCell $kind[1] '削除' $ov $null }
                 else { Add-Diff $Sheet $newCell $oldCell $kind[1] '変更' $ov $nv }
             }
         }
     }
-    foreach ($r in ($map.Added | Sort-Object { [int]$_ })) {
+    foreach ($mv in ($moved | Sort-Object { [int]$_[1] })) {
+        Add-Diff $Sheet "A$($mv[1])" "A$($mv[0])" '行' '移動' (Format-RowContent $oldView.Rows[$mv[0]]) (Format-RowContent $newView.Rows[$mv[1]])
+    }
+    foreach ($r in ($added | Sort-Object { [int]$_ })) {
         Add-Diff $Sheet "A$r" $null '行' '追加' $null (Format-RowContent $NewSheet.Rows[$r])
     }
-    foreach ($r in ($map.Removed | Sort-Object { [int]$_ })) {
+    foreach ($r in ($removed | Sort-Object { [int]$_ })) {
         Add-Diff $Sheet $null "A$r" '行' '削除' (Format-RowContent $OldSheet.Rows[$r]) $null
     }
 
-    # コメント: 旧の位置を行の対応で新の位置に読み替えて比べる
+    # ---- コメント: 旧の位置を行・列の対応で新の位置に読み替えて比べる
     $oldComments = @{}
     foreach ($cell in $OldSheet.Comments.Keys) {
         $m = [regex]::Match($cell, '^([A-Z]+)(\d+)$')
-        $mapped = $cell
-        if ($rowMap.ContainsKey($m.Groups[2].Value)) { $mapped = $m.Groups[1].Value + $rowMap[$m.Groups[2].Value] }
-        $oldComments[$mapped] = @($cell, $OldSheet.Comments[$cell])
+        $row = $m.Groups[2].Value
+        if ($rowMap.ContainsKey($row)) { $row = $rowMap[$row] }
+        $oldComments[(& $L $m.Groups[1].Value) + $row] = @($cell, $OldSheet.Comments[$cell])
     }
     foreach ($cell in $NewSheet.Comments.Keys) {
         if ($oldComments.ContainsKey($cell)) {
@@ -316,7 +578,7 @@ function Compare-Sheet {
     }
     foreach ($k in $oldComments.Keys) { Add-Diff $Sheet $null $oldComments[$k][0] 'コメント' '削除' $oldComments[$k][1] $null }
 
-    # 図形: 名前で対応付ける
+    # ---- 図形: 名前で対応付ける
     foreach ($name in $NewSheet.Shapes.Keys) {
         $ns = $NewSheet.Shapes[$name]
         if ($OldSheet.Shapes.ContainsKey($name)) {
@@ -328,6 +590,85 @@ function Compare-Sheet {
     foreach ($name in $OldSheet.Shapes.Keys) {
         if (-not $NewSheet.Shapes.ContainsKey($name)) { Add-Diff $Sheet $null $OldSheet.Shapes[$name].Cell '図形' '削除' $OldSheet.Shapes[$name].Text $null }
     }
+    Merge-Renumbering -From $firstDiff
+    Sort-SheetDiff -From $firstDiff
+    $script:OldSheetName = $null
+}
+
+function Merge-Renumbering {
+    #     行の挿入・削除で No などの連番が振り直されると、番号のセルが 1 つずつ「変更」になってしまう。
+    #     同じ列で、新の行が連続し、旧の番号も連続していて、どれも同じだけずれた整数のセルの変更（2 個以上）を 1 件にまとめる
+    param([int] $From)
+
+    $items = @()
+    for ($i = $From; $i -lt $script:Diffs.Count; $i++) { $items += $script:Diffs[$i] }
+    $isNum = { param($d) $d.Kind -eq '値' -and $d.Change -eq '変更' -and $d.Old -match '^-?\d+$' -and $d.New -match '^-?\d+$' }
+    $runs = New-Object System.Collections.Generic.List[object]
+    $byCol = @{}
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $d = $items[$i]
+        if (-not (& $isNum $d)) { continue }
+        $m = [regex]::Match($d.Cell, '^([A-Z]+)(\d+)$')
+        $col = $m.Groups[1].Value
+        if (-not $byCol.ContainsKey($col)) { $byCol[$col] = New-Object System.Collections.Generic.List[object] }
+        $byCol[$col].Add([pscustomobject]@{ Index = $i; Diff = $d; Row = [int]$m.Groups[2].Value; OldNumber = [long]$d.Old; Delta = [long]$d.New - [long]$d.Old })
+    }
+    foreach ($col in $byCol.Keys) {
+        $cur = New-Object System.Collections.Generic.List[object]
+        foreach ($x in ($byCol[$col] | Sort-Object Row)) {
+            # 行も番号も 1 ずつ増え、ずれ幅が同じあいだを 1 つの連番とみなす（金額などがたまたま同じだけ増えたものはまとめない）
+            $prev = if ($cur.Count -gt 0) { $cur[$cur.Count - 1] } else { $null }
+            if ($prev -and ($x.Row -ne $prev.Row + 1 -or $x.Delta -ne $prev.Delta -or $x.OldNumber -ne $prev.OldNumber + 1)) {
+                if ($cur.Count -ge 2) { $runs.Add($cur) }
+                $cur = New-Object System.Collections.Generic.List[object]
+            }
+            $cur.Add($x)
+        }
+        if ($cur.Count -ge 2) { $runs.Add($cur) }
+    }
+    if ($runs.Count -eq 0) { return }
+
+    $drop = @{}        # まとめて消す差分の位置
+    $summaryAt = @{}   # まとめた 1 件を置く位置（まとめた中で最初の差分の位置）
+    foreach ($run in $runs) {
+        $first = $run[0].Diff; $last = $run[$run.Count - 1].Diff
+        foreach ($x in $run) { $drop[$x.Index] = $true }
+        $summary = [pscustomobject]@{
+            File = $first.File; Location = $first.Location; Sheet = $first.Sheet; Cell = $first.Cell
+            OldLocation = $first.OldLocation; OldSheet = $first.OldSheet; Kind = '連番'; Change = '変更'
+            Old = '{0}～{1}' -f $first.Old, $last.Old; New = '{0}～{1}' -f $first.New, $last.New
+            Detail = '連番の振り直し: {0}～{1}（{2}～{3} → {4}～{5}、{6} 個）' -f $first.Cell, $last.Cell, $first.Old, $last.Old, $first.New, $last.New, $run.Count
+            Path = $first.Path; OldPath = $first.OldPath
+        }
+        $summary.PSObject.TypeNames.Insert(0, 'CompareExcel.Diff')
+        $summaryAt[(@($run | Sort-Object Index)[0].Index)] = $summary
+    }
+    $kept = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        if ($summaryAt.ContainsKey($i)) { $kept.Add($summaryAt[$i]) }
+        elseif (-not $drop.ContainsKey($i)) { $kept.Add($items[$i]) }
+    }
+    $script:Diffs.RemoveRange($From, $script:Diffs.Count - $From)
+    foreach ($d in $kept) { $script:Diffs.Add($d) }
+}
+
+function Sort-SheetDiff {
+    #     シートの中の差分を、上の行から順（同じ行なら左の列から）に並べ替える。
+    #     削除した行・セルは旧の行番号の位置に置く。同じ位置どうしは見つけた順のまま
+    param([int] $From)
+
+    $count = $script:Diffs.Count - $From
+    if ($count -lt 2) { return }
+    $keyed = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt $count; $i++) {
+        $d = $script:Diffs[$From + $i]
+        $row = 0; $col = 0
+        $m = [regex]::Match([string]$d.Cell, '^([A-Z]+)(\d+)$')
+        if ($m.Success) { $row = [int]$m.Groups[2].Value; $col = Get-ColumnIndex $m.Groups[1].Value }
+        $keyed.Add([pscustomobject]@{ Row = $row; Col = $col; Order = $i; Diff = $d })
+    }
+    $sorted = @($keyed | Sort-Object Row, Col, Order)
+    for ($i = 0; $i -lt $count; $i++) { $script:Diffs[$From + $i] = $sorted[$i].Diff }
 }
 
 function Compare-Book {
@@ -335,12 +676,39 @@ function Compare-Book {
 
     $oldBook = Read-Book $OldPath
     $newBook = Read-Book $NewPath
+
+    # 片方にしか無いシートどうしで中身がよく似ていれば、シート名の変更とみなす
+    $renamed = @{}   # 新のシート名 → 旧のシート名
+    $onlyOld = @($oldBook.Keys | Where-Object { -not $newBook.Contains($_) })
+    $onlyNew = @($newBook.Keys | Where-Object { -not $oldBook.Contains($_) })
+    if ($onlyOld.Count -gt 0 -and $onlyNew.Count -gt 0) {
+        $cands = New-Object System.Collections.Generic.List[object]
+        foreach ($o in $onlyOld) { foreach ($n in $onlyNew) {
+            $sim = Get-SheetSimilarity $oldBook[$o] $newBook[$n]
+            if ($sim -ge 0.5) { $cands.Add([pscustomobject]@{ Old = $o; New = $n; Sim = $sim }) }
+        } }
+        $usedOld = @{}
+        foreach ($c in ($cands | Sort-Object Sim -Descending)) {
+            if ($usedOld.ContainsKey($c.Old) -or $renamed.ContainsKey($c.New)) { continue }
+            $usedOld[$c.Old] = $true; $renamed[$c.New] = $c.Old
+        }
+    }
+
     foreach ($sheet in $newBook.Keys) {
         if ($oldBook.Contains($sheet)) { Compare-Sheet -Sheet $sheet -OldSheet $oldBook[$sheet] -NewSheet $newBook[$sheet] }
+        elseif ($renamed.ContainsKey($sheet)) {
+            $oldName = $renamed[$sheet]
+            $script:OldSheetName = $oldName
+            Add-Diff $sheet $null $null 'シート' '名前変更' $oldName $sheet
+            $script:OldSheetName = $null
+            Compare-Sheet -Sheet $sheet -OldSheet $oldBook[$oldName] -NewSheet $newBook[$sheet] -OldName $oldName
+        }
         else { Add-Diff $sheet $null $null 'シート' '追加' $null ("{0} 行" -f $newBook[$sheet].Rows.Count) }
     }
+    $renamedOld = @{}
+    foreach ($v in $renamed.Values) { $renamedOld[$v] = $true }
     foreach ($sheet in $oldBook.Keys) {
-        if (-not $newBook.Contains($sheet)) { Add-Diff $sheet $null $null 'シート' '削除' ("{0} 行" -f $oldBook[$sheet].Rows.Count) $null }
+        if (-not $newBook.Contains($sheet) -and -not $renamedOld.ContainsKey($sheet)) { Add-Diff $sheet $null $null 'シート' '削除' ("{0} 行" -f $oldBook[$sheet].Rows.Count) $null }
     }
 }
 
@@ -424,7 +792,9 @@ if ($OutXlsx) {
         }
         if ($target) {
             $loc = ''
-            if ($d.Sheet -and $d.Kind -ne 'シート' -and $cell) { $loc = "'{0}'!{1}" -f $d.Sheet.Replace("'", "''"), $cell }
+            $linkSheet = $d.Sheet
+            if ($d.Change -eq '削除') { $linkSheet = $d.OldSheet }
+            if ($linkSheet -and $d.Kind -ne 'シート' -and $cell) { $loc = "'{0}'!{1}" -f $linkSheet.Replace("'", "''"), $cell }
             $row.Link = @{ Column = 2; Path = $target; Location = $loc }
         }
         $rows.Add($row)
@@ -466,8 +836,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .DESCRIPTION
 #     値・数式・コメント・図形の文字・シートの追加削除を比べます。
-#     行を挿入・削除した場合でも、それより下のセルがすべて「変更」にならないよう、
-#     同じ内容の行どうしを対応付けてから比べます（-NoRowAlign で無効にできます）。
+#     行や列を挿入・削除した場合でも、それより下（右）のセルがすべて「変更」にならないよう、
+#     同じ内容の行・列どうしを対応付けてから比べます（-NoRowAlign で無効にできます）。
+#     内容が同じまま場所が変わった行は「移動」、中身がよく似たシートの名前が変わった場合は「名前変更」として出力します。
+#     行の挿入・削除で No などの連番が振り直された場合は、番号のセルの変更を「連番の振り直し」1 件にまとめます。
 #
 #     フォルダどうしを指定すると、同じ相対パスのファイルを比べ、片方にしかないファイルは追加・削除として出力します。
 #     結果は 1 差分 1 行のオブジェクトで出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
@@ -478,8 +850,17 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .PARAMETER New
 #     比較先（変更後）のファイルまたはフォルダ。
 #
+# .PARAMETER KeyColumn
+#     行をキーの値で対応付ける表の、キー列の見出し（複数指定可）。例: -KeyColumn '物理名', '項目ID'
+#     見出しと同じ文字のセルを探し、その下でキー列に値がある行を 1 つの表として、キーが同じ行どうしを比べます。
+#     並べ替えや途中への挿入があっても正しく対応付けられ、順番が変わった行は「移動」として出力します。
+#     キーの値が表の中で重複している場合は、その表は通常の方法（内容）で対応付けます。
+#
 # .PARAMETER NoRowAlign
-#     行の対応付けを行わず、同じセル番地どうしを比べます。
+#     行・列の対応付けを行わず、同じセル番地どうしを比べます。
+#
+# .PARAMETER NoColumnAlign
+#     列の挿入・削除の対応付けを行いません。
 #
 # .PARAMETER NoRecurse
 #     フォルダを比べるとき、サブフォルダを見ません。
@@ -497,6 +878,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     # 版のフォルダどうしを比べて保存する
 #     .\Compare-Excel.ps1 D:\納品\v1.0 D:\納品\v1.1 -OutXlsx D:\差分_v1.0-v1.1.xlsx
 #
+# .EXAMPLE
+#     # カラム定義を物理名で、インデックス定義をインデックス名で対応付ける
+#     .\Compare-Excel.ps1 .\v1.0\テーブル定義書.xlsx .\v1.1\テーブル定義書.xlsx -KeyColumn '物理名', 'インデックス名'
+#
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに ExcelTools.psm1 と Search-Excel.ps1 が必要です。
-#     列の挿入・削除は対応付けません（列がずれた場合はセルの変更として出力されます）。
+#     列の挿入・削除は、列ごとの値の集まりが似ている列どうしを対応付けて見つけます（値の少ない列は見つけにくい）。
