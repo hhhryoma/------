@@ -194,12 +194,100 @@ def make_review_fixtures():
     wb.save(os.path.join(REVIEW, "broken-checklist.xlsx"))
 
 
+DELIVERABLE = os.path.join(HERE, "deliverable")
+
+
+def add_parts(path, parts, content_types):
+    """xlsx に任意のパーツを足す（parts: 名前 → 中身、content_types: 追加する Override / Default 要素）"""
+    files = read_zip(path)
+    for name, body in parts.items():
+        if name in files and name.endswith(".rels") and body.startswith("+"):
+            files[name] = files[name].decode().replace("</Relationships>", body[1:] + "</Relationships>").encode()
+        else:
+            files[name] = body.encode() if isinstance(body, str) else body
+    ct = files["[Content_Types].xml"].decode()
+    files["[Content_Types].xml"] = ct.replace("</Types>", "".join(content_types) + "</Types>").encode()
+    rewrite_zip(path, files)
+
+
+def make_deliverable_fixtures(tmp):
+    """Test-ExcelDeliverable.ps1 用。good.xlsx は指摘なし、bad.xlsx は各チェックに 1 つ以上引っかかる"""
+    shutil.rmtree(DELIVERABLE, ignore_errors=True)
+    os.makedirs(DELIVERABLE)
+
+    # ---- 指摘なし: A1 選択・倍率 100%・先頭シート表示・見出し固定のシート（スクロール領域の左上を選択）
+    wb = openpyxl.Workbook()
+    ws = wb.active; ws.title = "表紙"; ws["A1"] = "提出用"
+    ws2 = wb.create_sheet("一覧"); ws2["A1"] = "No"; ws2["A2"] = 1
+    ws2.freeze_panes = "A2"
+    ws2.sheet_view.selection[0].activeCell = "A2"; ws2.sheet_view.selection[0].sqref = "A2"
+    wb.properties.creator = None
+    wb.properties.lastModifiedBy = None
+    wb.save(os.path.join(DELIVERABLE, "good.xlsx"))
+
+    # ---- 指摘あり
+    wb = openpyxl.Workbook()
+    ws = wb.active; ws.title = "表紙"
+    ws["A1"] = "提出用"
+    ws["C5"] = "TODO: 数値を確認"
+    ws["B2"] = "#REF!"                                    # エラー値
+    ws["D1"] = "メモ付き"
+    ws["D1"].comment = Comment("社内向けの注意", "山田")
+    ws.sheet_view.selection[0].activeCell = "C5"; ws.sheet_view.selection[0].sqref = "C5"
+    ws.sheet_view.topLeftCell = "B3"
+    ws.sheet_view.zoomScale = 85
+    ws.row_dimensions[8].hidden = True
+    ws["A10"] = "資料"
+    ws["A10"].hyperlink = "file:///C:/Users/yamada/Desktop/memo.xlsx"
+    ws2 = wb.create_sheet("詳細")
+    ws2["A1"] = "詳細"
+    ws2.sheet_view.view = "pageBreakPreview"
+    ws3 = wb.create_sheet("作業用"); ws3.sheet_state = "hidden"
+    ws4 = wb.create_sheet("隠し"); ws4.sheet_state = "veryHidden"
+    wb.active = 1                                          # 2 枚目が表示された状態
+    ws.sheet_view.tabSelected = True                       # 1 枚目も選択 → 作業グループ
+    ws2.sheet_view.tabSelected = True
+    from openpyxl.workbook.defined_name import DefinedName
+    wb.defined_names["壊れた名前"] = DefinedName("壊れた名前", attr_text="#REF!")
+    wb.properties.creator = "山田 太郎"
+    wb.properties.lastModifiedBy = "佐藤 花子"
+    bad = os.path.join(DELIVERABLE, "bad.xlsx")
+    wb.save(bad)
+    # 外部リンク（他ブックの参照）と会社名のプロパティを足す
+    files = read_zip(bad)
+    app = files["docProps/app.xml"].decode()
+    app = app.replace("</Properties>", "<Company>株式会社サンプル</Company></Properties>")
+    files["docProps/app.xml"] = app.encode()
+    rewrite_zip(bad, files)
+    add_parts(bad, {
+        "xl/externalLinks/externalLink1.xml":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><externalBook r:id="rId1"><sheetNames><sheetName val="Sheet1"/></sheetNames></externalBook></externalLink>',
+        "xl/externalLinks/_rels/externalLink1.xml.rels":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLinkPath" Target="file:///\\\\fileserver\\share\\原価表.xlsx" TargetMode="External"/></Relationships>',
+        "xl/_rels/workbook.xml.rels":
+            '+<Relationship Id="rIdX1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>',
+    }, ['<Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/>'])
+
+    # ---- マクロ付き（中身は空の vbaProject.bin）
+    wb = openpyxl.Workbook(); wb.active["A1"] = "マクロ"
+    wb.properties.creator = None
+    macro = os.path.join(DELIVERABLE, "macro.xlsm")
+    wb.save(macro)
+    add_parts(macro, {"xl/vbaProject.bin": b"\0" * 16},
+              ['<Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>'])
+
+    # ---- 読めないファイル
+    shutil.copy(os.path.join(GREP, "sub", "encrypted.xlsx"), os.path.join(DELIVERABLE, "encrypted.xlsx"))
+    shutil.copy(os.path.join(GREP, "sub", "legacy.xls"), os.path.join(DELIVERABLE, "legacy.xls"))
+
+
 def main():
     tmp = tempfile.mkdtemp()
     try:
         make_grep_fixtures(tmp)
         make_pdf_fixtures()
         make_review_fixtures()
+        make_deliverable_fixtures(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("fixtures written to", HERE)

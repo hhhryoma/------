@@ -34,6 +34,7 @@ $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.Xml
+Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
 
 # ---- Excel 定数（COM の列挙体を PowerShell から参照しないで済むよう定義） ----
 $xlSheetVisible    = -1
@@ -92,12 +93,6 @@ if ($Open -and -not (Get-Command Out-GridView -ErrorAction SilentlyContinue)) {
     throw 'この環境では Out-GridView が使えないため、-Open は利用できません（Windows で実行してください）。'
 }
 
-$script:XmlSettings = New-Object System.Xml.XmlReaderSettings
-$script:XmlSettings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
-$script:XmlSettings.XmlResolver   = $null
-$script:XmlSettings.IgnoreComments = $true
-$script:XmlSettings.CloseInput     = $true
-
 Update-TypeData -TypeName 'SearchExcel.Hit' -DefaultDisplayPropertySet File, Location, Kind, Text -Force
 
 # ---------------------------------------------------------------- ヘルパー
@@ -120,30 +115,7 @@ function Test-SheetNameMatch {
     return $true
 }
 
-function ConvertTo-ColumnName {
-    # 1 始まりの列番号を A, B, ..., Z, AA, ... に変換する
-    param([int] $Index)
 
-    $name = ''
-    while ($Index -gt 0) {
-        $m = ($Index - 1) % 26
-        $name = [string][char](65 + $m) + $name
-        $Index = [int][math]::Floor(($Index - 1) / 26)
-    }
-    return $name
-}
-
-function Get-ColumnIndex {
-    # "AB12" のようなセル番地から列番号（1 始まり）を取り出す
-    param([string] $Ref)
-
-    $col = 0
-    foreach ($ch in $Ref.ToUpperInvariant().ToCharArray()) {
-        if ($ch -lt 'A' -or $ch -gt 'Z') { break }
-        $col = $col * 26 + ([int]$ch - 64)
-    }
-    return $col
-}
 
 function ConvertFrom-OoxmlEscape {
     # OOXML の文字列に含まれる _xHHHH_ 形式のエスケープ（改行の _x000D_ など）を戻す
@@ -213,112 +185,12 @@ function Test-DateFormatCode {
 
 # ---------------------------------------------------------------- xlsx（Open XML）の読み取り
 
-function Open-ZipPackage {
-    param([string] $FilePath)
 
-    # Excel で開いている最中のファイルも読めるよう、共有モードで開く
-    $share  = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
-    $stream = New-Object System.IO.FileStream($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
-    try {
-        $zip = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Read, $false)
-    }
-    catch {
-        $stream.Dispose()
-        throw
-    }
 
-    # パーツ名の大文字小文字が規定と違うファイルがあるため、小文字で引けるようにしておく
-    $entries = @{}
-    foreach ($e in $zip.Entries) { $entries[$e.FullName.ToLowerInvariant()] = $e }
 
-    return [pscustomobject]@{ Zip = $zip; Entries = $entries }
-}
 
-function Get-PackageEntry {
-    param($Package, [string] $PartName)
-    return $Package.Entries[$PartName.TrimStart('/').ToLowerInvariant()]
-}
 
-function New-PartXmlReader {
-    param($Package, [string] $PartName)
 
-    $entry = Get-PackageEntry -Package $Package -PartName $PartName
-    if ($null -eq $entry) { return $null }
-    return [System.Xml.XmlReader]::Create($entry.Open(), $script:XmlSettings)
-}
-
-function Read-PartXml {
-    param($Package, [string] $PartName)
-
-    $reader = New-PartXmlReader -Package $Package -PartName $PartName
-    if ($null -eq $reader) { return $null }
-    try {
-        $doc = New-Object System.Xml.XmlDocument
-        $doc.XmlResolver = $null
-        $doc.Load($reader)
-        return $doc
-    }
-    finally {
-        $reader.Dispose()
-    }
-}
-
-function Resolve-PartName {
-    # リレーションの Target（相対パス）をパッケージ内の絶対パーツ名にする
-    param([string] $SourcePart, [string] $TargetPath)
-
-    if ($TargetPath.StartsWith('/')) { return $TargetPath.TrimStart('/') }
-
-    $dir = ''
-    $slash = $SourcePart.LastIndexOf('/')
-    if ($slash -ge 0) { $dir = $SourcePart.Substring(0, $slash) }
-
-    $parts = New-Object System.Collections.Generic.List[string]
-    if ($dir) { foreach ($seg in $dir.Split('/')) { $parts.Add($seg) } }
-    foreach ($seg in $TargetPath.Split('/')) {
-        if ($seg -eq '..') { if ($parts.Count -gt 0) { $parts.RemoveAt($parts.Count - 1) } }
-        elseif ($seg -ne '.' -and $seg -ne '') { $parts.Add($seg) }
-    }
-    return ($parts -join '/')
-}
-
-function Get-PartRelationships {
-    #     パーツのリレーション（_rels/*.rels）を読み、Id / 種類 / 解決済みパーツ名を返す
-    param($Package, [string] $PartName)
-
-    $slash = $PartName.LastIndexOf('/')
-    if ($slash -ge 0) {
-        $relsName = $PartName.Substring(0, $slash) + '/_rels/' + $PartName.Substring($slash + 1) + '.rels'
-    }
-    else {
-        $relsName = '_rels/' + $PartName + '.rels'
-    }
-
-    $doc = Read-PartXml -Package $Package -PartName $relsName
-    $list = New-Object System.Collections.Generic.List[object]
-    if ($null -eq $doc) { return ,$list }
-
-    foreach ($rel in $doc.SelectNodes("//*[local-name()='Relationship']")) {
-        if ($rel.GetAttribute('TargetMode') -eq 'External') { continue }
-        $type = $rel.GetAttribute('Type')
-        $list.Add([pscustomobject]@{
-            Id     = $rel.GetAttribute('Id')
-            Kind   = $type.Substring($type.LastIndexOf('/') + 1)
-            Target = Resolve-PartName -SourcePart $PartName -TargetPath $rel.GetAttribute('Target')
-        })
-    }
-    return ,$list
-}
-
-function Get-RelationshipIdAttribute {
-    # r:id 属性を名前空間（Transitional / Strict）によらず取り出す
-    param([System.Xml.XmlElement] $Element)
-
-    foreach ($a in $Element.Attributes) {
-        if ($a.LocalName -eq 'id' -and $a.NamespaceURI -like '*relationships') { return $a.Value }
-    }
-    return $null
-}
 
 function Read-RichText {
     #     XmlReader が <si> / <is> / <text> の開始位置にあるとき、その中の文字列を連結して返す。
@@ -922,121 +794,31 @@ function Search-ComWorkbook {
 
 # ---------------------------------------------------------------- 検索結果を xlsx に保存
 
-function ConvertTo-XmlText {
-    # XML の特殊文字をエスケープし、XML に書けない制御文字を除く
-    param([string] $Text)
-
-    if ($null -eq $Text) { return '' }
-    $Text = [regex]::Replace($Text, '[\x00-\x08\x0B\x0C\x0E-\x1F￾￿]', '')
-    return [System.Security.SecurityElement]::Escape($Text)
-}
 
 function Export-HitsToXlsx {
-    #     検索結果を xlsx に書き出す。Excel は使わず、Open XML を直接組み立てる。
+    #     検索結果を xlsx に書き出す（Excel 不要）。
     #     「場所」列は、クリックすると該当ファイルのそのセルが開くハイパーリンクにする。
     param($Hits, [string] $FilePath)
 
-    $maxLinks   = 65530   # Excel の 1 シートあたりのハイパーリンク上限
-    $maxCellLen = 32767   # Excel の 1 セルあたりの文字数上限
-
-    $headers = @('ファイル', '場所', 'シート', 'セル', '種類', '内容', '名前', 'フルパス')
-    $widths  = @(40, 24, 18, 8, 9, 80, 18, 60)
-
-    $rowCount = $Hits.Count + 1
-    $lastCol  = ConvertTo-ColumnName $headers.Count
-
-    $sheet = New-Object System.Text.StringBuilder
-    $rels  = New-Object System.Text.StringBuilder
-    $links = New-Object System.Text.StringBuilder
-
-    [void]$sheet.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>')
-    [void]$sheet.Append('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">')
-    [void]$sheet.Append(('<dimension ref="A1:{0}{1}"/>' -f $lastCol, $rowCount))
-    [void]$sheet.Append('<sheetViews><sheetView tabSelected="1" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>')
-    [void]$sheet.Append('<sheetFormatPr defaultRowHeight="18"/><cols>')
-    for ($i = 0; $i -lt $widths.Count; $i++) {
-        [void]$sheet.Append(('<col min="{0}" max="{0}" width="{1}" customWidth="1"/>' -f ($i + 1), $widths[$i]))
-    }
-    [void]$sheet.Append('</cols><sheetData>')
-
-    # 見出し行（スタイル 1: 太字・背景色）
-    [void]$sheet.Append('<row r="1">')
-    for ($i = 0; $i -lt $headers.Count; $i++) {
-        [void]$sheet.Append(('<c r="{0}1" s="1" t="inlineStr"><is><t>{1}</t></is></c>' -f (ConvertTo-ColumnName ($i + 1)), $headers[$i]))
-    }
-    [void]$sheet.Append('</row>')
-
-    [void]$rels.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>')
-    [void]$rels.Append('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">')
-
-    $r = 1
-    $linkCount = 0
+    $rows = New-Object System.Collections.Generic.List[object]
     foreach ($h in $Hits) {
-        $r++
-
-        # リンク先のセル。シート名のヒットや位置不明の図形は A1 にする
+        # シート名のヒットや位置不明の図形は A1 にリンクする
         $cell = $h.Cell
         if (-not $cell) { $cell = 'A1' }
-        $location = "'{0}'!{1}" -f $h.Sheet.Replace("'", "''"), $cell
-
-        $values = @($h.File, $h.Location, $h.Sheet, $h.Cell, $h.Kind, $h.Text, $h.Name, $h.Path)
-        [void]$sheet.Append(('<row r="{0}">' -f $r))
-        for ($i = 0; $i -lt $values.Count; $i++) {
-            $v = [string]$values[$i]
-            if ($v.Length -eq 0) { continue }
-            if ($v.Length -gt $maxCellLen) { $v = $v.Substring(0, $maxCellLen) }
-            $style = ''
-            if ($i -eq 1 -and $linkCount -lt $maxLinks) { $style = ' s="2"' }
-            [void]$sheet.Append(('<c r="{0}{1}"{2} t="inlineStr"><is><t xml:space="preserve">{3}</t></is></c>' -f (ConvertTo-ColumnName ($i + 1)), $r, $style, (ConvertTo-XmlText $v)))
-        }
-        [void]$sheet.Append('</row>')
-
-        if ($linkCount -lt $maxLinks) {
-            $linkCount++
-            # Excel が他ブックへのリンクを保存するときと同じ file:/// 形式にする
-            $target = $h.Path
-            if ($target.StartsWith('/')) { $target = 'file://' + $target } else { $target = 'file:///' + $target }
-            [void]$rels.Append(('<Relationship Id="rIdL{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{1}" TargetMode="External"/>' -f $linkCount, (ConvertTo-XmlText $target)))
-            [void]$links.Append(('<hyperlink ref="B{0}" r:id="rIdL{1}" location="{2}" tooltip="{3}"/>' -f $r, $linkCount, (ConvertTo-XmlText $location), (ConvertTo-XmlText ('{0} を開く' -f $h.File))))
-        }
+        $rows.Add(@{
+            Values = @($h.File, $h.Location, $h.Sheet, $h.Cell, $h.Kind, $h.Text, $h.Name, $h.Path)
+            Link   = @{ Column = 1; Path = $h.Path; Location = ("'{0}'!{1}" -f $h.Sheet.Replace("'", "''"), $cell); Tooltip = ('{0} を開く' -f $h.File) }
+        })
     }
 
-    [void]$sheet.Append('</sheetData>')
-    [void]$sheet.Append(('<autoFilter ref="A1:{0}{1}"/>' -f $lastCol, $rowCount))
-    if ($linkCount -gt 0) { [void]$sheet.Append('<hyperlinks>').Append($links.ToString()).Append('</hyperlinks>') }
-    [void]$sheet.Append('</worksheet>')
-    [void]$rels.Append('</Relationships>')
-
-    if ($Hits.Count -gt $maxLinks) {
-        Write-Warning ("ヒットが {0} 件を超えたため、{1} 行目以降にはリンクを付けていません（Excel の上限）。" -f $maxLinks, $maxLinks + 2)
-    }
-
-    $font = '<sz val="11"/><name val="游ゴシック"/><family val="3"/><charset val="128"/>'
-    $parts = [ordered]@{
-        '[Content_Types].xml' = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'
-        '_rels/.rels' = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'
-        'xl/workbook.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets><sheet name="検索結果" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">検索結果!$A$1:${0}${1}</definedName></definedNames></workbook>' -f $lastCol, $rowCount)
-        'xl/_rels/workbook.xml.rels' = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'
-        'xl/styles.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font>{0}</font><font><b/>{0}</font><font><u/><sz val="11"/><color rgb="FF0563C1"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles></styleSheet>' -f $font)
-        'xl/worksheets/sheet1.xml' = $sheet.ToString()
-        'xl/worksheets/_rels/sheet1.xml.rels' = $rels.ToString()
-    }
-    if ($linkCount -eq 0) { $parts.Remove('xl/worksheets/_rels/sheet1.xml.rels') }
-
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    $stream = New-Object System.IO.FileStream($FilePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-    try {
-        $zip = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Create, $true)
-        try {
-            foreach ($name in $parts.Keys) {
-                $entry  = $zip.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal)
-                $writer = New-Object System.IO.StreamWriter($entry.Open(), $utf8)
-                try { $writer.Write($parts[$name]) } finally { $writer.Dispose() }
-            }
-        }
-        finally { $zip.Dispose() }
-    }
-    finally { $stream.Dispose() }
+    Export-Workbook -FilePath $FilePath -Sheets @(@{
+        Name    = '検索結果'
+        Columns = @(
+            @{ Header = 'ファイル'; Width = 40 }, @{ Header = '場所'; Width = 24 }, @{ Header = 'シート'; Width = 18 },
+            @{ Header = 'セル'; Width = 8 }, @{ Header = '種類'; Width = 9 }, @{ Header = '内容'; Width = 80 },
+            @{ Header = '名前'; Width = 18 }, @{ Header = 'フルパス'; Width = 60 })
+        Rows    = $rows
+    })
 }
 
 # ---------------------------------------------------------------- 検索結果を Excel で開く

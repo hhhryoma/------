@@ -3,8 +3,12 @@
 | スクリプト | 内容 |
 | --- | --- |
 | [Search-Excel.ps1](#search-excelps1) | フォルダ配下の Excel を横断して文字列を検索する（Excel 版 grep） |
+| [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所をまとめて確認する |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
+
+**`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
+`Test-ExcelDeliverable.ps1` と `Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使います。
 
 ## Search-Excel.ps1
 
@@ -15,6 +19,7 @@
 ### 要件
 
 - PowerShell 5.1 以降（PowerShell 7 でも動作）
+- 同じフォルダに `ExcelTools.psm1`
 - **.xlsx / .xlsm / .xltx / .xltm は Excel 不要。** ファイル内部の XML を直接読むため、Excel を起動せず高速に動作します
 - .xls / .xlsb を検索する場合のみデスクトップ版 Excel が必要です（見つかったときだけ Excel を起動して読みます）
 
@@ -175,6 +180,62 @@ $hits | Group-Object File | Sort-Object Count -Descending   # ファイルごと
 - グラフ内の文字、ヘッダー／フッター、フォームコントロール（ActiveX）、名前定義、入力規則のリストは検索しません
 - .xls / .xlsb（Excel 経由）で読む場合、数式は英語版の関数名で検索されます。xlsx は保存されたとおり（英語の関数名）です
 - 行数の多いシートでは 1 ファイル数秒かかることがあります（目安: 6 万セルで約 2 秒）
+
+## Test-ExcelDeliverable.ps1
+
+Excel ファイルを社外へ提出する前に、**体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所**がないかをまとめて確認します。
+Excel を使わずにファイルの中身を直接読むので速く、**ファイルは一切変更しません**。
+
+```powershell
+.\Test-ExcelDeliverable.ps1 D:\提出物
+.\Test-ExcelDeliverable.ps1 D:\提出物 -OutXlsx D:\提出前チェック.xlsx   # 該当セルへのリンク付きで保存
+```
+
+```
+File      Location  Level  Detail
+----      --------  -----  ------
+見積書.xlsx 明細!F12  エラー セルがエラー値（#REF!）です
+見積書.xlsx           警告   ファイルのプロパティに作成者「山田 太郎」が残っています
+見積書.xlsx           警告   他のブックを参照しています（file:///\\fileserver\share\原価表.xlsx）
+見積書.xlsx 表紙!C5   警告   選択セルが C5 です（A1 にしてください）
+見積書.xlsx 表紙      警告   倍率が 85% です（100% にしてください）
+
+5 ファイル中 1 ファイルが要対応（エラー 1 件 / 警告 4 件 / 情報 0 件）
+```
+
+### チェック項目
+
+| 分類 | 区分 | 内容 |
+| --- | --- | --- |
+| 体裁 | 警告 | 選択セルが A1 でない（見出しを固定したシートはスクロール領域の左上でも可）、スクロールしたまま保存、倍率が 100% でない、開いたときに先頭シートが表示されない、**複数シートを選択したまま（作業グループ）** |
+| 体裁 | 情報 | 改ページプレビュー・ページレイアウト表示 |
+| 消し忘れ | 警告 | 非表示シート（VBA でしか再表示できない veryHidden も）、コメント（メモ）、TODO などの文言 |
+| 消し忘れ | 情報 | 非表示の行・列 |
+| 情報漏れ | 警告 | ファイルのプロパティの作成者・最終更新者・会社名・管理者、他ブックへの外部リンク、社内のファイルやフォルダへのハイパーリンク、他ブックを参照する名前の定義 |
+| 壊れ | エラー | エラー値（#REF!・#N/A など）のセル、参照先が壊れた名前の定義 |
+| マクロ | 情報 | VBA を含むブック |
+| ファイル | 情報 | パスワード付き・xls / xlsb（中身を読めないためチェックしていない） |
+
+区分の目安: **エラー**は必ず直す、**警告**は原則直す、**情報**は意図どおりか確認する。
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | チェックするフォルダまたはファイル（複数・ワイルドカード可） |
+| `-Check` | 項目を絞る。`View`（体裁）`Hidden`（非表示）`Comment` `Word`（文言）`Property` `Link` `Error` `Macro` |
+| `-Words` | 消し忘れとして探す文言（正規表現）。既定は TODO / TBD / FIXME / 要確認 / 未定 / 検討中 / 仮置き / （仮） / XXX / ○○ / ×× |
+| `-AllowedNames` | プロパティに残っていてもよい名前（正規表現。例: 自社名） |
+| `-Zoom` | 期待する倍率（既定 100） |
+| `-FileNamePattern` | ファイル名の命名規則（正規表現）。合わないファイルを警告 |
+| `-OutXlsx` | 結果を保存（指摘一覧・ファイル別） |
+| `-NoRecurse` | サブフォルダを見ない |
+
+### 既知の制約
+
+- xls / xlsb は中身を読めないためチェックしません（xlsx に保存し直してください）
+- 図形の中の文言は探しますが、画像の中の文字は読めません
+- 印刷範囲の外に残ったデータ、ヘッダー／フッターの内容はチェックしません
 
 ## Export-ExcelToPdf.ps1
 
@@ -426,7 +487,7 @@ AI は **Microsoft 365 Copilot** を想定しています。Copilot はスクリ
 ### 要件
 
 - PowerShell 5.1 以降、Windows（クリップボードを使うため）
-- 同じフォルダに `Search-Excel.ps1` があること（設計書の読み取りに使います。Excel は不要）
+- 同じフォルダに `Search-Excel.ps1` と `ExcelTools.psm1` があること（設計書の読み取りに使います。Excel は不要）
 - Microsoft 365 Copilot（Copilot Chat）を使えること
 
 ### 使い方
