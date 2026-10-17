@@ -3,8 +3,8 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string[]] $Path,
 
-    [ValidateSet('View', 'Hidden', 'Comment', 'Word', 'Property', 'Link', 'Error', 'Macro')]
-    [string[]] $Check = @('View', 'Hidden', 'Comment', 'Word', 'Property', 'Link', 'Error', 'Macro'),
+    [ValidateSet('View', 'Hidden', 'Comment', 'Word', 'Property', 'Link', 'Error', 'Macro', 'Print', 'Version')]
+    [string[]] $Check = @('View', 'Hidden', 'Comment', 'Word', 'Property', 'Link', 'Error', 'Macro', 'Print', 'Version'),
 
     [string] $Words = 'TODO|TBD|FIXME|要確認|未定|検討中|仮置き|（仮）|\(仮\)|XXX|○○|××',
 
@@ -14,6 +14,12 @@ param(
     [int] $Zoom = 100,
 
     [string] $FileNamePattern,
+
+    [switch] $RequirePageNumber,
+
+    [string] $HeaderFooterText,
+
+    [string] $HistorySheet = '改訂履歴|変更履歴|改版履歴|更新履歴|改訂記録',
 
     [switch] $NoRecurse,
 
@@ -27,7 +33,7 @@ Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChe
 
 $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
 
-foreach ($p in @($Words, $AllowedNames, $FileNamePattern)) {
+foreach ($p in @($Words, $AllowedNames, $FileNamePattern, $HeaderFooterText, $HistorySheet)) {
     if ($p) {
         try { [void][regex]::new($p) }
         catch { throw "正規表現が不正です: $p 詳細: $($_.Exception.InnerException.Message)" }
@@ -45,6 +51,12 @@ foreach ($c in $Check) { $checkSet[$c] = $true }
 
 $errorValues = @('#NULL!', '#DIV/0!', '#VALUE!', '#REF!', '#NAME?', '#NUM!', '#N/A', '#GETTING_DATA', '#SPILL!', '#CALC!', '#FIELD!', '#BLOCKED!', '#CONNECT!', '#BUSY!', '#UNKNOWN!')
 $maxPerSheet = 20   # エラー値などを 1 シートで個別に挙げる上限（超えた分はまとめて 1 件にする）
+
+# 用紙の幅と高さ（インチ）。pageSetup の paperSize の番号ごと。無い場合は Letter（Excel の既定）
+$paperSizes = @{
+    1 = @('レター', 8.5, 11); 5 = @('リーガル', 8.5, 14); 8 = @('A3', 11.69, 16.54); 9 = @('A4', 8.27, 11.69); 11 = @('A5', 5.83, 8.27)
+    12 = @('B4', 10.12, 14.33); 13 = @('B5', 7.17, 10.12)
+}
 
 # ---------------------------------------------------------------- 指摘の記録
 
@@ -88,7 +100,8 @@ function Test-AllowedName {
 function Read-SheetFacts {
     #     シートの XML を 1 回だけ先頭から読み、チェックに必要な情報を集める。
     #     表示（sheetView / pane / selection）、非表示の行・列、エラー値のセル、ハイパーリンク
-    param($Package, [string] $PartName)
+    #     印刷の設定（pageSetup / pageMargins / headerFooter / 列の幅）と、値のあるセルの範囲・印刷範囲の外のセル
+    param($Package, [string] $PartName, $PrintAreas)
 
     $facts = [pscustomobject]@{
         HasView = $false; TabSelected = $false; Zoom = 100; TopLeft = 'A1'; ViewMode = 'normal'
@@ -96,6 +109,10 @@ function Read-SheetFacts {
         HiddenRows = 0; HiddenCols = 0
         Errors = New-Object System.Collections.Generic.List[object]
         Links = New-Object System.Collections.Generic.List[object]
+        PageSetup = @{}; FitToPage = $false; MarginLeft = 0.7; MarginRight = 0.7
+        HeaderFooter = @{}; HasColBreaks = $false
+        Cols = New-Object System.Collections.Generic.List[object]; DefaultColWidth = 0.0; BaseColWidth = 8
+        ValueCells = 0; MaxValueCol = 0; Outside = 0; OutsideRefs = New-Object System.Collections.Generic.List[string]
     }
 
     $reader = New-PartXmlReader -Package $Package -PartName $PartName
@@ -104,13 +121,15 @@ function Read-SheetFacts {
         $inFirstView = $false
         $viewDone = $false
         $errorCell = $null
+        $cellRef = $null
+        $counted = $false
         $advance = $true
         while ($true) {
             if ($advance -and -not $reader.Read()) { break }
             $advance = $true
             if ($reader.NodeType -eq [System.Xml.XmlNodeType]::EndElement) {
                 if ($reader.LocalName -eq 'sheetView' -and $inFirstView) { $inFirstView = $false; $viewDone = $true }
-                elseif ($reader.LocalName -eq 'c') { $errorCell = $null }
+                elseif ($reader.LocalName -eq 'c') { $errorCell = $null; $cellRef = $null }
                 continue
             }
             if ($reader.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
@@ -153,14 +172,42 @@ function Read-SheetFacts {
                     if (@('1', 'true') -contains $reader.GetAttribute('hidden')) {
                         $facts.HiddenCols += [int]$reader.GetAttribute('max') - [int]$reader.GetAttribute('min') + 1
                     }
+                    $w = 0.0
+                    [void][double]::TryParse([string]$reader.GetAttribute('width'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$w)
+                    $facts.Cols.Add([pscustomobject]@{ Min = [int]$reader.GetAttribute('min'); Max = [int]$reader.GetAttribute('max'); Width = $w; Hidden = (@('1', 'true') -contains $reader.GetAttribute('hidden')) })
                 }
+                'sheetFormatPr' {
+                    $w = 0.0
+                    if ([double]::TryParse([string]$reader.GetAttribute('defaultColWidth'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$w)) { $facts.DefaultColWidth = $w }
+                    $b = $reader.GetAttribute('baseColWidth')
+                    if ($b) { $facts.BaseColWidth = [int]$b }
+                }
+                'pageSetUpPr' { $facts.FitToPage = @('1', 'true') -contains $reader.GetAttribute('fitToPage') }
+                'pageMargins' {
+                    $l = 0.0; $r = 0.0
+                    if ([double]::TryParse([string]$reader.GetAttribute('left'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$l)) { $facts.MarginLeft = $l }
+                    if ([double]::TryParse([string]$reader.GetAttribute('right'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$r)) { $facts.MarginRight = $r }
+                }
+                'pageSetup' {
+                    foreach ($a in @('orientation', 'paperSize', 'scale', 'fitToWidth', 'fitToHeight')) { $facts.PageSetup[$a] = $reader.GetAttribute($a) }
+                }
+                { @('oddHeader', 'oddFooter', 'evenHeader', 'evenFooter', 'firstHeader', 'firstFooter') -contains $_ } {
+                    $facts.HeaderFooter[$reader.LocalName] = $reader.ReadElementContentAsString()
+                    $advance = $false
+                }
+                'colBreaks' { $facts.HasColBreaks = $true }
+                'is' { if ($cellRef -and -not $counted) { Add-ValueCell $facts $cellRef $PrintAreas; $counted = $true } }
                 'row' {
                     if (@('1', 'true') -contains $reader.GetAttribute('hidden')) { $facts.HiddenRows++ }
                 }
                 'c' {
                     if ($reader.GetAttribute('t') -eq 'e' -and -not $reader.IsEmptyElement) { $errorCell = $reader.GetAttribute('r') }
+                    $cellRef = $null
+                    if (-not $reader.IsEmptyElement) { $cellRef = $reader.GetAttribute('r') }
+                    $counted = $false
                 }
                 'v' {
+                    if ($cellRef -and -not $counted) { Add-ValueCell $facts $cellRef $PrintAreas; $counted = $true }
                     if ($errorCell) {
                         $facts.Errors.Add([pscustomobject]@{ Cell = $errorCell; Value = $reader.ReadElementContentAsString() })
                         $errorCell = $null
@@ -179,6 +226,273 @@ function Read-SheetFacts {
     }
     finally { $reader.Dispose() }
     return $facts
+}
+
+function Add-ValueCell {
+    #     値のあるセルを数え、いちばん右の列と、印刷範囲の外にあるセルを覚える
+    param($Facts, [string] $Ref, $PrintAreas)
+    $m = [regex]::Match($Ref, '^([A-Z]+)(\d+)$')
+    if (-not $m.Success) { return }
+    $col = Get-ColumnIndex $m.Groups[1].Value
+    $row = [int]$m.Groups[2].Value
+    $Facts.ValueCells++
+    if ($col -gt $Facts.MaxValueCol) { $Facts.MaxValueCol = $col }
+    if ($PrintAreas -and $PrintAreas.Count -gt 0) {
+        foreach ($a in $PrintAreas) { if ($row -ge $a.R0 -and $row -le $a.R1 -and $col -ge $a.C0 -and $col -le $a.C1) { return } }
+        $Facts.Outside++
+        if ($Facts.OutsideRefs.Count -lt 5) { $Facts.OutsideRefs.Add($Ref) }
+    }
+}
+
+function Get-PrintAreas {
+    #     名前の定義 _xlnm.Print_Area（'シート'!$A$1:$H$40,'シート'!$J$1:$K$5）を、行・列の範囲の一覧にする
+    param([string] $Text)
+    $areas = New-Object System.Collections.Generic.List[object]
+    foreach ($m in [regex]::Matches($Text, '\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?(?=,|$)')) {
+        $c0 = Get-ColumnIndex $m.Groups[1].Value; $r0 = [int]$m.Groups[2].Value
+        $c1 = $c0; $r1 = $r0
+        if ($m.Groups[3].Success) { $c1 = Get-ColumnIndex $m.Groups[3].Value; $r1 = [int]$m.Groups[4].Value }
+        $areas.Add([pscustomobject]@{ R0 = $r0; R1 = $r1; C0 = $c0; C1 = $c1 })
+    }
+    return , $areas
+}
+
+function Get-MaxDigitWidth {
+    #     列の幅（文字数）をピクセルにするための、標準フォントの数字 1 文字の幅（ピクセル）の目安。
+    #     日本語のフォント（游ゴシック・ＭＳ Ｐゴシックなど）は 11 ポイントで 8、欧文のフォント（Calibri など）は 7
+    param($Package, [string] $StylesPart)
+    $doc = $null
+    if ($StylesPart) { $doc = Read-PartXml -Package $Package -PartName $StylesPart }
+    if ($null -eq $doc) { return 7 }
+    $font = $doc.SelectSingleNode("//*[local-name()='fonts']/*[local-name()='font']")
+    if ($null -eq $font) { return 7 }
+    $name = ''; $size = 11.0
+    $n = $font.SelectSingleNode("*[local-name()='name']")
+    if ($n) { $name = $n.GetAttribute('val') }
+    $z = $font.SelectSingleNode("*[local-name()='sz']")
+    if ($z) { [void][double]::TryParse($z.GetAttribute('val'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$size) }
+    $base = 7
+    if ($name -match '[^\x00-\x7F]|Yu Gothic|Meiryo|MS P?Gothic|MS P?Mincho') { $base = 8 }
+    return [math]::Max(4, [math]::Round($base * $size / 11))
+}
+
+function Test-PrintSetup {
+    #     印刷の設定をチェックする（表示されているワークシートで、値のあるセルがあるものだけ）
+    param($Sheets, [int] $Mdw)
+
+    $printable = @($Sheets | Where-Object { $_.Facts -and $_.State -eq 'visible' -and $_.IsWorksheet -and $_.Facts.ValueCells -gt 0 })
+    foreach ($s in $printable) {
+        $f = $s.Facts
+        # 印刷範囲の外に残ったデータ
+        if ($s.PrintAreas.Count -gt 0 -and $f.Outside -gt 0) {
+            $more = ''
+            if ($f.Outside -gt $f.OutsideRefs.Count) { $more = ' など' }
+            Add-Issue '警告' '印刷' '印刷範囲の外' ("印刷範囲の外に値のあるセルが {0} 個あります（{1}{2}）。印刷されません" -f $f.Outside, ($f.OutsideRefs -join '、'), $more) -Sheet $s.Name -Cell $f.OutsideRefs[0]
+        }
+
+        # 横が 1 ページに収まるか（「次のページ数に合わせて印刷」や改ページを設定していれば意図どおりとみなす）
+        if (-not $f.FitToPage -and -not $f.HasColBreaks) {
+            $c0 = 1; $c1 = $f.MaxValueCol
+            if ($s.PrintAreas.Count -gt 0) { $c0 = ($s.PrintAreas | Measure-Object C0 -Minimum).Minimum; $c1 = ($s.PrintAreas | Measure-Object C1 -Maximum).Maximum }
+            $default = $f.DefaultColWidth
+            if ($default -le 0) { $default = $f.BaseColWidth + 0.71 }
+            $px = 0.0
+            for ($c = $c0; $c -le $c1; $c++) {
+                $w = $default
+                foreach ($col in $f.Cols) { if ($c -ge $col.Min -and $c -le $col.Max) { $w = $col.Width; if ($col.Hidden) { $w = 0 }; break } }
+                $px += $w * $Mdw
+            }
+            $scale = 100
+            if ($f.PageSetup['scale']) { $scale = [int]$f.PageSetup['scale'] }
+            $paperNo = 1
+            if ($f.PageSetup['paperSize']) { $paperNo = [int]$f.PageSetup['paperSize'] }
+            $paper = $paperSizes[$paperNo]
+            if ($paper) {
+                $paperWidth = $paper[1]
+                if ($f.PageSetup['orientation'] -eq 'landscape') { $paperWidth = $paper[2] }
+                $printableInch = $paperWidth - $f.MarginLeft - $f.MarginRight
+                $contentInch = $px * 0.75 / 72 * $scale / 100
+                # 列の幅の見積もりには誤差があるので、1 割はみ出すまでは 1 ページとみなす
+                if ($printableInch -gt 0 -and $contentInch -gt $printableInch * 1.1) {
+                    $pages = [math]::Ceiling($contentInch / $printableInch)
+                    $orient = '縦'
+                    if ($f.PageSetup['orientation'] -eq 'landscape') { $orient = '横' }
+                    Add-Issue '警告' '印刷' '横のはみ出し' ("印刷すると横が約 {0} ページに分かれます（{1}・{2}向き・{3}%）。「ページ設定」の「次のページ数に合わせて印刷」で横 1 ページにしてください" -f $pages, $paper[0], $orient, $scale) -Sheet $s.Name
+                }
+            }
+        }
+
+        # ヘッダー／フッター
+        $hf = (@($f.HeaderFooter.Values) -join "`n")
+        if ($hf -match '&[Zz]') { Add-Issue '警告' '情報漏れ' 'ヘッダー／フッター' 'ヘッダー／フッターにファイルの場所（&Z）が印刷されます' -Sheet $s.Name }
+        if ($checkSet['Word'] -and $Words) {
+            $plain = [regex]::Replace($hf, '&(?:"[^"]*"|\d+|[A-Za-z&])', ' ')
+            $m = [regex]::Match($plain, $Words, 'IgnoreCase')
+            if ($m.Success) { Add-Issue '警告' '消し忘れ' '残っている文言' ("ヘッダー／フッターに「{0}」が残っています" -f $m.Value) -Sheet $s.Name }
+        }
+        if ($RequirePageNumber -and $hf -notmatch '&[Pp]') { Add-Issue '警告' '印刷' 'ページ番号' 'ヘッダー／フッターにページ番号がありません' -Sheet $s.Name }
+        if ($HeaderFooterText -and $hf -notmatch $HeaderFooterText) { Add-Issue '警告' '印刷' 'ヘッダー／フッター' ("ヘッダー／フッターに「{0}」がありません" -f $HeaderFooterText) -Sheet $s.Name }
+    }
+
+    # 用紙のサイズ・向きがシートごとにばらばら
+    if ($printable.Count -gt 1) {
+        foreach ($kind in @(@('paperSize', '用紙サイズ'), @('orientation', '用紙の向き'))) {
+            $groups = [ordered]@{}
+            foreach ($s in $printable) {
+                $v = $s.Facts.PageSetup[$kind[0]]
+                if ($kind[0] -eq 'paperSize') {
+                    if (-not $v) { $v = '1' }
+                    $name = $paperSizes[[int]$v]
+                    if ($name) { $v = $name[0] } else { $v = "番号 $v" }
+                }
+                elseif ($v -eq 'landscape') { $v = '横' } else { $v = '縦' }
+                if (-not $groups.Contains($v)) { $groups[$v] = New-Object System.Collections.Generic.List[string] }
+                $groups[$v].Add($s.Name)
+            }
+            if ($groups.Count -gt 1) {
+                $parts = @($groups.Keys | ForEach-Object { '{0}: {1}' -f $_, ($groups[$_] -join '、') })
+                Add-Issue '情報' '印刷' $kind[1] ("{0}がシートによって違います（{1}）" -f $kind[1], ($parts -join ' / '))
+            }
+        }
+    }
+}
+
+function ConvertTo-VersionText {
+    #     版数の文字（「第1.1版」「Ver.1.10」「v1.1」など）を比較用の「1.1」の形にする（無ければ $null）
+    param([string] $Text)
+    if (-not $Text) { return $null }
+    $t = $Text.Normalize([System.Text.NormalizationForm]::FormKC)
+    $m = [regex]::Match($t, '(\d+(?:\.\d+)*)')
+    if (-not $m.Success) { return $null }
+    return (@($m.Groups[1].Value.Split('.') | ForEach-Object { [string][int64]$_ }) -join '.')
+}
+
+function ConvertTo-DateText {
+    #     日付の文字（2026/10/1・2026-10-01・2026年10月1日）を「2026/10/01」の形にする（無ければ $null）
+    param([string] $Text)
+    if (-not $Text) { return $null }
+    $t = $Text.Normalize([System.Text.NormalizationForm]::FormKC)
+    $m = [regex]::Match($t, '(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})')
+    if (-not $m.Success) { return $null }
+    return '{0}/{1:D2}/{2:D2}' -f [int]$m.Groups[1].Value, [int]$m.Groups[2].Value, [int]$m.Groups[3].Value
+}
+
+function Compare-VersionText {
+    #     版数どうしを数として比べる（-1 / 0 / 1）
+    param([string] $A, [string] $B)
+    $x = @($A.Split('.') | ForEach-Object { [int64]$_ }); $y = @($B.Split('.') | ForEach-Object { [int64]$_ })
+    for ($i = 0; $i -lt [math]::Max($x.Count, $y.Count); $i++) {
+        $p = 0; $q = 0
+        if ($i -lt $x.Count) { $p = $x[$i] }
+        if ($i -lt $y.Count) { $q = $y[$i] }
+        if ($p -lt $q) { return -1 }
+        if ($p -gt $q) { return 1 }
+    }
+    return 0
+}
+
+function Test-VersionConsistency {
+    #     表紙の版数・更新日と、改訂履歴の最後の行と、ファイル名の版数が合っているかをチェックする
+    param([string] $FilePath, $Sheets, [string] $FileName)
+
+    $visible = @($Sheets | Where-Object { $_.State -eq 'visible' -and $_.IsWorksheet })
+    $cover = @($visible | Where-Object { $_.Name -match '^\s*表紙\s*$' })[0]
+    if (-not $cover) { $cover = $visible[0] }
+    $hist = @($Sheets | Where-Object { $_.IsWorksheet -and $_.Name -match $HistorySheet })[0]
+    $names = @(@($cover, $hist) | Where-Object { $_ } | ForEach-Object { [regex]::Escape($_.Name) } | Select-Object -Unique)
+    if ($names.Count -eq 0) { return }
+
+    # 表紙と改訂履歴のセルの値（日付は yyyy/m/d の文字）を Search-Excel で読む
+    $cells = @{}
+    $hits = @(& $searchScript -Pattern '\S' -Path ([System.Management.Automation.WildcardPattern]::Escape($FilePath)) -Target Value -NoExcel `
+        -SheetNamePattern ('^(?:{0})$' -f ($names -join '|')) -WarningAction SilentlyContinue 6>$null)
+    foreach ($h in $hits) {
+        $m = [regex]::Match($h.Cell, '^([A-Z]+)(\d+)$')
+        if (-not $cells.ContainsKey($h.Sheet)) { $cells[$h.Sheet] = @{} }
+        $row = [int]$m.Groups[2].Value
+        if (-not $cells[$h.Sheet].ContainsKey($row)) { $cells[$h.Sheet][$row] = New-Object System.Collections.Generic.List[object] }
+        $cells[$h.Sheet][$row].Add([pscustomobject]@{ Col = (Get-ColumnIndex $m.Groups[1].Value); Cell = $h.Cell; Text = $h.Text.Trim() })
+    }
+    $norm = { param($t) $t.Normalize([System.Text.NormalizationForm]::FormKC) -replace '\s', '' }
+    $versionLabel = '^(版数|版|改訂版数|バージョン|Version|Ver\.?|Rev\.?|改版番号)$'
+    $dateLabel = '^(最終更新日|更新日|改訂日|改版日|最終改訂日)$'
+
+    # ---- 表紙: 見出し（「版数」など）の右の値、または「第1.1版」「Ver.1.1」の形の文字
+    $coverVersion = $null; $coverVersionCell = $null; $coverDate = $null; $coverDateCell = $null
+    if ($cover -and $cells.ContainsKey($cover.Name)) {
+        foreach ($row in ($cells[$cover.Name].Keys | Sort-Object)) {
+            $list = @($cells[$cover.Name][$row] | Sort-Object Col)
+            for ($i = 0; $i -lt $list.Count; $i++) {
+                $label = & $norm $list[$i].Text
+                if (-not $coverVersion -and $label -match $versionLabel -and $i + 1 -lt $list.Count) {
+                    $coverVersion = ConvertTo-VersionText $list[$i + 1].Text; $coverVersionCell = $list[$i + 1].Cell
+                }
+                elseif (-not $coverDate -and $label -match $dateLabel -and $i + 1 -lt $list.Count) {
+                    $coverDate = ConvertTo-DateText $list[$i + 1].Text; $coverDateCell = $list[$i + 1].Cell
+                }
+                elseif (-not $coverVersion -and $label -match '^(第\d+(\.\d+)*版|(Ver|Version|Rev)\.?\d+(\.\d+)*)$') {
+                    $coverVersion = ConvertTo-VersionText $label; $coverVersionCell = $list[$i].Cell
+                }
+            }
+        }
+    }
+
+    # ---- 改訂履歴: 「版数」と「改訂日」などの見出しがある行の下で、版数のある最後の行。
+    #      シートの上部（帳票のヘッダ）にも「版数」「更新日」が並ぶことがあるので、下に版数の行がいちばん多い見出しの行を使う
+    $histVersion = $null; $histDate = $null
+    if ($hist -and $cells.ContainsKey($hist.Name)) {
+        $rows = @($cells[$hist.Name].Keys | Sort-Object)
+        $best = $null
+        foreach ($row in $rows) {
+            $vCol = 0; $dCol = 0
+            foreach ($c in $cells[$hist.Name][$row]) {
+                $label = & $norm $c.Text
+                if ($label -match $versionLabel) { $vCol = $c.Col }
+                elseif ($label -match '^(日付|改訂日|改版日|更新日|年月日|変更日)$') { $dCol = $c.Col }
+            }
+            if (-not $vCol -or -not $dCol) { continue }
+            $entries = New-Object System.Collections.Generic.List[object]
+            foreach ($r in @($rows | Where-Object { $_ -gt $row })) {
+                $vc = @($cells[$hist.Name][$r] | Where-Object { $_.Col -eq $vCol })[0]
+                if (-not $vc) { continue }
+                $v = ConvertTo-VersionText $vc.Text
+                if (-not $v) { continue }
+                $dc = @($cells[$hist.Name][$r] | Where-Object { $_.Col -eq $dCol })[0]
+                $d = $null
+                if ($dc) { $d = ConvertTo-DateText $dc.Text }
+                $entries.Add([pscustomobject]@{ Version = $v; Text = $vc.Text; Cell = $vc.Cell; Date = $d })
+            }
+            if (-not $best -or $entries.Count -gt $best.Count) { $best = $entries }
+        }
+        if ($best -and $best.Count -gt 0) {
+            for ($i = 1; $i -lt $best.Count; $i++) {
+                if ((Compare-VersionText $best[$i].Version $best[$i - 1].Version) -le 0) {
+                    Add-Issue '警告' '版数' '改訂履歴の版数' ("改訂履歴の版数（{0}）が前の行（{1}）より大きくありません" -f $best[$i].Text, $best[$i - 1].Text) -Sheet $hist.Name -Cell $best[$i].Cell
+                }
+            }
+            $histVersion = $best[$best.Count - 1].Version
+            $histDate = $best[$best.Count - 1].Date
+        }
+    }
+
+    # ---- 突き合わせ
+    if ($coverVersion -and $histVersion -and (Compare-VersionText $coverVersion $histVersion) -ne 0) {
+        Add-Issue '警告' '版数' '表紙の版数' ("表紙の版数（{0}）と、改訂履歴の最後の版数（{1}）が違います" -f $coverVersion, $histVersion) -Sheet $cover.Name -Cell $coverVersionCell
+    }
+    if ($coverDate -and $histDate -and $coverDate -ne $histDate) {
+        Add-Issue '警告' '版数' '表紙の更新日' ("表紙の更新日（{0}）と、改訂履歴の最後の改訂日（{1}）が違います" -f $coverDate, $histDate) -Sheet $cover.Name -Cell $coverDateCell
+    }
+    $latest = $histVersion
+    if (-not $latest) { $latest = $coverVersion }
+    $fm = [regex]::Match([System.IO.Path]::GetFileNameWithoutExtension($FileName).Normalize([System.Text.NormalizationForm]::FormKC), '(?i)(?:(?<![a-z])v(?:er)?\.?\s*|第\s*)(\d+(?:\.\d+)*)')
+    if ($latest -and $fm.Success) {
+        $fileVersion = ConvertTo-VersionText $fm.Groups[1].Value
+        if ((Compare-VersionText $fileVersion $latest) -ne 0) {
+            $where = '改訂履歴の最後の版数'
+            if (-not $histVersion) { $where = '表紙の版数' }
+            Add-Issue '警告' '版数' 'ファイル名の版数' ("ファイル名の版数（{0}）と、{1}（{2}）が違います" -f $fileVersion, $where, $latest)
+        }
+    }
 }
 
 function Get-ExpectedCell {
@@ -207,12 +521,23 @@ function Test-Workbook {
         $relById = @{}
         foreach ($rel in $wbRels) { $relById[$rel.Id] = $rel }
 
+        # 印刷範囲（シートの番号 → 範囲）
+        $printAreas = @{}
+        foreach ($dn in $wbDoc.SelectNodes("//*[local-name()='definedNames']/*[local-name()='definedName']")) {
+            if ($dn.GetAttribute('name') -ne '_xlnm.Print_Area' -or -not $dn.GetAttribute('localSheetId')) { continue }
+            $printAreas[[int]$dn.GetAttribute('localSheetId')] = Get-PrintAreas $dn.InnerText
+        }
         $sheets = New-Object System.Collections.Generic.List[object]
+        $index = 0
         foreach ($s in $wbDoc.SelectNodes("//*[local-name()='sheets']/*[local-name()='sheet']")) {
             $rel = $relById[(Get-RelationshipIdAttribute $s)]
             $state = $s.GetAttribute('state')
             if (-not $state) { $state = 'visible' }
-            $sheets.Add([pscustomobject]@{ Name = $s.GetAttribute('name'); State = $state; Rel = $rel; Facts = $null })
+            $areas = $printAreas[$index]
+            if (-not $areas) { $areas = New-Object System.Collections.Generic.List[object] }
+            $isWorksheet = $rel -and (@('worksheet', 'macrosheet') -contains $rel.Kind)
+            $sheets.Add([pscustomobject]@{ Name = $s.GetAttribute('name'); State = $state; Rel = $rel; Facts = $null; PrintAreas = $areas; IsWorksheet = $isWorksheet })
+            $index++
         }
 
         # ---- 非表示シート
@@ -224,11 +549,11 @@ function Test-Workbook {
         }
 
         # ---- シートごとに読む
-        $needFacts = $checkSet['View'] -or $checkSet['Hidden'] -or $checkSet['Error'] -or $checkSet['Link']
+        $needFacts = $checkSet['View'] -or $checkSet['Hidden'] -or $checkSet['Error'] -or $checkSet['Link'] -or $checkSet['Print']
         foreach ($s in $sheets) {
             if ($null -eq $s.Rel) { continue }
             $sheetRels = Get-PartRelationships -Package $pkg -PartName $s.Rel.Target
-            if ($needFacts) { $s.Facts = Read-SheetFacts -Package $pkg -PartName $s.Rel.Target }
+            if ($needFacts) { $s.Facts = Read-SheetFacts -Package $pkg -PartName $s.Rel.Target -PrintAreas $s.PrintAreas }
             $f = $s.Facts
             $isWorksheet = @('worksheet', 'macrosheet') -contains $s.Rel.Kind
 
@@ -322,6 +647,11 @@ function Test-Workbook {
             }
         }
 
+        if ($checkSet['Print']) {
+            $stylesPart = @($wbRels | Where-Object { $_.Kind -eq 'styles' } | ForEach-Object { $_.Target })[0]
+            Test-PrintSetup -Sheets $sheets -Mdw (Get-MaxDigitWidth $pkg $stylesPart)
+        }
+
         # ---- ブック全体
         if ($checkSet['Link']) {
             foreach ($rel in @($wbRels | Where-Object { $_.Kind -eq 'externalLink' })) {
@@ -359,6 +689,7 @@ function Test-Workbook {
     finally {
         $pkg.Zip.Dispose()
     }
+    if ($checkSet['Version']) { Test-VersionConsistency -FilePath $FilePath -Sheets $sheets -FileName ([System.IO.Path]::GetFileName($FilePath)) }
 }
 
 function Get-ExternalTarget {
@@ -471,7 +802,7 @@ Write-Progress -Activity '提出前チェック' -Completed
 
 
 $levelOrder = @{ 'エラー' = 0; '警告' = 1; '情報' = 2 }
-$categoryOrder = @{ 'ファイル' = 0; '壊れ' = 1; '情報漏れ' = 2; '消し忘れ' = 3; '体裁' = 4; 'マクロ' = 5 }
+$categoryOrder = @{ 'ファイル' = 0; '壊れ' = 1; '情報漏れ' = 2; '版数' = 3; '消し忘れ' = 4; '体裁' = 5; '印刷' = 6; 'マクロ' = 7 }
 $sorted = @($script:Issues | Sort-Object @{ e = { $_.File } }, @{ e = { $levelOrder[$_.Level] } }, @{ e = { $categoryOrder[$_.Category] } }, @{ e = { $_.Sheet } })
 $sorted
 
@@ -539,6 +870,9 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       消し忘れ   非表示シート、コメント（メモ）、TODO などの文言、非表示の行・列（情報）
 #       情報漏れ   作成者・最終更新者・会社名などのプロパティ、他ブックへの外部リンク、社内パスへのハイパーリンク
 #       壊れ       エラー値（#REF! など）のセル、参照先が壊れた名前の定義
+#       版数       表紙の版数・更新日と、改訂履歴の最後の行・ファイル名の版数の食い違い、改訂履歴の版数の逆戻り
+#       印刷       印刷すると横がはみ出す、印刷範囲の外のデータ、ヘッダー／フッターのファイルの場所（&Z）や TODO、
+#                  用紙のサイズ・向きがシートによって違う（情報）
 #       マクロ     VBA を含むブック（情報）
 #
 #     結果は 1 指摘 1 行のオブジェクトで出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
@@ -549,7 +883,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER Check
 #     チェックする項目。View（体裁）/ Hidden（非表示）/ Comment（コメント）/ Word（残っている文言）/
-#     Property（プロパティ）/ Link（外部リンク・名前の定義）/ Error（エラー値）/ Macro（マクロ）。既定はすべて。
+#     Property（プロパティ）/ Link（外部リンク・名前の定義）/ Error（エラー値）/ Macro（マクロ）/
+#     Print（印刷）/ Version（表紙と改訂履歴の版数）。既定はすべて。
 #
 # .PARAMETER Words
 #     消し忘れとして探す文言の正規表現（大文字小文字は区別しません）。
@@ -563,6 +898,16 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER FileNamePattern
 #     ファイル名の命名規則の正規表現。一致しないファイルを警告します（例: '^[A-Z]{2}-\d{2}-\d{2}-\d{4}_.+\.xlsx$'）。
+#
+# .PARAMETER RequirePageNumber
+#     ヘッダー／フッターにページ番号（&P）が無いシートを警告します。
+#
+# .PARAMETER HeaderFooterText
+#     ヘッダー／フッターに必ず入れる文字の正規表現（例: '社外秘|Confidential'）。無いシートを警告します。
+#
+# .PARAMETER HistorySheet
+#     版数のチェックで使う、改訂履歴のシート名の正規表現。既定は「改訂履歴|変更履歴|改版履歴|更新履歴|改訂記録」。
+#     表紙は「表紙」という名前のシート、無ければ最初に表示されているシートです。
 #
 # .PARAMETER NoRecurse
 #     サブフォルダをチェックしません。
@@ -580,6 +925,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .EXAMPLE
 #     # 体裁だけを確認する
 #     .\Test-ExcelDeliverable.ps1 D:\提出物 -Check View
+#
+# .EXAMPLE
+#     # 印刷と版数だけを、ページ番号と「社外秘」の表示も含めて確認する
+#     .\Test-ExcelDeliverable.ps1 D:\提出物 -Check Print, Version -RequirePageNumber -HeaderFooterText '社外秘'
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。Excel は不要です。同じフォルダに ExcelTools.psm1 と Search-Excel.ps1 が必要です。

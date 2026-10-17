@@ -137,6 +137,10 @@ def table(ws, top, columns, rows, *, col_start=1):
     return r
 
 
+# 作成中のブックの最終更新（改訂履歴の最後の行の改訂日・改訂者）。表紙と各シートのヘッダに使う
+_last_update = {"date": D.CREATED, "by": D.AUTHOR}
+
+
 def doc_header(ws, title, id_label="", id_value="", name_label="", name_value=""):
     """各シート共通の帳票ヘッダ（1〜2 行目）"""
     put(ws, 1, 1, 14, title, font=FONT_TITLE, align=CENTER, rows=2)
@@ -154,9 +158,9 @@ def doc_header(ws, title, id_label="", id_value="", name_label="", name_value=""
     else:
         put(ws, 2, 19, 16, id_value or D.SUBSYSTEM, align=MIDDLE_LEFT)
     put(ws, 2, 35, 4, "更新者", font=FONT_BOLD, fill=FILL_LABEL, align=CENTER)
-    put(ws, 2, 39, 8, D.UPDATER, align=MIDDLE_LEFT)
+    put(ws, 2, 39, 8, _last_update["by"], align=MIDDLE_LEFT)
     put(ws, 2, 47, 4, "更新日", font=FONT_BOLD, fill=FILL_LABEL, align=CENTER)
-    put(ws, 2, 51, 8, D.UPDATED, align=MIDDLE_LEFT, fmt="yyyy/mm/dd")
+    put(ws, 2, 51, 8, _last_update["date"], align=MIDDLE_LEFT, fmt="yyyy/mm/dd")
     ws.row_dimensions[1].height = 18
     ws.row_dimensions[2].height = 18
     return 4
@@ -172,7 +176,7 @@ def cover_sheet(wb, doc_title, doc_id, version):
     ws.row_dimensions[12].height = 36
     put(ws, 14, 1, GRID_COLS, "詳細設計書", font=Font(name=FONT_NAME, size=12), align=CENTER, border=False)
 
-    rows = [("文書番号", doc_id), ("版数", version), ("作成日", D.CREATED), ("最終更新日", D.UPDATED),
+    rows = [("文書番号", doc_id), ("版数", version), ("作成日", D.CREATED), ("最終更新日", _last_update["date"]),
             ("作成者", D.AUTHOR), ("作成部署", D.COMPANY)]
     r = 22
     for label, value in rows:
@@ -193,6 +197,9 @@ def history_sheet(wb, doc_title, history):
 
 
 def new_book(doc_title, doc_id, version, history):
+    # 表紙の版数・最終更新日と、改訂履歴の最後の行をそろえる（Test-ExcelDeliverable.ps1 の版数チェックで矛盾しないように）
+    assert history[-1][0] == version, (doc_title, version, history[-1])
+    _last_update["date"], _last_update["by"] = history[-1][1], history[-1][4]
     wb = Workbook()
     wb.remove(wb.active)
     cover_sheet(wb, doc_title, doc_id, version)
@@ -207,6 +214,8 @@ def save(wb, filename):
         ws.sheet_view.selection[0].activeCell = "A1"
         ws.sheet_view.selection[0].sqref = "A1"
         ws.sheet_view.tabSelected = ws is wb.worksheets[0]
+    # 作成者のプロパティ（既定は「openpyxl」）は残さない（提出前チェックで指摘されないように）
+    wb.properties.creator = None
     path = os.path.join(OUT_DIR, filename)
     wb.save(path)
     print("wrote", os.path.relpath(path, OUT_DIR))
