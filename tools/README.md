@@ -5,11 +5,12 @@
 | [Search-Excel.ps1](#search-excelps1) | フォルダ配下の Excel を横断して文字列を検索する（Excel 版 grep） |
 | [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所をまとめて確認する |
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
+| [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行の挿入・削除を考慮） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
-`Test-ExcelDeliverable.ps1`・`Reset-ExcelView.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
 
 ## Search-Excel.ps1
 
@@ -284,6 +285,63 @@ File        Result   Detail
 - いったん一時ファイルに書き出してから置き換えます
 - Excel で開いているファイルは書き換えず、失敗として表示します
 - xls / xlsb、パスワード付きのファイルは対象外です
+
+## Compare-Excel.ps1
+
+2 つの Excel ファイル（またはフォルダ）を比べ、**セル単位の差分**を一覧にします。設計書の版の比較や、改訂履歴の裏付けに使えます。Excel は不要です。
+
+```powershell
+.\Compare-Excel.ps1 .\v1.0\テーブル定義書.xlsx .\v1.1\テーブル定義書.xlsx
+.\Compare-Excel.ps1 D:\納品\v1.0 D:\納品\v1.1 -OutXlsx D:\差分_v1.0-v1.1.xlsx   # フォルダどうし
+```
+
+```
+File              Location      Change Detail
+----              --------      ------ ------
+テーブル定義書.xlsx T_ORDER!E14   変更   値: 8 → 10（旧 E13）
+テーブル定義書.xlsx T_ORDER!A15   追加   行を追加: B:配送時間帯 | C:DELIVERY_TIME_KBN | D:CHAR | E:2
+テーブル定義書.xlsx T_ORDER!G20   変更   数式: =SUM(G5:G18) → =SUM(G5:G19)
+テーブル定義書.xlsx 改訂履歴!A7   追加   行を追加: A:1.1 | B:2026/10/12 | ...
+
+1 ファイル: 差分あり 1 / 差分 4 件
+```
+
+### 比べるもの
+
+| 種類 | 内容 |
+| --- | --- |
+| 値・数式 | セルごとに 変更 / 追加 / 削除 |
+| 行 | 挿入・削除した行（内容を 1 行にまとめて表示） |
+| コメント・図形 | 文言の変更 / 追加 / 削除 |
+| シート | シートの追加 / 削除 |
+| ファイル | フォルダどうしを比べたとき、片方にしかないファイル |
+
+### 行の挿入・削除を考慮した比較
+
+単純にセル番地どうしを比べると、上の方に 1 行挿入しただけで、それより下のセルがすべて「変更」になります。
+このツールは、`diff` コマンドが行を対応付けるのと同じ考え方で、**同じ内容の行どうしを対応付けてから**比べます。
+
+1. 先頭と末尾の同じ行を対応付ける
+2. 残りを LCS（最長共通部分列）で対応付ける。行数が多い場合（旧 × 新 が 100 万行を超える場合）は、両方に 1 回しか出てこない行を目印にする方法（patience diff）に切り替える
+3. 対応が付かなかった行は、似ている行どうし（同じ列に同じ値が多い行）を「変更された行」として対応付け、残りを追加・削除とする
+
+行が移動したセルの差分には、旧の場所も表示します（`（旧 E13）`）。セル番地どうしで比べたい場合は `-NoRowAlign` を付けてください。
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Old` / `-New` | 比較元（変更前）と比較先（変更後）。両方ファイル、または両方フォルダ |
+| `-OutXlsx` | 結果を保存（差分一覧・ファイル別）。場所のリンクは、削除なら旧のファイル、それ以外は新のファイルの該当セルを開く |
+| `-NoRowAlign` | 行の対応付けをせず、セル番地どうしで比べる |
+| `-NoRecurse` | フォルダを比べるとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は比べられない） |
+
+### 既知の制約
+
+- 列の挿入・削除は対応付けません（列がずれた場合はセルの変更として出力されます）
+- 書式（色・罫線・フォント）の違いは比べません
+- 内容がまったく同じ行が何度も出てくる表で行を入れ替えた場合、対応付けが直感と違うことがあります
 
 ## Export-ExcelToPdf.ps1
 

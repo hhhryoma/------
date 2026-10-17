@@ -307,6 +307,38 @@ def make_view_fixtures():
     rewrite_zip(path, files)
 
 
+COMPARE = os.path.join(HERE, "compare")
+
+
+def make_compare_fixtures():
+    """Compare-Excel.ps1 用。v1 → v2 で、桁数の変更・行の挿入と削除・数式の変更・コメントの追加・
+    シートの追加と削除・ファイルの追加と削除を起こす"""
+    shutil.rmtree(COMPARE, ignore_errors=True)
+    os.makedirs(os.path.join(COMPARE, "v1")); os.makedirs(os.path.join(COMPARE, "v2"))
+
+    def book(path, rows, extra_sheet=None, formula="=SUM(C2:C4)", comment=None):
+        wb = openpyxl.Workbook(); ws = wb.active; ws.title = "項目定義"
+        for r, row in enumerate(rows, start=1):
+            for c, v in enumerate(row, start=1):
+                ws.cell(row=r, column=c, value=v)
+        ws.cell(row=len(rows) + 1, column=3, value=formula)
+        if comment:
+            ws["B2"].comment = Comment(comment, "x")
+        if extra_sheet:
+            wb.create_sheet(extra_sheet)["A1"] = "追加シートの内容"
+        wb.properties.creator = None
+        wb.save(path)
+
+    old_rows = [["No", "項目名", "桁数"], [1, "受注番号", 12], [2, "顧客コード", 8], [3, "顧客名", 100], [4, "備考", 500]]
+    new_rows = [["No", "項目名", "桁数"], [1, "受注番号", 12], [2, "顧客コード", 10], [2.5, "顧客区分", 1], [3, "顧客名", 100]]
+    v1 = os.path.join(COMPARE, "v1"); v2 = os.path.join(COMPARE, "v2")
+    book(os.path.join(v1, "項目定義.xlsx"), old_rows, extra_sheet="旧メモ")
+    book(os.path.join(v2, "項目定義.xlsx"), new_rows, extra_sheet="変更履歴", formula="=SUM(C2:C5)", comment="桁数を見直し")
+    book(os.path.join(v1, "同じ.xlsx"), old_rows); book(os.path.join(v2, "同じ.xlsx"), old_rows)
+    book(os.path.join(v1, "削除された.xlsx"), old_rows)
+    book(os.path.join(v2, "追加された.xlsx"), new_rows)
+
+
 def main():
     tmp = tempfile.mkdtemp()
     try:
@@ -315,6 +347,7 @@ def main():
         make_review_fixtures()
         make_deliverable_fixtures(tmp)
         make_view_fixtures()
+        make_compare_fixtures()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("fixtures written to", HERE)
