@@ -4,11 +4,12 @@
 | --- | --- |
 | [Search-Excel.ps1](#search-excelps1) | フォルダ配下の Excel を横断して文字列を検索する（Excel 版 grep） |
 | [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所をまとめて確認する |
+| [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
-`Test-ExcelDeliverable.ps1` と `Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Reset-ExcelView.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
 
 ## Search-Excel.ps1
 
@@ -236,6 +237,53 @@ File      Location  Level  Detail
 - xls / xlsb は中身を読めないためチェックしません（xlsx に保存し直してください）
 - 図形の中の文言は探しますが、画像の中の文字は読めません
 - 印刷範囲の外に残ったデータ、ヘッダー／フッターの内容はチェックしません
+
+## Reset-ExcelView.ps1
+
+Excel ファイルを、**開いたときに先頭シートの A1 が倍率 100% で表示される状態**に一括で直します。
+`Book1.xlsm` の「体裁整える」マクロの代わりで、Excel を使いません。
+
+```powershell
+.\Reset-ExcelView.ps1 D:\提出物 -WhatIf                          # 何が直されるかだけ確認
+.\Reset-ExcelView.ps1 D:\提出物 -BackupDir D:\修正前 -KeepTimestamp  # 修正前を残し、更新日時は変えずに直す
+```
+
+```
+File        Result   Detail
+----        ------   ------
+見積書.xlsx 修正     作業グループ・倍率・先頭シート・表示位置・選択セル
+仕様書.xlsx 変更なし
+旧資料.xlsx スキップ パスワードで保護（暗号化）されているためチェックしていません
+
+3 ファイル: 修正 1 / 変更なし 1 / スキップ 1
+```
+
+### 直す内容
+
+- 開いたときに、表示されている最初のシートが表示されるようにする
+- 各シートの選択セルを A1 に、表示位置を左上に、倍率を 100%（`-Zoom` で変更可）にする
+- **ウィンドウ枠を固定したシート**は、スクロール領域の左上（Ctrl+Home で移動する位置）を選択する
+- 複数シートの選択（作業グループ）を解除する
+- `-NormalView` を付けると、改ページプレビュー・ページレイアウト表示を標準表示に戻す
+
+### マクロとの違い
+
+| | 体裁整えるマクロ（Book1.xlsm） | Reset-ExcelView.ps1 |
+| --- | --- | --- |
+| Excel | 必要（1 ファイルずつ開いて保存） | **不要**（ファイルの中の表示設定だけを書き換える） |
+| 書き換えるファイル | すべて（更新日時がすべて変わる） | **直す必要があるファイルだけ**（判定は Test-ExcelDeliverable.ps1 と同じ基準） |
+| 更新日時 | 変わる | `-KeepTimestamp` で元のまま |
+| マクロ付きのブック | 開くとマクロが動く可能性がある | 開かないので動かない |
+| 1 ファイル失敗したとき | そこで止まる | 理由を表示して次へ進む |
+| 事前確認・バックアップ | なし | `-WhatIf`・`-BackupDir` |
+| ウィンドウ枠の固定 | 考慮なし | スクロール領域の左上を選択 |
+
+### 安全のための仕組み
+
+- 書き換えるのは `workbook.xml` の表示シートの指定と、各シートの `<sheetViews>`（表示設定）だけです。**セルの値・書式・数式・コメント・図形・マクロには触れません**（テストで、表示設定以外が 1 文字も変わらないことを確認しています）
+- いったん一時ファイルに書き出してから置き換えます
+- Excel で開いているファイルは書き換えず、失敗として表示します
+- xls / xlsb、パスワード付きのファイルは対象外です
 
 ## Export-ExcelToPdf.ps1
 

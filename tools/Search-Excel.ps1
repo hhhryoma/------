@@ -93,7 +93,7 @@ if ($Open -and -not (Get-Command Out-GridView -ErrorAction SilentlyContinue)) {
     throw 'この環境では Out-GridView が使えないため、-Open は利用できません（Windows で実行してください）。'
 }
 
-Update-TypeData -TypeName 'SearchExcel.Hit' -DefaultDisplayPropertySet File, Location, Kind, Text -Force
+Update-TypeData -TypeName 'SearchExcel.Hit' -DefaultDisplayPropertySet File, Location, Kind, Text -Force -WhatIf:$false
 
 # ---------------------------------------------------------------- ヘルパー
 
