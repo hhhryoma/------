@@ -535,6 +535,75 @@ def make_print_fixtures():
               [["Ver.1.0", "2026/10/1", "新規作成"], ["Ver.1.1", "2026/10/12", "修正"]])
 
 
+SIZE = os.path.join(HERE, "size")
+
+
+def make_size_fixtures():
+    """Measure-DesignSize.ps1 用（size）。期待値は tests/Measure-DesignSize.Tests.ps1 を参照"""
+    shutil.rmtree(SIZE, ignore_errors=True)
+    os.makedirs(SIZE)
+
+    def header(ws, labels):
+        # 帳票のヘッダ（見出しと値の組）を 1 行目に置く
+        c = 1
+        for label, value in labels:
+            ws.cell(row=1, column=c, value=label); ws.cell(row=1, column=c + 1, value=value)
+            c += 3
+
+    def table(ws, top, title, headers, rows):
+        ws.cell(row=top, column=1, value="■ " + title)
+        for i, h in enumerate(headers, start=1):
+            ws.cell(row=top + 1, column=i, value=h)
+        for r, row in enumerate(rows, start=top + 2):
+            for i, v in enumerate(row, start=1):
+                ws.cell(row=r, column=i, value=v)
+
+    def save(wb, name):
+        wb.properties.creator = None
+        wb.save(os.path.join(SIZE, name))
+
+    # 画面: 項目 3・イベント 3（EV02 は登録あり＝外部入力、EV03 は参照だけ＝外部照会、EV01 はテーブルなし）
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "画面項目定義"
+    header(ws, [("画面ID", "S01"), ("画面名", "ログイン")])
+    table(ws, 3, "画面項目定義", ["No", "項目名", "項目ID"], [[1, "ユーザーID", "userId"], [2, "パスワード", "password"], [3, "ログインボタン", "login"]])
+    ev = wb.create_sheet("イベント定義")
+    header(ev, [("画面ID", "S01"), ("画面名", "ログイン")])
+    table(ev, 3, "イベント定義", ["イベントID", "イベント名", "使用テーブル"],
+          [["EV01", "初期表示", None], ["EV02", "ログイン", "M_USER(R)、T_LOGIN_LOG(C)"], ["EV03", "ユーザー検索", "M_USER（R）"]])
+    table(ev, 10, "補足", ["メモ"], [["次の節は数えない"]])
+    save(wb, "画面設計書_S01_ログイン.xlsx")
+
+    # 画面: 項目定義の見出しが崩れていて数えられない。イベント定義は見出しだけで 0 件
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "画面項目定義"
+    header(ws, [("画面ID", "S02"), ("画面名", "壊れた画面")])
+    table(ws, 3, "画面項目定義", ["No", "項目"], [[1, "何か"]])
+    ev = wb.create_sheet("イベント定義")
+    table(ev, 3, "イベント定義", ["イベントID", "イベント名", "使用テーブル"], [])
+    save(wb, "画面設計書_S02_壊れ.xlsx")
+
+    # テーブル: M_USER はカラム 25（普通）、T_LOGIN_LOG はカラム 3（簡易）
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "M_USER"
+    header(ws, [("テーブルID", "M_USER"), ("テーブル名", "ユーザーマスタ")])
+    table(ws, 3, "カラム定義", ["No", "論理名", "物理名", "データ型"], [[i, "項目{0}".format(i), "COL_{0}".format(i), "CHAR"] for i in range(1, 26)])
+    ws = wb.create_sheet("T_LOGIN_LOG")
+    header(ws, [("テーブルID", "T_LOGIN_LOG"), ("テーブル名", "ログイン履歴")])
+    table(ws, 3, "カラム定義", ["No", "論理名", "物理名", "データ型"], [[1, "ユーザーID", "USER_ID", "CHAR"], [2, "日時", "LOGIN_AT", "TIMESTAMP"], [3, "結果", "RESULT", "CHAR"]])
+    save(wb, "テーブル定義書.xlsx")
+
+    # IF: 受信（外部入力）。帳票: 外部出力
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "IF概要"
+    header(ws, [("IF ID", "IF01"), ("IF名", "ユーザー連携")])
+    ws["A3"] = "送受信区分"; ws["B3"] = "受信"
+    rec = wb.create_sheet("レコード定義")
+    table(rec, 3, "レコード定義", ["No", "項目名", "項目ID"], [[1, "ユーザーID", "USER_ID"], [2, "氏名", "NAME"]])
+    save(wb, "IF定義書_IF01.xlsx")
+
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "帳票項目"
+    header(ws, [("帳票ID", "R01"), ("帳票名", "ログイン履歴一覧")])
+    table(ws, 3, "帳票項目", ["No", "項目名"], [[i, "項目{0}".format(i)] for i in range(1, 5)])
+    save(wb, "帳票設計書_R01.xlsx")
+
+
 def main():
     tmp = tempfile.mkdtemp()
     try:
@@ -548,6 +617,7 @@ def main():
         make_replace_fixtures(tmp)
         make_terms_fixtures()
         make_print_fixtures()
+        make_size_fixtures()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("fixtures written to", HERE)
