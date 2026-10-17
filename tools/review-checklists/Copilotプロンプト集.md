@@ -221,6 +221,7 @@ Get-ChildItem 【設計書のフォルダ】 -Recurse -File -Include *.xlsx,*.xl
 
 `Compare-Excel.ps1` で前の版との差分を CSV にして貼り付け、改訂履歴の下書きを作らせます。
 改訂履歴の書き漏れ（直したのに書いていない変更）の確認にも使えます。
+書き漏れの確認だけなら、`Compare-Excel.ps1 -CheckHistory` でも Copilot を使わずにできます（書かれていない変更と下書きの文を出力します）。
 
 ```powershell
 .\Compare-Excel.ps1 .\v1.0\テーブル定義書.xlsx .\v1.1\テーブル定義書.xlsx |

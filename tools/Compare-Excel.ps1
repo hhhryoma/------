@@ -14,6 +14,10 @@ param(
 
     [switch] $CompareFormat,
 
+    [switch] $CheckHistory,
+
+    [string] $HistorySheet = '改訂履歴|変更履歴|改版履歴|更新履歴|改訂記録',
+
     [switch] $NoRecurse,
 
     [switch] $NoExcel,
@@ -1297,6 +1301,7 @@ function Compare-Book {
 
     $oldBook = Read-Book $OldPath
     $newBook = Read-Book $NewPath
+    $firstDiff = $script:Diffs.Count
 
     # 片方にしか無いシートどうしで中身がよく似ていれば、シート名の変更とみなす
     $renamed = @{}   # 新のシート名 → 旧のシート名
@@ -1330,6 +1335,141 @@ function Compare-Book {
     foreach ($v in $renamed.Values) { $renamedOld[$v] = $true }
     foreach ($sheet in $oldBook.Keys) {
         if (-not $newBook.Contains($sheet) -and -not $renamedOld.ContainsKey($sheet)) { Add-Diff $sheet $null $null 'シート' '削除' ("{0} 行" -f $oldBook[$sheet].Rows.Count) $null }
+    }
+    if ($CheckHistory) { Test-HistoryCoverage -OldBook $oldBook -NewBook $newBook -From $firstDiff }
+}
+
+# ---------------------------------------------------------------- 改訂履歴の記載漏れ（-CheckHistory）
+
+
+function Test-HistoryTerm {
+    #     改訂履歴と突き合わせる語として使えるか（1 文字のもの、数字・日付・記号だけのものは使わない）
+    param([string] $Text)
+    if (-not $Text) { return $false }
+    $t = $Text.Trim()
+    if ($t.Length -lt 2) { return $false }
+    if ($t -match '^[\d\s.,:/+%年月日()（）-]+$') { return $false }
+    if ($t -match '^[\p{P}\p{S}\s○◯●×✓]+$') { return $false }
+    return $true
+}
+
+function Get-RowLabelTerms {
+    #     行を表す語として、左から 2 つの語を返す（例: 合計金額 / TOTAL_AMOUNT）
+    param($Row)
+    $terms = New-Object System.Collections.Generic.List[string]
+    if (-not $Row) { return , $terms }
+    foreach ($c in ($Row.V.Keys | Sort-Object { Get-ColumnIndex $_ })) {
+        if (Test-HistoryTerm $Row.V[$c]) {
+            $terms.Add($Row.V[$c].Trim())
+            if ($terms.Count -ge 2) { break }
+        }
+    }
+    return , $terms
+}
+
+function Get-ColumnHeaderText {
+    #     セルの列の見出しを返す。上の行へたどり、数値のセルが無く文字のセルが 2 つ以上ある最初の行を見出しの行とみなす
+    param($Sheet, [string] $Col, [int] $Row)
+    for ($r = $Row - 1; $r -ge 1; $r--) {
+        $data = $Sheet.Rows["$r"]
+        if (-not $data -or $data.V.Count -lt 2) { continue }
+        if (@($data.V.Values | Where-Object { $_ -match '^\s*-?[\d.,]+\s*$' }).Count -gt 0) { continue }
+        if ($data.V.ContainsKey($Col) -and $data.V[$Col].Trim()) { return $data.V[$Col].Trim() }
+        return $null
+    }
+    return $null
+}
+
+function Test-HistoryCoverage {
+    #     改訂履歴のシートに追記・変更した行に、ほかのシートの変更が書かれているかを確かめる。
+    #     書かれていない変更は、行（シート・列）ごとに「改訂履歴 / 記載なし」として、改訂履歴に書く文の下書きとともに出力する
+    param($OldBook, $NewBook, [int] $From)
+
+    $diffs = $script:Diffs.GetRange($From, $script:Diffs.Count - $From).ToArray()
+    $hist = @($NewBook.Keys | Where-Object { $_ -match $HistorySheet })[0]
+    $targets = @($diffs | Where-Object { $_.Sheet -ne $hist -and @('値', '数式', '行', '列', 'シート') -contains $_.Kind })
+    if ($targets.Count -eq 0) { return }
+    if (-not $hist) {
+        Add-Diff '' $null $null '改訂履歴' '記載なし' $null $null -DetailText ('改訂履歴のシートが見つかりません（-HistorySheet の「{0}」に一致する名前のシート）' -f $HistorySheet)
+        return
+    }
+    $written = @($diffs | Where-Object { $_.Sheet -eq $hist -and ($_.Change -eq '追加' -or $_.Change -eq '変更') -and $_.New } | ForEach-Object { $_.New })
+    if ($written.Count -eq 0) {
+        Add-Diff $hist $null $null '改訂履歴' '記載なし' $null $null -DetailText ('改訂履歴に追記がありません（ほかのシートの変更: {0} 件）' -f $targets.Count)
+        return
+    }
+    $nfkc = [System.Text.NormalizationForm]::FormKC
+    $historyText = ($written -join "`n").Normalize($nfkc).ToLowerInvariant()
+
+    # 行ごと（列・シートの変更はそれぞれ 1 件）にまとめ、行を表す語と、下書きの文をつくる
+    $groups = [ordered]@{}
+    foreach ($d in $targets) {
+        $useOld = $d.Change -eq '削除' -and $d.Kind -ne '値' -and $d.Kind -ne '数式'
+        $sheetName = $d.Sheet
+        $book = $NewBook
+        if ($useOld) { $sheetName = $d.OldSheet; $book = $OldBook }
+        $sheet = $book[$sheetName]
+        $m = [regex]::Match([string]$d.Cell, '^([A-Z]+)(\d+)')
+        $col = $m.Groups[1].Value; $row = $m.Groups[2].Value
+        $show = { param($t) if ($t) { Get-Short $t 30 } else { '（空）' } }
+        switch ($d.Kind) {
+            'シート' {
+                $key = 'S|' + $sheetName
+                $terms = @($d.Sheet)
+                if ($d.Change -eq '名前変更') { $terms += $d.Old; $text = 'シート名を {0} → {1} に変更' -f $d.Old, $d.New }
+                else { $text = 'シートを{0}' -f $d.Change }
+                $label = ''
+            }
+            '列' {
+                $key = 'C|{0}|{1}|{2}' -f $useOld, $sheetName, $col
+                $first = @($sheet.Rows.Keys | Where-Object { $sheet.Rows[$_].V.ContainsKey($col) } | Sort-Object { [int]$_ })[0]
+                $header = $null
+                if ($first) { $header = $sheet.Rows[$first].V[$col] }
+                $terms = @($header | Where-Object { Test-HistoryTerm $_ })
+                $label = $header
+                $text = '列を{0}' -f $d.Change
+            }
+            default {
+                $key = 'R|{0}|{1}|{2}' -f $useOld, $sheetName, $row
+                $terms = Get-RowLabelTerms $sheet.Rows[$row]
+                $label = ''
+                if ($terms.Count -gt 0) { $label = $terms[0] }
+                if ($terms.Count -gt 1) { $label += '（{0}）' -f $terms[1] }
+                if ($d.Kind -eq '行') { $text = '行を{0}' -f $d.Change }
+                else {
+                    $header = Get-ColumnHeaderText $sheet $col ([int]$row)
+                    if (-not $header) { $header = "$col 列" }
+                    switch ($d.Change) {
+                        '変更' {
+                            if ($d.Kind -eq '数式') { $text = '{0}の数式を変更' -f $header }
+                            else { $text = '{0}を {1} → {2} に変更' -f $header, (& $show $d.Old), (& $show $d.New) }
+                        }
+                        '追加' { $text = '{0}に「{1}」を追加' -f $header, (& $show $d.New) }
+                        '削除' { $text = '{0}の「{1}」を削除' -f $header, (& $show $d.Old) }
+                    }
+                }
+            }
+        }
+        if (-not $groups.Contains($key)) {
+            $newCell = $d.Cell; $oldCell = $null
+            if ($useOld) { $newCell = $null; $oldCell = $d.Cell }
+            $groups[$key] = [pscustomobject]@{ Sheet = $d.Sheet; OldSheet = $d.OldSheet; NewCell = $newCell; OldCell = $oldCell; Terms = $terms; Label = $label; Texts = New-Object System.Collections.Generic.List[string] }
+        }
+        if ($text -and -not $groups[$key].Texts.Contains($text)) { $groups[$key].Texts.Add($text) }
+    }
+
+    foreach ($g in $groups.Values) {
+        # 行を表す語が無い（数値だけの行など）変更は判定できないので出さない
+        if ($g.Terms.Count -eq 0) { continue }
+        $mentioned = $false
+        foreach ($t in $g.Terms) { if ($historyText.Contains($t.Normalize($nfkc).ToLowerInvariant())) { $mentioned = $true; break } }
+        if ($mentioned) { continue }
+        $subject = $g.Sheet
+        if ($g.Label) { $subject = '{0} {1}' -f $g.Sheet, $g.Label }
+        $draft = '{0}: {1}' -f $subject, ($g.Texts -join '、')
+        $script:OldSheetName = $g.OldSheet
+        Add-Diff $g.Sheet $g.NewCell $g.OldCell '改訂履歴' '記載なし' $null $draft -DetailText ('改訂履歴に記載が見当たりません: ' + $draft)
+        $script:OldSheetName = $null
     }
 }
 
@@ -1998,6 +2138,7 @@ if ($markedCount -gt 0) { Write-Host ("差分の印を付けた写しを保存�
 #     フォルダどうしを指定すると、同じ相対パスのファイルを比べ、片方にしかないファイルは追加・削除として出力します。
 #     結果は 1 差分 1 行のオブジェクトで出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
 #     -OutMarkedDir を付けると、新のブックの写しに差分の印（セルの色と、選んだときに出る変更前の値）を付けて保存します。
+#     -CheckHistory を付けると、改訂履歴に書かれていない変更を、改訂履歴に書く文の下書きとともに知らせます。
 #
 # .PARAMETER Old
 #     比較元（変更前）のファイルまたはフォルダ。
@@ -2021,6 +2162,15 @@ if ($markedCount -gt 0) { Write-Host ("差分の印を付けた写しを保存�
 #     セルの書式も比べます（.xlsx / .xlsm のみ）。対象は太字・斜体・下線・取り消し線・文字色・塗りつぶしと、
 #     文字列の一部だけに付けた書式です（フォントの種類・大きさ・罫線・表示形式は比べません）。
 #     同じ変更が隣り合うセルは「A5:F5」のように範囲にまとめます。
+#
+# .PARAMETER CheckHistory
+#     新のブックの改訂履歴のシートに追記・変更した行に、ほかのシートの変更が書かれているかを確かめます。
+#     変更した行を表す語（左から 2 つ。例: 論理名と物理名）が改訂履歴に無い変更を、行ごとに「改訂履歴 / 記載なし」として、
+#     「T_ORDER 合計金額（TOTAL_AMOUNT）: 桁数を 9 → 11 に変更」のような下書きとともに出力します（全角・半角は区別しません）。
+#     改訂履歴に追記が無い場合や、改訂履歴のシートが無い場合も知らせます。
+#
+# .PARAMETER HistorySheet
+#     -CheckHistory で使う、改訂履歴のシート名の正規表現。既定は「改訂履歴|変更履歴|改版履歴|更新履歴|改訂記録」。
 #
 # .PARAMETER NoRecurse
 #     フォルダを比べるとき、サブフォルダを見ません。
@@ -2052,6 +2202,10 @@ if ($markedCount -gt 0) { Write-Host ("差分の印を付けた写しを保存�
 # .EXAMPLE
 #     # 書式（赤字・取り消し線・塗りつぶしなど）の変更も比べる
 #     .\Compare-Excel.ps1 .\v1.0\画面設計書.xlsx .\v1.1\画面設計書.xlsx -CompareFormat
+#
+# .EXAMPLE
+#     # 改訂履歴の記載漏れを確かめる
+#     .\Compare-Excel.ps1 D:\納品\v1.0 D:\納品\v1.1 -CheckHistory -KeyColumn '物理名'
 #
 # .EXAMPLE
 #     # 新の版の写しに差分の印を付けて、レビュー用に保存する

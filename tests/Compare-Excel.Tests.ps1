@@ -388,6 +388,57 @@ Test-Case 'Compare-Excel: -OutMarkedDir で、値を消したセルは空のセ�
     Assert-Match $sheet '<dataValidations count="2"><dataValidation type="list"[^>]*sqref="B2:B3">.*</dataValidation><dataValidation [^>]*prompt="削除した値: メモ2" sqref="C3"/></dataValidations>' '既存の入力規則のあるセル（B2）にはメッセージを付けない'
 }
 
+function New-HistoryBooks {
+    #     改訂履歴とテーブル定義のブックを旧・新で作る（-CheckHistory のテスト用）
+    param([string] $Dir, $NewHistory, [string] $HistoryName = '改訂履歴', [switch] $AddSheet)
+    $table = @(@('No', '論理名', '物理名', '桁数'), @('1', '受注番号', 'ORDER_NO', '12'), @('2', '顧客コード', 'CUSTOMER_CD', '8'), @('3', '合計金額', 'TOTAL_AMOUNT', '9'))
+    $newTable = @(@('No', '論理名', '物理名', '桁数'), @('1', '受注番号', 'ORDER_NO', '12'), @('2', '顧客コード', 'CUSTOMER_CD', '8'), @('3', '合計金額', 'TOTAL_AMOUNT', '11'), @('4', '配送時間帯', 'DELIVERY_TIME_KBN', '2'))
+    $oldSheets = [ordered]@{}
+    $newSheets = [ordered]@{}
+    $oldSheets[$HistoryName] = @(@('版', '日付', '内容'), @('1.0', '2026/10/01', '新規作成'))
+    $newSheets[$HistoryName] = @(@('版', '日付', '内容'), @('1.0', '2026/10/01', '新規作成')) + $NewHistory
+    $oldSheets['T_ORDER'] = $table
+    $newSheets['T_ORDER'] = $newTable
+    if ($AddSheet) { $newSheets['T_ITEM'] = @(@('No', '論理名'), @('1', '商品コード')) }
+    New-SheetsBook (Join-Path $Dir 'old.xlsx') $oldSheets
+    New-SheetsBook (Join-Path $Dir 'new.xlsx') $newSheets
+}
+
+Test-Case 'Compare-Excel: -CheckHistory で、改訂履歴に書かれていない変更を下書きとともに知らせる' {
+    $dir = New-TestDir
+    New-HistoryBooks $dir @(, @('1.1', '2026/10/12', '配送時間帯（DELIVERY_TIME_KBN）を追加')) -AddSheet
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx'); CheckHistory = $true }
+    $found = @($diffs | Where-Object Kind -eq '改訂履歴')
+    Assert-Equal @(
+        'T_ORDER!D4|改訂履歴に記載が見当たりません: T_ORDER 合計金額（TOTAL_AMOUNT）: 桁数を 9 → 11 に変更',
+        'T_ITEM|改訂履歴に記載が見当たりません: T_ITEM: シートを追加') @($found | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Detail })
+    Assert-Equal 'T_ORDER 合計金額（TOTAL_AMOUNT）: 桁数を 9 → 11 に変更' $found[0].New '下書きは New に入れる'
+    # 書かれている変更（DELIVERY_TIME_KBN の行の追加）は知らせない。全角・半角は区別しない
+    $dir2 = New-TestDir
+    New-HistoryBooks $dir2 @(@('1.1', '2026/10/12', '配送時間帯（ＤＥＬＩＶＥＲＹ＿ＴＩＭＥ＿ＫＢＮ）を追加'), @('', '', '合計金額の桁数を 11 に変更'))
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir2 'old.xlsx'); New = (Join-Path $dir2 'new.xlsx'); CheckHistory = $true }
+    Assert-Equal 0 @($diffs | Where-Object Kind -eq '改訂履歴').Count (@($diffs | ForEach-Object { $_.Detail }) -join ' / ')
+}
+
+Test-Case 'Compare-Excel: -CheckHistory で、改訂履歴の追記漏れや改訂履歴のシートが無いことを知らせる' {
+    $dir = New-TestDir
+    New-HistoryBooks $dir @()
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx'); CheckHistory = $true }
+    Assert-Equal @('改訂履歴|改訂履歴に追記がありません（ほかのシートの変更: 2 件）') @($diffs | Where-Object Kind -eq '改訂履歴' | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Detail })
+
+    # シート名「履歴」は既定の名前に一致しないので、改訂履歴のシートが無い扱い。-HistorySheet で指定できる
+    $dir2 = New-TestDir
+    New-HistoryBooks $dir2 @() -HistoryName '履歴'
+    $old2 = Join-Path $dir2 'old.xlsx'; $new2 = Join-Path $dir2 'new.xlsx'
+    $diffs = Invoke-Compare @{ Old = $old2; New = $new2; CheckHistory = $true }
+    Assert-Match (@($diffs | Where-Object Kind -eq '改訂履歴')[0].Detail) '改訂履歴のシートが見つかりません'
+    $diffs = Invoke-Compare @{ Old = $old2; New = $new2; CheckHistory = $true; HistorySheet = '^履歴$' }
+    Assert-Match (@($diffs | Where-Object Kind -eq '改訂履歴')[0].Detail) '改訂履歴に追記がありません'
+    # -CheckHistory を付けなければ確かめない
+    $diffs = Invoke-Compare @{ Old = $old2; New = $new2 }
+    Assert-Equal 0 @($diffs | Where-Object Kind -eq '改訂履歴').Count
+}
+
 Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定するとエラー' {
     Assert-Throws { & $CompareExcel -Old (Join-Path $cmpDir 'v1') -New (Join-Path $cmpDir 'v2/同じ.xlsx') 6>$null } '両方とも'
 }
