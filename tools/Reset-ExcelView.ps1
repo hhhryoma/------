@@ -168,66 +168,8 @@ function Repair-Workbook {
 
     if ($changes.Count -eq 0) { return 0 }
 
-    # 一時ファイルに書き出す。変更しないパーツも展開して同じ名前・日時・中身で書き直す（ZipArchive は圧縮済みのままコピーできないため）
-    $temp = $FilePath + '.~reset' + [guid]::NewGuid().ToString('N').Substring(0, 8)
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    $share = [System.IO.FileShare]::Read
-    $src = New-Object System.IO.FileStream($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
-    try {
-        $inZip = New-Object System.IO.Compression.ZipArchive($src, [System.IO.Compression.ZipArchiveMode]::Read)
-        $dst = New-Object System.IO.FileStream($temp, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        try {
-            $outZip = New-Object System.IO.Compression.ZipArchive($dst, [System.IO.Compression.ZipArchiveMode]::Create)
-            try {
-                foreach ($e in $inZip.Entries) {
-                    $o = $outZip.CreateEntry($e.FullName, [System.IO.Compression.CompressionLevel]::Optimal)
-                    $o.LastWriteTime = $e.LastWriteTime
-                    $os = $o.Open()
-                    try {
-                        $key = $e.FullName.ToLowerInvariant()
-                        if ($changes.ContainsKey($key)) {
-                            $bytes = $utf8.GetBytes($changes[$key])
-                            $os.Write($bytes, 0, $bytes.Length)
-                        }
-                        else {
-                            $is = $e.Open()
-                            try { $is.CopyTo($os) } finally { $is.Dispose() }
-                        }
-                    }
-                    finally { $os.Dispose() }
-                }
-            }
-            finally { $outZip.Dispose() }
-        }
-        finally { $dst.Dispose() }
-    }
-    finally { $src.Dispose() }
-
-    # 元のファイルに上書きする。コピーで置き換えると、NTFS の代替データストリーム
-    # （インターネットから取得したファイルの印 Zone.Identifier など）やアクセス権・作成日時が失われるため、
-    # 元のファイルを開いて中身だけを書き換える
-    $written = $false
-    try {
-        $in = [System.IO.File]::OpenRead($temp)
-        try {
-            $out = New-Object System.IO.FileStream($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-            try {
-                $out.SetLength(0)
-                $in.CopyTo($out)
-                $written = $true
-            }
-            finally { $out.Dispose() }
-        }
-        finally { $in.Dispose() }
-    }
-    catch {
-        if (-not $written) {
-            # 途中で失敗した場合は、書き換え後の内容で置き換えて壊れた状態を残さない
-            try { [System.IO.File]::Copy($temp, $FilePath, $true); $written = $true } catch { }
-        }
-        if (-not $written) { throw ("書き換えに失敗しました。書き換え後の内容が {0} に残っています: {1}" -f $temp, $_.Exception.Message) }
-    }
-    Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+    # 書き換えたパーツだけを差し替えて、元のファイルに上書きする（代替データストリームやアクセス権は保つ）
+    Save-ZipPackage -FilePath $FilePath -Changes $changes
     return $changes.Count
 }
 

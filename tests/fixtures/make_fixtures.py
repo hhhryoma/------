@@ -392,6 +392,52 @@ def make_compare_format_fixtures(tmp):
         shutil.move(os.path.join(tmp, name), os.path.join(sst, name))
 
 
+REPLACE = os.path.join(HERE, "replace")
+
+
+def make_replace_fixtures(tmp):
+    """Replace-Excel.ps1 用（replace）。期待値は tests/Replace-Excel.Tests.ps1 を参照。
+    shared.xlsx: LibreOffice で共有文字列にしたブック。表紙と本文で同じ文字列「受注管理システム」を共有し、ふりがなを付ける
+    table.xlsx: openpyxl のブック（文字列はセルに直接）。テーブルの見出し・数式・コメントを持つ"""
+    from openpyxl.cell.rich_text import CellRichText, TextBlock
+    from openpyxl.cell.text import InlineFont
+    from openpyxl.worksheet.table import Table
+
+    shutil.rmtree(REPLACE, ignore_errors=True)
+    os.makedirs(REPLACE)
+
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "表紙"
+    ws["A1"] = "受注管理システム 基本設計書"; ws["A2"] = "受注管理システム"; ws["A3"] = "第1.0版"
+    body = wb.create_sheet("本文")
+    body["A1"] = "受注管理システム"
+    body["B1"] = CellRichText("顧客の", TextBlock(InlineFont(color="FFFF0000"), "正式名称"))
+    body["C1"] = "変更しない"
+    src = os.path.join(tmp, "shared.xlsx")
+    wb.properties.creator = None
+    wb.save(src)
+    out = os.path.join(tmp, "out")
+    os.makedirs(out, exist_ok=True)
+    soffice_convert(src, "xlsx", out)
+    path = os.path.join(REPLACE, "shared.xlsx")
+    files = read_zip(os.path.join(out, "shared.xlsx"))
+    sst = files["xl/sharedStrings.xml"].decode()
+    target = '<si><t xml:space="preserve">受注管理システム</t></si>'
+    assert target in sst, sst[:500]
+    # ふりがな（Excel で日本語を入力すると付く）
+    sst = sst.replace(target, '<si><t xml:space="preserve">受注管理システム</t><rPh sb="0" eb="2"><t>ジュチュウ</t></rPh><phoneticPr fontId="1"/></si>')
+    files["xl/sharedStrings.xml"] = sst.encode()
+    rewrite_zip(path, files)
+
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "一覧"
+    ws.append(["TODO列", "数量", "合計"])
+    ws.append(["TODO値", 1, "=SUM(B2:B3)"])
+    ws.append(["その他", 2, None])
+    ws.add_table(Table(displayName="T_LIST", ref="A1:C3"))
+    ws["A2"].comment = Comment("TODO: 確認", "x")
+    wb.properties.creator = None
+    wb.save(os.path.join(REPLACE, "table.xlsx"))
+
+
 def main():
     tmp = tempfile.mkdtemp()
     try:
@@ -402,6 +448,7 @@ def main():
         make_view_fixtures()
         make_compare_fixtures()
         make_compare_format_fixtures(tmp)
+        make_replace_fixtures(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("fixtures written to", HERE)
