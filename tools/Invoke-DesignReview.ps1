@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(Position = 0)]
     [string[]] $Path,
 
     [string] $Checklist,
@@ -12,6 +12,7 @@ param(
 
     [switch] $PromptOnly,
     [switch] $ImportOnly,
+    [switch] $CheckOnly,
 
     [string] $SheetNameExclude,
 
@@ -29,7 +30,12 @@ if (-not (Test-Path -LiteralPath $searchScript)) {
 if (-not $Checklist) {
     $Checklist = Join-Path (Join-Path $PSScriptRoot 'review-checklists') '詳細設計レビュー観点.xlsx'
 }
-if ($PromptOnly -and $ImportOnly) { throw '-PromptOnly と -ImportOnly は同時に指定できません。' }
+if (@($PromptOnly, $ImportOnly, $CheckOnly | Where-Object { $_ }).Count -gt 1) {
+    throw '-PromptOnly・-ImportOnly・-CheckOnly は同時に指定できません。'
+}
+if (-not $Path -and -not $ImportOnly -and -not $CheckOnly) {
+    throw 'レビューする設計書のフォルダまたはファイルを指定してください（例: .\Invoke-DesignReview.ps1 D:\Design\詳細設計）。'
+}
 
 $OutDir    = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
 $Checklist = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Checklist)
@@ -141,7 +147,14 @@ function Read-Checklist {
 
     $records = New-Object System.Collections.Generic.List[object]
     if ([System.IO.Path]::GetExtension($FilePath) -eq '.csv') {
-        foreach ($r in (Import-Csv -LiteralPath $FilePath -Encoding UTF8)) { $records.Add($r) }
+        $headers = @()
+        $rowNo = 1
+        foreach ($r in (Import-Csv -LiteralPath $FilePath -Encoding UTF8)) {
+            $rowNo++
+            if ($headers.Count -eq 0) { $headers = @($r.PSObject.Properties | ForEach-Object { $_.Name }) }
+            $r | Add-Member -NotePropertyName '__Row' -NotePropertyValue $rowNo
+            $records.Add($r)
+        }
     }
     else {
         $cells = Get-ExcelCells -FilePath $FilePath | Where-Object { $_.Kind -eq '値' }
@@ -163,34 +176,192 @@ function Read-Checklist {
                 break
             }
         }
-        if ($null -eq $headerRow) { throw "観点表に「観点ID」の見出しがありません: $FilePath" }
+        if ($null -eq $headerRow) { throw "観点表の先頭シートに「観点ID」の見出しがありません: $FilePath" }
+        $headers = @($columns.Keys)
 
         foreach ($r in $grid.Keys) {
             if ([int]$r -le [int]$headerRow) { continue }
-            $o = [ordered]@{}
+            $o = [ordered]@{ '__Row' = [int]$r }
             foreach ($h in $columns.Keys) { $o[$h] = $grid[$r][$columns[$h]] }
             $records.Add([pscustomobject]$o)
         }
     }
 
-    $list = New-Object System.Collections.Generic.List[object]
+    $all = New-Object System.Collections.Generic.List[object]
     foreach ($r in $records) {
-        if (-not $r.'観点ID') { continue }
-        if ($r.PSObject.Properties['有効'] -and $r.'有効' -and @('×', '-', '0', 'FALSE', '無効') -contains ([string]$r.'有効').Trim()) { continue }
+        if (-not ([string]$r.'観点ID').Trim()) { continue }
+        $enabledRaw = ''
+        if ($r.PSObject.Properties['有効']) { $enabledRaw = ([string]$r.'有効').Trim() }
         $target = [string]$r.'対象設計書'
-        if (-not $target) { $target = '*' }
-        $list.Add([pscustomobject]@{
-            Id        = ([string]$r.'観点ID').Trim()
-            Category  = [string]$r.'分類'
-            Point     = [string]$r.'観点'
-            Criteria  = [string]$r.'判定基準'
-            Severity  = [string]$r.'重要度'
-            Targets   = @($target -split '[,、\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-            Refs      = @(([string]$r.'参照設計書') -split '[,、\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if (-not $target.Trim()) { $target = '*' }
+        $all.Add([pscustomobject]@{
+            Row        = $r.'__Row'
+            Id         = ([string]$r.'観点ID').Trim()
+            Category   = [string]$r.'分類'
+            Point      = [string]$r.'観点'
+            Criteria   = [string]$r.'判定基準'
+            Severity   = ([string]$r.'重要度').Trim()
+            Targets    = @($target -split '[,、\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            Refs       = @(([string]$r.'参照設計書') -split '[,、\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            EnabledRaw = $enabledRaw
+            Enabled    = (@('×', '✕', '-', '－', '0', 'FALSE', '無効') -notcontains $enabledRaw)
         })
     }
-    if ($list.Count -eq 0) { throw "観点表に有効な観点がありません: $FilePath" }
-    return ,$list
+
+    return [pscustomobject]@{
+        Path    = $FilePath
+        Headers = $headers
+        All     = $all
+        Points  = @($all | Where-Object { $_.Enabled })
+    }
+}
+
+function Test-Checklist {
+    #     観点表の書き方の誤りを調べる。エラーはレビューが正しく動かないもの、警告は結果の質に関わるもの。
+    #     Files を渡すと、対象設計書・参照設計書のパターンが実際の設計書に当たるかも調べる。
+    param($List, $Files)
+
+    $issues = New-Object System.Collections.Generic.List[object]
+    $add = {
+        param($Level, $Row, $Id, $Message)
+        $issues.Add([pscustomobject]@{ Level = $Level; Row = $Row; Id = $Id; Message = $Message })
+    }
+
+    foreach ($h in @('観点', '判定基準')) {
+        if ($List.Headers -notcontains $h) { & $add 'エラー' $null $null "見出し「$h」の列がありません" }
+    }
+    foreach ($h in @('対象設計書', '重要度')) {
+        if ($List.Headers -notcontains $h) { & $add '警告' $null $null "見出し「$h」の列がありません（対象設計書が無い場合はすべての設計書が対象になります）" }
+    }
+
+    $points = @($List.Points)
+    if ($points.Count -eq 0) { & $add 'エラー' $null $null '有効な観点が 1 つもありません' }
+
+    # 回答の照合は大文字小文字を区別しないため、ID の重複も区別せずに調べる
+    foreach ($g in ($points | Group-Object { $_.Id.ToUpperInvariant() } | Where-Object { $_.Count -gt 1 })) {
+        $rows = ($g.Group | ForEach-Object { "$($_.Row)行目" }) -join '、'
+        foreach ($p in $g.Group) { & $add 'エラー' $p.Row $p.Id "観点IDが重複しています（$rows）" }
+    }
+
+    $vague = '適切|妥当|十分|適宜|必要に応じて|問題な[いく]'
+    foreach ($p in $List.All) {
+        if ($p.Id -match '[\s|｜]') {
+            & $add 'エラー' $p.Row $p.Id '観点IDに空白や「|」が含まれています（回答を照合できません）'
+        }
+        if ($p.EnabledRaw -and @('○', '〇', '◯', '1', 'TRUE', '有効', '×', '✕', '-', '－', '0', 'FALSE', '無効') -notcontains $p.EnabledRaw) {
+            & $add '警告' $p.Row $p.Id "「有効」の値「$($p.EnabledRaw)」は ○ か × にしてください（有効として扱います）"
+        }
+        if (-not $p.Enabled) { continue }
+
+        if (-not $p.Point.Trim()) { & $add 'エラー' $p.Row $p.Id '観点が空欄です' }
+        if (-not $p.Criteria.Trim()) {
+            & $add '警告' $p.Row $p.Id '判定基準が空欄です（AI の判定がぶれやすくなります）'
+        }
+        else {
+            # 「」や例示の中は判定基準そのものではないので除いて調べる
+            $plain = [regex]::Replace($p.Criteria, '「[^」]*」|（例[^）]*）|\(例[^)]*\)', '')
+            $found = @([regex]::Matches($plain, $vague) | ForEach-Object { $_.Value } | Sort-Object -Unique)
+            if ($found.Count -gt 0) {
+                & $add '警告' $p.Row $p.Id ("判定基準にあいまいな言葉があります（{0}）。何が書かれていれば OK かを具体的に書いてください" -f ($found -join '、'))
+            }
+        }
+        if (($p.Point + $p.Criteria) -match '[|｜]') {
+            & $add '警告' $p.Row $p.Id '観点・判定基準に「|」があります（プロンプトの区切りと紛れるため、別の記号にしてください）'
+        }
+        if ($p.Severity -and @('高', '中', '低') -notcontains $p.Severity) {
+            & $add '警告' $p.Row $p.Id "重要度「$($p.Severity)」は 高／中／低 のどれかにしてください（並び順が最後になります）"
+        }
+        elseif (-not $p.Severity) {
+            & $add '警告' $p.Row $p.Id '重要度が空欄です'
+        }
+
+        if ($Files) {
+            foreach ($t in $p.Targets) {
+                if (-not @($Files | Where-Object { $_.Name -like $t }).Count) {
+                    & $add '警告' $p.Row $p.Id "対象設計書「$t」に当たる設計書がありません（この観点は使われません）"
+                }
+            }
+            foreach ($t in $p.Refs) {
+                if (-not @($Files | Where-Object { $_.Name -like $t }).Count) {
+                    & $add '警告' $p.Row $p.Id "参照設計書「$t」に当たる設計書がありません"
+                }
+            }
+        }
+    }
+
+    if ($Files -and $points.Count -gt 0) {
+        # 種類別の観点（対象設計書が * 以外）があるのに、共通の観点しか当たらない設計書も知らせる。
+        # ファイル名の付け方がパターンと合っていない可能性がある
+        $specific = @($points | Where-Object { @($_.Targets | Where-Object { $_ -ne '*' }).Count -gt 0 })
+        foreach ($f in $Files) {
+            if (-not @($points | Where-Object { Test-NameLike $f.Name $_.Targets }).Count) {
+                & $add '警告' $null $null "設計書「$($f.Relative)」にはどの観点も当たりません（ファイル名と対象設計書のパターンを確認してください）"
+            }
+            elseif ($specific.Count -gt 0 -and -not @($specific | Where-Object { Test-NameLike $f.Name @($_.Targets | Where-Object { $_ -ne '*' }) }).Count) {
+                & $add '情報' $null $null "設計書「$($f.Relative)」には共通の観点（対象設計書 *）しか当たりません"
+            }
+        }
+    }
+    return ,$issues
+}
+
+function Show-ChecklistIssues {
+    #     チェック結果を表示する。エラーがあれば $true を返す。
+    param($List, $Issues)
+
+    $errors = @($Issues | Where-Object Level -eq 'エラー').Count
+    $warns  = @($Issues | Where-Object Level -eq '警告').Count
+    $infos  = @($Issues | Where-Object Level -eq '情報').Count
+    $disabled = @($List.All | Where-Object { -not $_.Enabled }).Count
+
+    Write-Host ("観点表: {0}（有効 {1} 観点、無効 {2} 観点）" -f $List.Path, $List.Points.Count, $disabled)
+    if ($Issues.Count -eq 0) {
+        Write-Host '  観点表のチェック: 問題ありません'
+        return $false
+    }
+    Write-Host ("  観点表のチェック: エラー {0} 件 / 警告 {1} 件 / 情報 {2} 件" -f $errors, $warns, $infos)
+    $order = @{ 'エラー' = 0; '警告' = 1; '情報' = 2 }
+    foreach ($i in ($Issues | Sort-Object @{ e = { $order[$_.Level] } }, @{ e = { if ($_.Row) { [int]$_.Row } else { 0 } } })) {
+        $where = ''
+        if ($i.Row) { $where = "$($i.Row)行目 " }
+        if ($i.Id) { $where += "$($i.Id) " }
+        $color = 'Yellow'
+        if ($i.Level -eq 'エラー') { $color = 'Red' }
+        elseif ($i.Level -eq '情報') { $color = 'Gray' }
+        Write-Host ("  [{0}] {1}{2}" -f $i.Level, $where, $i.Message) -ForegroundColor $color
+    }
+    return ($errors -gt 0)
+}
+
+function Get-DesignFiles {
+    #     レビュー対象の設計書を列挙する（出力フォルダと観点表は除く）
+    $files = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($p in $Path) {
+        $items = @(Get-Item -Path $p -ErrorAction SilentlyContinue)
+        if ($items.Count -eq 0) { Write-Warning "見つかりません: $p" }
+        foreach ($item in $items) {
+            if ($item.PSIsContainer) {
+                $root  = $item.FullName.TrimEnd('\', '/')
+                $found = Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue
+            }
+            else {
+                $root  = [System.IO.Path]::GetDirectoryName($item.FullName)
+                $found = @($item)
+            }
+            foreach ($f in $found) {
+                if (@('.xlsx', '.xlsm', '.xls') -notcontains $f.Extension.ToLowerInvariant()) { continue }
+                if ($f.Name.StartsWith('~$')) { continue }
+                if ($f.FullName.StartsWith($OutDir, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                if ([string]::Equals($f.FullName, $Checklist, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                if ($seen.ContainsKey($f.FullName)) { continue }
+                $seen[$f.FullName] = $true
+                $rel = $f.FullName.Substring($root.Length).TrimStart('\', '/')
+                $files.Add([pscustomobject]@{ Path = $f.FullName; Name = $f.Name; Relative = $rel })
+            }
+        }
+    }
+    return ,$files
 }
 
 function Test-NameLike {
@@ -483,35 +654,10 @@ function Export-Workbook {
 
 
 function New-ReviewRequests {
-    $points = Read-Checklist -FilePath $Checklist
-    Write-Host ("観点表: {0}（{1} 観点）" -f $Checklist, $points.Count)
+    param($Points, $Files)
 
-    # 設計書の列挙（出力フォルダと観点表は除く）
-    $files = New-Object System.Collections.Generic.List[object]
-    $seen = @{}
-    foreach ($p in $Path) {
-        foreach ($item in @(Get-Item -Path $p -ErrorAction SilentlyContinue)) {
-            if ($item.PSIsContainer) {
-                $root  = $item.FullName.TrimEnd('\', '/')
-                $found = Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue
-            }
-            else {
-                $root  = [System.IO.Path]::GetDirectoryName($item.FullName)
-                $found = @($item)
-            }
-            foreach ($f in $found) {
-                if (@('.xlsx', '.xlsm', '.xls') -notcontains $f.Extension.ToLowerInvariant()) { continue }
-                if ($f.Name.StartsWith('~$')) { continue }
-                if ($f.FullName.StartsWith($OutDir, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-                if ([string]::Equals($f.FullName, $Checklist, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-                if ($seen.ContainsKey($f.FullName)) { continue }
-                $seen[$f.FullName] = $true
-                $rel = $f.FullName.Substring($root.Length).TrimStart('\', '/')
-                $files.Add([pscustomobject]@{ Path = $f.FullName; Name = $f.Name; Relative = $rel })
-            }
-        }
-    }
-    if ($files.Count -eq 0) { throw '設計書（.xlsx / .xlsm / .xls）が見つかりません。' }
+    $points = $Points
+    $files  = $Files
 
     # テキスト化は参照資料でも使うので 1 回だけ行う
     $texts = @{}
@@ -604,25 +750,35 @@ function New-ReviewRequests {
             }
         }
     }
-    return [pscustomobject]@{ Points = $points; Requests = $requests }
+    return ,$requests
 }
 
 # ---------------------------------------------------------------- 実行
 
+
+# ---- 観点表のチェック（どのモードでも最初に行う）
+
+$checklistData = Read-Checklist -FilePath $Checklist
+$designFiles = $null
+if ($Path) {
+    $designFiles = Get-DesignFiles
+    if ($designFiles.Count -eq 0 -and -not $CheckOnly) { throw '設計書（.xlsx / .xlsm / .xls）が見つかりません。' }
+}
+$hasError = Show-ChecklistIssues -List $checklistData -Issues (Test-Checklist -List $checklistData -Files $designFiles)
+if ($CheckOnly) { return }
+if ($hasError) { throw '観点表にエラーがあります。上の一覧を見て観点表を直してから、もう一度実行してください。' }
+$points = $checklistData.Points
 
 New-Item -ItemType Directory -Force -Path $promptDir, $answerDir | Out-Null
 
 if ($ImportOnly) {
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw "依頼の一覧がありません。先に -PromptOnly などで依頼を作成してください: $manifestPath" }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $points = Read-Checklist -FilePath $Checklist
     $requests = @($manifest.Requests)
 }
 else {
     Write-Host '依頼を作成しています...'
-    $built = New-ReviewRequests
-    $points = $built.Points
-    $requests = $built.Requests.ToArray()
+    $requests = (New-ReviewRequests -Points $points -Files $designFiles).ToArray()
 
     # 前回の依頼と内容が変わったものは、古い回答を使わない
     $oldHash = @{}
@@ -846,6 +1002,11 @@ Write-Host "レビュー結果: $reportPath"
 # .PARAMETER PromptOnly
 #     プロンプトのファイルを作るだけで終了します（クリップボードを使えない環境向け）。
 #
+# .PARAMETER CheckOnly
+#     観点表のチェックだけを行って終了します。観点表を編集したあとの確認に使います。
+#     Path を指定すると、対象設計書・参照設計書のパターンが実際の設計書に当たるかも確認します。
+#     （チェックは通常の実行時にも毎回行い、エラーがあれば中断します）
+#
 # .PARAMETER ImportOnly
 #     answers フォルダに保存した回答から、レビュー結果だけを作り直します。
 #
@@ -861,6 +1022,10 @@ Write-Host "レビュー結果: $reportPath"
 # .EXAMPLE
 #     # 入力上限が 16,000 文字のテナントで、表紙と改訂履歴を除いて依頼数を減らす
 #     .\Invoke-DesignReview.ps1 D:\Design\詳細設計 -MaxChars 16000 -SheetNameExclude '表紙'
+#
+# .EXAMPLE
+#     # 観点表を編集したあと、書き方の誤りがないか確かめる
+#     .\Invoke-DesignReview.ps1 D:\Design\詳細設計 -CheckOnly
 #
 # .EXAMPLE
 #     # プロンプトをファイルで受け渡す
