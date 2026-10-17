@@ -123,6 +123,51 @@ Test-Case 'Test-ExcelDeliverable: -OutXlsx で該当セルへのリンク付き�
     Assert-Equal 'OK' $result['macro.xlsm'] '情報だけなら OK'
 }
 
+$printDir = Join-Path $script:Fixtures 'print'
+
+Test-Case 'Test-ExcelDeliverable: 印刷で横がはみ出すシート・印刷範囲の外のデータ・ヘッダー／フッターの問題を見つける' {
+    $issues = Invoke-Check @{ Path = (Join-Path $printDir 'wide.xlsx'); Check = @('Print', 'Word') }
+    Assert-Equal @(
+        '情報|用紙の向き|',
+        '警告|ヘッダー／フッター|一覧',
+        '警告|印刷範囲の外|範囲!E20',
+        '警告|横のはみ出し|一覧',
+        '警告|残っている文言|一覧') (Get-IssueKeys $issues)
+    Assert-Match (@($issues | Where-Object Item -eq '横のはみ出し')[0].Detail) '約 5 ページ.*A4・縦向き'
+    Assert-Match (@($issues | Where-Object Item -eq 'ヘッダー／フッター')[0].Detail) '&Z'
+    Assert-Match (@($issues | Where-Object Item -eq '用紙の向き')[0].Detail) '縦: 一覧、収める / 横: 範囲'
+}
+
+Test-Case 'Test-ExcelDeliverable: -RequirePageNumber と -HeaderFooterText で、ページ番号や「社外秘」の無いシートを知らせる' {
+    $issues = Invoke-Check @{ Path = (Join-Path $printDir 'wide.xlsx'); Check = 'Print'; RequirePageNumber = $true; HeaderFooterText = '社外秘' }
+    Assert-Equal @('一覧', '範囲') @($issues | Where-Object Item -eq 'ページ番号' | ForEach-Object { $_.Location } | Sort-Object) '「収める」はフッターにページ番号あり'
+    Assert-Equal @('一覧', '収める', '範囲') @($issues | Where-Object { $_.Detail -match '社外秘' } | ForEach-Object { $_.Location } | Sort-Object)
+}
+
+Test-Case 'Test-ExcelDeliverable: 表紙の版数・更新日と、改訂履歴の最後の行・ファイル名の版数の食い違いを見つける' {
+    $issues = Invoke-Check @{ Path = (Join-Path $printDir '仕様書_v1.2.xlsx'); Check = 'Version' }
+    Assert-Equal @(
+        '警告|ファイル名の版数|',
+        '警告|改訂履歴の版数|改訂履歴!A6',
+        '警告|表紙の更新日|表紙!D6',
+        '警告|表紙の版数|表紙!D5') (Get-IssueKeys $issues)
+    Assert-Match (@($issues | Where-Object Item -eq '表紙の版数')[0].Detail) '表紙の版数（1\.0）と、改訂履歴の最後の版数（1\.1）'
+    Assert-Match (@($issues | Where-Object Item -eq '表紙の更新日')[0].Detail) '2026/10/01.*2026/10/12'
+    Assert-Match (@($issues | Where-Object Item -eq 'ファイル名の版数')[0].Detail) 'ファイル名の版数（1\.2）'
+
+    # 「第1.1版」「Ver.1.1」「2026年10月12日」のような書き方でも、そろっていれば指摘なし
+    $ok = Invoke-Check @{ Path = (Join-Path $printDir '仕様書_第1.1版.xlsx'); Check = 'Version' }
+    Assert-Equal 0 $ok.Count ((Get-IssueKeys $ok) -join ', ')
+    # 改訂履歴のシートの上部に「版数」「更新日」が並んでいても、改訂履歴の表を読む
+    $ok = Invoke-Check @{ Path = (Join-Path $printDir '帳票ヘッダ付き.xlsx'); Check = 'Version' }
+    Assert-Equal 0 $ok.Count ((Get-IssueKeys $ok) -join ', ')
+}
+
+Test-Case 'Test-ExcelDeliverable: 詳細設計サンプルは印刷・版数を含めて指摘なし' {
+    $issues = Invoke-Check @{ Path = (Join-Path $script:RepoRoot 'docs/design-sample') }
+    Assert-Equal 0 $issues.Count ((@($issues | ForEach-Object { '{0} {1}' -f $_.File, $_.Detail })) -join ' / ')
+}
+
 Test-Case 'Test-ExcelDeliverable: Get-Help でヘルプが表示される' {
     $h = Get-Help $Deliverable
     Assert-Match $h.Synopsis '提出'
