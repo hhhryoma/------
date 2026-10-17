@@ -203,12 +203,31 @@ function Repair-Workbook {
     }
     finally { $src.Dispose() }
 
+    # 元のファイルに上書きする。コピーで置き換えると、NTFS の代替データストリーム
+    # （インターネットから取得したファイルの印 Zone.Identifier など）やアクセス権・作成日時が失われるため、
+    # 元のファイルを開いて中身だけを書き換える
+    $written = $false
     try {
-        [System.IO.File]::Copy($temp, $FilePath, $true)
+        $in = [System.IO.File]::OpenRead($temp)
+        try {
+            $out = New-Object System.IO.FileStream($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try {
+                $out.SetLength(0)
+                $in.CopyTo($out)
+                $written = $true
+            }
+            finally { $out.Dispose() }
+        }
+        finally { $in.Dispose() }
     }
-    finally {
-        Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+    catch {
+        if (-not $written) {
+            # 途中で失敗した場合は、書き換え後の内容で置き換えて壊れた状態を残さない
+            try { [System.IO.File]::Copy($temp, $FilePath, $true); $written = $true } catch { }
+        }
+        if (-not $written) { throw ("書き換えに失敗しました。書き換え後の内容が {0} に残っています: {1}" -f $temp, $_.Exception.Message) }
     }
+    Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
     return $changes.Count
 }
 
@@ -266,7 +285,12 @@ foreach ($entry in $files) {
         $found = @(& $checker -Path ([System.Management.Automation.WildcardPattern]::Escape($file.FullName)) -Check View -Zoom $Zoom 6>$null)
         $issues = @($found | Where-Object { $_.Category -eq '体裁' -and ($NormalView -or $_.Item -ne '表示モード') })
         $unreadable = @($found | Where-Object { $_.Category -eq 'ファイル' })
-        if ($unreadable.Count -gt 0) {
+        if ($file.IsReadOnly) {
+            # 確定版などで意図的に読み取り専用にしていることが多いので、書き換えない
+            $result = 'スキップ'
+            $detail = '読み取り専用のファイルです（読み取り専用を外すと直せます）'
+        }
+        elseif ($unreadable.Count -gt 0) {
             $result = 'スキップ'
             $detail = $unreadable[0].Detail
         }
@@ -356,4 +380,6 @@ if ($BackupDir -and @($results | Where-Object Result -eq '修正').Count -gt 0) 
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。Excel は不要です。同じフォルダに ExcelTools.psm1・Test-ExcelDeliverable.ps1・Search-Excel.ps1 が必要です。
-#     Excel で開いているファイルは書き換えられません（失敗として表示されます）。
+#     Excel で開いているファイルは書き換えられません（失敗として表示されます）。読み取り専用のファイルは書き換えません。
+#     書き換えは元のファイルの中身を置き換える形で行うため、アクセス権・作成日時・インターネットから取得したファイルの印
+#     （保護ビューで開くための情報）はそのまま残ります。

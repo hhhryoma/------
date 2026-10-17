@@ -144,6 +144,30 @@ Test-Case 'Reset-ExcelView: 開いている（ロックされた）ファイル�
     finally { $lock.Dispose() }
 }
 
+Test-Case 'Reset-ExcelView: 読み取り専用のファイルは書き換えない' {
+    $dir = Copy-Fixture 'deliverable'
+    $bad = Get-Item -LiteralPath (Join-Path $dir 'bad.xlsx')
+    $bad.IsReadOnly = $true
+    try {
+        $hash = (Get-FileHash -LiteralPath $bad.FullName).Hash
+        $r = Invoke-Reset @{ Path = $bad.FullName }
+        Assert-Equal 'スキップ' $r[0].Result
+        Assert-Match $r[0].Detail '読み取り専用'
+        Assert-Equal $hash (Get-FileHash -LiteralPath $bad.FullName).Hash
+    }
+    finally { (Get-Item -LiteralPath $bad.FullName).IsReadOnly = $false }
+}
+
+Test-Case 'Reset-ExcelView: インターネットから取得したファイルの印（Zone.Identifier）を消さない' -WindowsOnly {
+    $dir = Copy-Fixture 'deliverable'
+    $bad = Join-Path $dir 'bad.xlsx'
+    Set-Content -LiteralPath $bad -Stream 'Zone.Identifier' -Value "[ZoneTransfer]`r`nZoneId=3"
+    $r = Invoke-Reset @{ Path = $bad }
+    Assert-Equal '修正' $r[0].Result
+    $zone = Get-Content -LiteralPath $bad -Stream 'Zone.Identifier' -ErrorAction SilentlyContinue
+    Assert-Match ($zone -join "`n") 'ZoneId=3' 'Zone.Identifier が残っていない'
+}
+
 Test-Case 'Reset-ExcelView: Get-Help でヘルプが表示される' {
     $h = Get-Help $ResetView
     Assert-Match $h.Synopsis 'A1'
