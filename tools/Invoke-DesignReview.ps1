@@ -87,11 +87,11 @@ function ConvertTo-DesignText {
     $result = [ordered]@{}
     foreach ($name in $sheets.Keys) {
         $sb = New-Object System.Text.StringBuilder
-        [void]$sb.AppendLine("### シート: $name")
+        [void]$sb.Append("### シート: $name").Append("`n")
 
         $items = $sheets[$name]
         if ($items.Count -eq 0) {
-            [void]$sb.AppendLine('（空）')
+            [void]$sb.Append('（空）').Append("`n")
             $result[$name] = $sb.ToString()
             continue
         }
@@ -114,21 +114,21 @@ function ConvertTo-DesignText {
             if ([int]$r -le 3) {
                 $key = "$r|$line"
                 if ($seenHeader.ContainsKey($key)) {
-                    if (-not $omitted) { [void]$sb.AppendLine('（1～3行目の帳票ヘッダは前のシートと同じため省略）') }
+                    if (-not $omitted) { [void]$sb.Append('（1～3行目の帳票ヘッダは前のシートと同じため省略）').Append("`n") }
                     $omitted = $true
                     continue
                 }
                 $seenHeader[$key] = $true
             }
-            [void]$sb.AppendLine("$r| $line")
+            [void]$sb.Append("$r| $line").Append("`n")
         }
 
         foreach ($c in $items) {
             if ($c.Kind -eq '図形') {
-                [void]$sb.AppendLine(('図形（{0}付近）「{1}」: {2}' -f $c.Cell, $c.Name, $c.Text))
+                [void]$sb.Append(('図形（{0}付近）「{1}」: {2}' -f $c.Cell, $c.Name, $c.Text)).Append("`n")
             }
             elseif ($c.Kind -eq 'コメント') {
-                [void]$sb.AppendLine(('コメント（{0}）: {1}' -f $c.Cell, $c.Text))
+                [void]$sb.Append(('コメント（{0}）: {1}' -f $c.Cell, $c.Text)).Append("`n")
             }
         }
         $result[$name] = $sb.ToString()
@@ -393,30 +393,33 @@ $promptHeader = @'
 V01 | NG | 画面項目定義!G12 | 桁数が記入されていない | 入力項目は文字・数値の場合に桁数が必要
 V02 | OK | - | - | -
 '@
+# プロンプトの改行は OS によらず LF にそろえる。AppendLine や CRLF のスクリプトファイルのままだと
+# Windows では 1 行ごとに 1 文字多く数えられ、同じ設計書でも依頼の分割数が変わってしまう
+$promptHeader = $promptHeader.Replace("`r`n", "`n")
 
 function New-PromptText {
     param($Points, [string] $FileName, [string] $Body, [string] $PartNote, [string] $RefText)
 
     $sb = New-Object System.Text.StringBuilder
-    [void]$sb.AppendLine($promptHeader)
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine('【レビュー観点】')
-    [void]$sb.AppendLine('観点ID | 観点 | 判定基準')
+    [void]$sb.Append($promptHeader).Append("`n")
+    [void]$sb.Append("`n")
+    [void]$sb.Append('【レビュー観点】').Append("`n")
+    [void]$sb.Append('観点ID | 観点 | 判定基準').Append("`n")
     foreach ($p in $Points) {
-        [void]$sb.AppendLine(('{0} | {1} | {2}' -f $p.Id, $p.Point.Replace("`n", ' '), $p.Criteria.Replace("`n", ' ')))
+        [void]$sb.Append(('{0} | {1} | {2}' -f $p.Id, $p.Point.Replace("`n", ' '), $p.Criteria.Replace("`n", ' '))).Append("`n")
     }
-    [void]$sb.AppendLine()
-    [void]$sb.AppendLine("【設計書】$FileName$PartNote")
+    [void]$sb.Append("`n")
+    [void]$sb.Append("【設計書】$FileName$PartNote").Append("`n")
     [void]$sb.Append($Body)
     if ($RefText) {
-        [void]$sb.AppendLine()
+        [void]$sb.Append("`n")
         [void]$sb.Append($RefText)
     }
     return $sb.ToString()
 }
 
 function Split-SheetTexts {
-    #     シートのテキストを、1 つあたり Budget 文字以内のかたまりに分ける。
+    #     シートのテキストを、1 つあたり Budget 文字以内のかたまりに分ける（改行は LF で数える）。
     #     1 シートで Budget を超える場合は行単位で分ける。
     param($SheetTexts, [int] $Budget)
 
@@ -434,9 +437,9 @@ function Split-SheetTexts {
             if (-not $line) { continue }
             if ($current.Length + $line.Length + 2 -gt $Budget -and $current.Length -gt 0) {
                 $chunks.Add($current.ToString()); [void]$current.Clear()
-                [void]$current.AppendLine("### シート: $name（続き）")
+                [void]$current.Append("### シート: $name（続き）").Append("`n")
             }
-            [void]$current.AppendLine($line)
+            [void]$current.Append($line).Append("`n")
         }
     }
     if ($current.Length -gt 0) { $chunks.Add($current.ToString()) }
@@ -688,7 +691,7 @@ function New-ReviewRequests {
             foreach ($rf in $files) {
                 if ($rf.Path -eq $f.Path) { continue }
                 if (-not (Test-NameLike $rf.Name $Patterns)) { continue }
-                [void]$sb.AppendLine("【参照資料】$($rf.Name)（判定の参考。指摘の対象外）")
+                [void]$sb.Append("【参照資料】$($rf.Name)（判定の参考。指摘の対象外）").Append("`n")
                 foreach ($t in (& $getText $rf).Values) { [void]$sb.Append($t) }
             }
             if ($sb.Length -eq 0) { Write-Warning ("参照資料「{0}」に一致するファイルがありません" -f ($Patterns -join ', ')) }

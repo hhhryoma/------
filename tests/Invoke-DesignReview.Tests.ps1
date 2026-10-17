@@ -107,6 +107,8 @@ Test-Case 'Invoke-DesignReview: プロンプトにセル番地付きの設計書
     Assert-Match $p '\n6\| A:1 \| C:受注番号 \| I:orderNo'
     Assert-Match $p '【参照資料】DD05_メッセージ一覧\.xlsx'
     Assert-Match $p '1～3行目の帳票ヘッダは前のシートと同じため省略'
+    # 改行は OS によらず LF（Windows で CR の分だけ文字数が増え、分割数が変わるのを防ぐ）
+    Assert-True (-not $p.Contains("`r")) 'プロンプトに CR が含まれています'
 }
 
 Test-Case 'Invoke-DesignReview: 3 形式の回答を取り込んでレビュー結果を作る' {
