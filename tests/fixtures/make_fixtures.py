@@ -604,6 +604,62 @@ def make_size_fixtures():
     save(wb, "帳票設計書_R01.xlsx")
 
 
+ESTIMATE = os.path.join(HERE, "estimate")
+
+
+def make_estimate_fixtures(tmp):
+    """Test-ExcelEstimate.ps1 用（estimate）。期待値は tests/Test-ExcelEstimate.Tests.ps1 を参照。
+    openpyxl で作ったもの（数式の計算結果なし）と、LibreOffice で開いて保存し直したもの（共有文字列・共有数式・計算結果あり）"""
+    shutil.rmtree(ESTIMATE, ignore_errors=True)
+    os.makedirs(os.path.join(ESTIMATE, "lo"))
+
+    def build(path):
+        wb = openpyxl.Workbook(); ws = wb.active; ws.title = "見積"
+        ws.append(["No", "作業", "担当", "工数（人日）", "単価", "金額"])
+        rows = [(1, "要件定義", "SE", 5, 50000), (2, "基本設計", "SE", 10, 50000), (3, "詳細設計", "PG", 15, 40000),
+                (4, "製造", "SE", 20, 45000), (5, "単体テスト", "PG", 10, 40000), (6, "結合テスト", "PG", 8, 40000)]
+        for i, (no, task, role, days, price) in enumerate(rows, start=2):
+            ws.append([no, task, role, days, price, "=D{0}*E{0}".format(i)])
+        ws["F6"] = 900000             # 数式の列に数値を直接入力（上下は =D*E）
+        ws["F4"] = "=D4*E3"           # 上下と違う計算（単価の行がずれている）
+        ws["D7"] = "8"                # 工数が文字列（SUM に含まれない）
+        ws["B8"] = "総合テスト"; ws["C8"] = "PG"; ws["D8"] = 12; ws["E8"] = 40000; ws["F8"] = "=D8*E8"
+        ws["B9"] = "小計"; ws["D9"] = "=SUM(D2:D7)"; ws["F9"] = "=SUM(F2:F8)"   # 工数の小計は 8 行目を入れ忘れ
+        ws["B10"] = "合計"; ws["F10"] = 4000000                               # 合計が数値
+        ws["B11"] = "人月"; ws["D11"] = "=D9/20"
+        ws["B12"] = "消費税"; ws["F12"] = "=ROUNDDOWN(F9*0.1,0)"
+        detail = wb.create_sheet("内訳")
+        detail.append(["区分", "工数（人日）", "人月", "金額"])
+        detail.append(["設計", 30, "=B2/21", "=ROUND(C2*1000000,-3)"])   # 人月の換算が 21 日、端数処理は ROUND
+        detail.append(["製造", 20, "=B3/20", "=ROUNDDOWN(C3*1000000,-3)"])
+        wb.properties.creator = None
+        wb.save(path)
+
+    src = os.path.join(ESTIMATE, "見積書.xlsx")
+    build(src)
+
+    # 共有数式（Excel が数式をコピーしたときの保存形式）: C2 が元の数式で、C3・C5 はその写し。C4 だけ違う計算、合計は C5 を入れ忘れ
+    shared = os.path.join(ESTIMATE, "共有数式.xlsx")
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "明細"
+    ws.append(["数量", "単価", "金額"])
+    for i, (q, p) in enumerate([(1, 100), (2, 200), (3, 300), (4, 400)], start=2):
+        ws.append([q, p, "=A{0}*B{0}".format(i)])
+    ws["C6"] = "=SUM(C2:C4)"
+    wb.properties.creator = None
+    wb.save(shared)
+    files = read_zip(shared)
+    sheet = files["xl/worksheets/sheet1.xml"].decode()
+    sheet = sheet.replace("<f>A2*B2</f>", '<f t="shared" ref="C2:C5" si="0">A2*B2</f>')
+    sheet = sheet.replace("<f>A3*B3</f>", '<f t="shared" si="0"/>')
+    sheet = sheet.replace("<f>A4*B4</f>", "<f>A4*B3</f>")
+    sheet = sheet.replace("<f>A5*B5</f>", '<f t="shared" si="0"/>')
+    assert sheet.count('si="0"') == 3, sheet
+    files["xl/worksheets/sheet1.xml"] = sheet.encode()
+    rewrite_zip(shared, files)
+    soffice_convert(src, "xlsx", tmp)
+    shutil.move(os.path.join(tmp, "見積書.xlsx"), os.path.join(ESTIMATE, "lo", "見積書.xlsx"))
+
+
 def main():
     tmp = tempfile.mkdtemp()
     try:
@@ -615,6 +671,7 @@ def main():
         make_compare_fixtures()
         make_compare_format_fixtures(tmp)
         make_replace_fixtures(tmp)
+        make_estimate_fixtures(tmp)
         make_terms_fixtures()
         make_print_fixtures()
         make_size_fixtures()
