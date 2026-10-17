@@ -438,6 +438,79 @@ def make_replace_fixtures(tmp):
     wb.save(os.path.join(REPLACE, "table.xlsx"))
 
 
+PRINT = os.path.join(HERE, "print")
+
+
+def make_print_fixtures():
+    """Test-ExcelDeliverable.ps1 の印刷・版数のチェック用（print）。期待値は tests/Test-ExcelDeliverable.Tests.ps1 を参照"""
+    from openpyxl.worksheet.properties import PageSetupProperties
+
+    shutil.rmtree(PRINT, ignore_errors=True)
+    os.makedirs(PRINT)
+
+    # wide.xlsx: 横に広い表（A4 縦で約 5 ページ）、1 ページに収める設定のシート、印刷範囲の外にデータがあるシート
+    wb = openpyxl.Workbook()
+    wide = wb.active; wide.title = "一覧"
+    fit = wb.create_sheet("収める")
+    area = wb.create_sheet("範囲")
+    for ws in (wide, fit):
+        for c in range(1, 21):
+            ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width = 20
+            ws.cell(row=1, column=c, value="列{0}".format(c))
+        ws.page_setup.paperSize = 9
+        ws.page_setup.orientation = "portrait"
+    fit.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    fit.page_setup.fitToWidth = 1
+    fit.page_setup.fitToHeight = 0
+    wide.oddHeader.center.text = "TODO 社内用"
+    wide.oddFooter.left.text = "&Z&F"
+    fit.oddFooter.center.text = "&P / &N"
+    for r in range(1, 11):
+        for c in range(1, 4):
+            area.cell(row=r, column=c, value=r * c)
+    area["E20"] = "メモ"
+    area.print_area = "A1:C10"
+    area.page_setup.paperSize = 9
+    area.page_setup.orientation = "landscape"
+    wb.properties.creator = None
+    wb.save(os.path.join(PRINT, "wide.xlsx"))
+
+    def versioned(path, cover, history_header, history):
+        wb = openpyxl.Workbook()
+        ws = wb.active; ws.title = "表紙"
+        for ref, value in cover.items():
+            ws[ref] = value
+        h = wb.create_sheet("改訂履歴")
+        h["A1"] = "改訂履歴"
+        for c, v in enumerate(history_header, start=1):
+            h.cell(row=3, column=c, value=v)
+        for r, row in enumerate(history, start=4):
+            for c, v in enumerate(row, start=1):
+                h.cell(row=r, column=c, value=v)
+        wb.properties.creator = None
+        wb.save(path)
+
+    # 表紙の版数・更新日と、改訂履歴の最後の行、ファイル名の版数がそろっていない。版数が前の行より小さい行もある
+    versioned(os.path.join(PRINT, "仕様書_v1.2.xlsx"),
+              {"B2": "仕様書", "B5": "版数", "D5": "1.0", "B6": "最終更新日", "D6": datetime.date(2026, 10, 1)},
+              ["版数", "改訂日", "内容"],
+              [["1.0", datetime.date(2026, 10, 1), "新規作成"], ["1.2", datetime.date(2026, 10, 5), "見直し"], ["1.1", datetime.date(2026, 10, 12), "修正"]])
+    # 改訂履歴のシートの上部（帳票のヘッダ）にも「版数」「更新日」がある。表の見出しは 3 行目
+    path = os.path.join(PRINT, "帳票ヘッダ付き.xlsx")
+    versioned(path, {"B5": "版数", "D5": "1.1", "B6": "更新日", "D6": datetime.date(2026, 10, 12)},
+              ["版数", "改訂日", "内容"], [["1.0", datetime.date(2026, 10, 1), "新規作成"], ["1.1", datetime.date(2026, 10, 12), "修正"]])
+    wb = openpyxl.load_workbook(path)
+    h = wb["改訂履歴"]
+    h["E1"] = "版数"; h["F1"] = "1.1"; h["G1"] = "更新日"; h["H1"] = datetime.date(2026, 10, 12)
+    wb.properties.creator = None
+    wb.save(path)
+    # そろっている（表紙は「第1.1版」の形、日付は文字、改訂履歴の版数は Ver.1.1 の形）
+    versioned(os.path.join(PRINT, "仕様書_第1.1版.xlsx"),
+              {"B2": "仕様書", "B3": "第1.1版", "B6": "更新日", "D6": "2026年10月12日"},
+              ["版", "日付", "内容"],
+              [["Ver.1.0", "2026/10/1", "新規作成"], ["Ver.1.1", "2026/10/12", "修正"]])
+
+
 def main():
     tmp = tempfile.mkdtemp()
     try:
@@ -449,6 +522,7 @@ def main():
         make_compare_fixtures()
         make_compare_format_fixtures(tmp)
         make_replace_fixtures(tmp)
+        make_print_fixtures()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("fixtures written to", HERE)
