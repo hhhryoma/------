@@ -9,13 +9,14 @@
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認もできる） |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足など）を全件見つける（Excel 不要） |
+| [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
 | [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す（Excel 不要） |
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Test-DesignConsistency.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
 
 ## Search-Excel.ps1
 
@@ -688,6 +689,129 @@ DD05_メッセージ一覧.xlsx            メッセージ一覧!A22  エラー 
 
 - 処理概要などの文章の中の参照は、「書き方」の正規表現に一致するものだけを見つけます
 - 桁数・型の食い違い（画面項目とカラム）や、どこからも参照されていない定義はまだ確かめていません
+
+## Export-TableDdl.ps1
+
+テーブル定義書（Excel）から **DDL**（CREATE TABLE・コメント・インデックス・外部キー）を作ります。Oracle・PostgreSQL・SQL Server・MySQL に対応し、作る前に定義書の気になる点（予約語・桁数の抜け・外部キーの型の違いなど）を警告します。
+DB の列の一覧（カタログ）を CSV で渡すと、**定義書と DB の食い違い**も確かめられます。Excel は不要です。
+
+```powershell
+.\Export-TableDdl.ps1 D:\設計書\DD03_テーブル定義書.xlsx -OutFile D:\create_tables.sql                  # Oracle
+.\Export-TableDdl.ps1 D:\設計書 -Database PostgreSQL -IncludeDrop -OutFile D:\create_tables.sql
+.\Export-TableDdl.ps1 D:\設計書 -Database PostgreSQL -CompareCatalog D:\columns.csv -OutXlsx D:\DB差異.xlsx   # DB と比べる
+```
+
+```sql
+-- T_ORDER_DETAIL 受注明細（DD03_テーブル定義書.xlsx T_ORDER_DETAIL）
+CREATE TABLE T_ORDER_DETAIL (
+    ORDER_NO   CHAR(12 CHAR)     NOT NULL,
+    LINE_NO    NUMBER(3,0)       NOT NULL,
+    PRODUCT_CD CHAR(10 CHAR)     NOT NULL,
+    …
+    CREATED_AT TIMESTAMP         DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    VERSION_NO NUMBER(10)        DEFAULT 1 NOT NULL,
+    CONSTRAINT PK_T_ORDER_DETAIL PRIMARY KEY (ORDER_NO, LINE_NO)
+);
+COMMENT ON TABLE T_ORDER_DETAIL IS '受注明細';
+COMMENT ON COLUMN T_ORDER_DETAIL.ORDER_NO IS '受注番号';
+…
+CREATE INDEX IX_T_ORDER_DETAIL_01 ON T_ORDER_DETAIL (PRODUCT_CD);
+
+-- 外部キー
+ALTER TABLE T_ORDER_DETAIL ADD CONSTRAINT FK_T_ORDER_DETAIL_T_ORDER FOREIGN KEY (ORDER_NO) REFERENCES T_ORDER (ORDER_NO);
+```
+
+### 作るもの
+
+| 内容 | 元にする列 |
+| --- | --- |
+| CREATE TABLE | 物理名・データ型・桁数・小数（型の対応で DB の型にする）、デフォルト、必須（NOT NULL）、PK（数字は主キーの順番） |
+| コメント | テーブル名・論理名（Oracle・PostgreSQL は `COMMENT ON`、SQL Server は拡張プロパティ `MS_Description`、MySQL は `COMMENT`） |
+| CREATE INDEX | インデックス定義の表（インデックス名・カラム・ユニーク）。主キーと同じカラムのものは作らない |
+| 外部キー | 外部キー参照先（`テーブルID.カラム`）。参照先のテーブルごとに `ALTER TABLE … ADD CONSTRAINT FK_子_親` |
+
+- テーブルは**参照先が先**に来る順に並べます。`-IncludeDrop` の DROP TABLE は逆の順（参照しているテーブルから）です
+- テーブル ID はシートの「テーブルID」の右の値、無ければシート名を使います
+
+### 定義書の確かめ（警告）
+
+- テーブル名・カラム名・インデックス名: 英数字と `_` 以外の文字、SQL の予約語（`ORDER`・`USER`・`DATE` など）、名前の長さの上限（Oracle は 30 バイトを超えると 12.1 以前で使えない旨も）
+- 型の対応にないデータ型、桁数が必要な型（VARCHAR など）の桁数の抜け
+- 主キーの無いテーブル、同じテーブルに同じ物理名のカラム
+- 外部キーの参照先のテーブル・カラムが無い、**参照先と型・桁数が違う**
+- インデックスのカラムがテーブルに無い
+
+### 型の対応（`tools\ddl\型の対応.csv`）
+
+定義書の型と、DB ごとの型の対応です。`{n}` は桁数、`{s}` は小数に置き換えます。`[…]` は中の値が無ければ省き、値の無い `(…)` も省きます。
+
+| 定義書の型 | Oracle | PostgreSQL | SQL Server | MySQL |
+| --- | --- | --- | --- | --- |
+| CHAR | `CHAR({n} CHAR)` | `CHAR({n})` | `NCHAR({n})` | `CHAR({n})` |
+| VARCHAR | `VARCHAR2({n} CHAR)` | `VARCHAR({n})` | `NVARCHAR({n})` | `VARCHAR({n})` |
+| NUMERIC | `NUMBER({n}[,{s}])` | `NUMERIC({n}[,{s}])` | `DECIMAL({n}[,{s}])` | `DECIMAL({n}[,{s}])` |
+| INTEGER | `NUMBER(10)` | `INTEGER` | `INT` | `INT` |
+| TIMESTAMP | `TIMESTAMP` | `TIMESTAMP` | `DATETIME2` | `DATETIME` |
+
+ほかに DATE・BOOLEAN・TEXT・BLOB や、「文字列」「数値」「日付」などの日本語の型名も入っています。Oracle の文字列は日本語を考えて文字数（`CHAR`）で、SQL Server は `NCHAR`・`NVARCHAR` にしています。社内の決まりに合わせて CSV を直すか、`-TypeMap` で別の CSV を指定してください。
+
+見出しの文字が違う定義書（「カラム名」「NULL許可」など）は、`tools\ddl\テーブル定義書の見出し.csv` に見出しの候補を足します。
+
+### DB のカタログと比べる（`-CompareCatalog`）
+
+DB の列の一覧を次の SQL で CSV（1 行目は列名）に保存し、`-CompareCatalog` に渡します。テーブル・カラムの有無、型・桁数・NULL の可否の違いを出力します（DDL は出力しません）。
+
+```sql
+-- Oracle（SQL Developer のエクスポート、または SQL*Plus の SET MARKUP CSV ON で CSV に）
+SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, CHAR_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
+FROM USER_TAB_COLUMNS ORDER BY TABLE_NAME, COLUMN_ID;
+
+-- PostgreSQL（psql）
+\copy (SELECT table_name, column_name, data_type, character_maximum_length, numeric_precision, numeric_scale, is_nullable FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position) TO 'columns.csv' WITH CSV HEADER
+
+-- SQL Server（SSMS の結果を「結果に名前を付けて保存」で CSV に）
+SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE
+FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' ORDER BY TABLE_NAME, ORDINAL_POSITION;
+
+-- MySQL
+SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE
+FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME, ORDINAL_POSITION;
+```
+
+```
+Table          Column         Item               Detail
+-----          ------         ----               ------
+M_PRODUCT      extra_note     定義書にないカラム テーブル定義書の M_PRODUCT にカラム extra_note がありません
+T_ORDER        PAYMENT_METHOD 型                 T_ORDER.PAYMENT_METHOD の型が違います（定義書: CHAR(1) / DB: character varying）
+T_ORDER        DELIVERY_DATE  NULL               T_ORDER.DELIVERY_DATE の NULL の可否が違います（定義書: NULL 可 / DB: NOT NULL）
+T_ORDER        REMARKS        桁数               T_ORDER.REMARKS の桁数が違います（定義書: 500 / DB: 400）
+T_ORDER_DETAIL QUANTITY       桁数               T_ORDER_DETAIL.QUANTITY の桁数が違います（定義書: 5,0 / DB: 7,0）
+m_other                       定義書にないテーブル テーブル定義書にテーブル m_other がありません
+```
+
+型は DB ごとの名前の違い（`character varying` と `VARCHAR2` など）をそろえて比べます。
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | テーブル定義書のフォルダ・ファイル（複数可） |
+| `-Database` | 対象の DB（`Oracle` / `PostgreSQL` / `SQLServer` / `MySQL`）。既定は Oracle |
+| `-Table` | DDL を作るテーブル（ワイルドカード可）。例: `'T_ORDER*'` |
+| `-IncludeDrop` | 先頭に DROP TABLE を付ける |
+| `-OutFile` | DDL を保存するファイル（指定しなければ出力する） |
+| `-Encoding` | `-OutFile` の文字コード（`UTF8`（BOM なし・既定）/ `UTF8BOM` / `ShiftJIS`） |
+| `-CompareCatalog` | DB のカタログの CSV。DDL の代わりに定義書との差異を出力する |
+| `-OutXlsx` | DB との差異・定義書の指摘・テーブルの一覧を保存する（定義書の該当セルへのリンク付き） |
+| `-TypeMap` / `-Headers` | 型の対応・見出しの候補の CSV |
+
+### 既知の制約
+
+- 1 つのシートに 1 つのテーブル（カラム定義の表）がある書式を前提にしています
+- CHECK 制約・シーケンス・トリガー・パーティションは作りません。デフォルト値は書かれたとおりに出力します（DB ごとの関数名は変換しません）
+- DB との比較は列（型・桁数・NULL）だけで、主キー・インデックス・外部キーは比べません
+- Oracle の DROP TABLE は、テーブルが無いとエラーになります。SQL Server の `DROP TABLE IF EXISTS` は 2016 以降、コメントは `dbo` スキーマに付けます
+- 作った DDL は、実行する前に内容を確かめてください
 
 ## Measure-DesignSize.ps1
 

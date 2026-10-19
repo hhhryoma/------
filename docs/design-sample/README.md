@@ -83,7 +83,7 @@
 ## データ型
 
 テーブル定義書のデータ型は標準 SQL の型（`CHAR` `VARCHAR` `NUMERIC` `INTEGER` `DATE` `TIMESTAMP`）で書いています。
-DDL を生成するときに、対象 DB の型（Oracle の `VARCHAR2`・`NUMBER` など）へ変換する想定です。
+DDL を生成するときに、対象 DB の型（Oracle の `VARCHAR2`・`NUMBER` など）へ変換する想定です（[Export-TableDdl.ps1](../../tools/README.md#export-tableddlps1) で作れます）。
 
 ## 再生成
 
