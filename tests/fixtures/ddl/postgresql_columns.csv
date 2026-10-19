@@ -1,0 +1,52 @@
+table_name,column_name,data_type,character_maximum_length,numeric_precision,numeric_scale,is_nullable
+m_customer,customer_cd,character,8,,,NO
+m_customer,customer_name,character varying,100,,,NO
+m_customer,customer_name_kana,character varying,100,,,YES
+m_customer,customer_kbn,character,1,,,NO
+m_customer,postal_cd,character,7,,,YES
+m_customer,address,character varying,200,,,YES
+m_customer,tel,character varying,15,,,YES
+m_customer,email,character varying,254,,,YES
+m_customer,delete_flg,character,1,,,NO
+m_customer,created_at,timestamp without time zone,,,,NO
+m_customer,created_by,character varying,20,,,NO
+m_customer,updated_at,timestamp without time zone,,,,NO
+m_customer,updated_by,character varying,20,,,NO
+m_customer,version_no,integer,,32,0,NO
+m_other,id,integer,,32,0,YES
+m_product,product_cd,character,10,,,NO
+m_product,product_name,character varying,100,,,NO
+m_product,unit_price,numeric,,9,0,NO
+m_product,stock_qty,numeric,,7,0,NO
+m_product,delete_flg,character,1,,,NO
+m_product,created_at,timestamp without time zone,,,,NO
+m_product,created_by,character varying,20,,,NO
+m_product,updated_at,timestamp without time zone,,,,NO
+m_product,updated_by,character varying,20,,,NO
+m_product,version_no,integer,,32,0,NO
+m_product,extra_note,text,,,,YES
+t_order,order_no,character,12,,,NO
+t_order,order_date,date,,,,NO
+t_order,customer_cd,character,8,,,NO
+t_order,order_status,character,2,,,NO
+t_order,payment_method,character varying,1,,,NO
+t_order,delivery_date,date,,,,NO
+t_order,delivery_time_kbn,character,2,,,NO
+t_order,total_amount,numeric,,11,0,NO
+t_order,remarks,character varying,400,,,YES
+t_order,created_at,timestamp without time zone,,,,NO
+t_order,created_by,character varying,20,,,NO
+t_order,updated_at,timestamp without time zone,,,,NO
+t_order,updated_by,character varying,20,,,NO
+t_order,version_no,integer,,32,0,NO
+t_order_detail,order_no,character,12,,,NO
+t_order_detail,line_no,numeric,,3,0,NO
+t_order_detail,product_cd,character,10,,,NO
+t_order_detail,quantity,numeric,,7,0,NO
+t_order_detail,unit_price,numeric,,9,0,NO
+t_order_detail,amount,numeric,,11,0,NO
+t_order_detail,created_at,timestamp without time zone,,,,NO
+t_order_detail,created_by,character varying,20,,,NO
+t_order_detail,updated_at,timestamp without time zone,,,,NO
+t_order_detail,updated_by,character varying,20,,,NO
+t_order_detail,version_no,integer,,32,0,NO
