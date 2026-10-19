@@ -10,6 +10,7 @@
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認もできる） |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足など）を全件見つける（Excel 不要） |
 | [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
+| [New-DesignDocument.ps1](#new-designdocumentps1) | 画面一覧などの一覧から、雛形の差し込み欄（`{{画面ID}}` など）を埋めた設計書を一括で作る。設計書の版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする（Excel 不要） |
 | [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す（Excel 不要） |
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
 | [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
@@ -17,6 +18,7 @@
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
+`New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
 `Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
 
 ## Search-Excel.ps1
@@ -813,6 +815,76 @@ m_other                       定義書にないテーブル テーブル定義�
 - DB との比較は列（型・桁数・NULL）だけで、主キー・インデックス・外部キーは比べません
 - Oracle の DROP TABLE は、テーブルが無いとエラーになります。SQL Server の `DROP TABLE IF EXISTS` は 2016 以降、コメントは `dbo` スキーマに付けます
 - 作った DDL は、実行する前に内容を確かめてください
+
+## New-DesignDocument.ps1
+
+設計書の**作り始め**と**版上げ**の決まった作業をまとめて行います。Excel は不要です。
+
+### 雛形から一括で作る
+
+雛形の xlsx に `{{画面ID}}` `{{画面名}}` のような差し込み欄を書いておくと、一覧（画面一覧の Excel や CSV）の行ごとに雛形をコピーし、差し込み欄を一覧の値に置き換えます。
+
+```powershell
+.\New-DesignDocument.ps1 -Template .\画面設計書_雛形.xlsx -List D:\設計書\DD01_画面一覧.xlsx -ListSheet '^画面一覧$' `
+    -FileName 'DD02_画面設計書_{{画面ID}}_{{画面名}}.xlsx' -OutDir D:\設計書 -Author '山田 太郎'
+```
+
+```
+File                                 Status Detail
+----                                 ------ ------
+DD02_画面設計書_SCR001_受注一覧.xlsx 作成
+DD02_画面設計書_SCR002_受注登録.xlsx 作成
+DD02_画面設計書_SCR003_受注詳細.xlsx 作成
+```
+
+- 差し込み欄は、表紙・帳票のヘッダ・本文のセル、図形、コメントのどこに書いてもかまいません（置き換えは `Replace-Excel.ps1` で行うので、セルの書式はそのままです）
+- 一覧は、差し込み欄と同じ名前の見出し（「画面ID」「画面名」など）の列を読みます。Excel の一覧は、見出しがそろった表を探します
+- `{{作成日}}`（`{{日付}}`）と `{{作成者}}` は、`-Date`（既定は今日）と `-Author`（既定はログオンしているユーザー名）の値になります
+- ファイル名（`-FileName`）にも差し込み欄が必要です。**同じ名前のファイルがあれば作りません**
+- `-WhatIf` で、作るファイルを確かめられます
+
+### 版を上げる（`-Bump`）
+
+```powershell
+.\New-DesignDocument.ps1 -Bump D:\設計書\DD03_テーブル定義書_v1.1.xlsx -Description '配送時間帯を追加' -Section 'T_ORDER' -Author '佐藤 花子'
+```
+
+```
+File                          Status Detail
+----                          ------ ------
+DD03_テーブル定義書_v1.2.xlsx 版上げ 版数 1.1 → 1.2（表紙の版数・表紙の更新日・改訂履歴の 8 行目）
+```
+
+| 書き換える場所 | 内容 |
+| --- | --- |
+| 表紙 | 「版数」の右の値（「第1.1版」のような書き方はそのまま、数だけ変える）、「最終更新日」「更新日」の右の値 |
+| 改訂履歴 | 最後の行の下に、版数・改訂日・改訂箇所（`-Section`、既定は「全体」）・改訂内容（`-Description`）・改訂者（`-Author`）の行を足す。最後の行の書式・結合・行の高さを写す |
+| ファイル名 | 版数（`_v1.1`・`_第1.1版` など）があれば、新しい版数の名前で**別のファイル**に保存する（元の版は残す）。無ければ上書きする |
+
+- 新しい版数は、最後の数を 1 つ上げたもの（1.0 → 1.1）です。`-Version 2.0` のように指定もできます
+- 表紙と改訂履歴の見つけ方は `Test-ExcelDeliverable.ps1` の版数のチェックと同じなので、版上げのあとは版数の食い違いの指摘が出ません
+- 日付のセルは、もとが日付（数値）なら日付のまま、文字ならもとの書き方（`2026/11/02`・`2026年11月2日` など）で書きます
+- 改訂履歴の最後の行の下に別の内容があるときは、行を足さずに知らせます
+- まず `-WhatIf` で、書き換えるファイルと版数を確かめてください
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Template` | 雛形の xlsx / xlsm（差し込み欄は `{{名前}}`） |
+| `-List` / `-ListSheet` | 一覧の Excel または CSV / 読むシートの名前の正規表現 |
+| `-FileName` | 作るファイルの名前（差し込み欄を使う）。既定は雛形のファイル名 |
+| `-OutDir` | 作ったファイルを保存するフォルダ |
+| `-Bump` / `-Path` | 版を上げる / 版を上げる設計書のファイル・フォルダ |
+| `-Description` / `-Section` | 改訂履歴の改訂内容 / 改訂箇所（既定は「全体」） |
+| `-Version` | 新しい版数（既定は最後の数を 1 つ上げる） |
+| `-Author` / `-Date` | 作成者・改訂者 / 作成日・改訂日（既定はユーザー名と今日） |
+| `-WhatIf` | 作る・書き換えるファイルを表示するだけ |
+
+### 既知の制約
+
+- ヘッダー／フッター・シート名の差し込み欄は置き換えません
+- 版上げでは、各シートのヘッダ（帳票の上部）の「更新者」「更新日」は書き換えません（変えたシートだけ直してください）
 
 ## Measure-DesignSize.ps1
 
