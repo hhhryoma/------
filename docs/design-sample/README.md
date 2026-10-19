@@ -78,6 +78,8 @@
 | イベント定義「遷移先」 | 画面 ID | 画面一覧（画面遷移シートと一致） |
 | カラム定義「外部キー参照先」 | `テーブルID.カラム物理名` | テーブル定義書 |
 
+これらの参照が合っているかは [Test-DesignConsistency.ps1](../../tools/README.md#test-designconsistencyps1) で確かめられます。
+
 ## データ型
 
 テーブル定義書のデータ型は標準 SQL の型（`CHAR` `VARCHAR` `NUMERIC` `INTEGER` `DATE` `TIMESTAMP`）で書いています。

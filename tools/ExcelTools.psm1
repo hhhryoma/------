@@ -452,4 +452,121 @@ function Export-Workbook {
     finally { $stream.Dispose() }
 }
 
+# ---------------------------------------------------------------- 設計書（Excel 方眼紙）を読む
+
+$script:Nfkc = [System.Text.NormalizationForm]::FormKC
+
+function ConvertTo-Label {
+    #     見出しや項目名を比べるための形（全角・半角をそろえ、空白を除く）
+    param([string] $Text)
+    if ($null -eq $Text) { return '' }
+    return ($Text.Normalize($script:Nfkc) -replace '\s', '')
+}
+
+function Read-CsvFile {
+    #     設定の CSV を読み、必要な列がそろっているかを確かめる
+    param([string] $FilePath, [string[]] $Required, [string] $What)
+    if (-not (Test-Path -LiteralPath $FilePath)) { throw "$What が見つかりません: $FilePath" }
+    $rows = @(Read-TextFile $FilePath | ConvertFrom-Csv)
+    if ($rows.Count -gt 0) {
+        $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
+        foreach ($r in $Required) { if ($names -notcontains $r) { throw "$What に「$r」の列がありません: $FilePath" } }
+    }
+    return , $rows
+}
+
+function ConvertTo-DesignBooks {
+    #     Search-Excel.ps1 の結果（-Pattern '\S' -Target Value）を、ファイル → シート → 行番号 → 列番号 → 文字 の形にまとめる
+    #     戻り値: パス → @{ File; Path; Sheets = シート名 → シート }（ファイル・シートは読んだ順）
+    #     シート: @{ Cells = 行番号 → @{ 列番号 → 文字 }; Rows = 行番号（昇順）; Cols = 行番号 → 列番号（昇順）; Labels = 行番号 → @{ 列番号 → ConvertTo-Label 済みの文字 } }
+    param($Hits)
+    $books = [ordered]@{}
+    foreach ($h in $Hits) {
+        $m = [regex]::Match([string]$h.Cell, '^([A-Z]+)(\d+)$')
+        if (-not $m.Success) { continue }
+        if (-not $books.Contains($h.Path)) { $books[$h.Path] = [pscustomobject]@{ File = $h.File; Path = $h.Path; Sheets = [ordered]@{} } }
+        $sheets = $books[$h.Path].Sheets
+        if (-not $sheets.Contains($h.Sheet)) { $sheets[$h.Sheet] = @{} }
+        $row = [int]$m.Groups[2].Value
+        if (-not $sheets[$h.Sheet].ContainsKey($row)) { $sheets[$h.Sheet][$row] = @{} }
+        $sheets[$h.Sheet][$row][(Get-ColumnIndex $m.Groups[1].Value)] = [string]$h.Text
+    }
+    # 見出しを探すたびに比べる形へ変換しないよう、先に変換しておく
+    foreach ($book in $books.Values) {
+        foreach ($name in @($book.Sheets.Keys)) {
+            $cells = $book.Sheets[$name]
+            $rows = [int[]]@($cells.Keys)
+            [Array]::Sort($rows)
+            $cols = @{}; $labels = @{}
+            foreach ($r in $rows) {
+                $c = [int[]]@($cells[$r].Keys)
+                [Array]::Sort($c)
+                $cols[$r] = $c
+                $l = @{}
+                foreach ($col in $c) { $l[$col] = ($cells[$r][$col].Normalize($script:Nfkc) -replace '\s', '') }
+                $labels[$r] = $l
+            }
+            $book.Sheets[$name] = [pscustomobject]@{ Cells = $cells; Rows = $rows; Cols = $cols; Labels = $labels }
+        }
+    }
+    return $books
+}
+
+function Find-LabelCell {
+    #     「画面名」などの見出し（ConvertTo-Label 済み）のセルの右にある値と、その行・列。見出しが無ければ $null
+    #     Grid は ConvertTo-DesignBooks のシート
+    param($Grid, [string] $Label)
+    if (-not $Label) { return $null }
+    foreach ($row in $Grid.Rows) {
+        $cols = $Grid.Cols[$row]
+        $labels = $Grid.Labels[$row]
+        for ($i = 0; $i -lt $cols.Count - 1; $i++) {
+            if ($labels[$cols[$i]] -eq $Label) {
+                return [pscustomobject]@{ Value = $Grid.Cells[$row][$cols[$i + 1]].Trim(); Row = $row; Col = $cols[$i + 1] }
+            }
+        }
+    }
+    return $null
+}
+
+function Find-LabelValue {
+    #     「画面名」などの見出しのセルの右にある値（見出しが無ければ $null）
+    param($Grid, [string] $Label)
+    $c = Find-LabelCell $Grid $Label
+    if ($c) { return $c.Value }
+    return $null
+}
+
+function Find-DesignTables {
+    #     見出し（ConvertTo-Label 済み）がすべてそろっている行を探し、その下で KeyHeader の列に値のある行を返す。
+    #     「■」で始まる行（次の節）までを 1 つの表とみなす。KeyHeader が無い表では最初の見出しの列を使う
+    #     Grid は ConvertTo-DesignBooks のシート
+    #     戻り値: @{ HeaderRow; ColumnOf = 見出し → 列番号; Rows = @(@{ Row; Cells = 列番号 → 文字 }) } の一覧
+    param($Grid, [string[]] $Headers, [string] $KeyHeader)
+    $tables = New-Object System.Collections.Generic.List[object]
+    if (@($Headers).Count -eq 0) { return , $tables }
+    $rows = $Grid.Rows
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $labels = $Grid.Labels[$rows[$i]]
+        $colOf = @{}
+        foreach ($c in $Grid.Cols[$rows[$i]]) { $label = $labels[$c]; if (-not $colOf.ContainsKey($label)) { $colOf[$label] = $c } }
+        $ok = $true
+        foreach ($hdr in $Headers) { if (-not $colOf.ContainsKey($hdr)) { $ok = $false; break } }
+        if (-not $ok) { continue }
+        $keyCol = $colOf[$Headers[0]]
+        if ($KeyHeader -and $colOf.ContainsKey($KeyHeader)) { $keyCol = $colOf[$KeyHeader] }
+        $dataRows = New-Object System.Collections.Generic.List[object]
+        for ($j = $i + 1; $j -lt $rows.Count; $j++) {
+            $r = $Grid.Cells[$rows[$j]]
+            $section = $false
+            foreach ($v in $r.Values) { if ($v.TrimStart().StartsWith('■')) { $section = $true; break } }
+            if ($section) { break }
+            if ($r.ContainsKey($keyCol) -and $r[$keyCol].Trim()) { $dataRows.Add([pscustomobject]@{ Row = $rows[$j]; Cells = $r }) }
+        }
+        $tables.Add([pscustomobject]@{ HeaderRow = $rows[$i]; ColumnOf = $colOf; Rows = $dataRows })
+        $i = $j - 1
+    }
+    return , $tables
+}
+
 Export-ModuleMember -Function *

@@ -42,24 +42,6 @@ Update-TypeData -TypeName 'DesignSize.Item' -DefaultDisplayPropertySet Kind, Nam
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
 
-function ConvertTo-Label {
-    #     見出しや項目名を比べるための形（全角・半角をそろえ、空白を除く）
-    param([string] $Text)
-    if ($null -eq $Text) { return '' }
-    return ($Text.Normalize($nfkc) -replace '\s', '')
-}
-
-function Read-CsvFile {
-    param([string] $FilePath, [string[]] $Required, [string] $What)
-    if (-not (Test-Path -LiteralPath $FilePath)) { throw "$What が見つかりません: $FilePath" }
-    $rows = @(Read-TextFile $FilePath | ConvertFrom-Csv)
-    if ($rows.Count -gt 0) {
-        $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
-        foreach ($r in $Required) { if ($names -notcontains $r) { throw "$What に「$r」の列がありません: $FilePath" } }
-    }
-    return , $rows
-}
-
 # ---------------------------------------------------------------- 数え方と係数
 
 
@@ -93,63 +75,7 @@ if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
 $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
 
-# ファイル → シート → 行番号 → 列番号 → 文字
-$books = [ordered]@{}
-foreach ($h in $hits) {
-    $m = [regex]::Match([string]$h.Cell, '^([A-Z]+)(\d+)$')
-    if (-not $m.Success) { continue }
-    if (-not $books.Contains($h.Path)) { $books[$h.Path] = [pscustomobject]@{ File = $h.File; Path = $h.Path; Sheets = [ordered]@{} } }
-    $sheets = $books[$h.Path].Sheets
-    if (-not $sheets.Contains($h.Sheet)) { $sheets[$h.Sheet] = @{} }
-    $row = [int]$m.Groups[2].Value
-    if (-not $sheets[$h.Sheet].ContainsKey($row)) { $sheets[$h.Sheet][$row] = @{} }
-    $sheets[$h.Sheet][$row][(Get-ColumnIndex $m.Groups[1].Value)] = $h.Text
-}
-
-function Find-LabelValue {
-    #     「画面名」などの見出しのセルの右にある値（見出しが無ければ $null）
-    param($Grid, [string] $Label)
-    if (-not $Label) { return $null }
-    foreach ($row in ($Grid.Keys | Sort-Object)) {
-        $cols = @($Grid[$row].Keys | Sort-Object)
-        for ($i = 0; $i -lt $cols.Count - 1; $i++) {
-            if ((ConvertTo-Label $Grid[$row][$cols[$i]]) -eq $Label) { return $Grid[$row][$cols[$i + 1]].Trim() }
-        }
-    }
-    return $null
-}
-
-function Find-Tables {
-    #     見出しがすべてそろっている行を探し、その下で「数える列」に値のある行を返す。「■」で始まる行（次の節）までを 1 つの表とみなす
-    param($Grid, $Rule)
-    $tables = New-Object System.Collections.Generic.List[object]
-    $rows = @($Grid.Keys | Sort-Object)
-    for ($i = 0; $i -lt $rows.Count; $i++) {
-        $cells = $Grid[$rows[$i]]
-        $colOf = @{}
-        foreach ($c in $cells.Keys) { $label = ConvertTo-Label $cells[$c]; if (-not $colOf.ContainsKey($label)) { $colOf[$label] = $c } }
-        $ok = $true
-        foreach ($hdr in $Rule.Headers) { if (-not $colOf.ContainsKey($hdr)) { $ok = $false; break } }
-        if (-not $ok) { continue }
-        $keyCol = $colOf[$Rule.KeyHeader]
-        if (-not $keyCol) { $keyCol = $colOf[$Rule.Headers[0]] }
-        $crudCol = $null
-        if ($Rule.CrudHeader -and $colOf.ContainsKey($Rule.CrudHeader)) { $crudCol = $colOf[$Rule.CrudHeader] }
-        $dataRows = New-Object System.Collections.Generic.List[object]
-        for ($j = $i + 1; $j -lt $rows.Count; $j++) {
-            $r = $Grid[$rows[$j]]
-            if (@($r.Values | Where-Object { $_.TrimStart().StartsWith('■') }).Count -gt 0) { break }
-            if ($r.ContainsKey($keyCol) -and $r[$keyCol].Trim()) {
-                $crud = ''
-                if ($crudCol -and $r.ContainsKey($crudCol)) { $crud = $r[$crudCol] }
-                $dataRows.Add([pscustomobject]@{ Row = $rows[$j]; Key = $r[$keyCol]; Crud = $crud })
-            }
-        }
-        $tables.Add([pscustomobject]@{ HeaderRow = $rows[$i]; Rows = $dataRows })
-        $i = $j - 1
-    }
-    return , $tables
-}
+$books = ConvertTo-DesignBooks $hits
 
 function Get-IfDirection {
     #     IF の向き。「送受信区分」などに 受信／送信 があればそれ、無ければ「送信元」がこのシステム（システム名）なら送信
@@ -184,7 +110,7 @@ foreach ($book in $books.Values) {
         foreach ($sheetName in $book.Sheets.Keys) {
             if ($rule.SheetPattern -and $sheetName -notmatch $rule.SheetPattern) { continue }
             $grid = $book.Sheets[$sheetName]
-            foreach ($t in (Find-Tables $grid $rule)) {
+            foreach ($t in (Find-DesignTables $grid $rule.Headers $rule.KeyHeader)) {
                 $foundAny = $true
                 switch ($rule.Unit) {
                     'ファイル' { $key = '{0}|{1}' -f $rule.Kind, $book.Path }
@@ -208,9 +134,10 @@ foreach ($book in $books.Values) {
                 if (-not $item.Counts.Contains($rule.Measure)) { $item.Counts[$rule.Measure] = 0 }
                 $item.Counts[$rule.Measure] += $t.Rows.Count
                 # FP の試算法: 使用テーブルに登録・更新・削除（C / U / D）があるイベントは外部入力、参照（R）だけなら外部照会
-                if ($rule.CrudHeader) {
+                if ($rule.CrudHeader -and $t.ColumnOf.ContainsKey($rule.CrudHeader)) {
+                    $crudCol = $t.ColumnOf[$rule.CrudHeader]
                     foreach ($dr in $t.Rows) {
-                        $letters = (@([regex]::Matches(([string]$dr.Crud).Normalize($nfkc), '\(([CRUDcrud]+)\)') | ForEach-Object { $_.Groups[1].Value }) -join '').ToUpperInvariant()
+                        $letters = (@([regex]::Matches(([string]$dr.Cells[$crudCol]).Normalize($nfkc), '\(([CRUDcrud]+)\)') | ForEach-Object { $_.Groups[1].Value }) -join '').ToUpperInvariant()
                         if ($letters -match '[CUD]') { $item.EI++ } elseif ($letters -match 'R') { $item.EQ++ }
                     }
                 }
