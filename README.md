@@ -14,6 +14,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Compare-Excel.ps1](tools/README.md#compare-excelps1) | 2 つのブック・フォルダのセル単位の差分（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認もできる） | 不要 ※1 |
 | [Test-DesignConsistency.ps1](tools/README.md#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、画面遷移の食い違い） | 不要 ※1 |
 | [Export-TableDdl.ps1](tools/README.md#export-tableddlps1) | テーブル定義書から DDL（Oracle・PostgreSQL・SQL Server・MySQL）を作り、DB の列の一覧との食い違い（型・桁数・NULL）も確かめる | 不要 ※1 |
+| [New-DesignDocument.ps1](tools/README.md#new-designdocumentps1) | 一覧から雛形の差し込み欄を埋めた設計書を一括で作る。版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする | 不要 |
 | [Measure-DesignSize.ps1](tools/README.md#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す | 不要 ※1 |
 | [Test-ExcelEstimate.ps1](tools/README.md#test-excelestimateps1) | 見積書の検算（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算の日数や単価の食い違い） | 不要 |
 | [Invoke-DesignReview.ps1](tools/README.md#invoke-designreviewps1) | 設計書を観点表に沿って Microsoft 365 Copilot にレビューさせ、指摘一覧にまとめる | 不要 |
