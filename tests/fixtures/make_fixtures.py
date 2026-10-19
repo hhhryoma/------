@@ -660,6 +660,63 @@ def make_estimate_fixtures(tmp):
     shutil.move(os.path.join(tmp, "見積書.xlsx"), os.path.join(ESTIMATE, "lo", "見積書.xlsx"))
 
 
+CONSISTENCY = os.path.join(HERE, "consistency")
+
+
+def make_consistency_fixtures():
+    """Test-DesignConsistency.ps1 用（consistency）。docs/design-sample の写しに、参照の食い違いを入れたもの。
+    期待値は tests/Test-DesignConsistency.Tests.ps1 を参照"""
+    sample = os.path.join(REPO, "docs", "design-sample")
+    shutil.rmtree(CONSISTENCY, ignore_errors=True)
+    os.makedirs(CONSISTENCY)
+    for name in sorted(os.listdir(sample)):
+        if name.endswith(".xlsx"):
+            shutil.copy(os.path.join(sample, name), CONSISTENCY)
+    # ヘッダの ID を直し忘れた画面設計書の写し（ファイル名は SCR004 だが、中身は SCR001 のまま）
+    shutil.copy(os.path.join(sample, "DD02_画面設計書_SCR001_受注一覧.xlsx"),
+                os.path.join(CONSISTENCY, "DD02_画面設計書_SCR004_出荷状況照会.xlsx"))
+
+    def edit(name, changes):
+        path = os.path.join(CONSISTENCY, name)
+        wb = openpyxl.load_workbook(path)
+        for sheet, cell, value in changes:
+            wb[sheet][cell] = value
+        wb.save(path)
+
+    edit("DD02_画面設計書_SCR001_受注一覧.xlsx", [
+        ("画面項目定義", "AS6", "T_ORDERX.ORDER_NO"),     # テーブルが無い
+        ("画面項目定義", "AK9", "半角英数（E0099）"),      # メッセージが無い
+    ])
+    edit("DD02_画面設計書_SCR002_受注登録.xlsx", [
+        ("画面項目定義", "AS11", "T_ORDER.DELIVERY_TIME"),  # カラムが無い（正しくは DELIVERY_TIME_KBN）
+        ("画面項目定義", "BA9", "コード定義 C009"),         # コード区分が無い
+        ("画面項目定義", "AS6", "T_ORDER.order_date"),      # 大文字・小文字が違う
+    ])
+    edit("DD02_画面設計書_SCR003_受注詳細.xlsx", [
+        ("画面項目定義", "S2", "SCR002"),                   # このシートだけ画面 ID が違う
+        ("イベント定義", "AM7", "T_ORDERS(R,U)"),           # テーブルが無い
+    ])
+    edit("DD06_IF定義書_IF001_出荷指示データ.xlsx", [
+        ("レコード定義", "AG6", "Ｔ_ORDER.ORDER_NO"),       # 全角が混じっている
+    ])
+    edit("DD05_メッセージ一覧.xlsx", [
+        ("メッセージ一覧", "A22", "E0001"),                 # 同じ ID を 2 回定義
+        ("メッセージ一覧", "G22", "エラー"),
+        ("メッセージ一覧", "K22", "{0}を入力してください。"),
+    ])
+    edit("DD01_画面一覧.xlsx", [
+        ("画面一覧", "H8", "受注照会"),                     # 画面設計書の画面名（受注詳細）と違う
+        ("画面一覧", "A9", 4), ("画面一覧", "C9", "SCR004"), ("画面一覧", "H9", "出荷状況照会"),  # 設計書の無い画面
+        ("画面遷移", "Z7", "SCR002"),                       # SCR001 → SCR003 の遷移が一覧から漏れた
+        # 画面設計書に無い遷移（SCR003 → SCR002）
+        ("画面遷移", "A12", 7), ("画面遷移", "C12", "SCR003"), ("画面遷移", "I12", "受注詳細"),
+        ("画面遷移", "Q12", "複製"), ("画面遷移", "Z12", "SCR002"), ("画面遷移", "AF12", "受注登録"),
+    ])
+    edit("DD03_テーブル定義書.xlsx", [
+        ("テーブル一覧", "C9", None), ("テーブル一覧", "L9", None),  # T_ORDER_DETAIL が一覧から漏れた
+    ])
+
+
 def main():
     tmp = tempfile.mkdtemp()
     try:
@@ -675,6 +732,7 @@ def main():
         make_terms_fixtures()
         make_print_fixtures()
         make_size_fixtures()
+        make_consistency_fixtures()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("fixtures written to", HERE)
