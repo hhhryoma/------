@@ -84,7 +84,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Create') {
     if (-not $FileName) { $FileName = [System.IO.Path]::GetFileName($Template) }
 
     # 雛形とファイル名の差し込み欄
-    $tplHits = @(& $searchScript -Pattern '\{\{[^{}]+\}\}' -Path ([System.Management.Automation.WildcardPattern]::Escape($Template)) -Target Value, Comment, Shape -NoExcel 6>$null)
+    $tplHits = @(& $searchScript -Pattern '\{\{[^{}]+\}\}' -Path ([System.Management.Automation.WildcardPattern]::Escape($Template)) -Target Value, Comment, Shape, HeaderFooter -NoExcel 6>$null)
     $inTemplate = New-Object System.Collections.Generic.List[string]
     foreach ($h in $tplHits) {
         foreach ($m in [regex]::Matches([string]$h.Text, '\{\{([^{}]+)\}\}')) { $n = $m.Groups[1].Value.Trim(); if (-not $inTemplate.Contains($n)) { $inTemplate.Add($n) } }
@@ -144,7 +144,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Create') {
 
         Copy-Item -LiteralPath $Template -Destination $target
         if ($inTemplate.Count -gt 0) {
-            # 差し込み欄の置き換えは Replace-Excel.ps1 で行う（セル・図形・コメント。セルの書式や部分ごとの書式は保たれる）
+            # 差し込み欄の置き換えは Replace-Excel.ps1 で行う（セル・図形・コメント・ヘッダー／フッター。セルの書式や部分ごとの書式は保たれる）
             $csv = Join-Path ([System.IO.Path]::GetTempPath()) ('placeholders-' + [guid]::NewGuid().ToString('N') + '.csv')
             $lines = New-Object System.Collections.Generic.List[string]
             $lines.Add('置換前,置換後,正規表現')
@@ -380,7 +380,7 @@ foreach ($f in $files) {
 #
 # .DESCRIPTION
 #     雛形から作る: 雛形の xlsx に {{画面ID}} {{画面名}} のような差し込み欄を書いておくと、一覧（画面一覧の Excel や CSV）の
-#     行ごとに雛形をコピーし、差し込み欄を一覧の値に置き換えます（セル・図形・コメント。Replace-Excel.ps1 を使います）。
+#     行ごとに雛形をコピーし、差し込み欄を一覧の値に置き換えます（セル・図形・コメント・ヘッダー／フッター。Replace-Excel.ps1 を使います）。
 #     {{作成日}}（{{日付}}）と {{作成者}} は -Date・-Author の値になります。同じ名前のファイルがあれば作りません。
 #
 #     版を上げる（-Bump）: 表紙の版数と更新日を新しい版数・日付にし、改訂履歴の最後の行の下に
