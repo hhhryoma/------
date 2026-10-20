@@ -689,6 +689,12 @@ function Update-SheetDimension {
     if ($m.Success -and [int]$m.Groups[3].Value -lt $Row) { $dim.SetAttribute('ref', ('{0}:{1}{2}' -f $m.Groups[1].Value, $m.Groups[2].Value, $Row)) }
 }
 
+function Get-VersionlessName {
+    #     ファイル名（相対パス）から版数（_v1.0・Ver1.0・第1.0版 など）を除いた形（版数だけが違うファイルどうしを対応付けるため）
+    param([string] $Name)
+    return [regex]::Replace($Name.Normalize($script:Nfkc).ToLowerInvariant(), '(?:(?<![a-z])v(?:er)?\.?\s*|第\s*)\d+(?:\.\d+)*(?:版)?', '{v}')
+}
+
 function ConvertTo-ExcelDate {
     #     日付を Excel のシリアル値にする
     param([datetime] $Date)

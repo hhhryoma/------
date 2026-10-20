@@ -21,8 +21,11 @@ param(
     [Parameter(ParameterSetName = 'Bump', Mandatory = $true, Position = 0)]
     [string[]] $Path,
 
-    [Parameter(ParameterSetName = 'Bump', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'Bump')]
     [string] $Description,
+
+    [Parameter(ParameterSetName = 'Bump')]
+    [string] $CompareWith,
 
     [Parameter(ParameterSetName = 'Bump')]
     [string] $Section = '全体',
@@ -46,6 +49,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
 $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
 $replaceScript = Join-Path $PSScriptRoot 'Replace-Excel.ps1'
+$compareScript = Join-Path $PSScriptRoot 'Compare-Excel.ps1'
 
 Update-TypeData -TypeName 'DesignDocument.Result' -DefaultDisplayPropertySet File, Status, Detail -Force -WhatIf:$false
 
@@ -221,6 +225,23 @@ function Find-LabelPairs {
     return , $list
 }
 
+if (-not $Description -and -not $CompareWith) { throw '-Bump では、改訂内容（-Description）か、比べる前の版（-CompareWith）を指定してください。' }
+
+# 改訂履歴に一度に足す行の上限（超えた分は「ほか n 件」の 1 行にまとめる）
+$maxHistoryRows = 20
+
+function Get-HistoryDrafts {
+    #     前の版と比べ、改訂履歴に書く行（改訂箇所・改訂内容）の下書きを求める（Compare-Excel.ps1 -OutHistory）
+    param([string] $OldPath, [string] $NewPath)
+    $csv = Join-Path ([System.IO.Path]::GetTempPath()) ('history-' + [guid]::NewGuid().ToString('N') + '.csv')
+    try {
+        $null = & $compareScript -Old $OldPath -New $NewPath -OutHistory $csv -HistorySheet $HistorySheet -NoExcel -WarningAction SilentlyContinue 6>$null
+        if (-not (Test-Path -LiteralPath $csv)) { return @() }
+        return @(Read-TextFile $csv | ConvertFrom-Csv | ForEach-Object { [pscustomobject]@{ Section = $_.'改訂箇所'; Description = $_.'改訂内容' } })
+    }
+    finally { Remove-Item -LiteralPath $csv -Force -ErrorAction SilentlyContinue }
+}
+
 $files = New-Object System.Collections.Generic.List[object]
 foreach ($p in $Path) {
     $items = @(Get-Item -Path $p -ErrorAction SilentlyContinue)
@@ -231,7 +252,27 @@ foreach ($p in $Path) {
     }
 }
 
+# 前の版: ファイルならそのファイル（版を上げるファイルが 1 つのとき）、フォルダなら版数を除いた名前が同じファイル
+$oldByName = $null
+if ($CompareWith) {
+    $cw = Get-Item -LiteralPath $CompareWith -ErrorAction SilentlyContinue
+    if (-not $cw) { throw "-CompareWith が見つかりません: $CompareWith" }
+    if ($cw.PSIsContainer) {
+        $oldByName = @{}
+        foreach ($o in (Get-ChildItem -LiteralPath $cw.FullName -File -Recurse | Where-Object { @('.xlsx', '.xlsm') -contains $_.Extension.ToLowerInvariant() -and -not $_.Name.StartsWith('~$') })) {
+            $k = Get-VersionlessName $o.Name
+            if ($oldByName.ContainsKey($k)) { $oldByName[$k] = $null } else { $oldByName[$k] = $o.FullName }
+        }
+    }
+    elseif ($files.Count -gt 1) { throw '-CompareWith にファイルを指定できるのは、版を上げるファイルが 1 つのときだけです（複数のときは前の版のフォルダを指定してください）。' }
+}
+
 foreach ($f in $files) {
+    $oldPath = $null
+    if ($CompareWith) {
+        if ($oldByName) { $oldPath = $oldByName[(Get-VersionlessName $f.Name)] } else { $oldPath = $cw.FullName }
+        if (-not $oldPath) { New-Result $f.Name 'スキップ' ('前の版のファイルが -CompareWith のフォルダに見つかりません（版数を除いた名前が同じファイルが 1 つだけあるものを使います）') $f.FullName; continue }
+    }
     $hits = @(& $searchScript -Pattern '\S' -Path ([System.Management.Automation.WildcardPattern]::Escape($f.FullName)) -Target Value -NoExcel 6>$null)
     $books = ConvertTo-DesignBooks $hits
     if ($books.Count -eq 0) { New-Result $f.Name 'スキップ' '読めませんでした' $f.FullName; continue }
@@ -287,13 +328,33 @@ foreach ($f in $files) {
         if (-not $newVersion) { $newVersion = Get-NextVersion $current }
         $newVersion = ConvertTo-VersionText $newVersion
 
-        # 改訂履歴に足す行（最後の行の下。空いていなければ足さない）
+        # 改訂履歴に書く行（改訂箇所・改訂内容）。-Description の行と、前の版と比べた下書き
+        $entries = New-Object System.Collections.Generic.List[object]
+        if ($Description) { $entries.Add([pscustomobject]@{ Section = $Section; Description = $Description }) }
+        if ($oldPath) {
+            $drafts = @(Get-HistoryDrafts $oldPath $f.FullName)
+            if ($drafts.Count -gt $maxHistoryRows - $entries.Count) {
+                $keep = $maxHistoryRows - $entries.Count - 1
+                foreach ($d in $drafts[0..($keep - 1)]) { $entries.Add($d) }
+                $entries.Add([pscustomobject]@{ Section = '全体'; Description = ('ほか {0} 件の変更（Compare-Excel.ps1 の差分を参照）' -f ($drafts.Count - $keep)) })
+            }
+            else { foreach ($d in $drafts) { $entries.Add($d) } }
+            if ($entries.Count -eq 0) { New-Result $f.Name 'スキップ' ('前の版（{0}）と内容が同じです（改訂内容を -Description で指定してください）' -f [System.IO.Path]::GetFileName($oldPath)) $f.FullName; continue }
+        }
+
+        # 改訂履歴に足す行（最後に書いてある行の下。改訂履歴の列が空いていなければ足さない）
         $newRow = 0
+        $last = 0
         if ($hist) {
+            $grid = $book.Sheets[$histName]
             $last = $hist.HeaderRow
-            if ($hist.Entries.Count -gt 0) { $last = $hist.Entries[-1] }
+            foreach ($r in $grid.Rows) {
+                if ($r -le $last) { continue }
+                foreach ($col in $hist.Cols.Values) { if ($grid.Cells[$r].ContainsKey($col)) { $last = $r; break } }
+            }
             $newRow = $last + 1
-            if ($book.Sheets[$histName].Cells.ContainsKey($newRow)) { New-Result $f.Name 'スキップ' ('改訂履歴の最後の行（{0} 行目）の下が空いていないため、行を足せません' -f $last) $f.FullName; continue }
+            $busy = @($newRow..($newRow + $entries.Count - 1) | Where-Object { $row = $_; $grid.Cells.ContainsKey($row) -and @($hist.Cols.Values | Where-Object { $grid.Cells[$row].ContainsKey($_) }).Count -gt 0 })
+            if ($busy.Count -gt 0) { New-Result $f.Name 'スキップ' ('改訂履歴の {0} 行目が空いていないため、行を足せません' -f $busy[0]) $f.FullName; continue }
         }
 
         # 保存先: ファイル名に版数（_v1.0・第1.0版 など）があれば新しい版数の名前で別に保存し、無ければ上書きする
@@ -334,37 +395,45 @@ foreach ($f in $files) {
         if ($hist) {
             $doc = $docs[$histName]
             $grid = $book.Sheets[$histName]
+            # 版数・日付の書き方は最後の版の行に、セルの書式（罫線など）と結合は最後に書いてある行に合わせる
             $srcRow = $hist.HeaderRow
             if ($hist.Entries.Count -gt 0) { $srcRow = $hist.Entries[-1] }
             $srcEl = Get-SheetRowElement $doc $srcRow
-            $rowEl = Get-SheetRowElement $doc $newRow -Create -TemplateRow $srcEl
-            # 最後の行のセルの書式（罫線など）を写す
-            if ($srcEl -and $hist.Entries.Count -gt 0) {
-                foreach ($sc in (Get-XmlChildElements $srcEl 'c')) {
-                    $col = Get-ColumnIndex $sc.GetAttribute('r')
-                    $null = Get-SheetCellElement $doc $rowEl $newRow $col -Create -Style $sc.GetAttribute('s')
-                }
-                Copy-SheetRowMerges $doc $srcRow $newRow
-            }
+            $styleEl = $null
+            if ($last -gt $hist.HeaderRow) { $styleEl = Get-SheetRowElement $doc $last }
             $versionText = $newVersion
             if ($hist.Entries.Count -gt 0) { $versionText = Set-VersionText $grid.Cells[$srcRow][$hist.Cols['Version']] $newVersion }
-            $set = [ordered]@{ Version = $versionText; Date = $null; Section = $Section; Description = $Description; Author = $Author }
-            foreach ($k in $set.Keys) {
-                if (-not $hist.Cols[$k]) { continue }
-                $col = $hist.Cols[$k]
-                $c = Get-SheetCellElement $doc $rowEl $newRow $col -Create
-                $value = $set[$k]
-                if ($k -eq 'Date') {
-                    $old = $null
-                    if ($srcEl) { $old = Get-SheetCellElement $doc $srcEl $srcRow $col }
-                    $oldText = ''
-                    if ($grid.Cells.ContainsKey($srcRow)) { $oldText = $grid.Cells[$srcRow][$col] }
-                    if (Test-NumericCellElement $old) { $value = Get-DateValue $old $oldText } else { $value = Get-DateValue $null $oldText }
+            for ($i = 0; $i -lt $entries.Count; $i++) {
+                $row = $newRow + $i
+                $rowEl = Get-SheetRowElement $doc $row -Create -TemplateRow $styleEl
+                if ($styleEl) {
+                    foreach ($sc in (Get-XmlChildElements $styleEl 'c')) {
+                        $col = Get-ColumnIndex $sc.GetAttribute('r')
+                        $null = Get-SheetCellElement $doc $rowEl $row $col -Create -Style $sc.GetAttribute('s')
+                    }
+                    Copy-SheetRowMerges $doc $last $row
                 }
-                if ($null -ne $value) { Set-SheetCellValue $doc $c $value }
+                # 版数・日付・改訂者は最初の行だけに書く（続きの行は改訂箇所・改訂内容だけ）
+                $set = [ordered]@{ Section = $entries[$i].Section; Description = $entries[$i].Description }
+                if ($i -eq 0) { $set = [ordered]@{ Version = $versionText; Date = $null; Section = $entries[$i].Section; Description = $entries[$i].Description; Author = $Author } }
+                foreach ($k in $set.Keys) {
+                    if (-not $hist.Cols[$k]) { continue }
+                    $col = $hist.Cols[$k]
+                    $c = Get-SheetCellElement $doc $rowEl $row $col -Create
+                    $value = $set[$k]
+                    if ($k -eq 'Date') {
+                        $old = $null
+                        if ($srcEl) { $old = Get-SheetCellElement $doc $srcEl $srcRow $col }
+                        $oldText = ''
+                        if ($grid.Cells.ContainsKey($srcRow)) { $oldText = $grid.Cells[$srcRow][$col] }
+                        if (Test-NumericCellElement $old) { $value = Get-DateValue $old $oldText } else { $value = Get-DateValue $null $oldText }
+                    }
+                    if ($null -ne $value) { Set-SheetCellValue $doc $c $value }
+                }
             }
-            Update-SheetDimension $doc $newRow
-            $done.Add(('改訂履歴の {0} 行目' -f $newRow))
+            $lastNew = $newRow + $entries.Count - 1
+            Update-SheetDimension $doc $lastNew
+            if ($lastNew -gt $newRow) { $done.Add(('改訂履歴の {0}〜{1} 行目' -f $newRow, $lastNew)) } else { $done.Add(('改訂履歴の {0} 行目' -f $newRow)) }
         }
         foreach ($name in $docs.Keys) { $changes[$sheetParts[$name].ToLowerInvariant()] = ConvertTo-XmlString $docs[$name] }
     }
@@ -385,6 +454,7 @@ foreach ($f in $files) {
 #
 #     版を上げる（-Bump）: 表紙の版数と更新日を新しい版数・日付にし、改訂履歴の最後の行の下に
 #     版数・改訂日・改訂箇所・改訂内容・改訂者の行を足します（最後の行の書式と結合を写します）。
+#     -CompareWith で前の版を渡すと、前の版との差分から改訂箇所・改訂内容の行を作ります。
 #     ファイル名に版数（_v1.0・第1.0版 など）があれば新しい版数の名前で別のファイルに保存し、無ければ上書きします。
 #     表紙と改訂履歴の見つけ方は Test-ExcelDeliverable.ps1 の版数のチェックと同じです。
 #
@@ -410,7 +480,14 @@ foreach ($f in $files) {
 #     版を上げる設計書のファイルまたはフォルダ（複数可・ワイルドカード可）。
 #
 # .PARAMETER Description
-#     改訂履歴の改訂内容。
+#     改訂履歴の改訂内容。-CompareWith を指定しないときは必須です。
+#
+# .PARAMETER CompareWith
+#     前の版のファイル、または前の版のフォルダ。前の版と比べ（Compare-Excel.ps1 -OutHistory）、変更した行ごとに
+#     「合計金額（TOTAL_AMOUNT）: 桁数を 9 → 11 に変更」のような改訂箇所・改訂内容の行を改訂履歴に足します。
+#     版数・改訂日・改訂者は最初の行だけに書きます。-Description も指定すると、その行を最初に書きます。
+#     フォルダを指定すると、版数を除いた名前が同じファイル（DD03_テーブル定義書_v1.0.xlsx と _v1.1.xlsx など）と比べます。
+#     一度に足す行は 20 行までで、超えた分は「ほか n 件の変更」の 1 行にまとめます。
 #
 # .PARAMETER Section
 #     改訂履歴の改訂箇所。既定は「全体」。
@@ -437,6 +514,10 @@ foreach ($f in $files) {
 # .EXAMPLE
 #     # 版を上げる（まず -WhatIf で確かめる）
 #     .\New-DesignDocument.ps1 -Bump D:\設計書\DD03_テーブル定義書_v1.1.xlsx -Description '配送時間帯を追加' -Section 'T_ORDER' -Author '佐藤 花子' -WhatIf
+#
+# .EXAMPLE
+#     # 前の版（納品フォルダ）との差分から、改訂履歴の改訂箇所・改訂内容を書く
+#     .\New-DesignDocument.ps1 -Bump D:\設計書 -CompareWith D:\納品\v1.0 -Author '佐藤 花子'
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。Excel は不要です。同じフォルダに ExcelTools.psm1・Search-Excel.ps1・Replace-Excel.ps1 が必要です。
