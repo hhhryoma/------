@@ -14,6 +14,25 @@ function Get-ConsistencyKeys {
     return @($Issues | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Level, $_.Item, $_.File, $_.Location } | Sort-Object)
 }
 
+function Set-CellValues {
+    #     ブックのシートのセルの値を書き換える（テスト用。$null で空にする）
+    param([string] $File, [string] $Sheet, [hashtable] $Values)
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $pkg = Open-ZipPackage $File
+    try {
+        $part = (Get-WorkbookSheetParts $pkg).Sheets[$Sheet]
+        $doc = Read-PartXmlForEdit $pkg $part
+        foreach ($ref in $Values.Keys) {
+            $row = [int]($ref -replace '^[A-Z]+', '')
+            $rowEl = Get-SheetRowElement $doc $row -Create
+            Set-SheetCellValue $doc (Get-SheetCellElement $doc $rowEl $row (Get-ColumnIndex $ref) -Create) $Values[$ref]
+        }
+        $changes = @{ $part.ToLowerInvariant() = (ConvertTo-XmlString $doc) }
+    }
+    finally { $pkg.Zip.Dispose() }
+    Save-ZipPackage -FilePath $File -Changes $changes
+}
+
 Test-Case 'Test-DesignConsistency: 参照が整合している詳細設計サンプルでは指摘しない' {
     $issues = Invoke-Consistency @{ Path = $sampleDir }
     Assert-Equal 0 $issues.Count ((Get-ConsistencyKeys $issues) -join ', ')
@@ -67,6 +86,60 @@ Test-Case 'Test-DesignConsistency: 参照先なし・重複定義・一覧との
     }
 }
 
+Test-Case 'Test-DesignConsistency: 属性の違い（桁数・型・必須と既定値）と、どこからも参照されていない定義を見つける' {
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    $tables = Join-Path $dir 'DD03_テーブル定義書.xlsx'
+    # 配送時間帯の既定値を消す・備考を 200 桁にする・顧客コードを任意にする・顧客マスタの顧客コードの型を変える
+    Set-CellValues $tables 'T_ORDER' @{ AG19 = $null; X21 = 200; AE15 = $null }
+    Set-CellValues $tables 'M_CUSTOMER' @{ S13 = 'VARCHAR' }
+    Set-CellValues (Join-Path $dir 'DD05_メッセージ一覧.xlsx') 'メッセージ一覧' @{ A22 = 'E0099'; G22 = 'エラー'; K22 = 'どこからも使わないメッセージです。' }
+    $issues = Invoke-Consistency @{ Path = $dir }
+    $got = @($issues | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Level, $_.Item, $_.File, $_.Location, $_.Detail })
+    foreach ($expected in @(
+            '警告|属性の違い|DD02_画面設計書_SCR002_受注登録.xlsx|画面項目定義!AS11|入力が任意ですが、T_ORDER.DELIVERY_TIME_KBN は必須で既定値がありません（未入力では登録できません）',
+            '警告|属性の違い|DD02_画面設計書_SCR002_受注登録.xlsx|画面項目定義!AS12|桁数が 500 ですが、T_ORDER.REMARKS は 200 です（入力した値がカラムに入りきりません）',
+            '警告|属性の違い|DD06_IF定義書_IF001_出荷指示データ.xlsx|レコード定義!AG9|必須の項目ですが、T_ORDER.CUSTOMER_CD は必須ではありません（値が無いことがあります）',
+            '警告|属性の違い|DD03_テーブル定義書.xlsx|T_ORDER!AO15|型が「CHAR」ですが、M_CUSTOMER.CUSTOMER_CD は「VARCHAR」です',
+            '情報|未使用|DD05_メッセージ一覧.xlsx|メッセージ一覧!A22|メッセージ「E0099 どこからも使わないメッセージです。」は、どこからも参照されていません')) {
+        Assert-True ($got -contains $expected) ("指摘がありません: {0}`n実際: {1}" -f $expected, ($got -join "`n"))
+    }
+    # 検索画面（SCR001 は受注を参照するだけ）の任意の検索条件は、必須のカラムと比べない
+    Assert-Equal 0 @($issues | Where-Object { $_.File -like '*SCR001*' -and $_.Detail -like '入力が任意*' }).Count
+    Assert-Equal 1 @($issues | Where-Object Item -eq '未使用').Count
+}
+
+Test-Case 'Test-DesignConsistency: -OutXlsx に CRUD 図を足し、-Where で ID を使っている場所（影響範囲）を一覧にする' {
+    $dir = New-TestDir
+    $out = Join-Path $dir 'check.xlsx'
+    $null = Invoke-Consistency @{ Path = $sampleDir; OutXlsx = $out }
+    $crud = Read-XlsxSheet -Path $out -Index 3
+    Assert-Equal @('指摘一覧', '定義と参照', 'CRUD') $crud.Sheets
+    Assert-Equal '画面・IF|名前|M_CUSTOMER（顧客マスタ）|M_PRODUCT（商品マスタ）|T_ORDER（受注）|T_ORDER_DETAIL（受注明細）' (@('A', 'B', 'C', 'D', 'E', 'F' | ForEach-Object { $crud.Rows[1][$_] }) -join '|')
+    Assert-Equal @('IF001|出荷指示データ|R||R|R', 'SCR001|受注一覧|R||R|', 'SCR002|受注登録|R|RU|C|C', 'SCR003|受注詳細|R|RU|RU|R') @(2..5 | ForEach-Object { $r = $_; (@('A', 'B', 'C', 'D', 'E', 'F' | ForEach-Object { $crud.Rows[$r][$_] }) -join '|') }) 'イベント定義の使用テーブルと、IF の設定元（読み取り）'
+
+    $usages = Invoke-Consistency @{ Path = $sampleDir; Where = @('T_ORDER.DELIVERY_TIME_KBN', 'C005') }
+    Assert-Equal @(
+        'C005|定義|DD04_コード定義書.xlsx|コード一覧!A16',
+        'C005|参照|DD02_画面設計書_SCR002_受注登録.xlsx|画面項目定義!BA11',
+        'C005|参照|DD02_画面設計書_SCR003_受注詳細.xlsx|画面項目定義!BA13',
+        'C005|参照|DD03_テーブル定義書.xlsx|T_ORDER!AX19',
+        'C005|参照|DD06_IF定義書_IF001_出荷指示データ.xlsx|レコード定義!AR17',
+        'T_ORDER.DELIVERY_TIME_KBN|定義|DD03_テーブル定義書.xlsx|T_ORDER!J19',
+        'T_ORDER.DELIVERY_TIME_KBN|参照|DD02_画面設計書_SCR002_受注登録.xlsx|画面項目定義!AS11',
+        'T_ORDER.DELIVERY_TIME_KBN|参照|DD02_画面設計書_SCR003_受注詳細.xlsx|画面項目定義!AS13',
+        'T_ORDER.DELIVERY_TIME_KBN|参照|DD06_IF定義書_IF001_出荷指示データ.xlsx|レコード定義!AG17') @($usages | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Target, $_.Usage, $_.File, $_.Location })
+    # テーブルだけを指定すると、そのカラムの参照も含める
+    $usages = Invoke-Consistency @{ Path = $sampleDir; Where = 'M_PRODUCT' }
+    Assert-True (@($usages | Where-Object { $_.Text -eq 'M_PRODUCT.PRODUCT_NAME' }).Count -ge 1) 'カラムの参照'
+    Assert-True (@($usages | Where-Object Usage -eq '一覧').Count -eq 1) 'テーブル一覧'
+
+    $bad = Join-Path $dir 'bad.csv'
+    @('区分,種類,ファイル名,シート名,見出し,列,名前,親,元,書き方,重複,属性,未使用,CRUD', '定義,カラム,,,物理名,物理名,,,,,,長さ=桁数,,') | Set-Content -LiteralPath $bad -Encoding UTF8
+    Assert-Throws { & $ConsistencyTool -Path $sampleDir -Rules $bad 6>$null } '属性'
+    @('区分,種類,ファイル名,シート名,見出し,列,名前,親,元,書き方,重複,属性,未使用,CRUD', '参照,テーブル,,,,,,,@画面ID,(?<id>T_\w+),,,,X') | Set-Content -LiteralPath $bad -Encoding UTF8
+    Assert-Throws { & $ConsistencyTool -Path $sampleDir -Rules $bad 6>$null } 'CRUD'
+}
+
 Test-Case 'Test-DesignConsistency: -Exclude で確かめない参照を除き、定義の無い種類は「未確認」として知らせる' {
     $file = Join-Path $consistencyDir 'DD02_画面設計書_SCR001_受注一覧.xlsx'
     $issues = Invoke-Consistency @{ Path = $file; Exclude = '^T_ORDERX\.' }
@@ -118,7 +191,7 @@ Test-Case 'Test-DesignConsistency: -OutXlsx で指摘一覧（該当セルへの
     Assert-Equal 18 $sheet.Rows.Count '見出しと 17 件（保存先のファイル自体は読まない）'
     Assert-True (@($sheet.Links | Where-Object { $_.Location -eq "'メッセージ一覧'!A22" }).Count -eq 1) '重複定義のセルへのリンク'
     $stats = Read-XlsxSheet -Path $out -Index 2
-    Assert-Equal @('指摘一覧', '定義と参照') $stats.Sheets
+    Assert-Equal @('指摘一覧', '定義と参照', 'CRUD') $stats.Sheets
     $row = @($stats.Rows.Values | Where-Object { $_['A'] -eq 'メッセージ' })[0]
     Assert-Equal '16|1' ('{0}|{1}' -f $row['B'], $row['E']) 'メッセージの定義 16・参照先なし 1'
 }

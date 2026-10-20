@@ -11,6 +11,8 @@ param(
 
     [switch] $NoExcel,
 
+    [string[]] $Where,
+
     [string] $OutXlsx
 )
 
@@ -36,6 +38,7 @@ $excludeRx = $null
 if ($Exclude) { $excludeRx = New-RuleRegex $Exclude '-Exclude ' }
 
 Update-TypeData -TypeName 'DesignConsistency.Issue' -DefaultDisplayPropertySet File, Location, Level, Detail -Force -WhatIf:$false
+Update-TypeData -TypeName 'DesignConsistency.Usage' -DefaultDisplayPropertySet File, Location, Usage, Id, Text -Force -WhatIf:$false
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
 
@@ -59,38 +62,61 @@ function ConvertTo-Field {
 # ---------------------------------------------------------------- 参照のルール
 
 
+# 「属性」に書ける名前（桁数・型などを、定義と参照で比べる）
+$attributeNames = @('桁数', '小数', '型', '必須', '既定値', '入出力')
+
+function ConvertTo-Attributes {
+    #     ルールの「属性」（桁数=桁数;必須=必須 のように、属性の名前=表の列の見出し）
+    param([string] $Text, [string] $RuleWhere)
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($part in ([string]$Text -split '[;；]')) {
+        if (-not $part.Trim()) { continue }
+        $kv = $part -split '[=＝]', 2
+        $name = $kv[0].Trim()
+        if ($attributeNames -notcontains $name -or $kv.Count -lt 2 -or -not $kv[1].Trim()) { throw ("{0}: 「属性」は「桁数=桁数;必須=必須」のように、{1} のどれかと列の見出しを = でつないで書いてください（{2}）" -f $RuleWhere, ($attributeNames -join '・'), $part) }
+        $list.Add([pscustomobject]@{ Name = $name; Label = (ConvertTo-Label $kv[1]) })
+    }
+    return , $list
+}
+
 $ruleList = New-Object System.Collections.Generic.List[object]
 $line = 1
 foreach ($r in (Read-CsvFile $Rules @('区分', '種類', 'ファイル名', 'シート名', '見出し', '列', '名前', '親', '元', '書き方', '重複') '参照のルール')) {
     $line++
     $section = ([string]$r.'区分').Trim()
     if (-not $section) { continue }
-    $where = '参照のルールの {0} 行目' -f $line
-    if (@('定義', '一覧', '参照') -notcontains $section) { throw ("{0}: 「区分」は 定義 / 一覧 / 参照 のどれかにしてください（{1}）" -f $where, $section) }
+    $ruleWhere = '参照のルールの {0} 行目' -f $line
+    if (@('定義', '一覧', '参照') -notcontains $section) { throw ("{0}: 「区分」は 定義 / 一覧 / 参照 のどれかにしてください（{1}）" -f $ruleWhere, $section) }
     $kind = ([string]$r.'種類').Trim()
-    if (-not $kind) { throw "${where}: 「種類」が空です" }
+    if (-not $kind) { throw "${ruleWhere}: 「種類」が空です" }
     $rule = [pscustomobject]@{
         Line = $line; Section = $section; Kind = $kind; FileRx = $null; SheetRx = $null
         Headers = @(([string]$r.'見出し') -split '/' | ForEach-Object { ConvertTo-Label $_ } | Where-Object { $_ })
         Column = (ConvertTo-Field $r.'列'); Name = (ConvertTo-Field $r.'名前'); Parent = (ConvertTo-Field $r.'親'); From = (ConvertTo-Field $r.'元')
         Pattern = $null; AllowDuplicate = (([string]$r.'重複').Trim() -eq '可')
         Found = $false; Global = $false; Place = $null; Coverage = @{}; Pairs = @{}
+        # 2 段階目で足した列（無い CSV も読める）
+        Attributes = (ConvertTo-Attributes ([string]$r.'属性') $ruleWhere)
+        CheckUnused = (@('確認', '○', '〇', '1') -contains ([string]$r.'未使用').Trim()); Crud = ([string]$r.'CRUD').Trim().ToUpperInvariant()
     }
-    if (([string]$r.'ファイル名').Trim()) { $rule.FileRx = New-RuleRegex ([string]$r.'ファイル名').Trim() "${where}の「ファイル名」" }
-    if (([string]$r.'シート名').Trim()) { $rule.SheetRx = New-RuleRegex ([string]$r.'シート名').Trim() "${where}の「シート名」" }
+    if ($rule.Crud -and $rule.Crud -notmatch '^[CRUD]+$') { throw ("{0}: 「CRUD」は C・R・U・D の組み合わせで書いてください（{1}）" -f $ruleWhere, $rule.Crud) }
+    if ($rule.Attributes.Count -gt 0 -and $rule.Headers.Count -eq 0) { throw "${ruleWhere}: 「属性」を使うときは「見出し」も指定してください（表の列から読むため）" }
+    if (([string]$r.'ファイル名').Trim()) { $rule.FileRx = New-RuleRegex ([string]$r.'ファイル名').Trim() "${ruleWhere}の「ファイル名」" }
+    if (([string]$r.'シート名').Trim()) { $rule.SheetRx = New-RuleRegex ([string]$r.'シート名').Trim() "${ruleWhere}の「シート名」" }
     if ($section -eq '参照') {
         $p = ([string]$r.'書き方').Trim()
-        if (-not $p) { throw "${where}: 参照の「書き方」（正規表現）が空です" }
-        $rule.Pattern = New-RuleRegex $p "${where}の「書き方」"
-        if (@($rule.Pattern.GetGroupNames()) -notcontains 'id') { throw "${where}: 「書き方」に ID を表す (?<id>...) がありません" }
-        if ($rule.Column -and ($rule.Column.IsLabel -or $rule.Headers.Count -eq 0)) { throw "${where}: 参照の「列」は表の列の見出しで書き、「見出し」も指定してください" }
-        if ($rule.From -and -not $rule.From.IsLabel -and $rule.Headers.Count -eq 0) { throw "${where}: 「元」に表の列を指定するときは「見出し」も指定してください" }
+        if (-not $p) { throw "${ruleWhere}: 参照の「書き方」（正規表現）が空です" }
+        $rule.Pattern = New-RuleRegex $p "${ruleWhere}の「書き方」"
+        if (@($rule.Pattern.GetGroupNames()) -notcontains 'id') { throw "${ruleWhere}: 「書き方」に ID を表す (?<id>...) がありません" }
+        if ((@($rule.Pattern.GetGroupNames()) -contains 'crud' -or $rule.Crud) -and -not $rule.From) { throw "${ruleWhere}: CRUD 図に使う参照（「書き方」の (?<crud>...) か「CRUD」）には、「元」（@画面ID など）も指定してください" }
+        if ($rule.Column -and ($rule.Column.IsLabel -or $rule.Headers.Count -eq 0)) { throw "${ruleWhere}: 参照の「列」は表の列の見出しで書き、「見出し」も指定してください" }
+        if ($rule.From -and -not $rule.From.IsLabel -and $rule.Headers.Count -eq 0) { throw "${ruleWhere}: 「元」に表の列を指定するときは「見出し」も指定してください" }
     }
     else {
-        if (-not $rule.Column) { throw "${where}: 「列」（ID の列）が空です" }
-        if (-not $rule.Column.IsLabel -and $rule.Headers.Count -eq 0) { throw "${where}: 「列」に表の列を指定するときは「見出し」も指定してください（シートの見出しの右の値は「@画面ID」のように書きます）" }
+        if (-not $rule.Column) { throw "${ruleWhere}: 「列」（ID の列）が空です" }
+        if (-not $rule.Column.IsLabel -and $rule.Headers.Count -eq 0) { throw "${ruleWhere}: 「列」に表の列を指定するときは「見出し」も指定してください（シートの見出しの右の値は「@画面ID」のように書きます）" }
         foreach ($f in @($rule.Name, $rule.Parent)) {
-            if ($f -and -not $f.IsLabel -and $rule.Column.IsLabel) { throw "${where}: 「列」が「@」で始まるときは、「名前」「親」も「@」で始まる見出しで書いてください" }
+            if ($f -and -not $f.IsLabel -and $rule.Column.IsLabel) { throw "${ruleWhere}: 「列」が「@」で始まるときは、「名前」「親」も「@」で始まる見出しで書いてください" }
         }
     }
     $ruleList.Add($rule)
@@ -118,8 +144,18 @@ function New-Place {
     }
 }
 
+function Get-RowAttributes {
+    #     表の行から、ルールの「属性」の値を読む（属性の名前 → 値）
+    param($Rule, $Table, $DataRow)
+    $attrs = @{}
+    foreach ($a in $Rule.Attributes) {
+        if ($Table.ColumnOf.ContainsKey($a.Label)) { $attrs[$a.Name] = ([string]$DataRow.Cells[$Table.ColumnOf[$a.Label]]).Trim() }
+    }
+    return $attrs
+}
+
 function Add-Definition {
-    param($Rule, [string] $Id, [string] $Name, [string] $Parent, $Place, [string] $Unit, $Values)
+    param($Rule, [string] $Id, [string] $Name, [string] $Parent, $Place, [string] $Unit, $Values, $Attrs)
     $idKey = ConvertTo-Key $Id
     if (-not $idKey) { return }
     $parentKey = ConvertTo-Key $Parent
@@ -128,7 +164,7 @@ function Add-Definition {
     if ($Rule.Parent) { $key = '{0}.{1}' -f $parentKey, $idKey; $shown = '{0}.{1}' -f ([string]$Parent).Trim(), $Id.Trim() }
     $defs.Add([pscustomobject]@{
         Rule = $Rule; Section = $Rule.Section; Kind = $Rule.Kind; Id = $Id.Trim(); Shown = $shown; Name = ([string]$Name).Trim()
-        ParentKey = $parentKey; Key = $key; Place = $Place; Unit = $Unit; Values = $Values
+        ParentKey = $parentKey; Key = $key; Place = $Place; Unit = $Unit; Values = $Values; Attrs = $Attrs
     })
 }
 
@@ -203,15 +239,30 @@ function Read-TableDefinitions {
                     $parent = [string]$dr.Cells[$parentCol]
                     if ($parent.Trim()) { $lastParent = $parent } else { $parent = $lastParent }
                 }
-                Add-Definition $Rule $id $name $parent (New-Place $Book $s $dr.Row $idCol) '行' $null
+                Add-Definition $Rule $id $name $parent (New-Place $Book $s $dr.Row $idCol) '行' $null (Get-RowAttributes $Rule $t $dr)
             }
         }
     }
     return $found
 }
 
+# CRUD 図: 元（画面ID など）のキー → @{ Shown; Targets = 参照先のキー → @{ Kind; Shown; Letters } }
+$script:Crud = [ordered]@{}
+
+function Add-Crud {
+    param([string] $From, [string] $Kind, [string] $TargetShown, [string] $TargetKey, [string] $Letters)
+    $fk = ConvertTo-Key $From
+    if (-not $fk -or -not $TargetKey) { return }
+    if (-not $script:Crud.Contains($fk)) { $script:Crud[$fk] = [pscustomobject]@{ Shown = $From.Trim(); Targets = @{} } }
+    $targets = $script:Crud[$fk].Targets
+    if (-not $targets.ContainsKey($TargetKey)) { $targets[$TargetKey] = [pscustomobject]@{ Kind = $Kind; Shown = $TargetShown; Letters = '' } }
+    foreach ($ch in ($Letters.ToUpperInvariant() -replace '[^CRUD]', '').ToCharArray()) {
+        if ($targets[$TargetKey].Letters.IndexOf($ch) -lt 0) { $targets[$TargetKey].Letters += $ch }
+    }
+}
+
 function Add-Reference {
-    param($Rule, [string] $Text, [string] $From, $Book, [string] $Sheet, [int] $Row, [int] $Col)
+    param($Rule, [string] $Text, [string] $From, $Book, [string] $Sheet, [int] $Row, [int] $Col, $Attrs)
     if (-not $Text) { return }
     $matches2 = $Rule.Pattern.Matches($Text.Normalize($nfkc))
     if ($matches2.Count -eq 0) { return }
@@ -230,8 +281,14 @@ function Add-Reference {
             $pairKey = '{0}>{1}' -f $fromKey, $key
             if (-not $Rule.Pairs.ContainsKey($pairKey)) { $Rule.Pairs[$pairKey] = [pscustomobject]@{ FromKey = $fromKey; From = $From.Trim(); To = $shown; Place = $Place } }
         }
+        # CRUD 図: 「書き方」の (?<crud>...) か、ルールの「CRUD」。カラムの参照（T_ORDER.ORDER_NO）はテーブルへの操作として数える
+        $letters = $Rule.Crud
+        if ($m.Groups['crud'].Success) { $letters = $m.Groups['crud'].Value }
+        if ($letters -and $From) {
+            if ($parent) { Add-Crud $From $Rule.Kind $parent (ConvertTo-Key $parent) $letters } else { Add-Crud $From $Rule.Kind $id (ConvertTo-Key $id) $letters }
+        }
         if (-not $refSeen.Add(('{0}|{1}|{2}|{3}|{4}' -f $Rule.Kind, $key, $Place.Path, $Place.Sheet, $Place.Cell))) { continue }
-        $refs.Add([pscustomobject]@{ Rule = $Rule; Kind = $Rule.Kind; Shown = $shown; Key = $key; Parent = $parent; ParentKey = (ConvertTo-Key $parent); Raw = $Text; Place = $Place })
+        $refs.Add([pscustomobject]@{ Rule = $Rule; Kind = $Rule.Kind; Shown = $shown; Key = $key; Parent = $parent; ParentKey = (ConvertTo-Key $parent); Raw = $Text; Place = $Place; Attrs = $Attrs })
     }
 }
 
@@ -280,8 +337,10 @@ function Read-References {
                 $from = $fromLabel
                 if ($fromCol) { $from = [string]$dr.Cells[$fromCol] }
                 if ($Rule.Column) { $cols = @($t.ColumnOf[$Rule.Column.Label]) } else { $cols = @($dr.Cells.Keys | Sort-Object) }
+                $attrs = $null
+                if ($Rule.Attributes.Count -gt 0) { $attrs = Get-RowAttributes $Rule $t $dr }
                 foreach ($col in $cols) {
-                    if ($dr.Cells.ContainsKey($col)) { Add-Reference $Rule ([string]$dr.Cells[$col]) $from $Book $s $dr.Row $col }
+                    if ($dr.Cells.ContainsKey($col)) { Add-Reference $Rule ([string]$dr.Cells[$col]) $from $Book $s $dr.Row $col $attrs }
                 }
             }
         }
@@ -307,6 +366,66 @@ foreach ($bookPath in $bookPaths) {
             Write-Warning ("{0}: {1}の定義（{2}）が見つかりません" -f $book.File, $rule.Kind, $what)
         }
     }
+}
+
+# ---------------------------------------------------------------- 影響調査（-Where）
+
+
+if ($Where) {
+    #     指定した ID（カラム・テーブル・メッセージなど）の定義と、参照しているセルの一覧を出す（食い違いは確かめない）
+    $usages = New-Object System.Collections.Generic.List[object]
+    foreach ($w in $Where) {
+        $pattern = ConvertTo-Key $w
+        # 「T_ORDER」のように親（テーブル）だけを指定したときは、そのカラムの参照（T_ORDER.ORDER_NO など）も含める
+        $isParent = $pattern.IndexOf('.') -lt 0
+        $before = $usages.Count
+        $items = New-Object System.Collections.Generic.List[object]
+        # 同じ定義が何行にも書かれているもの（コード区分など）は最初の行だけ
+        $seenDefs = @{}
+        foreach ($d in $defs) {
+            if ($d.Key -notlike $pattern) { continue }
+            $dk = '{0}|{1}|{2}' -f $d.Section, $d.Kind, $d.Key
+            if ($seenDefs.ContainsKey($dk)) { continue }
+            $seenDefs[$dk] = $true
+            $items.Add(@($d.Kind, $d.Shown, $d.Section, $d.Name, $d.Place))
+        }
+        foreach ($ref in $refs) {
+            if ($ref.Key -like $pattern -or ($isParent -and $ref.ParentKey -and $ref.ParentKey -like $pattern)) { $items.Add(@($ref.Kind, $ref.Shown, '参照', $ref.Raw, $ref.Place)) }
+        }
+        foreach ($it in $items) {
+            $pl = $it[4]
+            $u = [pscustomobject]@{
+                Target = $w; Kind = $it[0]; Id = $it[1]; Usage = $it[2]; Text = $it[3]
+                File = $pl.File; Location = ('{0}!{1}' -f $pl.Sheet, $pl.Cell); Sheet = $pl.Sheet; Cell = $pl.Cell; Path = $pl.Path; SheetIndex = $pl.SheetIndex; Row = $pl.Row; Col = $pl.Col
+            }
+            $u.PSObject.TypeNames.Insert(0, 'DesignConsistency.Usage')
+            $usages.Add($u)
+        }
+        if ($usages.Count -eq $before) { Write-Warning ("「{0}」の定義も参照も見つかりません" -f $w) }
+    }
+    $usageOrder = @{ '定義' = 0; '一覧' = 1; '参照' = 2 }
+    $sortedUsages = @($usages | Sort-Object @{ e = { $_.Target } }, @{ e = { $usageOrder[$_.Usage] } }, @{ e = { $_.File } }, @{ e = { $_.SheetIndex } }, @{ e = { $_.Row } }, @{ e = { $_.Col } })
+    $sortedUsages
+    if ($OutXlsx) {
+        $rows = New-Object System.Collections.Generic.List[object]
+        foreach ($u in $sortedUsages) {
+            $rows.Add(@{ Values = @($u.Target, $u.File, $u.Usage, $u.Location, $u.Id, $u.Text); Link = @{ Column = 3; Path = $u.Path; Location = ("'{0}'!{1}" -f $u.Sheet.Replace("'", "''"), $u.Cell) } })
+        }
+        try {
+            Export-Workbook -FilePath $OutXlsx -Sheets @(@{ Name = '影響範囲'; Columns = @(@{ Header = '調べた ID'; Width = 24 }, @{ Header = 'ファイル'; Width = 36 }, @{ Header = '種類'; Width = 7 }, @{ Header = '場所'; Width = 22 }, @{ Header = 'ID'; Width = 26 }, @{ Header = '内容'; Width = 60 }); Rows = $rows })
+        }
+        catch {
+            Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
+            $OutXlsx = $null
+        }
+    }
+    Write-Host ''
+    foreach ($g in @($sortedUsages | Group-Object Target)) {
+        $count = { param($kind) @($g.Group | Where-Object Usage -eq $kind).Count }
+        Write-Host ('{0}: 定義 {1} か所・一覧 {2} か所・参照 {3} か所（{4} ファイル）' -f $g.Name, (& $count '定義'), (& $count '一覧'), (& $count '参照'), @($g.Group | ForEach-Object { $_.Path } | Select-Object -Unique).Count)
+    }
+    if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
+    return
 }
 
 # ---------------------------------------------------------------- 突き合わせる
@@ -437,6 +556,61 @@ foreach ($kind in $kinds) {
     }
 }
 
+function Get-Digits {
+    #     桁数の数（「12」「11,2」「10桁」など。無ければ $null）
+    param([string] $Text)
+    $m = [regex]::Match(([string]$Text).Normalize($nfkc), '^\s*(\d+)')
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+    return $null
+}
+
+function Test-Flag {
+    #     必須などの印（○・Y・1 など）が付いているか
+    param([string] $Text)
+    return (([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant() -replace '\s', '') -match '^(○|◯|〇|●|Y|YES|1|TRUE|必須|NOTNULL)$'
+}
+
+function Test-Attributes {
+    #     参照（画面項目・IF の項目・外部キーなど）と、参照先の定義（カラム）の属性（ルールの「属性」）を比べる
+    param($Ref, $Def)
+    $ra = $Ref.Attrs; $da = $Def.Attrs
+    # 「入出力」のある参照（画面項目）は入力（I）の項目だけ、無い参照（IF の項目など）はカラムの値を読む側として確かめる
+    $hasIo = $ra.ContainsKey('入出力')
+    $isInput = $hasIo -and (([string]$ra['入出力']).Normalize($nfkc) -match 'I|入')
+    if ($ra['型'] -and $da['型'] -and (ConvertTo-Key $ra['型']) -ne (ConvertTo-Key $da['型'])) {
+        Add-Issue '警告' '属性の違い' ('型が「{0}」ですが、{1} は「{2}」です' -f $ra['型'], $Def.Shown, $da['型']) $Ref.Place
+    }
+    foreach ($n in @('桁数', '小数')) {
+        if (-not $ra.ContainsKey($n) -or -not $da.ContainsKey($n)) { continue }
+        $a = Get-Digits $ra[$n]; $b = Get-Digits $da[$n]
+        if ($null -eq $a -or $null -eq $b -or $a -eq $b) { continue }
+        # 表示だけの項目は、編集（カンマ・日付の区切りなど）で長くなることがあるので、長いほうは見ない
+        if ($hasIo -and -not $isInput -and $a -gt $b) { continue }
+        $tail = ''
+        if ($isInput -and $a -gt $b) { $tail = '（入力した値がカラムに入りきりません）' }
+        Add-Issue '警告' '属性の違い' ('{0}が {1} ですが、{2} は {3} です{4}' -f $n, $a, $Def.Shown, $b, $tail) $Ref.Place
+    }
+    if ($ra.ContainsKey('必須') -and $da.ContainsKey('必須')) {
+        $refRequired = Test-Flag $ra['必須']; $defRequired = Test-Flag $da['必須']
+        # 入力が任意の項目は、その画面がテーブルを登録・更新する（使用テーブルの CRUD に C・U がある）ときだけ確かめる（検索条件などを除くため）
+        $writes = $false
+        $owner = $fileOwner[$Ref.Place.Path]
+        if ($owner -and $Ref.ParentKey -and $script:Crud.Contains($owner) -and $script:Crud[$owner].Targets.ContainsKey($Ref.ParentKey)) {
+            $writes = $script:Crud[$owner].Targets[$Ref.ParentKey].Letters -match '[CU]'
+        }
+        if ($isInput -and $writes -and -not $refRequired -and $defRequired -and -not $da['既定値']) {
+            Add-Issue '警告' '属性の違い' ('入力が任意ですが、{0} は必須で既定値がありません（未入力では登録できません）' -f $Def.Shown) $Ref.Place
+        }
+        elseif (-not $hasIo -and $refRequired -and -not $defRequired) {
+            Add-Issue '警告' '属性の違い' ('必須の項目ですが、{0} は必須ではありません（値が無いことがあります）' -f $Def.Shown) $Ref.Place
+        }
+    }
+}
+
+# ファイル → そのファイルで定義している画面・IF などの ID（CRUD 図の行）
+$fileOwner = @{}
+foreach ($d in $defs) { if ($d.Section -eq '定義' -and $d.Unit -eq 'ファイル' -and -not $fileOwner.ContainsKey($d.Place.Path)) { $fileOwner[$d.Place.Path] = $d.Key } }
+
 # 参照先なし: 参照している ID が、どの設計書にも定義されていない
 $unchecked = [ordered]@{}
 $missingCount = @{}
@@ -465,6 +639,36 @@ foreach ($ref in $refs) {
     if (-not [string]::Equals($original, $d.Shown, [System.StringComparison]::Ordinal)) {
         Add-Issue '情報' '表記の違い' ('「{0}」は、定義では「{1}」と書かれています（全角・半角や大文字・小文字）' -f $original, $d.Shown) $ref.Place
     }
+    if ($ref.Attrs -and $d.Attrs) { Test-Attributes $ref $d }
+}
+
+# 未使用: どこからも参照されていない定義（ルールの「未使用」が「確認」の種類だけ）。
+# 子の種類（カラムの親はテーブル）への参照があれば、親の定義も使っているとみなす
+$parentKindOf = @{}
+foreach ($r in $ruleList) {
+    if ($r.Section -ne '定義' -or -not $r.Parent) { continue }
+    $p = @($ruleList | Where-Object { $_.Section -eq '定義' -and $_.Kind -ne $r.Kind -and $_.Column.Label -eq $r.Parent.Label })[0]
+    if ($p) { $parentKindOf[$r.Kind] = $p.Kind }
+}
+$used = @{}
+foreach ($ref in $refs) {
+    $used['{0}|{1}' -f $ref.Kind, $ref.Key] = $true
+    if ($ref.ParentKey -and $parentKindOf.ContainsKey($ref.Kind)) { $used['{0}|{1}' -f $parentKindOf[$ref.Kind], $ref.ParentKey] = $true }
+}
+# 参照を探した種類（参照のルールに当てはまる設計書があったもの）だけを確かめる
+$searched = @{}
+foreach ($r in $ruleList) {
+    if ($r.Section -ne '参照' -or -not $r.Found) { continue }
+    $searched[$r.Kind] = $true
+    if ($parentKindOf.ContainsKey($r.Kind)) { $searched[$parentKindOf[$r.Kind]] = $true }
+}
+$reportedUnused = @{}
+foreach ($d in $defs) {
+    if ($d.Section -ne '定義' -or -not $d.Rule.CheckUnused -or -not $searched.ContainsKey($d.Kind)) { continue }
+    $uk = '{0}|{1}' -f $d.Kind, $d.Key
+    if ($used.ContainsKey($uk) -or $reportedUnused.ContainsKey($uk)) { continue }
+    $reportedUnused[$uk] = $true
+    Add-Issue '情報' '未使用' ('{0}「{1} {2}」は、どこからも参照されていません' -f $d.Kind, $d.Shown, $d.Name).Replace(' 」', '」') $d.Place
 }
 foreach ($k in $unchecked.Keys) {
     Add-Issue '情報' '未確認' ('{0}の定義が見つからないため、{0}の参照（{1} か所）は確かめていません' -f $k, $unchecked[$k]) $null
@@ -513,6 +717,35 @@ foreach ($kind in $kinds) {
     $stats.Add([pscustomobject]@{ Kind = $kind; Defined = $defKeys; Listed = $listKeys; References = $refCount; Missing = $missing; Checked = $index.ContainsKey($kind) })
 }
 
+function Get-CrudSheet {
+    #     CRUD 図のシート（行: 画面・IF、列: テーブル。C 登録・R 参照・U 更新・D 削除）
+    $names = @{}
+    foreach ($d in $defs) { if ($d.Section -eq '定義' -and -not $names.ContainsKey($d.Key)) { $names[$d.Key] = $d.Name } }
+    $targets = [ordered]@{}
+    foreach ($k in @($script:Crud.Values | ForEach-Object { $_.Targets.Keys } | Sort-Object -Unique)) {
+        $t = @($script:Crud.Values | Where-Object { $_.Targets.ContainsKey($k) })[0].Targets[$k]
+        $targets[$k] = $t.Shown
+    }
+    $columns = @(@{ Header = '画面・IF'; Width = 12 }, @{ Header = '名前'; Width = 20 })
+    foreach ($k in $targets.Keys) {
+        $header = $targets[$k]
+        if ($names[$k]) { $header = '{0}（{1}）' -f $targets[$k], $names[$k] }
+        $columns += @{ Header = $header; Width = 10 }
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($fk in @($script:Crud.Keys | Sort-Object)) {
+        $entry = $script:Crud[$fk]
+        $values = @($entry.Shown, [string]$names[$fk])
+        foreach ($k in $targets.Keys) {
+            $letters = ''
+            if ($entry.Targets.ContainsKey($k)) { $l = $entry.Targets[$k].Letters; $letters = -join @('C', 'R', 'U', 'D' | Where-Object { $l.Contains($_) }) }
+            $values += $letters
+        }
+        $rows.Add(@{ Values = $values })
+    }
+    return @{ Name = 'CRUD'; Columns = $columns; Rows = $rows }
+}
+
 if ($OutXlsx) {
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($i in $sorted) {
@@ -526,10 +759,12 @@ if ($OutXlsx) {
         if (-not $s.Checked) { $missing = '（定義なし）' }
         $statRows.Add(@{ Values = @($s.Kind, [double]$s.Defined, [double]$s.Listed, [double]$s.References, $missing) })
     }
+    $sheets = @(
+        @{ Name = '指摘一覧'; Columns = @(@{ Header = 'ファイル'; Width = 36 }, @{ Header = '区分'; Width = 7 }, @{ Header = '項目'; Width = 16 }, @{ Header = '場所'; Width = 22 }, @{ Header = '内容'; Width = 90 }); Rows = $rows },
+        @{ Name = '定義と参照'; Columns = @(@{ Header = '種類'; Width = 14 }, @{ Header = '定義'; Width = 8 }, @{ Header = '一覧'; Width = 8 }, @{ Header = '参照'; Width = 8 }, @{ Header = '参照先なし'; Width = 12 }); Rows = $statRows })
+    if ($script:Crud.Count -gt 0) { $sheets += Get-CrudSheet }
     try {
-        Export-Workbook -FilePath $OutXlsx -Sheets @(
-            @{ Name = '指摘一覧'; Columns = @(@{ Header = 'ファイル'; Width = 36 }, @{ Header = '区分'; Width = 7 }, @{ Header = '項目'; Width = 16 }, @{ Header = '場所'; Width = 22 }, @{ Header = '内容'; Width = 90 }); Rows = $rows },
-            @{ Name = '定義と参照'; Columns = @(@{ Header = '種類'; Width = 14 }, @{ Header = '定義'; Width = 8 }, @{ Header = '一覧'; Width = 8 }, @{ Header = '参照'; Width = 8 }, @{ Header = '参照先なし'; Width = 12 }); Rows = $statRows })
+        Export-Workbook -FilePath $OutXlsx -Sheets $sheets
     }
     catch {
         Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
@@ -542,7 +777,10 @@ $defText = @($stats | Where-Object { $_.Defined -gt 0 } | ForEach-Object { '{0} 
 if (-not $defText) { $defText = 'なし' }
 Write-Host ('{0} ファイルを読みました（定義: {1} / 参照: {2} か所）' -f $books.Count, $defText, $refs.Count)
 Write-Host ('エラー {0} 件 / 警告 {1} 件 / 情報 {2} 件' -f @($script:Issues | Where-Object Level -eq 'エラー').Count, @($script:Issues | Where-Object Level -eq '警告').Count, @($script:Issues | Where-Object Level -eq '情報').Count)
-if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
+if ($OutXlsx) {
+    Write-Host "結果を保存しました: $OutXlsx"
+    if ($script:Crud.Count -gt 0) { Write-Host ('CRUD 図（CRUD シート）: 画面・IF {0} 件 × テーブル {1} 件' -f $script:Crud.Count, @($script:Crud.Values | ForEach-Object { $_.Targets.Keys } | Sort-Object -Unique).Count) }
+}
 
 # .SYNOPSIS
 #     設計書どうしの参照の食い違い（定義されていない ID、重複した定義、一覧との過不足など）を見つけます（Excel 不要。ファイルは変更しません）。
@@ -556,17 +794,23 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       一覧との違い     画面一覧・テーブル一覧と設計書の過不足、名前の違い（警告）
 #       ヘッダの違い     1 つのファイルの中でシートによって画面ID・画面名が違う、ファイル名・シート名の ID と違う（警告）
 #       組み合わせの違い 画面遷移の一覧とイベント定義の遷移先など、同じ組み合わせを書く場所どうしの過不足（警告）
+#       属性の違い       画面項目・IF の項目・外部キーと、参照先のカラムの桁数・型が違う。入力が任意なのにカラムが
+#                        必須で既定値が無い（登録・更新する画面だけ）。IF の必須の項目なのにカラムが必須でない（警告）
 #       表記の違い       参照の ID の全角・半角、大文字・小文字が定義と違う（情報）
+#       未使用           どこからも参照されていないメッセージ・コード区分・テーブル（ルールの「未使用」が「確認」の種類。情報）
 #       未確認           定義が見つからない種類の参照（設計書がフォルダに無いなど。情報）
 #
 #     結果は 1 指摘 1 行のオブジェクトで出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
+#     -OutXlsx には、イベント定義の使用テーブル（T_ORDER(R,U) など）と IF の設定元から作った CRUD 図も入れます。
+#     -Where を付けると、食い違いは確かめずに、指定した ID の定義と参照している場所（影響範囲）を一覧にします。
 #
 # .PARAMETER Path
 #     設計書のフォルダまたはファイル（複数可・ワイルドカード可）。既定はカレントフォルダ。
 #     参照先の設計書（テーブル定義書・メッセージ一覧など）も含めて指定してください。
 #
 # .PARAMETER Rules
-#     参照のルールの CSV（区分・種類・ファイル名・シート名・見出し・列・名前・親・元・書き方・重複）。
+#     参照のルールの CSV（区分・種類・ファイル名・シート名・見出し・列・名前・親・元・書き方・重複・属性・未使用・CRUD。
+#     属性・未使用・CRUD の列は無くてもかまいません）。
 #     既定は tools\consistency\参照のルール.csv。社内の設計書の書式に合わせて直して使えます。
 #
 # .PARAMETER Exclude
@@ -578,14 +822,24 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .PARAMETER NoExcel
 #     Excel を起動しません（.xls / .xlsb は読まなくなります）。
 #
+# .PARAMETER Where
+#     影響調査: 指定した ID（T_ORDER.DELIVERY_TIME_KBN・E0001・C005 など。複数可・ワイルドカード可）の定義と、
+#     参照しているセルを一覧にします（食い違いは確かめません）。テーブルだけ（T_ORDER）を指定すると、
+#     そのカラムの参照（T_ORDER.ORDER_NO など）も含めます。Compare-Excel.ps1 で変わったカラムを渡せば、直すべき画面・IF が分かります。
+#
 # .PARAMETER OutXlsx
-#     結果を xlsx に保存します（指摘一覧と、種類ごとの定義・参照の数。場所をクリックすると該当セルが開きます）。
+#     結果を xlsx に保存します（指摘一覧、種類ごとの定義・参照の数、CRUD 図。場所をクリックすると該当セルが開きます）。
+#     -Where を付けたときは、影響範囲の一覧を保存します。
 #
 # .EXAMPLE
 #     .\Test-DesignConsistency.ps1 D:\設計書
 #
 # .EXAMPLE
 #     .\Test-DesignConsistency.ps1 D:\設計書 -Exclude '^EXT_' -OutXlsx D:\整合性チェック.xlsx
+#
+# .EXAMPLE
+#     # カラムの桁数を変える前に、使っている画面・IF を調べる
+#     .\Test-DesignConsistency.ps1 D:\設計書 -Where 'T_ORDER.DELIVERY_TIME_KBN'
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに ExcelTools.psm1 と Search-Excel.ps1 が必要です。
