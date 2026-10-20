@@ -15,8 +15,8 @@ param(
     [switch] $SimpleMatch,
     [switch] $CaseSensitive,
 
-    [ValidateSet('Value', 'Formula', 'Comment', 'Shape')]
-    [string[]] $Target = @('Value', 'Comment', 'Shape'),
+    [ValidateSet('Value', 'Formula', 'Comment', 'Shape', 'HeaderFooter', 'Validation')]
+    [string[]] $Target = @('Value', 'Comment', 'Shape', 'HeaderFooter', 'Validation'),
 
     [switch] $NoRecurse,
     [switch] $SkipHiddenSheets,
@@ -41,6 +41,8 @@ $wantValue   = $Target -contains 'Value'
 $wantFormula = $Target -contains 'Formula'
 $wantComment = $Target -contains 'Comment'
 $wantShape   = $Target -contains 'Shape'
+$wantHeaderFooter = $Target -contains 'HeaderFooter'
+$wantValidation   = $Target -contains 'Validation'
 
 $regexOptions = [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
 if (-not $CaseSensitive) { $regexOptions = $regexOptions -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase }
@@ -99,8 +101,6 @@ if ($OutXlsx) {
 Update-TypeData -TypeName 'ReplaceExcel.Item' -DefaultDisplayPropertySet File, Location, Kind, Result, Change -Force -WhatIf:$false
 
 $xmlNs = 'http://www.w3.org/XML/1998/namespace'
-# workbook.xml の子要素のうち、calcPr より後ろに置くもの（スキーマで順序が決まっている）
-$afterCalcPr = 'oleSize|customWorkbookViews|pivotCaches|smartTagPr|smartTagTypes|webPublishing|fileRecoveryPr|webPublishObjects|extLst'
 
 # ---------------------------------------------------------------- 文字の置換
 
@@ -121,6 +121,12 @@ function Invoke-TextReplace {
     $after = -join @($nodes | ForEach-Object { $_.InnerText })
     if ($after -ceq $before) { return $null }
     return @($before, $after)
+}
+
+function Invoke-StringReplace {
+    #     文字列に置換の規則を当てる。返り値: 置換したら @(置換前, 置換後)、一致しなければ $null
+    param([string] $Text)
+    return Invoke-TextReplace @([pscustomobject]@{ InnerText = $Text })
 }
 
 function Test-AnyRuleMatch {
@@ -191,6 +197,148 @@ function Invoke-RichTextReplace {
     if ($null -eq $res) { return $null }
     foreach ($ph in @($Element.SelectNodes("*[local-name()='rPh']"))) { [void]$Element.RemoveChild($ph) }
     return $res
+}
+
+function Get-SheetCells {
+    #     シートのセルを、番地・行・列と合わせて順に返す（r 属性を省略するツールで作られたファイル向けに位置を数える）
+    param([System.Xml.XmlDocument] $Doc)
+    $list = New-Object System.Collections.Generic.List[object]
+    $rowNo = 0
+    foreach ($row in $Doc.SelectNodes("//*[local-name()='sheetData']/*[local-name()='row']")) {
+        $r = $row.GetAttribute('r')
+        if ($r) { $rowNo = [int]$r } else { $rowNo++ }
+        $colNo = 0
+        foreach ($c in $row.SelectNodes("*[local-name()='c']")) {
+            $ref = $c.GetAttribute('r')
+            if ($ref) { $colNo = Get-ColumnIndex $ref }
+            else { $colNo++; $ref = (ConvertTo-ColumnName $colNo) + $rowNo }
+            $list.Add([pscustomobject]@{ Ref = $ref; Row = $rowNo; Col = $colNo; Cell = $c })
+        }
+    }
+    return , $list
+}
+
+function Update-SharedFormulas {
+    #     共有数式（Excel が数式をコピーしたときの保存形式。先頭のセルにだけ数式があり、写しのセルはそれを位置に合わせてずらして使う）を置換する。
+    #     写しのセルも、それぞれの位置の数式で置換する。置換した後も「先頭の数式をずらしたもの」になっていれば先頭の数式だけを書き換え、
+    #     一部のセルだけが変わるときなどは、各セルに数式を書いて共有をやめる。
+    #     返り値: 共有数式のセル番地 → 置換したら @(置換前, 置換後)、変わらなければ $null
+    param($Cells)
+
+    $groups = [ordered]@{}
+    foreach ($x in $Cells) {
+        $f = $x.Cell.SelectSingleNode("*[local-name()='f']")
+        if (-not $f -or $f.GetAttribute('t') -ne 'shared' -or -not $f.GetAttribute('si')) { continue }
+        $si = $f.GetAttribute('si')
+        if (-not $groups.Contains($si)) { $groups[$si] = New-Object System.Collections.Generic.List[object] }
+        $groups[$si].Add([pscustomobject]@{ Ref = $x.Ref; Row = $x.Row; Col = $x.Col; F = $f; Text = $f.InnerText; New = $null })
+    }
+
+    $result = @{}
+    foreach ($members in $groups.Values) {
+        foreach ($m in $members) { $result[$m.Ref] = $null }
+        $master = @($members | Where-Object { $_.Text })[0]
+        # 先頭の数式が無い（壊れた）ものは変えない
+        if (-not $master) { continue }
+        $changed = $false
+        foreach ($m in $members) {
+            if ($m -ne $master) { $m.Text = Move-FormulaReference $master.Text ($m.Row - $master.Row) ($m.Col - $master.Col) }
+            $m.New = $m.Text
+            $res = Invoke-StringReplace $m.Text
+            if ($res) { $m.New = $res[1]; $result[$m.Ref] = $res; $changed = $true }
+        }
+        if (-not $changed) { continue }
+        $keep = $true
+        foreach ($m in $members) {
+            if ((Move-FormulaReference $master.New ($m.Row - $master.Row) ($m.Col - $master.Col)) -cne $m.New) { $keep = $false; break }
+        }
+        if ($keep) { $master.F.InnerText = $master.New; continue }
+        foreach ($m in $members) {
+            $m.F.InnerText = $m.New
+            foreach ($a in @('t', 'si', 'ref')) { $m.F.RemoveAttribute($a) }
+        }
+    }
+    return $result
+}
+
+function Update-HeaderFooter {
+    #     ヘッダー・フッターの文字を置換する（書式（&"フォント" など）と、ページ番号などの項目はそのまま。項目をまたぐ一致は置換しない）。
+    #     返り値: 置換した位置ごとの @{ Name; Before; After }
+    param([System.Xml.XmlDocument] $Doc, [string] $FileName, [string] $SheetName)
+
+    $result = New-Object System.Collections.Generic.List[object]
+    foreach ($hf in @($Doc.SelectNodes("//*[local-name()='headerFooter']/*"))) {
+        $label = Get-HeaderFooterName $hf.LocalName
+        if (-not $label -or -not $hf.InnerText) { continue }
+        $tokens = Split-HeaderFooterText $hf.InnerText
+        $before = Get-HeaderFooterSections $tokens
+        # 位置の指定・項目で区切った、文字の並びごとに置換する
+        $runs = New-Object System.Collections.Generic.List[object]
+        $run = New-Object System.Collections.Generic.List[object]
+        foreach ($t in $tokens) {
+            if ($t.Kind -eq 'Text') { $run.Add($t) }
+            elseif ($t.Kind -eq 'Section' -or $t.Kind -eq 'Field') {
+                if ($run.Count -gt 0) { $runs.Add($run); $run = New-Object System.Collections.Generic.List[object] }
+            }
+        }
+        if ($run.Count -gt 0) { $runs.Add($run) }
+        $changed = $false
+        foreach ($r in $runs) { if (Invoke-TextReplace $r.ToArray()) { $changed = $true } }
+        if (-not $changed) { continue }
+        $text = Join-HeaderFooterText $tokens
+        if ($text.Length -gt 255) {
+            # ヘッダー・フッターは 255 文字まで（超えると Excel が開くときに修復する）
+            Write-Warning ("{0}: シート「{1}」の{2}は、置換すると 255 文字を超えるため置換しません。" -f $FileName, $SheetName, $label)
+            continue
+        }
+        $after = Get-HeaderFooterSections $tokens
+        foreach ($key in @('L', 'C', 'R')) {
+            $b = [string](@($before | Where-Object { $_.Key -eq $key }) | ForEach-Object { $_.Text })
+            $a = [string](@($after | Where-Object { $_.Key -eq $key }) | ForEach-Object { $_.Text })
+            if ($a -cne $b) {
+                $section = @{ L = '左'; C = '中央'; R = '右' }[$key]
+                $result.Add([pscustomobject]@{ Name = ('{0}（{1}）' -f $label, $section); Before = $b; After = $a })
+            }
+        }
+        $hf.InnerText = $text
+    }
+    return , $result
+}
+
+function Update-DataValidations {
+    #     入力規則のリスト（"未着手,完了" のように直接書いたもの）と、入力時・エラーのメッセージを置換する。
+    #     ほかのシートの範囲を参照するリストや条件の数式は、-Target Formula のときだけ置換する。
+    #     返り値: 置換した箇所ごとの @{ Cell; Name; Before; After }
+    param([System.Xml.XmlDocument] $Doc, [string] $FileName, [string] $SheetName)
+
+    $result = New-Object System.Collections.Generic.List[object]
+    foreach ($dv in @($Doc.SelectNodes("//*[local-name()='dataValidation']"))) {
+        $range = Get-ValidationRange $dv
+        $first = ($range -split '[\s:]')[0]
+        foreach ($v in (Get-ValidationTexts $dv)) {
+            $isFormula = -not $v.IsList -and -not $v.Attribute
+            if (($isFormula -and -not $wantFormula) -or (-not $isFormula -and -not $wantValidation)) { continue }
+            $text = $v.Text
+            if ($isFormula) { $text = $text.Substring(1) }
+            $res = Invoke-StringReplace $text
+            if (-not $res) { continue }
+            $new = $res[1]
+            if ($v.IsList) {
+                # 直接書いたリストは 255 文字まで（超えると Excel が開くときに修復する）
+                if ($new.Length -gt 255) {
+                    Write-Warning ("{0}: 入力規則のリスト（{1}!{2}）は、置換すると 255 文字を超えるため置換しません。" -f $FileName, $SheetName, $range)
+                    continue
+                }
+                $v.Node.InnerText = '"' + $new.Replace('"', '""') + '"'
+            }
+            elseif ($v.Attribute) { $v.Node.SetAttribute($v.Attribute, $new) }
+            else { $v.Node.InnerText = $new }
+            $before = $res[0]; $after = $new
+            if ($isFormula) { $before = '=' + $before; $after = '=' + $after }
+            $result.Add([pscustomobject]@{ Cell = $first; Name = ('{0}（{1}）' -f $v.Name, $range); Before = $before; After = $after })
+        }
+    }
+    return , $result
 }
 
 function Get-TableHeaderCells {
@@ -343,44 +491,47 @@ function Get-ReplacePlan {
             if ($null -eq $entry) { continue }
             $sr = New-Object System.IO.StreamReader($entry.Open())
             try { $raw = $sr.ReadToEnd() } finally { $sr.Dispose() }
-            $needSheet = $repoint.ContainsKey($sh.Part) -or ($wantValue -and $raw.Contains('inlineStr')) -or ($wantFormula -and $raw -match '<(\w+:)?f[ >]')
+            $needSheet = $repoint.ContainsKey($sh.Part) -or ($wantValue -and $raw.Contains('inlineStr')) -or ($wantFormula -and $raw -match '<(\w+:)?f[ >]') -or
+                ($wantHeaderFooter -and $raw -match '<(\w+:)?(odd|even|first)(Header|Footer)>') -or (($wantValidation -or $wantFormula) -and $raw -match '<(\w+:)?dataValidation[ >]')
             if ($needSheet) {
                 $doc = Read-PartXmlForEdit -Package $pkg -PartName $sh.Part
                 $map = $repoint[$sh.Part]
                 $edited = $false
-                $rowNo = 0
-                foreach ($row in $doc.SelectNodes("//*[local-name()='sheetData']/*[local-name()='row']")) {
-                    $r = $row.GetAttribute('r')
-                    if ($r) { $rowNo = [int]$r } else { $rowNo++ }
-                    $colNo = 0
-                    foreach ($c in $row.SelectNodes("*[local-name()='c']")) {
-                        # r 属性を省略するツールで作られたファイル向けに位置を数える
-                        $ref = $c.GetAttribute('r')
-                        if ($ref) { $colNo = Get-ColumnIndex $ref }
-                        else { $colNo++; $ref = (ConvertTo-ColumnName $colNo) + $rowNo }
-                        if ($map -and $map.ContainsKey($ref)) {
-                            $v = $c.SelectSingleNode("*[local-name()='v']")
-                            $v.InnerText = [string]$map[$ref]
-                            $edited = $true
+                $cells = Get-SheetCells $doc
+                $shared = @{}
+                if ($wantFormula) { $shared = Update-SharedFormulas $cells }
+                foreach ($x in $cells) {
+                    $c = $x.Cell; $ref = $x.Ref
+                    if ($map -and $map.ContainsKey($ref)) {
+                        $v = $c.SelectSingleNode("*[local-name()='v']")
+                        $v.InnerText = [string]$map[$ref]
+                        $edited = $true
+                    }
+                    if ($wantValue -and $c.GetAttribute('t') -eq 'inlineStr') {
+                        $is = $c.SelectSingleNode("*[local-name()='is']")
+                        if ($is -and $sh.Headers.ContainsKey($ref)) {
+                            if (Test-AnyRuleMatch $is.InnerText) { $skippedHeaders.Add(('{0}!{1}' -f $sh.Name, $ref)) }
                         }
-                        if ($wantValue -and $c.GetAttribute('t') -eq 'inlineStr') {
-                            $is = $c.SelectSingleNode("*[local-name()='is']")
-                            if ($is -and $sh.Headers.ContainsKey($ref)) {
-                                if (Test-AnyRuleMatch $is.InnerText) { $skippedHeaders.Add(('{0}!{1}' -f $sh.Name, $ref)) }
-                            }
-                            elseif ($is) {
-                                $res = Invoke-RichTextReplace $is
-                                if ($res) { $items.Add((New-ReplaceItem $sh.Name $ref '値' $res[0] $res[1])); $edited = $true }
-                            }
-                        }
-                        if ($wantFormula) {
-                            $f = $c.SelectSingleNode("*[local-name()='f']")
-                            if ($f -and $f.InnerText) {
-                                $res = Invoke-TextReplace @($f)
-                                if ($res) { $items.Add((New-ReplaceItem $sh.Name $ref '数式' ('=' + $res[0]) ('=' + $res[1]))); $edited = $true; $formulaChanged = $true }
-                            }
+                        elseif ($is) {
+                            $res = Invoke-RichTextReplace $is
+                            if ($res) { $items.Add((New-ReplaceItem $sh.Name $ref '値' $res[0] $res[1])); $edited = $true }
                         }
                     }
+                    if ($wantFormula) {
+                        $res = $null
+                        if ($shared.ContainsKey($ref)) { $res = $shared[$ref] }
+                        else {
+                            $f = $c.SelectSingleNode("*[local-name()='f']")
+                            if ($f -and $f.InnerText) { $res = Invoke-TextReplace @($f) }
+                        }
+                        if ($res) { $items.Add((New-ReplaceItem $sh.Name $ref '数式' ('=' + $res[0]) ('=' + $res[1]))); $edited = $true; $formulaChanged = $true }
+                    }
+                }
+                if ($wantHeaderFooter) {
+                    foreach ($h in (Update-HeaderFooter $doc ([System.IO.Path]::GetFileName($FilePath)) $sh.Name)) { $items.Add((New-ReplaceItem $sh.Name $null 'ヘッダー・フッター' $h.Before $h.After $h.Name)); $edited = $true }
+                }
+                if ($wantValidation -or $wantFormula) {
+                    foreach ($v in (Update-DataValidations $doc ([System.IO.Path]::GetFileName($FilePath)) $sh.Name)) { $items.Add((New-ReplaceItem $sh.Name $v.Cell '入力規則' $v.Before $v.After $v.Name)); $edited = $true }
                 }
                 if ($edited) { $changes[$sh.Part.ToLowerInvariant()] = ConvertTo-XmlString $doc }
             }
@@ -458,22 +609,7 @@ function Get-ReplacePlan {
             $entry = Get-PackageEntry -Package $pkg -PartName $wbPart
             $sr = New-Object System.IO.StreamReader($entry.Open())
             try { $wbXml = $sr.ReadToEnd() } finally { $sr.Dispose() }
-            $px = [regex]::Match($wbXml, '<(\w+:)?workbook\b').Groups[1].Value
-            $calc = [regex]::Match($wbXml, ('<{0}calcPr\b[^>]*?/?>' -f $px))
-            if ($calc.Success) {
-                $tag = $calc.Value
-                if ($tag -match '\sfullCalcOnLoad="[^"]*"') { $tag = $tag -replace '\sfullCalcOnLoad="[^"]*"', ' fullCalcOnLoad="1"' }
-                elseif ($tag.EndsWith('/>')) { $tag = $tag.Substring(0, $tag.Length - 2) + ' fullCalcOnLoad="1"/>' }
-                else { $tag = $tag.Substring(0, $tag.Length - 1) + ' fullCalcOnLoad="1">' }
-                $wbXml = $wbXml.Substring(0, $calc.Index) + $tag + $wbXml.Substring($calc.Index + $calc.Length)
-            }
-            else {
-                $after = [regex]::Match($wbXml, ('<{0}(?:{1})\b' -f $px, $afterCalcPr))
-                $at = $wbXml.LastIndexOf(('</{0}workbook>' -f $px))
-                if ($after.Success) { $at = $after.Index }
-                $wbXml = $wbXml.Substring(0, $at) + ('<{0}calcPr fullCalcOnLoad="1"/>' -f $px) + $wbXml.Substring($at)
-            }
-            $changes[$wbPart.ToLowerInvariant()] = $wbXml
+            $changes[$wbPart.ToLowerInvariant()] = Set-FullCalcOnLoad $wbXml
         }
     }
     finally { $pkg.Zip.Dispose() }
@@ -676,7 +812,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     複数の Excel ファイルの文字を一括で置換します（Excel 不要）。
 #
 # .DESCRIPTION
-#     Search-Excel.ps1 と同じ指定で、セルの値・コメント・図形の文字（-Target Formula で数式も）を置換します。
+#     Search-Excel.ps1 と同じ指定で、セルの値・コメント・図形の文字・ヘッダー／フッター・入力規則のリスト
+#     （-Target Formula で数式も）を置換します。
 #     システム名・版数・旧称の書き換えなどに使えます。
 #
 #     まず全ファイルを調べて置換する箇所を表示し、確認してから書き換えます（-WhatIf なら表示だけ、-Force なら確認なし）。
@@ -708,8 +845,12 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     英字の大文字と小文字を区別します。
 #
 # .PARAMETER Target
-#     置換する対象。Value（セルの文字列）/ Formula（数式）/ Comment（コメント）/ Shape（図形の文字）。
-#     既定は Value, Comment, Shape。数式を置換すると、開いたときに再計算されるようにします。
+#     置換する対象。Value（セルの文字列）/ Formula（数式）/ Comment（コメント）/ Shape（図形の文字）
+#     / HeaderFooter（ヘッダー・フッター）/ Validation（入力規則のリストとメッセージ）。
+#     既定は Formula 以外のすべて。数式を置換すると、開いたときに再計算されるようにします。
+#     共有数式（コピーした数式）は、写しのセルもそれぞれの位置の数式で置換します。一部のセルだけが変わるときは、
+#     各セルに数式を書いて共有をやめます。入力規則のうち、ほかのシートの範囲を参照するリストや条件の数式は
+#     Formula を指定したときに置換します。ヘッダー・フッターの書式（フォントなど）とページ番号などの項目はそのままです。
 #
 # .PARAMETER NoRecurse
 #     フォルダを指定したとき、サブフォルダを見ません。

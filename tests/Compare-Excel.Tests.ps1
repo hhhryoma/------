@@ -439,6 +439,36 @@ Test-Case 'Compare-Excel: -CheckHistory で、改訂履歴の追記漏れや改�
     Assert-Equal 0 @($diffs | Where-Object Kind -eq '改訂履歴').Count
 }
 
+Test-Case 'Compare-Excel: -OutHistory で、変更した行ごとの改訂履歴の下書きを CSV に保存する（版数・更新日などの欄は除く）' {
+    $dir = New-TestDir
+    # 表紙の版数・更新日（版を上げるたびに変わる欄）と、改訂履歴のシートの変更は下書きに入れない
+    $old = Join-Path $dir 'old.xlsx'; $new = Join-Path $dir 'new.xlsx'
+    New-SheetsBook $old ([ordered]@{ '表紙' = @(@('項目', '値'), @('版数', '1.0'), @('更新日', '2026/10/01'), @('システム名', '受注管理')); '改訂履歴' = @(@('版', '日付', '内容'), @('1.0', '2026/10/01', '新規作成')); 'T_ORDER' = @(@('No', '論理名', '物理名', '桁数'), @('1', '受注番号', 'ORDER_NO', '12'), @('2', '合計金額', 'TOTAL_AMOUNT', '9')) })
+    New-SheetsBook $new ([ordered]@{ '表紙' = @(@('項目', '値'), @('版数', '1.1'), @('更新日', '2026/10/12'), @('システム名', '販売管理')); '改訂履歴' = @(@('版', '日付', '内容'), @('1.0', '2026/10/01', '新規作成'), @('1.1', '2026/10/12', '')); 'T_ORDER' = @(@('No', '論理名', '物理名', '桁数'), @('1', '受注番号', 'ORDER_NO', '12'), @('2', '合計金額', 'TOTAL_AMOUNT', '11'), @('3', '配送時間帯', 'DELIVERY_TIME_KBN', '2')); 'T_ITEM' = @(@('No', '論理名'), @('1', '商品コード')) })
+    $csv = Join-Path $dir 'history.csv'
+    $null = Invoke-Compare @{ Old = $old; New = $new; OutHistory = $csv }
+    $rows = @(Import-Csv -LiteralPath $csv -Encoding UTF8)
+    Assert-Equal @(
+        'new.xlsx|表紙|システム名を 受注管理 → 販売管理 に変更|表紙!B4',
+        'new.xlsx|T_ORDER|合計金額（TOTAL_AMOUNT）: 桁数を 9 → 11 に変更|T_ORDER!D3',
+        'new.xlsx|T_ORDER|配送時間帯（DELIVERY_TIME_KBN）: 行を追加|T_ORDER!A4',
+        'new.xlsx|T_ITEM|シートを追加|T_ITEM') @($rows | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.'ファイル', $_.'改訂箇所', $_.'改訂内容', $_.'場所' })
+    Assert-Equal 'EF-BB-BF' ([System.BitConverter]::ToString([System.IO.File]::ReadAllBytes($csv), 0, 3)) 'BOM 付き'
+}
+
+Test-Case 'Compare-Excel: フォルダどうしでは、版数だけが違う名前のファイルを同じファイルとして比べる' {
+    $dir = New-TestDir
+    $oldDir = Join-Path $dir 'v1.0'; $newDir = Join-Path $dir 'v1.1'
+    $null = New-Item -ItemType Directory -Path $oldDir, $newDir
+    New-TableBook (Join-Path $oldDir 'DD03_テーブル定義書_v1.0.xlsx') @('論理名', '物理名', '桁数') @(, @('受注番号', 'ORDER_NO', '10'))
+    New-TableBook (Join-Path $newDir 'DD03_テーブル定義書_v1.1.xlsx') @('論理名', '物理名', '桁数') @(, @('受注番号', 'ORDER_NO', '12'))
+    New-TableBook (Join-Path $newDir 'DD04_コード定義書_v1.0.xlsx') @('区分', '名称') @(, @('C001', '受注区分'))
+    $csv = Join-Path $dir 'history.csv'
+    $diffs = Invoke-Compare @{ Old = $oldDir; New = $newDir; OutHistory = $csv }
+    Assert-Equal @('DD03_テーブル定義書_v1.1.xlsx|Data!C2|値|変更', 'DD04_コード定義書_v1.0.xlsx||ファイル|追加') (Get-DiffKeys $diffs)
+    Assert-Equal @('DD03_テーブル定義書_v1.1.xlsx|Data|受注番号（ORDER_NO）: 桁数を 10 → 12 に変更', 'DD04_コード定義書_v1.0.xlsx|全体|新規作成') @(Import-Csv -LiteralPath $csv -Encoding UTF8 | ForEach-Object { '{0}|{1}|{2}' -f $_.'ファイル', $_.'改訂箇所', $_.'改訂内容' })
+}
+
 Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定するとエラー' {
     Assert-Throws { & $CompareExcel -Old (Join-Path $cmpDir 'v1') -New (Join-Path $cmpDir 'v2/同じ.xlsx') 6>$null } '両方とも'
 }

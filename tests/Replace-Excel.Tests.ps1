@@ -121,6 +121,54 @@ Test-Case 'Replace-Excel: -Target Formula で数式を置換し、開いたと�
     Assert-WellFormed $file
 }
 
+Test-Case 'Replace-Excel: 共有数式（コピーした数式）は写しのセルも置換し、同じ形なら共有のまま、一部だけ変わるなら共有をやめる' {
+    $dir = Copy-Fixture 'formula'
+    $file = Join-Path $dir '明細.xlsx'
+    $r = Invoke-Replace @{ Pattern = 'ROUND('; Replacement = 'ROUNDDOWN('; SimpleMatch = $true; Path = $file; Target = 'Formula'; Force = $true }
+    Assert-Equal @('C2', 'C3', 'C4', 'C5', 'C6') @($r | ForEach-Object { $_.Cell }) '写しのセルも記録する'
+    Assert-Equal '=ROUND(A6*B6*(1+税率),0) → =ROUNDDOWN(A6*B6*(1+税率),0)' $r[4].Change
+    $sheet = Read-PartText $file 'xl/worksheets/sheet1.xml'
+    Assert-Match $sheet '<f t="shared" ref="C2:C6" si="0">ROUNDDOWN\(A2\*B2' '先頭の数式だけ書き換える'
+    Assert-Equal 4 ([regex]::Matches($sheet, '<f t="shared" si="0" ?/>').Count) '写しのセルは共有のまま'
+
+    $r = Invoke-Replace @{ Pattern = 'A4*B4'; Replacement = 'A4*B3'; SimpleMatch = $true; Path = $file; Target = 'Formula'; Force = $true }
+    Assert-Equal '明細!C4|=ROUNDDOWN(A4*B4*(1+税率),0) → =ROUNDDOWN(A4*B3*(1+税率),0)' ('{0}|{1}' -f $r[0].Location, $r[0].Change)
+    Assert-Equal 1 $r.Count
+    $sheet = Read-PartText $file 'xl/worksheets/sheet1.xml'
+    Assert-Match $sheet '<c r="C3"><f>ROUNDDOWN\(A3\*B3\*\(1\+税率\),0\)</f>' 'ほかのセルにも数式を書く'
+    Assert-Match $sheet '<c r="C4"><f>ROUNDDOWN\(A4\*B3\*'
+    Assert-Equal 0 ([regex]::Matches($sheet, 'si="0"').Count) 'C 列の共有をやめる'
+    Assert-Equal 4 ([regex]::Matches($sheet, '<f t="shared" si="1" ?/>').Count) 'ほかの共有数式はそのまま'
+    $texts = @(& $SearchExcel -Pattern '.' -Path ([System.Management.Automation.WildcardPattern]::Escape($file)) -Target Formula 6>$null | Where-Object Cell -eq 'C6')
+    Assert-Equal '=ROUNDDOWN(A6*B6*(1+税率),0)' $texts[0].Text
+    Assert-WellFormed $file
+}
+
+Test-Case 'Replace-Excel: ヘッダー・フッターと入力規則のリスト・メッセージも置換する（書式・ページ番号などはそのまま）' {
+    $dir = Copy-Fixture 'formula'
+    $file = Join-Path $dir '明細.xlsx'
+    $list = Join-Path (New-TestDir) 'list.csv'
+    @('置換前,置換後', '受注管理システム,販売管理システム', 'A&B,A&C', '対応中,作業中', 'リストから,一覧から', '集計,合計') | Set-Content -LiteralPath $list -Encoding UTF8
+    $r = Invoke-Replace @{ ListPath = $list; Path = $file; Force = $true }
+    Assert-Equal @(
+        '明細|ヘッダー・フッター|ヘッダー（左）|受注管理システム → 販売管理システム',
+        '明細|ヘッダー・フッター|フッター（右）|株式会社A&B → 株式会社A&C',
+        '明細!F2|入力規則|リスト（F2:F6）|未着手,対応中,完了 → 未着手,作業中,完了',
+        '明細!F2|入力規則|入力時メッセージ（F2:F6）|未着手・対応中・完了から選んでください → 未着手・作業中・完了から選んでください',
+        '明細!F2|入力規則|エラーメッセージ（F2:F6）|リストから選んでください → 一覧から選んでください') `
+        @($r | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Location, $_.Kind, $_.Name, $_.Change }) 'ほかのシートを参照するリスト（数式）は -Target Formula のときだけ'
+    $sheet = Read-PartText $file 'xl/worksheets/sheet1.xml'
+    Assert-Match $sheet '<oddHeader>&amp;L&amp;"ＭＳ ゴシック,太字"販売管理システム&amp;"ＭＳ ゴシック,標準"&amp;R&amp;D</oddHeader>'
+    Assert-Match $sheet '<oddFooter>&amp;C&amp;P / &amp;N&amp;R株式会社A&amp;&amp;C</oddFooter>' '文字の & は && のまま'
+    Assert-Match $sheet '<formula1>"未着手,作業中,完了"</formula1>'
+    Assert-Match $sheet "<xm:f>'集計 A1'!\`$A\`$1:\`$A\`$3</xm:f>"
+    Assert-WellFormed $file
+
+    $r = Invoke-Replace @{ Pattern = "'集計 A1'"; Replacement = "'担当者'"; SimpleMatch = $true; Path = $file; Target = 'Formula'; Force = $true }
+    Assert-Equal @('明細!E2', '明細!E3', '明細!E4', '明細!E5', '明細!E6', '明細!G2') @($r | ForEach-Object { $_.Location })
+    Assert-Equal "リスト（G2:G6）|='集計 A1'!`$A`$1:`$A`$3 → ='担当者'!`$A`$1:`$A`$3" ('{0}|{1}' -f $r[5].Name, $r[5].Change)
+}
+
 Test-Case 'Replace-Excel: 図形・隠しシート・セル番地を省略したセルも置換し、-BackupDir には変えたファイルだけ残す' {
     $dir = Copy-Fixture 'grep'
     $backup = Join-Path (New-TestDir) 'backup'
