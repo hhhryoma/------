@@ -13,12 +13,13 @@
 | [New-DesignDocument.ps1](#new-designdocumentps1) | 画面一覧などの一覧から、雛形の差し込み欄（`{{画面ID}}` など）を埋めた設計書を一括で作る。設計書の版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする（Excel 不要） |
 | [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す（Excel 不要） |
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
+| [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
 
 ## Search-Excel.ps1
 
@@ -1020,6 +1021,78 @@ File        Location Level Detail
 | `-RoleHeader` | 単価のチェックで、要員を表す列の見出しの正規表現 |
 | `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
 | `-OutXlsx` | 結果を xlsx に保存する（場所をクリックすると該当セルが開く） |
+
+## Export-ExcelToMarkdown.ps1
+
+Excel（設計書など）を **Markdown のテキスト**にします。Excel は不要です。
+
+- **Git で設計書を管理しているとき**: `git diff`・`git log -p` で、Excel の変更を文字の差分として見られます（下の設定）
+- **AI に渡すとき**: Copilot 以外の AI（社内で使える AI など）にも、表の形のまま貼り付けられます
+- **全文検索・比較**: テキストの検索ツールや差分ツールでそのまま扱えます
+
+```powershell
+.\Export-ExcelToMarkdown.ps1 D:\設計書 -OutDir D:\設計書_md            # フォルダ構成のまま .md を保存（変わったファイルだけ）
+.\Export-ExcelToMarkdown.ps1 D:\設計書\画面設計書_SCR001.xlsx -CellAddress   # 行番号・セル番地付きで出力
+```
+
+```markdown
+## 画面項目定義
+
+- 画面設計書 | システム名 | 受注管理システム | 作成者 | 山田 太郎 | 作成日 | 2026/10/01
+- 画面ID | SCR001 | 画面名 | 受注一覧 | 更新者 | 山田 太郎 | 更新日 | 2026/10/01
+
+### ■ 画面項目定義
+
+| No | 項目名 | 項目ID | 区分 | 入出力 | 型 | 桁数 | 必須 | 初期値 | 入力チェック | 対応項目 | 備考 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 受注番号 | orderNo | テキスト | I | 半角英数 | 12 |  |  | 半角英数（E0003） | T_ORDER.ORDER_NO | 前方一致 |
+```
+
+### 変換のしかた
+
+| Excel | Markdown |
+| --- | --- |
+| シート | `## シート名` |
+| 見出しの行（3 つ以上の値）の下に、見出しの列だけを使う行が続くところ | 表（項目定義・カラム定義など） |
+| 「■」で始まる行 | `### ■ …`（小見出し） |
+| それ以外の行 | 箇条書き（1 行の値を ` \| ` でつなぐ） |
+| 図形・コメント | シートの最後に「図形」「コメント」としてまとめる |
+
+- 結合したセルは 1 つの値に、セル内の改行は `<br>` にします
+- 既定ではセル番地を書きません。行を挿入しても、差分はその行だけになります。`-CellAddress` を付けると、表に行番号、箇条書きにセル番地が付きます（AI に場所を答えさせたいときなど）
+
+### git diff で Excel の変更を見る
+
+リポジトリの `.gitattributes` に次の行を書き、`git config` で変換のコマンドを登録します（パスは置き場所に合わせてください）。
+
+```
+*.xlsx diff=excel
+*.xlsm diff=excel
+```
+
+```powershell
+git config diff.excel.textconv "powershell -NoProfile -ExecutionPolicy Bypass -File C:/tools/Export-ExcelToMarkdown.ps1 -TextConv"
+```
+
+`git diff` で、変わった行だけが表示されます。
+
+```diff
+@@ -49,3 +49,4 @@
+ | I0003 | 情報 | 該当するデータがありません。 |  |
+ | Q0001 | 確認 | 登録します。よろしいですか？ |  |
+ | Q0002 | 確認 | 受注をキャンセルします。よろしいですか？ |  |
++| E0001 | エラー | {0}を入力してください。 |  |
+```
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | Excel のフォルダ・ファイル（複数可） |
+| `-OutDir` | .md を保存するフォルダ。元のフォルダ構成のまま保存し、Excel より新しい .md があるファイルは変換しない |
+| `-Force` | `-OutDir` の .md が新しくても変換し直す |
+| `-CellAddress` | 行番号・セル番地を付ける |
+| `-TextConv` | git の textconv 用（1 ファイルの Markdown を UTF-8 で標準出力へ。見出しにファイル名を入れない） |
 
 ## Export-ExcelToPdf.ps1
 
