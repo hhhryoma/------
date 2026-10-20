@@ -5,7 +5,7 @@
 | [Search-Excel.ps1](#search-excelps1) | フォルダ配下の Excel を横断して文字列を検索する（Excel 版 grep） |
 | [Replace-Excel.ps1](#replace-excelps1) | 複数の Excel の文字を一括で置換する（Excel 不要。置換する箇所を確認してから書き換える） |
 | [Test-ExcelTerms.ps1](#test-exceltermsps1) | 複数の Excel の表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を見つけ、Replace-Excel 用の置換リストを作る |
-| [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違いをまとめて確認する |
+| [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違いをまとめて確認する（プロパティの個人名など、機械で直せるものは `-Fix` で直す） |
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認もできる） |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足など）を全件見つける（Excel 不要） |
@@ -333,7 +333,7 @@ ID               ＩＤ               2              31 全角・半角
 ## Test-ExcelDeliverable.ps1
 
 Excel ファイルを社外へ提出する前に、**体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所**がないかをまとめて確認します。
-Excel を使わずにファイルの中身を直接読むので速く、**ファイルは一切変更しません**。
+Excel を使わずにファイルの中身を直接読むので速く、**ファイルは変更しません**（`-Fix` を付けたときだけ、機械で直せる指摘を直します）。
 
 ```powershell
 .\Test-ExcelDeliverable.ps1 D:\提出物
@@ -370,6 +370,25 @@ File      Location  Level  Detail
 
 区分の目安: **エラー**は必ず直す、**警告**は原則直す、**情報**は意図どおりか確認する。
 
+### 機械で直せる指摘を直す（`-Fix`）
+
+`-Fix` を付けると、次の指摘を直してから、**直したあとに残っている指摘**を出力します。まず `-WhatIf` で直すファイルと項目を確かめてください。
+
+```powershell
+.\Test-ExcelDeliverable.ps1 D:\提出物 -Fix -AllowedNames '株式会社サンプル' -BackupDir D:\直す前 -WhatIf
+.\Test-ExcelDeliverable.ps1 D:\提出物 -Fix -AllowedNames '株式会社サンプル' -BackupDir D:\直す前
+```
+
+| 指摘 | 直し方 |
+| --- | --- |
+| プロパティ（作成者・最終更新者・会社名・管理者） | 値を消す（`-AllowedNames` に一致するものは残す） |
+| ヘッダー／フッターのファイルの場所（`&Z`） | `&Z` を消す（ファイル名 `&F` などはそのまま） |
+| 体裁（倍率・選択セル・表示位置・先頭シート・作業グループ） | `Reset-ExcelView.ps1` と同じように直す（表示モードは直さない） |
+
+- コメント・非表示シート・外部リンク・残っている文言・エラー値など、**内容が消える・変わる指摘は直しません**。中身を確かめて手で直してください
+- 読み取り専用のファイルは書き換えません。Excel で開いているファイルは失敗として知らせます
+- `-BackupDir` を付けると、直す前のファイルを同じ相対パスで残します
+
 ### 主なパラメーター
 
 | パラメーター | 説明 |
@@ -384,6 +403,7 @@ File      Location  Level  Detail
 | `-HeaderFooterText` | ヘッダー／フッターに必ず入れる文字（正規表現。例: `社外秘`）。無いシートを警告 |
 | `-HistorySheet` | 改訂履歴のシート名（正規表現。既定は 改訂履歴・変更履歴・改版履歴・更新履歴・改訂記録） |
 | `-OutXlsx` | 結果を保存（指摘一覧・ファイル別） |
+| `-Fix` / `-BackupDir` | 機械で直せる指摘を直す / 直す前のファイルを残すフォルダ（上） |
 | `-NoRecurse` | サブフォルダを見ない |
 
 ### 印刷と版数のチェック

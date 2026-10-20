@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+﻿[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string[]] $Path,
@@ -23,6 +23,10 @@ param(
 
     [switch] $NoRecurse,
 
+    [switch] $Fix,
+
+    [string] $BackupDir,
+
     [string] $OutXlsx
 )
 
@@ -32,6 +36,8 @@ Add-Type -AssemblyName System.IO.Compression
 Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
 
 $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
+$resetScript = Join-Path $PSScriptRoot 'Reset-ExcelView.ps1'
+if ($BackupDir) { $BackupDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($BackupDir) }
 
 foreach ($p in @($Words, $AllowedNames, $FileNamePattern, $HeaderFooterText, $HistorySheet)) {
     if ($p) {
@@ -88,6 +94,9 @@ function Add-Issue {
     $issue.PSObject.TypeNames.Insert(0, 'ExcelDeliverable.Issue')
     $script:Issues.Add($issue)
 }
+
+# ファイルのプロパティのうち、個人名・会社名が残りやすいもの（要素名 → 表示の名前）
+$propertyLabels = [ordered]@{ 'creator' = '作成者'; 'lastModifiedBy' = '最終更新者'; 'Company' = '会社名'; 'Manager' = '管理者' }
 
 function Test-AllowedName {
     param([string] $Value)
@@ -668,7 +677,7 @@ function Test-Workbook {
         }
 
         if ($checkSet['Property']) {
-            $labels = [ordered]@{ 'creator' = '作成者'; 'lastModifiedBy' = '最終更新者'; 'Company' = '会社名'; 'Manager' = '管理者' }
+            $labels = $propertyLabels
             foreach ($part in @('docProps/core.xml', 'docProps/app.xml')) {
                 $doc = Read-PartXml -Package $pkg -PartName $part
                 if ($null -eq $doc) { continue }
@@ -753,33 +762,32 @@ foreach ($p in $Path) {
 }
 if ($files.Count -eq 0) { Write-Warning 'チェックする Excel ファイルがありません。'; return }
 
-$index = 0
-foreach ($entry in $files) {
-    $index++
-    $script:CurrentFile = $entry.Relative
-    $script:CurrentPath = $entry.Info.FullName
-    Write-Progress -Activity '提出前チェック' -Status ("{0}/{1}  {2}" -f $index, $files.Count, $entry.Relative) -PercentComplete ([int](100 * $index / $files.Count))
+function Invoke-FileChecks {
+    #     1 ファイルをチェックし、指摘を $script:Issues に足す
+    param($Entry)
+    $script:CurrentFile = $Entry.Relative
+    $script:CurrentPath = $Entry.Info.FullName
 
-    if ($FileNamePattern -and $entry.Info.Name -notmatch $FileNamePattern) {
+    if ($FileNamePattern -and $Entry.Info.Name -notmatch $FileNamePattern) {
         Add-Issue '警告' 'ファイル' 'ファイル名' "ファイル名が命名規則（$FileNamePattern）に合っていません"
     }
 
-    $ext = $entry.Info.Extension.ToLowerInvariant()
+    $ext = $Entry.Info.Extension.ToLowerInvariant()
     try {
-        $kind = Get-FileKind -FilePath $entry.Info.FullName
+        $kind = Get-FileKind -FilePath $Entry.Info.FullName
         if ($ext -eq '.xlsb' -or ($kind -eq 'Ole' -and $ext -eq '.xls') -or $kind -eq 'Unknown') {
             Add-Issue '情報' 'ファイル' '形式' 'xlsx / xlsm 形式ではないためチェックしていません（xlsx に保存し直すとチェックできます）'
-            continue
+            return
         }
         if ($kind -eq 'Ole') {
             Add-Issue '情報' 'ファイル' 'パスワード' 'パスワードで保護（暗号化）されているためチェックしていません'
-            continue
+            return
         }
 
-        Test-Workbook -FilePath $entry.Info.FullName
+        Test-Workbook -FilePath $Entry.Info.FullName
 
         if ($checkSet['Word'] -and $Words) {
-            $hits = @(& $searchScript -Pattern $Words -Path ([System.Management.Automation.WildcardPattern]::Escape($entry.Info.FullName)) -Target Value, Shape -NoExcel -WarningAction SilentlyContinue 6>$null)
+            $hits = @(& $searchScript -Pattern $Words -Path ([System.Management.Automation.WildcardPattern]::Escape($Entry.Info.FullName)) -Target Value, Shape -NoExcel -WarningAction SilentlyContinue 6>$null)
             foreach ($h in $hits) {
                 $m = [regex]::Match($h.Text, $Words, 'IgnoreCase')
                 $text = $h.Text
@@ -794,6 +802,127 @@ foreach ($entry in $files) {
         $msg = $ex.Message
         if ($ex -is [System.IO.InvalidDataException]) { $msg = "ファイルが壊れているか Excel 形式ではありません（$msg）" }
         Add-Issue 'エラー' 'ファイル' '読み取り' "読み取れませんでした: $msg"
+    }
+}
+
+# ---------------------------------------------------------------- 機械で直せる指摘を直す（-Fix）
+
+
+function Repair-Properties {
+    #     ファイルのプロパティの作成者・最終更新者・会社名・管理者（-AllowedNames に一致しないもの）を消す。返り値: 消した項目の名前
+    param($Package, [hashtable] $Changes)
+    $cleared = New-Object System.Collections.Generic.List[string]
+    foreach ($part in @('docProps/core.xml', 'docProps/app.xml')) {
+        $doc = Read-PartXmlForEdit -Package $Package -PartName $part
+        if ($null -eq $doc) { continue }
+        $edited = $false
+        foreach ($key in $propertyLabels.Keys) {
+            $node = $doc.SelectSingleNode("//*[local-name()='$key']")
+            if ($null -eq $node) { continue }
+            $value = $node.InnerText.Trim()
+            if (-not $value -or (Test-AllowedName $value)) { continue }
+            $node.InnerText = ''
+            $cleared.Add($propertyLabels[$key])
+            $edited = $true
+        }
+        if ($edited) { $Changes[$part.ToLowerInvariant()] = ConvertTo-XmlString $doc }
+    }
+    return , $cleared
+}
+
+function Repair-HeaderFooterPath {
+    #     ヘッダー・フッターから、ファイルの場所（&Z）を消す（文字の &&Z はそのまま）。返り値: 直したシートの数
+    param($Package, [hashtable] $Changes)
+    $count = 0
+    foreach ($part in (Get-WorkbookSheetParts $Package).Sheets.Values) {
+        $doc = Read-PartXmlForEdit -Package $Package -PartName $part
+        if ($null -eq $doc) { continue }
+        $edited = $false
+        foreach ($hf in @($doc.SelectNodes("//*[local-name()='headerFooter']/*"))) {
+            $new = [regex]::Replace($hf.InnerText, '(?<!&)((?:&&)*)&[Zz]', '$1')
+            if ($new -cne $hf.InnerText) { $hf.InnerText = $new; $edited = $true }
+        }
+        if ($edited) { $Changes[$part.ToLowerInvariant()] = ConvertTo-XmlString $doc; $count++ }
+    }
+    return $count
+}
+
+function Repair-Deliverable {
+    #     機械で直せる指摘を直す。返り値: 直したことの説明
+    param($Entry, $Issues)
+    $done = New-Object System.Collections.Generic.List[string]
+    $path = $Entry.Info.FullName
+    $changes = @{}
+    $pkg = Open-ZipPackage -FilePath $path
+    try {
+        if (@($Issues | Where-Object Item -eq 'プロパティ').Count -gt 0) {
+            $cleared = Repair-Properties $pkg $changes
+            if ($cleared.Count -gt 0) { $done.Add(('プロパティの{0}を消去' -f ($cleared -join '・'))) }
+        }
+        if (@($Issues | Where-Object { $_.Item -eq 'ヘッダー／フッター' -and $_.Detail -like '*&Z*' }).Count -gt 0) {
+            if ((Repair-HeaderFooterPath $pkg $changes) -gt 0) { $done.Add('ヘッダー／フッターのファイルの場所（&Z）を削除') }
+        }
+    }
+    finally { $pkg.Zip.Dispose() }
+    if ($changes.Count -gt 0) { Save-ZipPackage -FilePath $path -Changes $changes }
+    # 表示の状態（倍率・選択セル・先頭シートなど）は Reset-ExcelView.ps1 で直す
+    if (@($Issues | Where-Object { $_.Category -eq '体裁' -and $_.Item -ne '表示モード' }).Count -gt 0) {
+        $r = @(& $resetScript -Path ([System.Management.Automation.WildcardPattern]::Escape($path)) -Zoom $Zoom -Confirm:$false -WarningAction SilentlyContinue 6>$null)
+        if (@($r | Where-Object Result -eq '修正').Count -gt 0) { $done.Add('表示の状態（倍率・選択セル・先頭シートなど）を直した') }
+    }
+    return , $done
+}
+
+function Test-FileLocked {
+    # Excel で開いているファイルは書き換えられないので、先に確かめる
+    param([string] $FilePath)
+    try {
+        $fs = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $fs.Dispose()
+        return $false
+    }
+    catch { return $true }
+}
+
+$script:Fixes = New-Object System.Collections.Generic.List[object]
+$index = 0
+foreach ($entry in $files) {
+    $index++
+    Write-Progress -Activity '提出前チェック' -Status ("{0}/{1}  {2}" -f $index, $files.Count, $entry.Relative) -PercentComplete ([int](100 * $index / $files.Count))
+    Invoke-FileChecks $entry
+    if (-not $Fix) { continue }
+
+    # 機械で直せる指摘: プロパティの個人名・会社名、ヘッダー／フッターのファイルの場所、表示の状態
+    $path = $entry.Info.FullName
+    $fixable = @($script:Issues | Where-Object { $_.Path -eq $path -and ($_.Item -eq 'プロパティ' -or ($_.Item -eq 'ヘッダー／フッター' -and $_.Detail -like '*&Z*') -or ($_.Category -eq '体裁' -and $_.Item -ne '表示モード')) })
+    if ($fixable.Count -eq 0) { continue }
+    $what = @($fixable | ForEach-Object { $_.Item } | Sort-Object -Unique) -join '・'
+    if ($entry.Info.IsReadOnly) {
+        $script:Fixes.Add([pscustomobject]@{ File = $entry.Relative; Result = 'スキップ'; Detail = '読み取り専用のファイルです' })
+        continue
+    }
+    if (-not $PSCmdlet.ShouldProcess($entry.Relative, "指摘を直す（$what）")) {
+        $script:Fixes.Add([pscustomobject]@{ File = $entry.Relative; Result = '修正予定'; Detail = $what })
+        continue
+    }
+    try {
+        if (Test-FileLocked $path) { throw 'ファイルを開いているため書き換えられません（Excel で閉じてから実行してください）' }
+        if ($BackupDir) {
+            $dest = Join-Path $BackupDir $entry.Relative
+            New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+            Copy-Item -LiteralPath $path -Destination $dest -Force
+        }
+        $done = Repair-Deliverable $entry $fixable
+        # 直したあとの状態でチェックし直す（出力するのは残っている指摘）
+        $keep = @($script:Issues | Where-Object { $_.Path -ne $path })
+        $script:Issues.Clear()
+        foreach ($k in $keep) { $script:Issues.Add($k) }
+        Invoke-FileChecks $entry
+        $script:Fixes.Add([pscustomobject]@{ File = $entry.Relative; Result = '修正'; Detail = ($done -join '・') })
+    }
+    catch {
+        $script:Fixes.Add([pscustomobject]@{ File = $entry.Relative; Result = '失敗'; Detail = $_.Exception.Message })
+        Write-Warning ("{0}: 直せませんでした: {1}" -f $entry.Relative, $_.Exception.Message)
     }
 }
 Write-Progress -Activity '提出前チェック' -Completed
@@ -858,6 +987,15 @@ Write-Host ''
 Write-Host ("{0} ファイル中 {1} ファイルが要対応（エラー {2} 件 / 警告 {3} 件 / 情報 {4} 件）" -f $files.Count, $ngFiles,
     @($script:Issues | Where-Object Level -eq 'エラー').Count, @($script:Issues | Where-Object Level -eq '警告').Count, @($script:Issues | Where-Object Level -eq '情報').Count)
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
+if ($Fix) {
+    $fixed = @($script:Fixes | Where-Object Result -eq '修正')
+    if ($script:Fixes.Count -eq 0) { Write-Host '機械で直せる指摘はありませんでした' }
+    foreach ($x in $script:Fixes) { Write-Host ('  {0}  {1}: {2}' -f $x.Result, $x.File, $x.Detail) }
+    if ($fixed.Count -gt 0) {
+        Write-Host ('{0} ファイルを直しました（上の件数は直したあとに残っている指摘です）' -f $fixed.Count)
+        if ($BackupDir) { Write-Host "直す前のファイル: $BackupDir" }
+    }
+}
 
 # .SYNOPSIS
 #     Excel ファイルを社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所がないかをまとめて確認します。
@@ -877,6 +1015,9 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 #     結果は 1 指摘 1 行のオブジェクトで出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
 #     区分は エラー（必ず直す）／警告（原則直す）／情報（意図どおりか確認する）の 3 つです。
+#
+#     -Fix を付けると、機械で直せる指摘（プロパティの個人名・会社名、ヘッダー／フッターのファイルの場所、
+#     表示の状態）を直してから、直したあとの状態で残っている指摘を出力します（このときだけファイルを書き換えます）。
 #
 # .PARAMETER Path
 #     チェックするフォルダまたはファイル（複数指定可、ワイルドカード可）。
@@ -912,6 +1053,17 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .PARAMETER NoRecurse
 #     サブフォルダをチェックしません。
 #
+# .PARAMETER Fix
+#     機械で直せる指摘を直します。
+#       プロパティ          作成者・最終更新者・会社名・管理者を消す（-AllowedNames に一致するものは残す）
+#       ヘッダー／フッター  ファイルの場所（&Z）を消す（ファイル名 &F などはそのまま）
+#       体裁                倍率・選択セル・表示位置・先頭シート・作業グループを直す（Reset-ExcelView.ps1 と同じ）
+#     コメント・非表示シート・外部リンク・残っている文言など、内容が消える・変わるものは直しません。
+#     読み取り専用のファイルは書き換えません。-WhatIf で直すファイルと項目を確かめられます。
+#
+# .PARAMETER BackupDir
+#     -Fix で書き換える前のファイルを、このフォルダに同じ相対パスで残します。
+#
 # .PARAMETER OutXlsx
 #     結果を xlsx に保存します（指摘一覧・ファイル別。場所をクリックすると該当セルが開きます）。
 #
@@ -929,6 +1081,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .EXAMPLE
 #     # 印刷と版数だけを、ページ番号と「社外秘」の表示も含めて確認する
 #     .\Test-ExcelDeliverable.ps1 D:\提出物 -Check Print, Version -RequirePageNumber -HeaderFooterText '社外秘'
+#
+# .EXAMPLE
+#     # 機械で直せる指摘を直す（直す前のファイルを残す）。まず -WhatIf で確かめる
+#     .\Test-ExcelDeliverable.ps1 D:\提出物 -Fix -AllowedNames '株式会社サンプル' -BackupDir D:\直す前 -WhatIf
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。Excel は不要です。同じフォルダに ExcelTools.psm1 と Search-Excel.ps1 が必要です。
