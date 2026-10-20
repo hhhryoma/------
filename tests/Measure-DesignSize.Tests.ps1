@@ -72,6 +72,49 @@ Test-Case 'Measure-DesignSize: -OutXlsx で集計・規模一覧・係数表を�
     Assert-True (@($detail.Links | Where-Object { $_.Location -like "'T_ORDER'!A*" }).Count -eq 1) '設計書の表へのリンク'
 }
 
+Test-Case 'Measure-DesignSize: -Baseline で前の版と比べ、対象ごとの新規・変更・削除と、行の追加・変更・削除の数を出す' {
+    # 前の版は詳細設計サンプル、新しい版はそれに食い違いを入れた写し（tests\fixtures\consistency）
+    $changes = @(& $MeasureSize -Path (Join-Path $script:Fixtures 'consistency') -Baseline $sampleDir 6>$null 3>$null)
+    $got = @($changes | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Kind, $_.File, $_.Change, $_.Detail, $_.ChangeDays })
+    foreach ($expected in @(
+            '画面|DD02_画面設計書_SCR004_出荷状況照会.xlsx|新規|項目数 17・イベント数 6|5',
+            '画面|DD02_画面設計書_SCR002_受注登録.xlsx|変更|項目数 19 → 19（追加 0・変更 3・削除 0）|0.58',
+            'メッセージ|DD05_メッセージ一覧.xlsx|変更|件数 16 → 17（追加 1・変更 0・削除 0）|0.05',
+            'テーブル|DD03_テーブル定義書.xlsx|変更なし||0')) {
+        Assert-True (@($got | Where-Object { $_ -like "$expected*" }).Count -ge 1) ("ありません: {0}`n実際: {1}" -f $expected, ($got -join "`n"))
+    }
+    # 逆向き（新しい版に無いもの）は削除
+    $changes = @(& $MeasureSize -Path $sampleDir -Baseline (Join-Path $script:Fixtures 'consistency') 6>$null 3>$null)
+    Assert-Equal 'DD02_画面設計書_SCR004_出荷状況照会.xlsx' (@($changes | Where-Object Change -eq '削除')[0].File)
+    $out = Join-Path (New-TestDir) 'diff.xlsx'
+    $null = & $MeasureSize -Path $sampleDir -Baseline $sampleDir -OutXlsx $out 6>$null 3>$null
+    $sheet = Read-XlsxSheet -Path $out -Index 4
+    Assert-Equal '前の版との差' $sheet.Sheets[3]
+    Assert-Equal @('変更なし') @(2..$sheet.Rows.Count | ForEach-Object { $sheet.Rows[$_]['C'] } | Select-Object -Unique) '同じ版どうし'
+}
+
+Test-Case 'Measure-DesignSize: -Actuals の実績の工数を難易度ごとに平均し、-OutCoefficients で係数表を作る' {
+    $dir = New-TestDir
+    $actuals = Join-Path $dir 'actuals.csv'
+    @('種類,ID,名前,工数（人日）', '画面,SCR001,,4', '画面,SCR002,,6', ',,受注詳細,8', 'テーブル,T_ORDER,,1', 'メッセージ,,DD05_メッセージ一覧.xlsx（メッセージ一覧）,1.6', '画面,SCR999,,3') | Set-Content -LiteralPath $actuals -Encoding UTF8
+    $coef = Join-Path $dir 'coef.csv'
+    $w = $null
+    $null = & $MeasureSize -Path $sampleDir -Actuals $actuals -OutCoefficients $coef -WarningVariable w -WarningAction SilentlyContinue 6>$null
+    Assert-Match (@($w | ForEach-Object { $_.Message }) -join ' / ') 'SCR999'
+    $rows = @(Import-Csv -LiteralPath $coef -Encoding UTF8)
+    $byKey = @{}
+    foreach ($r in $rows) { $byKey['{0}|{1}' -f $r.'種類', $r.'難易度'] = $r }
+    Assert-Equal '6|3|5' ('{0}|{1}|{2}' -f $byKey['画面|普通'].'工数', $byKey['画面|普通'].'実績件数', $byKey['画面|普通'].'元の工数') '画面（普通）の実績の平均'
+    Assert-Equal '1|1' ('{0}|{1}' -f $byKey['テーブル|簡易'].'工数', $byKey['テーブル|簡易'].'実績件数')
+    Assert-Equal '0.1|件' ('{0}|{1}' -f $byKey['メッセージ|'].'工数', $byKey['メッセージ|'].'単位') '「件」の行は 1 件あたり（1.6 人日 ÷ 16 件）'
+    Assert-Equal '8|0' ('{0}|{1}' -f $byKey['画面|複雑'].'工数', $byKey['画面|複雑'].'実績件数') '実績の無い難易度は元のまま'
+    # 作った係数表をそのまま使える
+    $summary = & $MeasureSize -Path $sampleDir -Coefficients $coef -Summary 6>$null
+    Assert-Equal 'SCR001|6' (@(& $MeasureSize -Path $sampleDir -Coefficients $coef 6>$null | Where-Object Kind -eq '画面')[0] | ForEach-Object { '{0}|{1}' -f $_.Id, $_.Days })
+    Assert-True ($summary.TotalDays -gt 0)
+    Assert-Throws { & $MeasureSize -Path $sampleDir -OutCoefficients $coef 6>$null } 'Actuals'
+}
+
 Test-Case 'Measure-DesignSize: Get-Help でヘルプが表示される' {
     $h = Get-Help $MeasureSize
     Assert-Match $h.Synopsis '規模'
