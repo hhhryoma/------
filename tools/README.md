@@ -14,12 +14,13 @@
 | [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す（Excel 不要） |
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
 | [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
+| [Measure-ReviewQuality.ps1](#measure-reviewqualityps1) | レビューの指摘管理表を集計し、設計書ごとの指摘件数・指摘密度（ページ数・規模あたり）・未完了・期限切れを出し、基準値から外れた設計書を知らせる（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-ReviewQuality.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
 
 ## Search-Excel.ps1
 
@@ -1093,6 +1094,78 @@ git config diff.excel.textconv "powershell -NoProfile -ExecutionPolicy Bypass -F
 | `-Force` | `-OutDir` の .md が新しくても変換し直す |
 | `-CellAddress` | 行番号・セル番地を付ける |
 | `-TextConv` | git の textconv 用（1 ファイルの Markdown を UTF-8 で標準出力へ。見出しにファイル名を入れない） |
+
+## Measure-ReviewQuality.ps1
+
+レビューの**指摘管理表**（Excel・CSV）を集計し、品質報告に使う数字を出します。Excel は不要です。
+
+- 設計書ごとの**指摘件数・未完了・期限切れ**と、**指摘密度**（ページ数や規模あたりの指摘件数）
+- 指摘密度を**基準値**と比べ、多すぎる設計書（品質に問題の疑い）と、少なすぎる設計書（レビュー不足の疑い）を知らせる
+- 分類・重要度・対応者ごとの内訳、未完了の一覧、日ごとの起票・完了の推移（収束の確認）
+
+```powershell
+# 設計書の規模（Measure-DesignSize.ps1 で数える）を分母にする
+.\Measure-ReviewQuality.ps1 D:\レビュー\指摘管理表.xlsx -DesignPath D:\設計書 -OutXlsx D:\品質分析.xlsx
+
+# PDF のページ数を分母にする（Export-ExcelToPdf.ps1 のページ数の CSV をそのまま使う）
+.\Export-ExcelToPdf.ps1 -Path D:\設計書_PDF -CountOnly -LogPath D:\pages.csv
+.\Measure-ReviewQuality.ps1 D:\レビュー -SizeCsv D:\pages.csv
+```
+
+```
+Document                        Findings Open Overdue Density Judgement
+--------                        -------- ---- ------- ------- ---------
+DD02_画面設計書_SCR001_受注一覧        3    1       1    0.75 基準内
+DD03_テーブル定義書                    1    1       0    0.10 少ない（レビュー不足の疑い）
+DD05_メッセージ一覧.pdf                0    0       0    0.00 少ない（レビュー不足の疑い）
+
+指摘 4 件（未完了 2 件・うち期限切れ 1 件。取下げなどで数えなかったもの 1 件）/ 設計書 3 件（2026/10/20 時点）
+重要度: 中 2・低 1・高 1
+分類: 誤り 3・漏れ 1
+基準値から外れた設計書: 2 件
+```
+
+### 指摘管理表の読み方
+
+見出しの文字で列を探します（見出しの行に「指摘内容」と、「設計書」「状態」「重要度」「分類」のどれかがあれば、その下を指摘の表として読みます）。
+**Invoke-DesignReview.ps1 のレビュー結果（指摘一覧）もそのまま読めます。** 見出しの文字が違う場合は、`tools\review-quality\指摘管理表の見出し.csv` に候補を足してください。
+
+| 項目 | 見出しの候補（一部） | 使い方 |
+| --- | --- | --- |
+| 設計書 | 設計書・対象成果物・資料名 | 設計書ごとに集計（ファイル名の拡張子とフォルダは無視して比べる） |
+| 指摘内容 | 指摘内容・指摘事項 | （必須） |
+| 分類・重要度・対応者・工程 | 指摘区分・重大度・担当者・レビュー工程 | 内訳 |
+| 状態・対応要否 | 対応状況・ステータス | 「完了」「済」「対応不要」などは完了。「取下げ」「却下」「対象外」「重複」は数えない |
+| 起票日・期限・完了日 | 指摘日・対応期限・対応完了日 | 期限切れ（`-AsOf` の日より前で未完了）、推移 |
+
+### 指摘密度の分母と基準値
+
+| 分母 | 渡し方 | 内容 |
+| --- | --- | --- |
+| ページ数 | `-SizeCsv`（Export-ExcelToPdf.ps1 の `-LogPath` の CSV など。ファイルとページ数の列） | 設計書の PDF のページ数 |
+| 規模 | `-DesignPath`（設計書のフォルダ） | Measure-DesignSize.ps1 で数えた規模（画面の項目数・テーブルのカラム数など）の合計 |
+
+基準値は `tools\review-quality\基準値_サンプル.csv`（`分母,工程,下限,上限`）です。**サンプルの数値は例です。** 社内の実績や標準値に合わせて直し、`-Limits` で指定してください。工程の列に「基本設計」などを書くと、指摘管理表の工程ごとに基準値を変えられます。
+
+### -OutXlsx の内容
+
+| シート | 内容 |
+| --- | --- |
+| 設計書別 | 指摘・未完了・期限切れ・規模・指摘密度・判定・重要度と分類の内訳 |
+| 内訳 | 分類・重要度・対応者・工程・状態ごとの件数（未完了・期限切れも） |
+| 未完了 | 対応が終わっていない指摘（期限切れから順。指摘管理表の該当行へのリンク付き） |
+| 推移 | 日ごとの起票・完了と、累計・未完了の残り |
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 指摘管理表のファイル・フォルダ（Excel・CSV） |
+| `-DesignPath` / `-SizeCsv` | 指摘密度の分母（規模 / ページ数など）。どちらか一方 |
+| `-Limits` | 基準値の CSV |
+| `-Headers` | 指摘管理表の見出しの候補の CSV |
+| `-AsOf` | 期限切れを判定する日（既定は今日） |
+| `-OutXlsx` | 設計書別・内訳・未完了・推移を保存する |
 
 ## Export-ExcelToPdf.ps1
 
