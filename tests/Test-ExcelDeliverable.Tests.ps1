@@ -168,8 +168,42 @@ Test-Case 'Test-ExcelDeliverable: 詳細設計サンプルは印刷・版数を�
     Assert-Equal 0 $issues.Count ((@($issues | ForEach-Object { '{0} {1}' -f $_.File, $_.Detail })) -join ' / ')
 }
 
+function Read-ZipText {
+    param([string] $Path, [string] $Name)
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Read)
+        $sr = New-Object System.IO.StreamReader($zip.GetEntry($Name).Open())
+        try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+    }
+    finally { $fs.Dispose() }
+}
+
+Test-Case 'Test-ExcelDeliverable: -Fix でプロパティの個人名・ヘッダーのファイルの場所・表示の状態を直し、残っている指摘を出す' {
+    $dir = New-TestDir
+    Copy-Item -LiteralPath (Join-Path $delivDir 'bad.xlsx') -Destination $dir
+    Copy-Item -LiteralPath (Join-Path $script:Fixtures 'print/wide.xlsx') -Destination $dir
+    $bad = Join-Path $dir 'bad.xlsx'; $wide = Join-Path $dir 'wide.xlsx'
+    $hash = (Get-FileHash -LiteralPath $bad).Hash
+    # -WhatIf では書き換えない
+    $issues = Invoke-Check @{ Path = $dir; Fix = $true; WhatIf = $true }
+    Assert-Equal $hash (Get-FileHash -LiteralPath $bad).Hash '-WhatIf'
+    Assert-True (@($issues | Where-Object Item -eq 'プロパティ').Count -eq 3)
+
+    $backup = Join-Path (New-TestDir) 'backup'
+    $issues = Invoke-Check @{ Path = $dir; Fix = $true; AllowedNames = '株式会社サンプル'; BackupDir = $backup }
+    Assert-Equal 0 @($issues | Where-Object { $_.Item -eq 'プロパティ' -or ($_.Item -eq 'ヘッダー／フッター' -and $_.Detail -like '*&Z*') }).Count ((@($issues | ForEach-Object { $_.Detail })) -join ' / ')
+    Assert-Equal @('表示モード') @($issues | Where-Object { $_.Category -eq '体裁' } | ForEach-Object { $_.Item }) '表示モード（改ページプレビュー）は意図どおりのことがあるので直さない'
+    Assert-True (@($issues | Where-Object Item -eq '非表示シート').Count -eq 2) '内容に関わる指摘は残す'
+    $core = Read-ZipText $bad 'docProps/core.xml'
+    Assert-NotMatch $core '山田 太郎|佐藤 花子'
+    Assert-Match (Read-ZipText $bad 'docProps/app.xml') '<Company>株式会社サンプル</Company>' '-AllowedNames に一致する会社名は残す'
+    Assert-Match (Read-ZipText $wide 'xl/worksheets/sheet1.xml') '<oddFooter>&amp;L&amp;F</oddFooter>' 'ファイル名（&F）は残す'
+    Assert-Equal $hash (Get-FileHash -LiteralPath (Join-Path $backup 'bad.xlsx')).Hash '直す前のファイル'
+}
+
 Test-Case 'Test-ExcelDeliverable: Get-Help でヘルプが表示される' {
     $h = Get-Help $Deliverable
     Assert-Match $h.Synopsis '提出'
-    Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
+    Assert-True (@($h.parameters.parameter | Where-Object { $_.name -notin @('WhatIf', 'Confirm') -and -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
