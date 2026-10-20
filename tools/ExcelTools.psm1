@@ -569,4 +569,149 @@ function Find-DesignTables {
     return , $tables
 }
 
+# ---------------------------------------------------------------- シートの XML のセルを書き換える
+
+
+function Get-WorkbookSheetParts {
+    #     ブックのパーツ名と、シート名 → シートのパーツ名（シートの順）
+    param($Package)
+    $wbPart = @((Get-PartRelationships -Package $Package -PartName '') | Where-Object { $_.Kind -eq 'officeDocument' })[0].Target
+    $wb = Read-PartXml -Package $Package -PartName $wbPart
+    $rels = Get-PartRelationships -Package $Package -PartName $wbPart
+    $sheets = [ordered]@{}
+    foreach ($s in $wb.SelectNodes("//*[local-name()='sheet']")) {
+        $rid = Get-RelationshipIdAttribute $s
+        $t = @($rels | Where-Object { $_.Id -eq $rid })[0]
+        if ($t) { $sheets[$s.GetAttribute('name')] = $t.Target }
+    }
+    return [pscustomobject]@{ WorkbookPart = $wbPart; Sheets = $sheets }
+}
+
+function Get-XmlChildElements {
+    param($Node, [string] $LocalName)
+    return @($Node.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.LocalName -eq $LocalName })
+}
+
+function Get-SheetRowElement {
+    #     行の要素（無ければ $null。-Create なら行番号の順の位置に作り、TemplateRow の属性（高さなど）を写す）
+    param([System.Xml.XmlDocument] $Doc, [int] $Row, [switch] $Create, $TemplateRow)
+    $sheetData = @(Get-XmlChildElements $Doc.DocumentElement 'sheetData')[0]
+    $n = 0; $next = $null
+    foreach ($el in (Get-XmlChildElements $sheetData 'row')) {
+        $r = $el.GetAttribute('r')
+        if ($r) { $n = [int]$r } else { $n++; $el.SetAttribute('r', [string]$n) }
+        if ($n -eq $Row) { return $el }
+        if ($n -gt $Row -and -not $next) { $next = $el }
+    }
+    if (-not $Create) { return $null }
+    $new = $Doc.CreateElement($sheetData.Prefix, 'row', $sheetData.NamespaceURI)
+    if ($TemplateRow) { foreach ($a in @($TemplateRow.Attributes)) { if ($a.Name -ne 'r') { $new.SetAttribute($a.Name, $a.Value) } } }
+    $new.SetAttribute('r', [string]$Row)
+    if ($next) { [void]$sheetData.InsertBefore($new, $next) } else { [void]$sheetData.AppendChild($new) }
+    return $new
+}
+
+function Get-SheetCellElement {
+    #     セルの要素（無ければ $null。-Create なら列の順の位置に作る）
+    param([System.Xml.XmlDocument] $Doc, $RowElement, [int] $Row, [int] $Col, [switch] $Create, [string] $Style)
+    $n = 0; $next = $null; $found = $null
+    foreach ($c in (Get-XmlChildElements $RowElement 'c')) {
+        $ref = $c.GetAttribute('r')
+        if ($ref) { $n = Get-ColumnIndex $ref } else { $n++; $c.SetAttribute('r', ('{0}{1}' -f (ConvertTo-ColumnName $n), $Row)) }
+        if ($n -eq $Col) { $found = $c }
+        elseif ($n -gt $Col -and -not $next) { $next = $c }
+    }
+    if ($found -or -not $Create) { return $found }
+    $new = $Doc.CreateElement($RowElement.Prefix, 'c', $RowElement.NamespaceURI)
+    $new.SetAttribute('r', ('{0}{1}' -f (ConvertTo-ColumnName $Col), $Row))
+    if ($Style) { $new.SetAttribute('s', $Style) }
+    if ($next) { [void]$RowElement.InsertBefore($new, $next) } else { [void]$RowElement.AppendChild($new) }
+    return $new
+}
+
+function Test-NumericCellElement {
+    #     数値のセル（日付のシリアル値など）か
+    param($Cell)
+    if (-not $Cell) { return $false }
+    $t = $Cell.GetAttribute('t')
+    return (-not $t -or $t -eq 'n') -and @(Get-XmlChildElements $Cell 'v').Count -gt 0
+}
+
+function Set-SheetCellValue {
+    #     セルの値を書き換える（文字はセル内の文字列、数は数値、$null は空。書式 s はそのまま。数式は消える）
+    param([System.Xml.XmlDocument] $Doc, $Cell, $Value)
+    foreach ($child in @($Cell.ChildNodes)) { [void]$Cell.RemoveChild($child) }
+    if ($null -eq $Value) { $Cell.RemoveAttribute('t'); return }
+    if ($Value -is [double] -or $Value -is [int] -or $Value -is [long] -or $Value -is [decimal]) {
+        $Cell.RemoveAttribute('t')
+        $v = $Doc.CreateElement($Cell.Prefix, 'v', $Cell.NamespaceURI)
+        $v.InnerText = ([double]$Value).ToString('R', $invariant)
+        [void]$Cell.AppendChild($v)
+        return
+    }
+    $Cell.SetAttribute('t', 'inlineStr')
+    $is = $Doc.CreateElement($Cell.Prefix, 'is', $Cell.NamespaceURI)
+    $t = $Doc.CreateElement($Cell.Prefix, 't', $Cell.NamespaceURI)
+    [void]$t.SetAttribute('space', 'http://www.w3.org/XML/1998/namespace', 'preserve')
+    $t.InnerText = [string]$Value
+    [void]$is.AppendChild($t)
+    [void]$Cell.AppendChild($is)
+}
+
+function Copy-SheetRowMerges {
+    #     もとの行の結合（1 行の中だけのもの）を新しい行にも付ける
+    param([System.Xml.XmlDocument] $Doc, [int] $FromRow, [int] $ToRow)
+    $merges = @(Get-XmlChildElements $Doc.DocumentElement 'mergeCells')[0]
+    if (-not $merges) { return }
+    $ranges = New-Object System.Collections.Generic.List[object]
+    foreach ($mc in (Get-XmlChildElements $merges 'mergeCell')) {
+        $m = [regex]::Match($mc.GetAttribute('ref'), '^([A-Z]+)(\d+):([A-Z]+)(\d+)$')
+        if ($m.Success) { $ranges.Add([pscustomobject]@{ C1 = (Get-ColumnIndex $m.Groups[1].Value); R1 = [int]$m.Groups[2].Value; C2 = (Get-ColumnIndex $m.Groups[3].Value); R2 = [int]$m.Groups[4].Value }) }
+    }
+    $added = 0
+    foreach ($g in @($ranges | Where-Object { $_.R1 -eq $FromRow -and $_.R2 -eq $FromRow })) {
+        $overlap = @($ranges | Where-Object { $_.R1 -le $ToRow -and $_.R2 -ge $ToRow -and $_.C1 -le $g.C2 -and $_.C2 -ge $g.C1 }).Count -gt 0
+        if ($overlap) { continue }
+        $mc = $Doc.CreateElement($merges.Prefix, 'mergeCell', $merges.NamespaceURI)
+        $mc.SetAttribute('ref', ('{0}{2}:{1}{2}' -f (ConvertTo-ColumnName $g.C1), (ConvertTo-ColumnName $g.C2), $ToRow))
+        [void]$merges.AppendChild($mc)
+        $added++
+    }
+    if ($added -gt 0 -and $merges.HasAttribute('count')) { $merges.SetAttribute('count', [string]((Get-XmlChildElements $merges 'mergeCell').Count)) }
+}
+
+function Update-SheetDimension {
+    #     シートの使用範囲（dimension）を、Row 行目まで広げる
+    param([System.Xml.XmlDocument] $Doc, [int] $Row)
+    $dim = @(Get-XmlChildElements $Doc.DocumentElement 'dimension')[0]
+    if (-not $dim) { return }
+    $m = [regex]::Match($dim.GetAttribute('ref'), '^([A-Z]+\d+):([A-Z]+)(\d+)$')
+    if ($m.Success -and [int]$m.Groups[3].Value -lt $Row) { $dim.SetAttribute('ref', ('{0}:{1}{2}' -f $m.Groups[1].Value, $m.Groups[2].Value, $Row)) }
+}
+
+function ConvertTo-ExcelDate {
+    #     日付を Excel のシリアル値にする
+    param([datetime] $Date)
+    return [double]($Date.Date - [datetime]'1899-12-30').TotalDays
+}
+
+function Set-FullCalcOnLoad {
+    #     workbook.xml の文字列に、開いたときに再計算させる指定（calcPr fullCalcOnLoad="1"）を付ける
+    param([string] $WorkbookXml)
+    $px = [regex]::Match($WorkbookXml, '<(\w+:)?workbook\b').Groups[1].Value
+    $calc = [regex]::Match($WorkbookXml, ('<{0}calcPr\b[^>]*?/?>' -f $px))
+    if ($calc.Success) {
+        $tag = $calc.Value
+        if ($tag -match '\sfullCalcOnLoad="[^"]*"') { $tag = $tag -replace '\sfullCalcOnLoad="[^"]*"', ' fullCalcOnLoad="1"' }
+        elseif ($tag.EndsWith('/>')) { $tag = $tag.Substring(0, $tag.Length - 2).TrimEnd() + ' fullCalcOnLoad="1"/>' }
+        else { $tag = $tag.Substring(0, $tag.Length - 1) + ' fullCalcOnLoad="1">' }
+        return $WorkbookXml.Substring(0, $calc.Index) + $tag + $WorkbookXml.Substring($calc.Index + $calc.Length)
+    }
+    # calcPr は definedNames の後、oleSize などの前に置く
+    $after = [regex]::Match($WorkbookXml, ('<{0}(?:oleSize|customWorkbookViews|pivotCaches|smartTagPr|smartTagTypes|webPublishing|fileRecoveryPr|webPublishObjects|extLst)\b' -f $px))
+    $at = $WorkbookXml.LastIndexOf(('</{0}workbook>' -f $px))
+    if ($after.Success) { $at = $after.Index }
+    return $WorkbookXml.Substring(0, $at) + ('<{0}calcPr fullCalcOnLoad="1"/>' -f $px) + $WorkbookXml.Substring($at)
+}
+
 Export-ModuleMember -Function *

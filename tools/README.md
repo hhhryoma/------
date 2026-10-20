@@ -11,6 +11,7 @@
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足など）を全件見つける（Excel 不要） |
 | [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
 | [New-DesignDocument.ps1](#new-designdocumentps1) | 画面一覧などの一覧から、雛形の差し込み欄（`{{画面ID}}` など）を埋めた設計書を一括で作る。設計書の版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする（Excel 不要） |
+| [Measure-Progress.ps1](#measure-progressps1) | WBS から子のタスクごとの遅れ（営業日）・状態と PV／EV／SPI を出し、遅延タスクと週ごとの完了数をスケジュール遅延リカバリ計画のテンプレートに書き込む（Excel 不要） |
 | [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す（Excel 不要） |
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
 | [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
@@ -20,7 +21,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-ReviewQuality.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
 
 ## Search-Excel.ps1
 
@@ -886,6 +887,82 @@ DD03_テーブル定義書_v1.2.xlsx 版上げ 版数 1.1 → 1.2（表紙の版
 
 - ヘッダー／フッター・シート名の差し込み欄は置き換えません
 - 版上げでは、各シートのヘッダ（帳票の上部）の「更新者」「更新日」は書き換えません（変えたシートだけ直してください）
+
+## Measure-Progress.ps1
+
+WBS（Excel・CSV）から**進捗**を集計します。週次の進捗報告や、遅延したときのリカバリ計画づくりに使えます。Excel は不要です。
+
+- 子のタスク（下に 1.1 などのタスクが無いもの）ごとに、基準日（`-AsOf`）の**予定の進捗率・遅れ（営業日）・状態**
+- **PV・EV・SPI**（実績工数の列があれば **AC・CPI** も）、担当者別の SPI
+- 遅延タスクと週ごとの完了数を、[スケジュール遅延リカバリ計画のテンプレート](../docs/schedule-recovery/README.md)の「02_遅延状況」「08_週次モニタリング」に書き込む（`-FillTemplate`）
+
+```powershell
+.\Measure-Progress.ps1 D:\PJ\WBS.xlsx -Holidays .\syukujitsu.csv
+.\Measure-Progress.ps1 D:\PJ\WBS.xlsx -AsOf 2026-10-14 -Holidays .\syukujitsu.csv `
+    -FillTemplate ..\docs\schedule-recovery\スケジュール遅延リカバリ計画_テンプレート.xlsx -OutFile D:\PJ\リカバリ計画.xlsx
+```
+
+```
+WbsNo Task         Owner Progress PlannedProgress Delay Status
+----- ----         ----- -------- --------------- ----- ------
+1.1   画面設計     山田      1.00            1.00     2 完了
+1.2   テーブル設計 佐藤      0.60            1.00     2 遅延
+1.3   IF 設計      佐藤      0.00            0.50     2 遅延
+2.1   画面詳細     山田      0.00            0.00     0 未着手
+
+タスク 4 件（2026/10/14 時点。親のタスクは除く）: 完了 1・遅延 2・予定どおり 0・未着手 1
+PV 12 / EV 8 / BAC 22 / SPI 0.67 / AC 11 / CPI 0.73
+遅延 2 件（最大 2 営業日: テーブル設計）
+```
+
+### WBS の読み方
+
+見出しの文字で列を探します。「予定」「実績」の見出しの下に「開始」「終了」が並ぶ **2 行の見出し**も読めます。見出しの文字が違う場合は `tools\progress\WBSの見出し.csv` に候補を足してください。
+
+| 項目 | 見出しの候補（一部） | 使い方 |
+| --- | --- | --- |
+| WBS番号 | WBS・WBS No・項番 | 親のタスク（1 の下に 1.1 がある 1）を除く。無ければすべての行をタスクとして数える |
+| タスク・担当 | タスク名・作業・担当者 | （タスクは必須） |
+| 予定開始・予定終了 | 予定開始日・開始予定日・計画開始（2 行の見出しの「予定」＋「開始」も） | （必須）予定の進捗率 |
+| 実績開始・実績終了 | 実績開始日・実績終了日・完了日 | 実績終了日があれば完了 |
+| 見込終了 | 見込終了日・終了見込 | 遅れの日数 |
+| 進捗率 | 進捗率・進捗（45%・0.45・45 のどれでも） | EV |
+| 予定工数・実績工数 | 予定工数・計画工数・実績工数 | PV・EV の重み（無ければ予定の営業日数）、AC |
+
+### 計算のしかた
+
+- **営業日**は、土日と `-Holidays` の休日を除いた日です。休日の CSV は、内閣府の「国民の祝日」の CSV（`syukujitsu.csv`、Shift_JIS）をそのまま使えます
+- **予定の進捗率** = 予定開始日から基準日までの営業日 ÷ 予定の営業日
+- **遅れ（営業日）**: 完了したタスクは予定終了日と実績終了日の差、見込終了日があればその差、予定終了日を過ぎていれば基準日までの日数、それ以外は（予定の進捗率 − 進捗率）× 予定の営業日
+- **状態**: 完了 / 遅延（遅れ > 0）/ 未着手（予定開始日の前）/ 予定どおり
+- **PV** = 予定工数 × 予定の進捗率、**EV** = 予定工数 × 進捗率、**SPI** = EV ÷ PV、**CPI** = EV ÷ AC（実績工数のあるタスクだけで計算）
+
+### スケジュール遅延リカバリ計画のテンプレートに書き込む（`-FillTemplate`）
+
+| シート | 書き込む内容 |
+| --- | --- |
+| 02_遅延状況 | 遅延タスク（遅れの大きい順）: WBS No・タスク名・担当・当初開始日・当初終了日・実績／見込開始日・実績／見込終了日（無ければ予定終了日 + 遅れの営業日）・進捗率 |
+| 08_週次モニタリング | 最初のタスクの週から基準日の週まで: 週 No・対象週（月曜）・計画完了タスク数・実績完了タスク数 |
+
+- 記入例の行は残し、その下の空いている行から書きます（遅延日数・累計・達成率の数式はそのまま。開いたときに再計算されます）
+- 原因・クリティカルパス・影響などは、書き込んだあとに手で記入してください
+- テンプレート自体は変更せず、`-OutFile` に保存します
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | WBS のファイル（Excel・CSV。複数可） |
+| `-AsOf` | 基準日（既定は今日） |
+| `-Holidays` | 休日の CSV（1 列目が日付） |
+| `-SheetNamePattern` | WBS のシート名の正規表現 |
+| `-FillTemplate` / `-OutFile` | スケジュール遅延リカバリ計画のテンプレート / 書き込んだものの保存先 |
+| `-OutXlsx` | タスク（WBS の該当行へのリンク付き）・担当者別・週次を保存する |
+
+### 既知の制約
+
+- 日付の列が無く、セルの色でバーを描いたガントチャートだけの WBS は読めません
+- 先行・後続の関係（クリティカルパス）は見ていません
 
 ## Measure-DesignSize.ps1
 

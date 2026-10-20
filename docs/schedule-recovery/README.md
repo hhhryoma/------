@@ -25,6 +25,8 @@
 
 サマリを最後に書くことで、シート間で数字が食い違いません。
 
+WBS がある場合は、[Measure-Progress.ps1](../../tools/README.md#measure-progressps1) の `-FillTemplate` で、遅延タスク（02）と週ごとの完了数（08）をこのテンプレートに書き込めます。
+
 ## セルの色
 
 | 色 | 意味 |

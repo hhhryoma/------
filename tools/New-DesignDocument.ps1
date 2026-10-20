@@ -198,116 +198,14 @@ $sectionLabel = '^(改訂箇所|改版箇所|変更箇所|改訂対象|対象|�
 $descLabel = '^(改訂内容|改版内容|変更内容|内容|概要|改訂概要|変更概要)$'
 $authorLabel = '^(改訂者|改版者|変更者|更新者|担当者|担当|作成者)$'
 
-# ---- シートの XML の書き換え
-
-function Get-ChildElements {
-    param($Node, [string] $LocalName)
-    return @($Node.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.LocalName -eq $LocalName })
-}
-
-function Get-RowElement {
-    #     行の要素（無ければ $null。-Create なら行番号の順の位置に作る）
-    param([System.Xml.XmlDocument] $Doc, [int] $Row, [switch] $Create, $TemplateRow)
-    $sheetData = @(Get-ChildElements $Doc.DocumentElement 'sheetData')[0]
-    $n = 0; $next = $null
-    foreach ($el in (Get-ChildElements $sheetData 'row')) {
-        $r = $el.GetAttribute('r')
-        if ($r) { $n = [int]$r } else { $n++; $el.SetAttribute('r', [string]$n) }
-        if ($n -eq $Row) { return $el }
-        if ($n -gt $Row -and -not $next) { $next = $el }
-    }
-    if (-not $Create) { return $null }
-    $new = $Doc.CreateElement($sheetData.Prefix, 'row', $sheetData.NamespaceURI)
-    if ($TemplateRow) { foreach ($a in @($TemplateRow.Attributes)) { if ($a.Name -ne 'r') { $new.SetAttribute($a.Name, $a.Value) } } }
-    $new.SetAttribute('r', [string]$Row)
-    if ($next) { [void]$sheetData.InsertBefore($new, $next) } else { [void]$sheetData.AppendChild($new) }
-    return $new
-}
-
-function Get-CellElement {
-    #     セルの要素（無ければ $null。-Create なら列の順の位置に作る）
-    param([System.Xml.XmlDocument] $Doc, $RowElement, [int] $Row, [int] $Col, [switch] $Create, [string] $Style)
-    $n = 0; $next = $null; $found = $null
-    foreach ($c in (Get-ChildElements $RowElement 'c')) {
-        $ref = $c.GetAttribute('r')
-        if ($ref) { $n = Get-ColumnIndex $ref } else { $n++; $c.SetAttribute('r', ('{0}{1}' -f (ConvertTo-ColumnName $n), $Row)) }
-        if ($n -eq $Col) { $found = $c }
-        elseif ($n -gt $Col -and -not $next) { $next = $c }
-    }
-    if ($found -or -not $Create) { return $found }
-    $new = $Doc.CreateElement($RowElement.Prefix, 'c', $RowElement.NamespaceURI)
-    $new.SetAttribute('r', ('{0}{1}' -f (ConvertTo-ColumnName $Col), $Row))
-    if ($Style) { $new.SetAttribute('s', $Style) }
-    if ($next) { [void]$RowElement.InsertBefore($new, $next) } else { [void]$RowElement.AppendChild($new) }
-    return $new
-}
-
-function Test-NumberCell {
-    #     数値のセル（日付のシリアル値など）か
-    param($Cell)
-    if (-not $Cell) { return $false }
-    $t = $Cell.GetAttribute('t')
-    return (-not $t -or $t -eq 'n') -and @(Get-ChildElements $Cell 'v').Count -gt 0
-}
-
-function Set-CellValue {
-    #     セルの値を書き換える（文字はセル内の文字列、数は数値。書式 s はそのまま）
-    param([System.Xml.XmlDocument] $Doc, $Cell, $Value)
-    foreach ($child in @($Cell.ChildNodes)) { [void]$Cell.RemoveChild($child) }
-    if ($Value -is [double] -or $Value -is [int]) {
-        $Cell.RemoveAttribute('t')
-        $v = $Doc.CreateElement($Cell.Prefix, 'v', $Cell.NamespaceURI)
-        $v.InnerText = ([double]$Value).ToString('R', $invariant)
-        [void]$Cell.AppendChild($v)
-        return
-    }
-    $Cell.SetAttribute('t', 'inlineStr')
-    $is = $Doc.CreateElement($Cell.Prefix, 'is', $Cell.NamespaceURI)
-    $t = $Doc.CreateElement($Cell.Prefix, 't', $Cell.NamespaceURI)
-    [void]$t.SetAttribute('space', 'http://www.w3.org/XML/1998/namespace', 'preserve')
-    $t.InnerText = [string]$Value
-    [void]$is.AppendChild($t)
-    [void]$Cell.AppendChild($is)
-}
-
 function Get-DateValue {
     #     日付のセルに書く値（もとが数値なら Excel のシリアル値、文字ならもとの書き方に合わせた文字）
     param($Cell, [string] $OldText)
-    if (Test-NumberCell $Cell) { return [double]($Date - [datetime]'1899-12-30').TotalDays }
+    if (Test-NumericCellElement $Cell) { return ConvertTo-ExcelDate $Date }
     $t = ([string]$OldText).Normalize($nfkc)
     if ($t -match '\d{4}年') { return $Date.ToString('yyyy年M月d日', $invariant) }
     if ($t -match '\d{4}-\d') { return $Date.ToString('yyyy-MM-dd', $invariant) }
     return $dateText
-}
-
-function Copy-RowMerges {
-    #     もとの行の結合（1 行の中だけのもの）を新しい行にも付ける
-    param([System.Xml.XmlDocument] $Doc, [int] $FromRow, [int] $ToRow)
-    $merges = @(Get-ChildElements $Doc.DocumentElement 'mergeCells')[0]
-    if (-not $merges) { return }
-    $ranges = New-Object System.Collections.Generic.List[object]
-    foreach ($mc in (Get-ChildElements $merges 'mergeCell')) {
-        $m = [regex]::Match($mc.GetAttribute('ref'), '^([A-Z]+)(\d+):([A-Z]+)(\d+)$')
-        if ($m.Success) { $ranges.Add([pscustomobject]@{ C1 = (Get-ColumnIndex $m.Groups[1].Value); R1 = [int]$m.Groups[2].Value; C2 = (Get-ColumnIndex $m.Groups[3].Value); R2 = [int]$m.Groups[4].Value }) }
-    }
-    $added = 0
-    foreach ($g in @($ranges | Where-Object { $_.R1 -eq $FromRow -and $_.R2 -eq $FromRow })) {
-        $overlap = @($ranges | Where-Object { $_.R1 -le $ToRow -and $_.R2 -ge $ToRow -and $_.C1 -le $g.C2 -and $_.C2 -ge $g.C1 }).Count -gt 0
-        if ($overlap) { continue }
-        $mc = $Doc.CreateElement($merges.Prefix, 'mergeCell', $merges.NamespaceURI)
-        $mc.SetAttribute('ref', ('{0}{2}:{1}{2}' -f (ConvertTo-ColumnName $g.C1), (ConvertTo-ColumnName $g.C2), $ToRow))
-        [void]$merges.AppendChild($mc)
-        $added++
-    }
-    if ($added -gt 0 -and $merges.HasAttribute('count')) { $merges.SetAttribute('count', [string]((Get-ChildElements $merges 'mergeCell').Count)) }
-}
-
-function Update-Dimension {
-    param([System.Xml.XmlDocument] $Doc, [int] $Row)
-    $dim = @(Get-ChildElements $Doc.DocumentElement 'dimension')[0]
-    if (-not $dim) { return }
-    $m = [regex]::Match($dim.GetAttribute('ref'), '^([A-Z]+\d+):([A-Z]+)(\d+)$')
-    if ($m.Success -and [int]$m.Groups[3].Value -lt $Row) { $dim.SetAttribute('ref', ('{0}:{1}{2}' -f $m.Groups[1].Value, $m.Groups[2].Value, $Row)) }
 }
 
 function Find-LabelPairs {
@@ -341,16 +239,7 @@ foreach ($f in $files) {
 
     $pkg = Open-ZipPackage $f.FullName
     try {
-        $rels = Get-PartRelationships $pkg ''
-        $wbPart = @($rels | Where-Object Kind -eq 'officeDocument')[0].Target
-        $wb = Read-PartXml $pkg $wbPart
-        $wbRels = Get-PartRelationships $pkg $wbPart
-        $sheetParts = [ordered]@{}
-        foreach ($s in $wb.SelectNodes("//*[local-name()='sheet']")) {
-            $rid = Get-RelationshipIdAttribute $s
-            $t = @($wbRels | Where-Object { $_.Id -eq $rid })[0]
-            if ($t) { $sheetParts[$s.GetAttribute('name')] = $t.Target }
-        }
+        $sheetParts = (Get-WorkbookSheetParts $pkg).Sheets
         $coverName = @($sheetParts.Keys | Where-Object { $_ -match '^\s*表紙\s*$' })[0]
         if (-not $coverName) { $coverName = @($sheetParts.Keys)[0] }
         $histName = @($sheetParts.Keys | Where-Object { $_ -match $HistorySheet })[0]
@@ -429,17 +318,17 @@ foreach ($f in $files) {
         $done = New-Object System.Collections.Generic.List[string]
         if ($coverVersion) {
             $doc = $docs[$coverName]
-            $c = Get-CellElement $doc (Get-RowElement $doc $coverVersion.Row -Create) $coverVersion.Row $coverVersion.Col -Create
+            $c = Get-SheetCellElement $doc (Get-SheetRowElement $doc $coverVersion.Row -Create) $coverVersion.Row $coverVersion.Col -Create
             $value = Set-VersionText $coverVersion.Text $newVersion
             $num = 0.0
-            if ((Test-NumberCell $c) -and [double]::TryParse($value, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$num)) { $value = $num }
-            Set-CellValue $doc $c $value
+            if ((Test-NumericCellElement $c) -and [double]::TryParse($value, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$num)) { $value = $num }
+            Set-SheetCellValue $doc $c $value
             $done.Add('表紙の版数')
         }
         if ($coverDate) {
             $doc = $docs[$coverName]
-            $c = Get-CellElement $doc (Get-RowElement $doc $coverDate.Row -Create) $coverDate.Row $coverDate.Col -Create
-            Set-CellValue $doc $c (Get-DateValue $c $coverDate.Text)
+            $c = Get-SheetCellElement $doc (Get-SheetRowElement $doc $coverDate.Row -Create) $coverDate.Row $coverDate.Col -Create
+            Set-SheetCellValue $doc $c (Get-DateValue $c $coverDate.Text)
             $done.Add('表紙の更新日')
         }
         if ($hist) {
@@ -447,15 +336,15 @@ foreach ($f in $files) {
             $grid = $book.Sheets[$histName]
             $srcRow = $hist.HeaderRow
             if ($hist.Entries.Count -gt 0) { $srcRow = $hist.Entries[-1] }
-            $srcEl = Get-RowElement $doc $srcRow
-            $rowEl = Get-RowElement $doc $newRow -Create -TemplateRow $srcEl
+            $srcEl = Get-SheetRowElement $doc $srcRow
+            $rowEl = Get-SheetRowElement $doc $newRow -Create -TemplateRow $srcEl
             # 最後の行のセルの書式（罫線など）を写す
             if ($srcEl -and $hist.Entries.Count -gt 0) {
-                foreach ($sc in (Get-ChildElements $srcEl 'c')) {
+                foreach ($sc in (Get-XmlChildElements $srcEl 'c')) {
                     $col = Get-ColumnIndex $sc.GetAttribute('r')
-                    $null = Get-CellElement $doc $rowEl $newRow $col -Create -Style $sc.GetAttribute('s')
+                    $null = Get-SheetCellElement $doc $rowEl $newRow $col -Create -Style $sc.GetAttribute('s')
                 }
-                Copy-RowMerges $doc $srcRow $newRow
+                Copy-SheetRowMerges $doc $srcRow $newRow
             }
             $versionText = $newVersion
             if ($hist.Entries.Count -gt 0) { $versionText = Set-VersionText $grid.Cells[$srcRow][$hist.Cols['Version']] $newVersion }
@@ -463,18 +352,18 @@ foreach ($f in $files) {
             foreach ($k in $set.Keys) {
                 if (-not $hist.Cols[$k]) { continue }
                 $col = $hist.Cols[$k]
-                $c = Get-CellElement $doc $rowEl $newRow $col -Create
+                $c = Get-SheetCellElement $doc $rowEl $newRow $col -Create
                 $value = $set[$k]
                 if ($k -eq 'Date') {
                     $old = $null
-                    if ($srcEl) { $old = Get-CellElement $doc $srcEl $srcRow $col }
+                    if ($srcEl) { $old = Get-SheetCellElement $doc $srcEl $srcRow $col }
                     $oldText = ''
                     if ($grid.Cells.ContainsKey($srcRow)) { $oldText = $grid.Cells[$srcRow][$col] }
-                    if (Test-NumberCell $old) { $value = Get-DateValue $old $oldText } else { $value = Get-DateValue $null $oldText }
+                    if (Test-NumericCellElement $old) { $value = Get-DateValue $old $oldText } else { $value = Get-DateValue $null $oldText }
                 }
-                if ($null -ne $value) { Set-CellValue $doc $c $value }
+                if ($null -ne $value) { Set-SheetCellValue $doc $c $value }
             }
-            Update-Dimension $doc $newRow
+            Update-SheetDimension $doc $newRow
             $done.Add(('改訂履歴の {0} 行目' -f $newRow))
         }
         foreach ($name in $docs.Keys) { $changes[$sheetParts[$name].ToLowerInvariant()] = ConvertTo-XmlString $docs[$name] }
