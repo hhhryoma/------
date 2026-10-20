@@ -97,6 +97,35 @@ Test-Case 'New-DesignDocument: ファイル名に版数があれば新しい版�
     Assert-Match $r[0].Detail '版数が見つかりません'
 }
 
+Test-Case 'New-DesignDocument: -CompareWith で前の版との差分から改訂箇所・改訂内容の行を足す（版数などは最初の行だけ）' {
+    $dir = New-TestDir
+    $oldDir = Join-Path $dir '納品'
+    $null = New-Item -ItemType Directory -Path $oldDir
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD03_テーブル定義書.xlsx') -Destination (Join-Path $oldDir 'DD03_テーブル定義書_v1.1.xlsx')
+    $file = Join-Path $dir 'DD03_テーブル定義書_v1.1.xlsx'
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD03_テーブル定義書.xlsx') -Destination $file
+    $replace = Join-Path $script:ToolsDir 'Replace-Excel.ps1'
+    $null = & $replace '^配送時間帯$' '配送希望時間帯' -Path $file -SheetNamePattern '^T_ORDER$' -Force 6>$null
+    $null = & $replace '^顧客名カナ$' '顧客名（カナ）' -Path $file -SheetNamePattern '^M_CUSTOMER$' -Force 6>$null
+    $r = @(& $NewDocTool -Bump -Path $file -CompareWith $oldDir -Author '佐藤 花子' -Date '2026-11-02' 6>$null)
+    Assert-Equal 'DD03_テーブル定義書_v1.2.xlsx|版上げ' ('{0}|{1}' -f $r[0].File, $r[0].Status)
+    Assert-Match $r[0].Detail '改訂履歴の 8〜9 行目'
+    $new = Join-Path $dir 'DD03_テーブル定義書_v1.2.xlsx'
+    $hist = Get-CellTexts $new '改訂履歴'
+    Assert-Equal '1.2|2026/11/02|M_CUSTOMER|CUSTOMER_NAME_KANA: 論理名を 顧客名カナ → 顧客名（カナ） に変更|佐藤 花子' ('{0}|{1}|{2}|{3}|{4}' -f $hist['A8'], $hist['E8'], $hist['K8'], $hist['W8'], $hist['AY8'])
+    Assert-Equal '|||T_ORDER|DELIVERY_TIME_KBN: 論理名を 配送時間帯 → 配送希望時間帯 に変更|' ('|{0}|{1}|{2}|{3}|{4}' -f $hist['A9'], $hist['E9'], $hist['K9'], $hist['W9'], $hist['AY9'])
+    $issues = @(& (Join-Path $script:ToolsDir 'Test-ExcelDeliverable.ps1') -Path $new -Check Version 6>$null)
+    Assert-Equal 0 $issues.Count (@($issues | ForEach-Object { $_.Detail }) -join ' / ')
+    # 次の版上げは、続きの行（9 行目）の下に足す
+    $r = @(& $NewDocTool -Bump -Path $new -Description '索引を追加' -Date '2026-11-10' 6>$null)
+    Assert-Equal '1.3|索引を追加' ('{0}|{1}' -f (Get-CellTexts (Join-Path $dir 'DD03_テーブル定義書_v1.3.xlsx') '改訂履歴')['A10'], (Get-CellTexts (Join-Path $dir 'DD03_テーブル定義書_v1.3.xlsx') '改訂履歴')['W10'])
+    # 前の版と同じ内容なら版を上げない。改訂内容も前の版も無ければエラー
+    $r = @(& $NewDocTool -Bump -Path (Join-Path $oldDir 'DD03_テーブル定義書_v1.1.xlsx') -CompareWith (Join-Path $oldDir 'DD03_テーブル定義書_v1.1.xlsx') -WhatIf 6>$null)
+    Assert-Equal 'スキップ' $r[0].Status
+    Assert-Match $r[0].Detail '内容が同じ'
+    Assert-Throws { & $NewDocTool -Bump -Path $file 6>$null } 'CompareWith'
+}
+
 Test-Case 'New-DesignDocument: Get-Help でヘルプが表示される' {
     $h = Get-Help $NewDocTool
     Assert-Match $h.Synopsis '雛形'
