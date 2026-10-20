@@ -714,4 +714,165 @@ function Set-FullCalcOnLoad {
     return $WorkbookXml.Substring(0, $at) + ('<{0}calcPr fullCalcOnLoad="1"/>' -f $px) + $WorkbookXml.Substring($at)
 }
 
+# ---------------------------------------------------------------- 数式・ヘッダー／フッター
+
+
+# 数式の中のセル参照（A1・$A$1・A:A・1:1）。文字列（"..."）・シート名（'...'）・テーブルの列名（[...]）は飛ばす。
+# 関数名（LOG10( など）や、シート名（Sheet1! など）の一部には一致させない
+$script:FormulaRefRx = New-Object System.Text.RegularExpressions.Regex(
+    '"(?:[^"]|"")*"|''(?:[^'']|'''')*''|\[[^\]]*\]|(?<![A-Za-z0-9_.$])(?:(\$?)([A-Z]{1,3})(\$?)(\d+)|(\$?)([A-Z]{1,3}):(\$?)([A-Z]{1,3})|(\$?)(\d+):(\$?)(\d+))(?![A-Za-z0-9_.(!])')
+
+function Move-FormulaReference {
+    #     数式の相対参照を RowOffset 行・ColumnOffset 列ずらす（$ の付いた行・列はずらさない）。
+    #     共有数式（Excel が数式をコピーしたときの保存形式。先頭のセルにだけ数式があり、写しのセルには数式が無い）の、
+    #     写しのセルの数式を求めるのに使う。シートの外に出た参照は #REF! にする
+    param([string] $Formula, [int] $RowOffset, [int] $ColumnOffset)
+
+    if ($RowOffset -eq 0 -and $ColumnOffset -eq 0) { return $Formula }
+    return $script:FormulaRefRx.Replace($Formula, {
+        param($m)
+        $g = $m.Groups
+        # 列（C）・行（R）の並び。A1 は列と行を区切らずにつなげ、A:B・1:2 は : でつなげる
+        $parts = New-Object System.Collections.Generic.List[string]
+        if ($g[2].Success) { $parts.Add('C' + $g[1].Value + $g[2].Value); $parts.Add('R' + $g[3].Value + $g[4].Value); $sep = '' }
+        elseif ($g[6].Success) { $parts.Add('C' + $g[5].Value + $g[6].Value); $parts.Add('C' + $g[7].Value + $g[8].Value); $sep = ':' }
+        elseif ($g[10].Success) { $parts.Add('R' + $g[9].Value + $g[10].Value); $parts.Add('R' + $g[11].Value + $g[12].Value); $sep = ':' }
+        else { return $m.Value }
+        $out = New-Object System.Text.StringBuilder
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            $p = $parts[$i]
+            if ($i -gt 0) { [void]$out.Append($sep) }
+            if ($p.Substring(1, 1) -eq '$') { [void]$out.Append($p.Substring(1)); continue }
+            if ($p[0] -eq 'C') {
+                $c = (Get-ColumnIndex $p.Substring(1)) + $ColumnOffset
+                if ($c -lt 1 -or $c -gt 16384) { return '#REF!' }
+                [void]$out.Append((ConvertTo-ColumnName $c))
+            }
+            else {
+                $r = [long]$p.Substring(1) + $RowOffset
+                if ($r -lt 1 -or $r -gt 1048576) { return '#REF!' }
+                [void]$out.Append($r)
+            }
+        }
+        return $out.ToString()
+    })
+}
+
+function Split-HeaderFooterText {
+    #     ヘッダー・フッターの文字（&L 左 &C 中央 &R 右。&P などはページ番号などの項目、&"フォント" &12 &B などは書式）を区切る。
+    #     返り値: 区切りの並び。Section（L / C / R）、Kind（Text: 文字 / Field: ページ番号などの項目 / Format: 書式 / Section: 位置の指定）、
+    #     Raw（元の書き方）、InnerText（Text は文字（&& は & に戻す）、Field は Excel の画面と同じ書き方（&[ページ番号] など）、それ以外は空）。
+    #     Text の InnerText を書き換えてから Join-HeaderFooterText に渡すと、書式や項目を保ったまま文字を変えられる
+    param([string] $Text)
+
+    $fields = @{ P = '&[ページ番号]'; N = '&[総ページ数]'; D = '&[日付]'; T = '&[時刻]'; Z = '&[パス]'; F = '&[ファイル名]'; A = '&[シート名]'; G = '&[図]' }
+    $tokens = New-Object System.Collections.Generic.List[object]
+    # 位置の指定が無い文字は中央に出る
+    $section = 'C'
+    foreach ($m in [regex]::Matches([string]$Text, '&&|&[LCR]|&[PNDTZFAG]|&"[^"]*"?|&K(?:[0-9A-Fa-f]{6}|\d\d[+-]\d{3})|&\d+|&.?|[^&]+', 'Singleline')) {
+        $raw = $m.Value
+        if ($raw -eq '&&' -or -not $raw.StartsWith('&')) {
+            $t = $raw
+            if ($raw -eq '&&') { $t = '&' }
+            # 続いている文字は 1 つにまとめる
+            if ($tokens.Count -gt 0 -and $tokens[$tokens.Count - 1].Kind -eq 'Text') {
+                $last = $tokens[$tokens.Count - 1]
+                $last.Raw += $raw; $last.InnerText += $t
+                continue
+            }
+            $tokens.Add([pscustomobject]@{ Section = $section; Kind = 'Text'; Raw = $raw; InnerText = $t })
+        }
+        elseif ($raw -cmatch '^&[LCR]$') {
+            $section = $raw.Substring(1)
+            $tokens.Add([pscustomobject]@{ Section = $section; Kind = 'Section'; Raw = $raw; InnerText = '' })
+        }
+        elseif ($raw -cmatch '^&[PNDTZFAG]$') {
+            $tokens.Add([pscustomobject]@{ Section = $section; Kind = 'Field'; Raw = $raw; InnerText = $fields[$raw.Substring(1)] })
+        }
+        else {
+            $tokens.Add([pscustomobject]@{ Section = $section; Kind = 'Format'; Raw = $raw; InnerText = '' })
+        }
+    }
+    return , $tokens
+}
+
+function Join-HeaderFooterText {
+    #     Split-HeaderFooterText の区切りをつなげて、ヘッダー・フッターの文字に戻す（文字の & は && にする）
+    param($Tokens)
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($t in $Tokens) {
+        if ($t.Kind -eq 'Text') { [void]$sb.Append($t.InnerText.Replace('&', '&&')) }
+        else { [void]$sb.Append($t.Raw) }
+    }
+    return $sb.ToString()
+}
+
+function Get-HeaderFooterSections {
+    #     ヘッダー・フッターの文字を、位置（左・中央・右）ごとの表示の文字にする。返り値: @(@{ Section = '左'; Text }) （空の位置は除く）
+    param($Tokens)
+    $names = [ordered]@{ L = '左'; C = '中央'; R = '右' }
+    $result = New-Object System.Collections.Generic.List[object]
+    foreach ($key in $names.Keys) {
+        $text = -join @($Tokens | Where-Object { $_.Section -eq $key -and ($_.Kind -eq 'Text' -or $_.Kind -eq 'Field') } | ForEach-Object { $_.InnerText })
+        if ($text) { $result.Add([pscustomobject]@{ Key = $key; Section = $names[$key]; Text = $text }) }
+    }
+    return , $result
+}
+
+# ヘッダー・フッターの要素名 → 表示の名前
+$script:HeaderFooterNames = [ordered]@{
+    oddHeader = 'ヘッダー'; oddFooter = 'フッター'; evenHeader = '偶数ページのヘッダー'; evenFooter = '偶数ページのフッター'
+    firstHeader = '先頭ページのヘッダー'; firstFooter = '先頭ページのフッター'
+}
+
+function Get-HeaderFooterName {
+    #     ヘッダー・フッターの要素名（oddHeader など）の表示の名前。ヘッダー・フッターの要素でなければ $null
+    param([string] $LocalName)
+    if ($script:HeaderFooterNames.Contains($LocalName)) { return $script:HeaderFooterNames[$LocalName] }
+    return $null
+}
+
+function Get-ValidationTexts {
+    #     入力規則（dataValidation 要素。拡張部分の x14:dataValidation も）の、検索・置換する文字。
+    #     返り値: @(@{ Name; Text; Node; Attribute; IsList }) Name は「リスト」「条件」「入力時メッセージ」など。
+    #     リスト（"未着手,完了" のように直接書いたもの）の Text は値の並び。参照・条件の Text は =数式。
+    #     Node・Attribute は書き換える場所（Attribute が空なら Node の文字）
+    param([System.Xml.XmlElement] $Element)
+
+    $result = New-Object System.Collections.Generic.List[object]
+    $type = $Element.GetAttribute('type')
+    foreach ($fn in @('formula1', 'formula2')) {
+        $f = @(Get-XmlChildElements $Element $fn)[0]
+        if (-not $f) { continue }
+        # 拡張部分（x14）は <x14:formula1><xm:f>…</xm:f></x14:formula1>
+        $inner = @(Get-XmlChildElements $f 'f')[0]
+        if ($inner) { $f = $inner }
+        $text = $f.InnerText
+        if ($type -eq 'list' -and $text -match '^"([\s\S]*)"$') {
+            $result.Add([pscustomobject]@{ Name = 'リスト'; Text = $Matches[1].Replace('""', '"'); Node = $f; Attribute = ''; IsList = $true })
+        }
+        elseif ($text) {
+            $name = '条件'
+            if ($type -eq 'list') { $name = 'リスト' }
+            $result.Add([pscustomobject]@{ Name = $name; Text = '=' + $text; Node = $f; Attribute = ''; IsList = $false })
+        }
+    }
+    foreach ($a in @(@('promptTitle', '入力時メッセージのタイトル'), @('prompt', '入力時メッセージ'), @('errorTitle', 'エラーメッセージのタイトル'), @('error', 'エラーメッセージ'))) {
+        $v = $Element.GetAttribute($a[0])
+        if ($v) { $result.Add([pscustomobject]@{ Name = $a[1]; Text = $v; Node = $Element; Attribute = $a[0]; IsList = $false }) }
+    }
+    return , $result
+}
+
+function Get-ValidationRange {
+    #     入力規則の範囲（sqref 属性。x14 では xm:sqref 要素）
+    param([System.Xml.XmlElement] $Element)
+    $sqref = $Element.GetAttribute('sqref')
+    if (-not $sqref) {
+        $node = @(Get-XmlChildElements $Element 'sqref')[0]
+        if ($node) { $sqref = $node.InnerText }
+    }
+    return $sqref.Trim()
+}
+
 Export-ModuleMember -Function *

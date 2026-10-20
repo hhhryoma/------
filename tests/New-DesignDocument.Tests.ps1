@@ -53,6 +53,19 @@ Test-Case 'New-DesignDocument: CSV の一覧と {{作成日}} を使える。-Wh
     Assert-Throws { & $NewDocTool -Template $tpl -List $list -FileName '{{画面ID}}.xlsx' -OutDir $out 6>$null } '画面名'
 }
 
+Test-Case 'New-DesignDocument: ヘッダー・フッターの差し込み欄も置き換える（書式で分かれていてもよい）' {
+    $dir = New-TestDir
+    $tpl = Join-Path $dir '明細_雛形.xlsx'
+    Copy-Item -LiteralPath (Join-Path $script:Fixtures 'formula/明細.xlsx') -Destination $tpl
+    $null = & (Join-Path $script:ToolsDir 'Replace-Excel.ps1') '受注管理' '{{画面名}}' -Path $tpl -SimpleMatch -Target HeaderFooter -Force 6>$null
+    $list = Join-Path $dir 'list.csv'
+    @('画面ID,画面名', 'S20,出荷管理') | Set-Content -LiteralPath $list -Encoding UTF8
+    $r = @(& $NewDocTool -Template $tpl -List $list -FileName '{{画面ID}}.xlsx' -OutDir (Join-Path $dir 'out') 6>$null)
+    Assert-Equal 'S20.xlsx|作成' ('{0}|{1}' -f $r[0].File, $r[0].Status)
+    $h = @(& (Join-Path $script:ToolsDir 'Search-Excel.ps1') -Pattern 'システム' -Path ([System.Management.Automation.WildcardPattern]::Escape((Join-Path $dir 'out/S20.xlsx'))) -Target HeaderFooter 6>$null)
+    Assert-Equal 'ヘッダー（左）|出荷管理システム' ('{0}|{1}' -f $h[0].Name, $h[0].Text)
+}
+
 Test-Case 'New-DesignDocument: -Bump で表紙の版数・更新日と改訂履歴の行を書き換え、版数のチェックが通る' {
     $dir = New-TestDir
     $file = Join-Path $dir 'DD05_メッセージ一覧.xlsx'

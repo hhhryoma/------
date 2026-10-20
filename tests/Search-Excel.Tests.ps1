@@ -116,6 +116,35 @@ Test-Case 'Search-Excel: 数式を検索できる' {
     Assert-Match $hits[0].Text '^=VLOOKUP\(A2,'
 }
 
+Test-Case 'Search-Excel: 共有数式（コピーした数式）は、写しのセルも位置をずらした数式で検索される' {
+    $hits = Invoke-Search -Pattern '.' -Path (Join-Path $script:Fixtures 'formula/明細.xlsx') -Target Formula
+    $byCell = @{}
+    foreach ($h in $hits) { $byCell[$h.Cell] = $h.Text }
+    Assert-Equal 19 $hits.Count
+    Assert-Equal '=ROUND(A4*B4*(1+税率),0)' $byCell['C4'] '縦にコピー'
+    Assert-Equal '=SUM($C$2:C5)' $byCell['D5'] '$ の付いた参照はずらさない'
+    Assert-Equal '=IF(A6>3,"A2以上",''集計 A1''!$B$1)' $byCell['E6'] '文字列やシート名の中の A2・A1 はずらさない'
+    Assert-Equal '=COUNTA(C:C)' $byCell['C8'] '横にコピーした列の参照'
+    Assert-Equal '=SUM(3:3)' $byCell['A11'] '行の参照'
+    $hits = Invoke-Search -Pattern 'A5\*B5' -Path (Join-Path $script:Fixtures 'formula/明細.xlsx')
+    Assert-Equal '明細!C5|数式' ('{0}|{1}' -f $hits[0].Location, $hits[0].Kind) '写しのセルだけにある文字も見つかる'
+}
+
+Test-Case 'Search-Excel: ヘッダー・フッター、名前の定義、入力規則を検索できる' {
+    $file = Join-Path $script:Fixtures 'formula/明細.xlsx'
+    $hits = Invoke-Search -Pattern 'システム|ページ|A&B' -Path $file
+    Assert-Equal @('明細|ヘッダー・フッター|ヘッダー（左）|受注管理システム', '明細|ヘッダー・フッター|フッター（中央）|&[ページ番号] / &[総ページ数]', '明細|ヘッダー・フッター|フッター（右）|株式会社A&B') `
+        @($hits | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Location, $_.Kind, $_.Name, $_.Text }) '書式（フォント）で分かれた文字もつなげて探す'
+    $hits = Invoke-Search -Pattern '明細|税率' -Path $file -Target DefinedName
+    Assert-Equal @('税率|=明細!$J$1', '明細!対象|=明細!$A$2:$A$6', '明細!Print_Area|=明細!$A$1:$G$11') @($hits | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Text }) 'Excel が内部で使う非表示の名前は除く'
+    $hits = Invoke-Search -Pattern '対応中|集計|リストから' -Path $file -Target Validation
+    Assert-Equal @('明細!F2|リスト（F2:F6）|未着手,対応中,完了', '明細!F2|入力時メッセージ（F2:F6）|未着手・対応中・完了から選んでください', '明細!F2|エラーメッセージ（F2:F6）|リストから選んでください', "明細!G2|リスト（G2:G6）|='集計 A1'!`$A`$1:`$A`$3") `
+        @($hits | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Name, $_.Text })
+    $out = Join-Path (New-TestDir) 'hits.xlsx'
+    $null = Invoke-Search -Pattern '税率' -Path $file -Target DefinedName -OutXlsx $out
+    Assert-Equal 0 @((Read-XlsxSheet -Path $out).Links | Where-Object { $_.Location }).Count 'ブック全体の名前はファイルを開くだけのリンク'
+}
+
 Test-Case 'Search-Excel: コメントとシート名を検索できる' {
     $c = Invoke-Search -Pattern '住所' -Path (Join-Path $grep 'sample.xlsx') -Target Comment
     Assert-Equal 'コメント' $c[0].Kind
