@@ -17,6 +17,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [New-DesignDocument.ps1](tools/README.md#new-designdocumentps1) | 一覧から雛形の差し込み欄を埋めた設計書を一括で作る。版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする | 不要 |
 | [Measure-DesignSize.ps1](tools/README.md#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す | 不要 ※1 |
 | [Test-ExcelEstimate.ps1](tools/README.md#test-excelestimateps1) | 見積書の検算（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算の日数や単価の食い違い） | 不要 |
+| [Export-ExcelToMarkdown.ps1](tools/README.md#export-exceltomarkdownps1) | Excel を Markdown にする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見られる | 不要 ※1 |
 | [Measure-ReviewQuality.ps1](tools/README.md#measure-reviewqualityps1) | 指摘管理表を集計し、設計書ごとの指摘件数・指摘密度・未完了・期限切れ、基準値から外れた設計書、起票・完了の推移を出す | 不要 ※1 |
 | [Invoke-DesignReview.ps1](tools/README.md#invoke-designreviewps1) | 設計書を観点表に沿って Microsoft 365 Copilot にレビューさせ、指摘一覧にまとめる | 不要 |
 | [Export-ExcelToPdf.ps1](tools/README.md#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える | 必要 ※2 |
