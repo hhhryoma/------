@@ -717,6 +717,76 @@ def make_consistency_fixtures():
     ])
 
 
+FORMULA = os.path.join(HERE, "formula")
+
+
+def make_formula_fixtures():
+    """Search-Excel.ps1 / Replace-Excel.ps1 の、共有数式・ヘッダー／フッター・名前の定義・入力規則用（formula）。
+    期待値は tests/Search-Excel.Tests.ps1・tests/Replace-Excel.Tests.ps1 を参照"""
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.workbook.defined_name import DefinedName
+    shutil.rmtree(FORMULA, ignore_errors=True)
+    os.makedirs(FORMULA)
+    path = os.path.join(FORMULA, "明細.xlsx")
+
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "明細"
+    ws.append(["数量", "単価", "金額", "累計", "判定", "状態", "担当", None, "税率", 0.1])
+    for i, (q, p) in enumerate([(1, 100), (2, 200), (3, 300), (4, 400), (5, 500)], start=2):
+        ws.append([q, p, "=ROUND(A{0}*B{0}*(1+税率),0)".format(i), "=SUM($C$2:C{0})".format(i),
+                   '=IF(A{0}>3,"A2以上",\'集計 A1\'!$B$1)'.format(i)])
+    ws["A8"] = "件数"; ws["B8"] = "=COUNTA(B:B)"; ws["C8"] = "=COUNTA(C:C)"
+    ws["A10"] = "=SUM(2:2)"; ws["A11"] = "=SUM(3:3)"
+    dv = DataValidation(type="list", formula1='"未着手,対応中,完了"', allow_blank=True, showInputMessage=True, showErrorMessage=True,
+                        promptTitle="状態", prompt="未着手・対応中・完了から選んでください", errorTitle="入力エラー", error="リストから選んでください")
+    ws.add_data_validation(dv); dv.add("F2:F6")
+    other = wb.create_sheet("集計 A1")
+    for r, name in enumerate(["山田", "佐藤", "鈴木"], start=1):
+        other.cell(row=r, column=1, value=name)
+    other["B1"] = "対象外"
+    wb.defined_names["税率"] = DefinedName("税率", attr_text="明細!$J$1")
+    ws.defined_names["対象"] = DefinedName("対象", attr_text="明細!$A$2:$A$6")
+    ws.defined_names["_xlnm.Print_Area"] = DefinedName("_xlnm.Print_Area", attr_text="明細!$A$1:$G$11")
+    ws.defined_names["_xlnm._FilterDatabase"] = DefinedName("_xlnm._FilterDatabase", attr_text="明細!$A$1:$G$6", hidden=True)
+    wb.properties.creator = None
+    wb.save(path)
+
+    files = read_zip(path)
+    sheet = files["xl/worksheets/sheet1.xml"].decode()
+    # 共有数式（Excel が数式をコピーしたときの保存形式）: 先頭のセルにだけ数式があり、写しのセルには数式が無い
+    def share(cells, si):
+        nonlocal sheet
+        first = True
+        for cell in cells:
+            m = re.search(r'<c r="{0}"><f>(.*?)</f>'.format(cell), sheet)
+            assert m, cell
+            if first:
+                new = '<c r="{0}"><f t="shared" ref="{1}:{2}" si="{3}">{4}</f>'.format(cell, cells[0], cells[-1], si, m.group(1))
+                first = False
+            else:
+                new = '<c r="{0}"><f t="shared" si="{1}"/>'.format(cell, si)
+            sheet = sheet[:m.start()] + new + sheet[m.end():]
+    share(["C2", "C3", "C4", "C5", "C6"], 0)
+    share(["D2", "D3", "D4", "D5", "D6"], 1)
+    share(["E2", "E3", "E4", "E5", "E6"], 2)
+    share(["B8", "C8"], 3)
+    share(["A10", "A11"], 4)
+    assert sheet.count('t="shared"') == 19, sheet
+    # ヘッダー・フッター（文字の途中で書式を変えたもの、ページ番号などの項目、文字の &）
+    header = ('<headerFooter><oddHeader>&amp;L&amp;"ＭＳ ゴシック,太字"受注管理&amp;"ＭＳ ゴシック,標準"システム&amp;R&amp;D</oddHeader>'
+              '<oddFooter>&amp;C&amp;P / &amp;N&amp;R株式会社A&amp;&amp;B</oddFooter></headerFooter>')
+    sheet = re.sub(r'(<pageMargins [^>]*/>)', lambda m: m.group(1) + header, sheet)
+    # 別のシートを参照するリスト（Excel 2010 以降の拡張部分 x14 に保存される）
+    ext = ('<extLst><ext uri="{CCE6A557-97BC-4b89-ADB6-D9C93CAAB3DF}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">'
+           '<x14:dataValidations count="1" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main">'
+           '<x14:dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1">'
+           "<x14:formula1><xm:f>'集計 A1'!$A$1:$A$3</xm:f></x14:formula1><xm:sqref>G2:G6</xm:sqref>"
+           '</x14:dataValidation></x14:dataValidations></ext></extLst>')
+    sheet = sheet.replace("</worksheet>", ext + "</worksheet>")
+    assert "<headerFooter>" in sheet and "x14:dataValidation " in sheet
+    files["xl/worksheets/sheet1.xml"] = sheet.encode()
+    rewrite_zip(path, files)
+
+
 def main():
     tmp = tempfile.mkdtemp()
     try:
@@ -733,6 +803,7 @@ def main():
         make_print_fixtures()
         make_size_fixtures()
         make_consistency_fixtures()
+        make_formula_fixtures()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("fixtures written to", HERE)
