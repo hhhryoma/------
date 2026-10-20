@@ -73,19 +73,6 @@ function ConvertTo-R1C1 {
     })
 }
 
-function ConvertFrom-R1C1 {
-    #     相対位置の数式（ConvertTo-R1C1 の結果）を、指定したセルの A1 形式の数式に戻す（共有数式の写しの数式を求める）
-    param([string] $R1C1, [int] $Row, [int] $Col)
-    return [regex]::Replace($R1C1, '"[^"]*"|R(\[-?\d+\]|\d+)C(\[-?\d+\]|\d+)', {
-        param($m)
-        if ($m.Value.StartsWith('"')) { return $m.Value }
-        $rs = $m.Groups[1].Value; $cs = $m.Groups[2].Value
-        if ($rs.StartsWith('[')) { $r = $Row + [int]$rs.Trim('[', ']'); $rt = "$r" } else { $rt = '$' + $rs }
-        if ($cs.StartsWith('[')) { $c = $Col + [int]$cs.Trim('[', ']'); $ct = ConvertTo-ColumnName $c } else { $ct = '$' + (ConvertTo-ColumnName ([int]$cs)) }
-        return $ct + $rt
-    })
-}
-
 # ---------------------------------------------------------------- 読み取り
 
 
@@ -127,7 +114,7 @@ function Read-SheetCells {
     param($Package, [string] $PartName, $Strings)
 
     $rows = @{}
-    $shared = @{}   # 共有数式の番号 → 相対表記
+    $shared = @{}   # 共有数式の番号 → 先頭のセル
     $pending = New-Object System.Collections.Generic.List[object]
     $reader = New-PartXmlReader -Package $Package -PartName $PartName
     if ($null -eq $reader) { return $rows }
@@ -170,7 +157,7 @@ function Read-SheetCells {
                             if ($text) {
                                 $cell.Formula = $text
                                 $cell.R1C1 = ConvertTo-R1C1 $text $cell.Row $cell.Col
-                                if ($ft -eq 'shared' -and $si) { $shared[$si] = $cell.R1C1 }
+                                if ($ft -eq 'shared' -and $si) { $shared[$si] = $cell }
                             }
                             elseif ($ft -eq 'shared' -and $si) { $cell.SharedIndex = $si; $pending.Add($cell) }
                         }
@@ -190,8 +177,10 @@ function Read-SheetCells {
 
     foreach ($c in $pending) {
         if ($shared.ContainsKey($c.SharedIndex)) {
-            $c.R1C1 = $shared[$c.SharedIndex]
-            $c.Formula = ConvertFrom-R1C1 $c.R1C1 $c.Row $c.Col
+            # 共有数式の写しのセルは、先頭のセルの数式を位置に合わせてずらしたもの
+            $master = $shared[$c.SharedIndex]
+            $c.R1C1 = $master.R1C1
+            $c.Formula = Move-FormulaReference $master.Formula ($c.Row - $master.Row) ($c.Col - $master.Col)
         }
     }
     $idx = 0

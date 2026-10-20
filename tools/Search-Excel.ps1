@@ -10,8 +10,8 @@ param(
     [switch] $CaseSensitive,
     [switch] $IgnoreWidth,
 
-    [ValidateSet('Value', 'Formula', 'Comment', 'Shape', 'SheetName')]
-    [string[]] $Target = @('Value', 'Formula', 'Comment', 'Shape', 'SheetName'),
+    [ValidateSet('Value', 'Formula', 'Comment', 'Shape', 'SheetName', 'HeaderFooter', 'DefinedName', 'Validation')]
+    [string[]] $Target = @('Value', 'Formula', 'Comment', 'Shape', 'SheetName', 'HeaderFooter', 'DefinedName', 'Validation'),
 
     [switch] $NoRecurse,
     [switch] $SkipHiddenSheets,
@@ -53,6 +53,9 @@ $wantFormula   = $Target -contains 'Formula'
 $wantComment   = $Target -contains 'Comment'
 $wantShape     = $Target -contains 'Shape'
 $wantSheetName = $Target -contains 'SheetName'
+$wantHeaderFooter = $Target -contains 'HeaderFooter'
+$wantDefinedName  = $Target -contains 'DefinedName'
+$wantValidation   = $Target -contains 'Validation'
 
 # ---------------------------------------------------------------- 検索条件
 
@@ -338,6 +341,8 @@ function Search-WorksheetCells {
     $numStyle   = [System.Globalization.NumberStyles]::Float
     $num        = 0.0
     $idx        = 0
+    # 共有数式の番号 → @(先頭のセルの数式, 行, 列)
+    $sharedFormulas = @{}
 
     # セルごとの処理は回数が多いため、関数呼び出しを避けて直接書いている
 
@@ -388,11 +393,41 @@ function Search-WorksheetCells {
                         $advance = $false
                     }
                     elseif ($name -eq 'f') {
+                        $ft = $reader.GetAttribute('t')
+                        $si = $reader.GetAttribute('si')
                         $formula = $reader.ReadElementContentAsString()
                         $advance = $false
+                        # 共有数式（Excel が数式をコピーしたときの保存形式）の写しのセルは、先頭のセルの数式を位置に合わせてずらして求める
+                        if ($wantFormula -and $ft -eq 'shared' -and $si) {
+                            $fc = Get-ColumnIndex $ref
+                            if ($formula) { $sharedFormulas[$si] = @($formula, $row, $fc) }
+                            elseif ($sharedFormulas.ContainsKey($si)) {
+                                $master = $sharedFormulas[$si]
+                                $formula = Move-FormulaReference $master[0] ($row - $master[1]) ($fc - $master[2])
+                            }
+                        }
                     }
                     elseif ($name -eq 'is') {
                         $inline = Read-RichText -Reader $reader
+                    }
+                }
+                elseif ($wantHeaderFooter -and (Get-HeaderFooterName $name)) {
+                    $label = Get-HeaderFooterName $name
+                    $raw = $reader.ReadElementContentAsString()
+                    $advance = $false
+                    foreach ($sec in (Get-HeaderFooterSections (Split-HeaderFooterText $raw))) {
+                        if (Test-TextMatch $sec.Text) { New-Hit -Kind 'ヘッダー・フッター' -Sheet $SheetName -Cell $null -Text $sec.Text -Name ('{0}（{1}）' -f $label, $sec.Section) }
+                    }
+                }
+                elseif ($wantValidation -and $name -eq 'dataValidation') {
+                    # 入力規則（拡張部分の x14:dataValidation も）。小さい要素なので、この要素だけ XML の文書として読む
+                    $sub = $reader.ReadSubtree()
+                    $dv = New-Object System.Xml.XmlDocument
+                    try { $dv.Load($sub) } finally { $sub.Dispose() }
+                    $range = Get-ValidationRange $dv.DocumentElement
+                    $first = ($range -split '[\s:]')[0]
+                    foreach ($v in (Get-ValidationTexts $dv.DocumentElement)) {
+                        if (Test-TextMatch $v.Text) { New-Hit -Kind '入力規則' -Sheet $SheetName -Cell $first -Text $v.Text -Name ('{0}（{1}）' -f $v.Name, $range) }
                     }
                 }
             }
@@ -524,6 +559,35 @@ function Search-SheetShapes {
     }
 }
 
+function Search-DefinedNames {
+    #     名前の定義（名前の管理）の名前と参照範囲・数式を検索する。
+    #     Excel が内部で使う非表示の名前（フィルターの範囲など）は除く。印刷範囲などは Print_Area のように表示する。
+    #     シートに限った名前はそのシート、ブック全体の名前はシートなしにする（-SheetNamePattern を指定したときは対象外）
+    param([System.Xml.XmlDocument] $WorkbookXml)
+
+    $sheets = @($WorkbookXml.SelectNodes("//*[local-name()='sheets']/*[local-name()='sheet']"))
+    foreach ($dn in $WorkbookXml.SelectNodes("//*[local-name()='definedNames']/*[local-name()='definedName']")) {
+        if (@('1', 'true') -contains $dn.GetAttribute('hidden')) { continue }
+        $scope = ''
+        $id = 0
+        if ([int]::TryParse($dn.GetAttribute('localSheetId'), [ref]$id) -and $id -ge 0 -and $id -lt $sheets.Count) {
+            $scope = $sheets[$id].GetAttribute('name')
+            $state = $sheets[$id].GetAttribute('state')
+            if ($SkipHiddenSheets -and ($state -eq 'hidden' -or $state -eq 'veryHidden')) { continue }
+        }
+        if (-not (Test-SheetNameMatch $scope)) { continue }
+        $name = $dn.GetAttribute('name') -replace '^_xlnm\.', ''
+        $text = '=' + $dn.InnerText
+        if ((Test-TextMatch $name) -or (Test-TextMatch $text)) {
+            # 場所は Excel の書き方（シートに限った名前は シート名!名前）にする
+            $hit = New-Hit -Kind '名前の定義' -Sheet $scope -Cell $null -Text $text -Name $name
+            $hit.Location = $name
+            if ($scope) { $hit.Location = '{0}!{1}' -f $scope, $name }
+            $hit
+        }
+    }
+}
+
 function Search-OpenXmlWorkbook {
     param([string] $FilePath)
 
@@ -580,7 +644,7 @@ function Search-OpenXmlWorkbook {
             # グラフシートなどセルを持たないシートは中身を見ない
             if ($rel.Kind -ne 'worksheet' -and $rel.Kind -ne 'macrosheet') { continue }
 
-            if ($wantValue -or $wantFormula) {
+            if ($wantValue -or $wantFormula -or $wantHeaderFooter -or $wantValidation) {
                 Search-WorksheetCells -Package $pkg -PartName $rel.Target -SheetName $sheetName `
                     -Shared $shared -DateStyles $dateStyles -Date1904 $date1904
             }
@@ -591,6 +655,8 @@ function Search-OpenXmlWorkbook {
                 if ($wantShape)   { Search-SheetShapes -Package $pkg -Rels $sheetRels -SheetName $sheetName }
             }
         }
+
+        if ($wantDefinedName) { Search-DefinedNames -WorkbookXml $wbDoc }
     }
     finally {
         $pkg.Zip.Dispose()
@@ -805,9 +871,12 @@ function Export-HitsToXlsx {
         # シート名のヒットや位置不明の図形は A1 にリンクする
         $cell = $h.Cell
         if (-not $cell) { $cell = 'A1' }
+        # シートの無いもの（ブック全体の名前の定義）はファイルを開くだけにする
+        $location = $null
+        if ($h.Sheet) { $location = "'{0}'!{1}" -f $h.Sheet.Replace("'", "''"), $cell }
         $rows.Add(@{
             Values = @($h.File, $h.Location, $h.Sheet, $h.Cell, $h.Kind, $h.Text, $h.Name, $h.Path)
-            Link   = @{ Column = 1; Path = $h.Path; Location = ("'{0}'!{1}" -f $h.Sheet.Replace("'", "''"), $cell); Tooltip = ('{0} を開く' -f $h.File) }
+            Link   = @{ Column = 1; Path = $h.Path; Location = $location; Tooltip = ('{0} を開く' -f $h.File) }
         })
     }
 
@@ -879,6 +948,7 @@ function Open-HitInExcel {
     }
 
     $wb.Activate()
+    if (-not $Hit.Sheet) { return }
     $ws = $wb.Sheets.Item($Hit.Sheet)
     if ($ws.Visible -ne $xlSheetVisible) {
         Write-Warning ("シート「{0}」は非表示のため、ブックだけ開きました: {1}" -f $Hit.Sheet, $Hit.File)
@@ -1081,8 +1151,8 @@ if ($Open -and $allHits.Count -gt 0) { Show-HitPicker -Hits $allHits }
 #     フォルダ配下の Excel ファイルを横断して文字列を検索します（Excel 版 grep）。
 #
 # .DESCRIPTION
-#     セルの値・数式・コメント（メモ）・図形やテキストボックスの文字・シート名を検索し、
-#     ヒットしたファイル・シート・セル番地・内容を一覧表示します。
+#     セルの値・数式・コメント（メモ）・図形やテキストボックスの文字・シート名・ヘッダー／フッター・
+#     名前の定義・入力規則を検索し、ヒットしたファイル・シート・セル番地・内容を一覧表示します。
 #
 #     xlsx / xlsm / xltx / xltm 形式は ZIP 内の XML を直接読むため Excel を起動せず高速です。
 #     Excel がインストールされていない端末でも動作します。
@@ -1110,7 +1180,10 @@ if ($Open -and $allHits.Count -gt 0) { Show-HitPicker -Hits $allHits }
 #
 # .PARAMETER Target
 #     検索対象。Value（セルの値） / Formula（数式） / Comment（コメント・メモ） / Shape（図形の文字）
-#     / SheetName（シート名）から複数指定できます。既定はすべて。
+#     / SheetName（シート名） / HeaderFooter（ヘッダー・フッター） / DefinedName（名前の定義）
+#     / Validation（入力規則のリスト・条件・メッセージ）から複数指定できます。既定はすべて。
+#     共有数式（コピーした数式）は、写しのセルも位置をずらした数式で検索します。
+#     HeaderFooter・DefinedName・Validation は xlsx / xlsm だけが対象です（.xls / .xlsb では検索しません）。
 #
 # .PARAMETER NoRecurse
 #     サブフォルダを検索しません。
