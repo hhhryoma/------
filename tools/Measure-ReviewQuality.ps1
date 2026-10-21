@@ -445,7 +445,12 @@ foreach ($k in $docs.Keys) {
     $size = $null; $unit = ''; $density = $null; $judgement = ''
     $effortDensity = $null; $effortJudgement = ''; $zone = $null
     if ($d.SizeKey) { $size = $sizes[$d.SizeKey].Size; $unit = $sizes[$d.SizeKey].Unit }
-    $process = @($items | Where-Object { $_.Process } | Group-Object Process | Sort-Object Count -Descending | ForEach-Object { $_.Name })[0]
+    # 基準値に使う工程は、指摘の多い工程（同じ数なら先に出てきた工程。Windows PowerShell 5.1 の Sort-Object は同じ値の順番を保たないため並べ替えない）
+    $process = ''; $most = 0
+    foreach ($g in @($items | Where-Object { $_.Process } | Group-Object Process)) { if ($g.Count -gt $most) { $most = $g.Count; $process = $g.Name } }
+    # レビューしたか: 指摘かレビュー記録があればした。レビュー記録を読んだときだけ、どちらも無い設計書を未レビューとする（読まなければ分からない）
+    $wasReviewed = $null
+    if ($items.Count -gt 0 -or $d.Reviews -gt 0) { $wasReviewed = $true } elseif ($ReviewLog) { $wasReviewed = $false }
     if ($null -ne $size -and $size -gt 0) {
         $density = [math]::Round($items.Count / $size, 3)
         $level = Get-Judgement 'Findings' $unit $process $density
@@ -457,6 +462,7 @@ foreach ($k in $docs.Keys) {
         }
     }
     elseif ($sizes.Count -gt 0) { $judgement = '規模なし' }
+    if ($wasReviewed -eq $false) { $judgement = '未レビュー'; $zone = $null }
     $effort = $null
     if ($null -ne $d.Effort) { $effort = [math]::Round($d.Effort, 2) }
     $r = [pscustomobject]@{
@@ -464,7 +470,7 @@ foreach ($k in $docs.Keys) {
         Size = $size; Unit = $unit; Density = $density; Judgement = $judgement; Process = $process
         Effort = $effort; Reviews = $d.Reviews; EffortDensity = $effortDensity; EffortJudgement = $effortJudgement
         Zone = $(if ($zone) { $zone.Zone } else { '' }); ZoneView = $(if ($zone) { $zone.View } else { '' }); ZoneAction = $(if ($zone) { $zone.Action } else { '' })
-        NeedsAction = [bool]($zone -and $zone.NeedsAction)
+        NeedsAction = [bool]($zone -and $zone.NeedsAction); Reviewed = $wasReviewed
         BySeverity = (Format-Breakdown $items 'Severity'); ByCategory = (Format-Breakdown $items 'Category')
     }
     $r.PSObject.TypeNames.Insert(0, 'ReviewQuality.Document')
@@ -571,9 +577,19 @@ if ($ReviewLog) {
     $zoned = @($results | Where-Object { $_.Zone })
     if ($zoned.Count -gt 0) { Write-Host ('ゾーン: {0}' -f (Format-Breakdown $zoned 'Zone')) }
     foreach ($r in @($results | Where-Object NeedsAction)) { Write-Host ('  要対応: {0}（{1}）{2}' -f $r.Document, $r.Zone, $r.ZoneAction) }
-    $noEffort = @($results | Where-Object { $null -eq $_.Effort -and $null -ne $_.Density })
+    if ($sizes.Count -gt 0 -and $results.Count -gt 0) {
+        # レビュー実施率は、規模（設計書の一覧）があるときだけ出す（無ければ、レビューしていない設計書は結果に出てこない）
+        $unreviewed = @($results | Where-Object { $_.Reviewed -eq $false })
+        Write-Host ('レビュー実施率 {0:0.0}%（設計書 {1} 件のうち {2} 件）' -f (($results.Count - $unreviewed.Count) * 100.0 / $results.Count), $results.Count, ($results.Count - $unreviewed.Count))
+        if ($unreviewed.Count -gt 0) { Write-Host ('  未レビュー: {0}' -f (@($unreviewed | ForEach-Object { $_.Document }) -join '・')) }
+    }
+    $noEffort = @($results | Where-Object { $null -eq $_.Effort -and $null -ne $_.Density -and $_.Reviewed -ne $false })
     if ($noEffort.Count -gt 0) { Write-Host ('レビューの記録が無い設計書: {0} 件（ゾーンを決められません）' -f $noEffort.Count) }
     if (@($limitRows | Where-Object { $_.Metric -eq 'Effort' }).Count -eq 0) { Write-Warning ('基準値の CSV にレビュー工数密度の行がありません（指標の列に「レビュー工数密度」と書いた行を足してください）: {0}' -f $Limits) }
+}
+else {
+    $zeroDocs = @($results | Where-Object { $_.Findings -eq 0 })
+    if ($zeroDocs.Count -gt 0) { Write-Host ('指摘 0 件の設計書: {0} 件（-ReviewLog でレビュー記録を渡すと、未レビューと区別できます）' -f $zeroDocs.Count) }
 }
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 

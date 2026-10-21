@@ -138,6 +138,29 @@ Test-Case 'Measure-ReviewQuality: -ReviewLog でレビュー工数密度を出�
     Assert-Equal 3 @($again | Where-Object { $_.Document -like 'DD02*' })[0].Effort
 }
 
+Test-Case 'Measure-ReviewQuality: レビュー記録も指摘も無い設計書を未レビューとし、レビュー実施率を出す' {
+    $dir = New-TestDir
+    $csv = New-Findings $dir
+    $logDir = New-ReviewLogs $dir
+    Add-Content -LiteralPath $csv -Value '"DD04_コード定義書.pdf","","3","0","成功","","0"' -Encoding UTF8
+    $r = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -ReviewLog $logDir -AsOf '2026-10-20' 6>$null)
+    $dd04 = @($r | Where-Object { $_.Document -like 'DD04*' })[0]
+    Assert-Equal '未レビュー|False|' ('{0}|{1}|{2}' -f $dd04.Judgement, $dd04.Reviewed, $dd04.Zone)
+    # 指摘が 0 件でもレビュー記録があればレビューした（DD05）
+    Assert-Equal $true @($r | Where-Object { $_.Document -like 'DD05*' })[0].Reviewed
+    $text = Get-HostText { & $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -ReviewLog $logDir -AsOf '2026-10-20' 3>$null | Out-Null }
+    Assert-Match $text 'レビュー実施率 80\.0%（設計書 5 件のうち 4 件）'
+    Assert-Match $text '未レビュー: DD04_コード定義書\.pdf'
+    Assert-NotMatch $text 'レビューの記録が無い設計書'
+
+    # レビュー記録が無ければ、指摘 0 件の設計書を未レビューとは決めない
+    $r = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -AsOf '2026-10-20' 6>$null)
+    $dd04 = @($r | Where-Object { $_.Document -like 'DD04*' })[0]
+    Assert-Equal '少ない（レビュー不足の疑い）|' ('{0}|{1}' -f $dd04.Judgement, $dd04.Reviewed)
+    $text = Get-HostText { & $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -AsOf '2026-10-20' 3>$null | Out-Null }
+    Assert-Match $text '指摘 0 件の設計書: 2 件（-ReviewLog でレビュー記録を渡すと、未レビューと区別できます）'
+}
+
 Test-Case 'Measure-ReviewQuality: 指標の列が無い基準値（以前の形）は指摘密度の基準値とし、ゾーンは決めずに知らせる' {
     $dir = New-TestDir
     $csv = New-Findings $dir
