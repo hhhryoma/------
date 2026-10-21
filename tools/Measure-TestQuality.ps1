@@ -516,7 +516,7 @@ elseif ($fit.AtLowerBound -or $fit.K -gt $totalFound * 10) {
 else {
     $growth.Potential = [math]::Round($fit.K, 1)
     $growth.Rate = [math]::Round($totalFound / $fit.K, 3)
-    $growth.Remaining = [math]::Round([math]::Max(0, $fit.K - $totalFound), 1)
+    $growth.Remaining = [math]::Round([math]::Max(0.0, $fit.K - $totalFound), 1)
     $growth.RSquared = [math]::Round($fit.RSquared, 3)
     if ($growth.Rate -ge $ConvergenceRate) { $growth.Judgement = '収束している' }
     else { $growth.Judgement = '収束していない' }
