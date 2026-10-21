@@ -70,10 +70,12 @@ function Get-Similarity {
     return $common / ($A.Count + $B.Count - $common)
 }
 
+# 読み取り結果（どのファイル・シートをどの見出しで読んだか）
+$readLog = New-Object System.Collections.Generic.List[object]
 function Read-Findings {
     param([string[]] $Paths, [string] $Source)
     $records = Read-HeaderRecords -Inputs (Get-InputFiles $Paths "${Source}の指摘" -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
-        -Need @('指摘内容', '設計書') -Key @('指摘内容') -What "${Source}の指摘" -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel
+        -Need @('指摘内容', '設計書') -Key @('指摘内容') -What "${Source}の指摘" -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
     $list = New-Object System.Collections.Generic.List[object]
     foreach ($rec in $records) {
         $v = $rec.Values
@@ -198,7 +200,7 @@ if ($OutXlsx) {
         Export-Workbook -FilePath $OutXlsx -Sheets @(
             @{ Name = '突き合わせ'; Columns = @(@{ Header = '結果'; Width = 8 }, @{ Header = '設計書'; Width = 30 }, @{ Header = '観点ID'; Width = 8 }, @{ Header = 'AI の場所'; Width = 20 }, @{ Header = 'AI の指摘'; Width = 40 }, @{ Header = '人の場所'; Width = 20 }, @{ Header = '人の指摘'; Width = 40 }, @{ Header = '決め手'; Width = 7 }, @{ Header = '似ている度合い'; Width = 9 }); Rows = $pairRows },
             @{ Name = '観点別'; Columns = @(@{ Header = '観点ID'; Width = 10 }, @{ Header = 'AI の指摘'; Width = 9 }, @{ Header = '人と一致'; Width = 9 }, @{ Header = '一致率'; Width = 8 }); Rows = $pointRows },
-            @{ Name = '設計書別'; Columns = @(@{ Header = '設計書'; Width = 36 }, @{ Header = 'AI の指摘'; Width = 9 }, @{ Header = '人の指摘'; Width = 9 }, @{ Header = '一致'; Width = 7 }, @{ Header = 'AI だけ'; Width = 8 }, @{ Header = '人だけ'; Width = 8 }); Rows = $docRows })
+            @{ Name = '設計書別'; Columns = @(@{ Header = '設計書'; Width = 36 }, @{ Header = 'AI の指摘'; Width = 9 }, @{ Header = '人の指摘'; Width = 9 }, @{ Header = '一致'; Width = 7 }, @{ Header = 'AI だけ'; Width = 8 }, @{ Header = '人だけ'; Width = 8 }); Rows = $docRows }, (New-ReadLogSheet $readLog))
     }
     catch {
         Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
@@ -216,6 +218,7 @@ if ($byPoint.Count -gt 0) {
     $low = @($byPoint | Where-Object { $_.Ai -ge 2 } | Sort-Object Rate, PointId | Select-Object -First 3)
     if ($low.Count -gt 0) { Write-Host ('一致率の低い観点: {0}' -f ((@($low | ForEach-Object { '{0} {1}/{2}' -f $_.PointId, $_.Matched, $_.Ai })) -join '・')) }
 }
+Write-ReadLogSummary $readLog
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
 # .SYNOPSIS

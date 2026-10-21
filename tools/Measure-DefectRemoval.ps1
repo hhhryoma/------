@@ -92,10 +92,12 @@ function Add-Defect {
 }
 
 $bugFields = @('障害内容', '起票日', '状態', '重要度', '障害ID', '原因', '混入工程', '摘出工程')
+# 読み取り結果（どのファイル・シートをどの見出しで読んだか）
+$readLog = New-Object System.Collections.Generic.List[object]
 if ($BugList) {
     $candidates = Read-HeaderCandidates $Headers $bugFields
     $records = Read-HeaderRecords -Inputs (Get-InputFiles $BugList '障害管理表' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $bugFields `
-        -Need @('障害内容', @('混入工程', '摘出工程')) -Key @('障害内容') -What '障害管理表' -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel
+        -Need @('障害内容', @('混入工程', '摘出工程')) -Key @('障害内容') -What '障害管理表' -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
     foreach ($rec in $records) {
         $v = $rec.Values
         Add-Defect 'バグ' ([string]$v['障害内容']) ([string]$v['混入工程']) ([string]$v['摘出工程']) ([string]$v['原因']) ([string]$v['重要度']) ([string]$v['状態']) $rec
@@ -107,7 +109,7 @@ if ($Findings) {
     $candidates = Read-HeaderCandidates $FindingHeaders $findingFields
     if ($candidates['混入工程'].Count -eq 0) { $candidates['混入工程'] = (Read-HeaderCandidates $Headers @('混入工程'))['混入工程'] }
     $records = Read-HeaderRecords -Inputs (Get-InputFiles $Findings '指摘管理表' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $findingFields `
-        -Need @('指摘内容', '工程') -Key @('指摘内容') -What '指摘管理表' -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel
+        -Need @('指摘内容', '工程') -Key @('指摘内容') -What '指摘管理表' -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
     foreach ($rec in $records) {
         $v = $rec.Values
         $injected = [string]$v['混入工程']
@@ -205,7 +207,7 @@ if ($OutXlsx) {
             @{ Name = '工程別'; Columns = @(@{ Header = '工程'; Width = 12 }, @{ Header = '摘出すべき工程'; Width = 12 }, @{ Header = '混入'; Width = 7 }, @{ Header = 'それまでに摘出'; Width = 10 }, @{ Header = '流出'; Width = 7 }, @{ Header = '摘出率'; Width = 8 }, @{ Header = 'この工程で摘出'; Width = 10 }, @{ Header = 'うち前の工程から流出'; Width = 12 }); Rows = $phaseRows },
             @{ Name = '工程マトリクス'; Columns = $matrixColumns; Rows = $matrixRows },
             @{ Name = '原因'; Columns = @(@{ Header = '原因'; Width = 24 }, @{ Header = '件数'; Width = 7 }, @{ Header = '割合'; Width = 8 }, @{ Header = '累積の割合'; Width = 10 }); Rows = $paretoRows },
-            @{ Name = '流出'; Columns = @(@{ Header = '種類'; Width = 6 }, @{ Header = '混入工程'; Width = 10 }, @{ Header = '摘出工程'; Width = 10 }, @{ Header = '内容'; Width = 50 }, @{ Header = '原因'; Width = 14 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '場所'; Width = 40 }); Rows = $leakRows })
+            @{ Name = '流出'; Columns = @(@{ Header = '種類'; Width = 6 }, @{ Header = '混入工程'; Width = 10 }, @{ Header = '摘出工程'; Width = 10 }, @{ Header = '内容'; Width = 50 }, @{ Header = '原因'; Width = 14 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '場所'; Width = 40 }); Rows = $leakRows }, (New-ReadLogSheet $readLog))
     }
     catch {
         Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
@@ -226,6 +228,7 @@ if ($judged.Count -gt 0) {
     if ($bugCount -gt 0 -and $designLeak.Count -gt 0) { Write-Host ('  設計で入り、テストで見つかった欠陥: {0} 件（{1}）' -f $designLeak.Count, ((@($designLeak | Group-Object Injected | Sort-Object @{ e = { $_.Count }; Descending = $true }, Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・')) }
 }
 if ($pareto.Count -gt 0) { Write-Host ('原因の上位: {0}' -f ((@($pareto | Select-Object -First 3 | ForEach-Object { '{0} {1}（{2:0}%）' -f $_.Cause, $_.Count, ($_.Ratio * 100) })) -join '・')) }
+Write-ReadLogSummary $readLog
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
 # .SYNOPSIS

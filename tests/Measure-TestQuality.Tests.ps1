@@ -76,7 +76,7 @@ Test-Case 'Measure-TestQuality: 機能ごとのテスト密度・バグ密度と
     Assert-Match $text '食い違い: 14 件（予定日を過ぎても未実施 10・NG なのにバグ番号が無い 1・再テストの結果が無い 1・実施日が無い 1・障害管理表に無いバグ番号 1）'
 
     $book = Read-XlsxSheet -Path $out -Index 1
-    Assert-Equal @('サマリー', '機能別', 'ゾーン分析', '推移', 'バグの内訳', '食い違い') $book.Sheets
+    Assert-Equal @('サマリー', '機能別', 'ゾーン分析', '推移', 'バグの内訳', '食い違い', '読み取り結果') $book.Sheets
     $summary = @{}
     foreach ($row in $book.Rows.Values) { $summary[$row['A']] = $row['B'] }
     Assert-Equal '0.95' ([string]$summary['消化率'])
@@ -90,6 +90,12 @@ Test-Case 'Measure-TestQuality: 機能ごとのテスト密度・バグ密度と
     $issueSheet = Read-XlsxSheet -Path $out -Index 6
     Assert-Equal 15 $issueSheet.Rows.Count '見出しと食い違い 14 件'
     Assert-True (@($issueSheet.Links | Where-Object { $_.Location -eq "'テストケース'!A26" }).Count -eq 1) 'NG なのにバグ番号が無いケース（No 25）へのリンク'
+    $readSheet = Read-XlsxSheet -Path $out -Index 7
+    $caseRow = @($readSheet.Rows.Values | Where-Object { $_['A'] -eq 'テスト仕様書' })[0]
+    Assert-Equal 'UT_受注.xlsx|テストケース|1|200' ('{0}|{1}|{2}|{3}' -f $caseRow['B'], $caseRow['C'], $caseRow['D'], $caseRow['E']) '読み取り結果: ファイル・シート・見出しの行・読んだ行数'
+    Assert-Match $caseRow['F'] 'テスト内容（確認内容）'
+    Assert-Match $caseRow['G'] '工程'
+    Assert-Match $text '読み取り（テスト仕様書）: 1 ファイル・200 行。見出しが無い項目: .*工程（1/1 表）'
     $breakdown = Read-XlsxSheet -Path $out -Index 5
     Assert-True (@($breakdown.Rows.Values | Where-Object { $_['A'] -eq '混入工程' -and $_['B'] -eq '詳細設計' -and $_['C'] -eq '24' }).Count -eq 1) '混入工程の内訳'
 }

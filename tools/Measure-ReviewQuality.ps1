@@ -152,6 +152,8 @@ foreach ($p in $Path) {
     }
 }
 
+# 読み取り結果（どのファイル・シートをどの見出しで読んだか）
+$readLog = New-Object System.Collections.Generic.List[object]
 if ($excelFiles.Count -gt 0) {
     $searchArgs = @{ Pattern = '\S'; Path = $excelFiles.ToArray(); Target = 'Value' }
     if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
@@ -159,6 +161,7 @@ if ($excelFiles.Count -gt 0) {
     $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
     $books = ConvertTo-DesignBooks $hits
     foreach ($book in $books.Values) {
+        $tableFound = $false
         foreach ($sheetName in $book.Sheets.Keys) {
             $grid = $book.Sheets[$sheetName]
             # 見出しの行: 指摘内容と、設計書・状態・重要度・分類のどれかの見出しがある行
@@ -170,7 +173,9 @@ if ($excelFiles.Count -gt 0) {
                 if ($m['指摘内容'] -and @(@('設計書', '状態', '重要度', '分類') | Where-Object { $m[$_] }).Count -gt 0) { $map = $m; break }
             }
             if (-not $map) { continue }
+            $tableFound = $true
             foreach ($t in (Find-DesignTables $grid @($map.Values) $map['指摘内容'])) {
+                Add-ReadLog $readLog '指摘管理表' $book.File $sheetName $t.HeaderRow $t.Rows.Count $map $fields ''
                 foreach ($dr in $t.Rows) {
                     $v = @{}
                     foreach ($f in $map.Keys) { $v[$f] = [string]$dr.Cells[$t.ColumnOf[$map[$f]]] }
@@ -179,6 +184,7 @@ if ($excelFiles.Count -gt 0) {
                 }
             }
         }
+        if (-not $tableFound) { Add-ReadLog $readLog '指摘管理表' $book.File '' $null 0 $null $fields '表が見つかりません（必要な見出しの行がありません）' }
     }
 }
 foreach ($c in $csvFiles) {
@@ -187,7 +193,14 @@ foreach ($c in $csvFiles) {
     $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
     $map = @{}
     foreach ($f in $fields) { foreach ($n in $names) { if (-not $map[$f] -and $candidates[$f] -contains (ConvertTo-Label $n)) { $map[$f] = $n } } }
-    if (-not $map['指摘内容']) { Write-Warning ("{0}: 指摘内容の列が見つかりません" -f $c.Name); continue }
+    if (-not $map['指摘内容']) {
+        Write-Warning ("{0}: 指摘内容の列が見つかりません" -f $c.Name)
+        Add-ReadLog $readLog '指摘管理表' $c.Name '' $null 0 $null $fields '表が見つかりません（指摘内容の列がありません）'
+        continue
+    }
+    $labelMap = @{}
+    foreach ($f in $map.Keys) { $labelMap[$f] = ConvertTo-Label $map[$f] }
+    Add-ReadLog $readLog '指摘管理表' $c.Name '' 1 $rows.Count $labelMap $fields ''
     $line = 1
     foreach ($r in $rows) {
         $line++
@@ -285,6 +298,7 @@ if ($ReviewLog) {
         if ($NoExcel) { $searchArgs['NoExcel'] = $true }
         $books = ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
         foreach ($book in $books.Values) {
+            $logFound = $false
             foreach ($sheetName in $book.Sheets.Keys) {
                 $grid = $book.Sheets[$sheetName]
                 # 表の形: 設計書と、工数か時間の見出しがある行の下を、1 行 1 回のレビューとして読む
@@ -296,7 +310,9 @@ if ($ReviewLog) {
                     if ($m['設計書'] -and ($m['工数'] -or $m['時間'])) { $map = $m; break }
                 }
                 if ($map) {
+                    $logFound = $true
                     foreach ($t in (Find-DesignTables $grid @($map.Values) $map['設計書'])) {
+                        Add-ReadLog $readLog 'レビュー記録' $book.File $sheetName $t.HeaderRow $t.Rows.Count $map $logFields ''
                         foreach ($dr in $t.Rows) {
                             $v = @{}
                             foreach ($f in $map.Keys) { $v[$f] = [string]$dr.Cells[$t.ColumnOf[$map[$f]]] }
@@ -318,8 +334,13 @@ if ($ReviewLog) {
                         break
                     }
                 }
-                if ($v['設計書'] -and ($v['工数'] -or $v['時間'])) { Add-Effort $v $found ([pscustomobject]@{ File = $book.File; Sheet = $sheetName; Row = 0 }) }
+                if ($v['設計書'] -and ($v['工数'] -or $v['時間'])) {
+                    $logFound = $true
+                    Add-ReadLog $readLog 'レビュー記録' $book.File $sheetName $null 1 $found $logFields '記録票の形（見出しの右の値）'
+                    Add-Effort $v $found ([pscustomobject]@{ File = $book.File; Sheet = $sheetName; Row = 0 })
+                }
             }
+            if (-not $logFound) { Add-ReadLog $readLog 'レビュー記録' $book.File '' $null 0 $null $logFields '表・記録票が見つかりません（設計書と、工数か時間の見出しがありません）' }
         }
     }
     foreach ($c in $logCsv) {
@@ -328,9 +349,14 @@ if ($ReviewLog) {
         $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
         $map = @{}
         foreach ($f in $logFields) { foreach ($n in $names) { if (-not $map[$f] -and $candidates[$f] -contains (ConvertTo-Label $n)) { $map[$f] = $n } } }
-        if (-not $map['設計書'] -or -not ($map['工数'] -or $map['時間'])) { Write-Warning ("{0}: 設計書と、工数か時間の列が見つかりません" -f $c.Name); continue }
+        if (-not $map['設計書'] -or -not ($map['工数'] -or $map['時間'])) {
+            Write-Warning ("{0}: 設計書と、工数か時間の列が見つかりません" -f $c.Name)
+            Add-ReadLog $readLog 'レビュー記録' $c.Name '' $null 0 $null $logFields '表が見つかりません（設計書と、工数か時間の列がありません）'
+            continue
+        }
         $labels = @{}
         foreach ($f in $map.Keys) { $labels[$f] = ConvertTo-Label $map[$f] }
+        Add-ReadLog $readLog 'レビュー記録' $c.Name '' 1 $rows.Count $labels $logFields ''
         $line = 1
         foreach ($r in $rows) {
             $line++
@@ -553,6 +579,7 @@ if ($OutXlsx) {
         if ($ReviewLog) {
             $sheets += @{ Name = 'ゾーン分析'; Columns = @(@{ Header = '工数密度 ＼ 指摘密度'; Width = 18 }, @{ Header = '指摘密度が少ない'; Width = 40 }, @{ Header = '指摘密度が基準内'; Width = 40 }, @{ Header = '指摘密度が多い'; Width = 40 }); Rows = $zoneRows }
         }
+        $sheets += New-ReadLogSheet $readLog
         Export-Workbook -FilePath $OutXlsx -Sheets $sheets
     }
     catch {
@@ -591,6 +618,7 @@ else {
     $zeroDocs = @($results | Where-Object { $_.Findings -eq 0 })
     if ($zeroDocs.Count -gt 0) { Write-Host ('指摘 0 件の設計書: {0} 件（-ReviewLog でレビュー記録を渡すと、未レビューと区別できます）' -f $zeroDocs.Count) }
 }
+Write-ReadLogSummary $readLog
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
 # .SYNOPSIS

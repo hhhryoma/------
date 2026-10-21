@@ -50,9 +50,11 @@ if ($VagueWords) { $vagueRx = New-Object System.Text.RegularExpressions.Regex((@
 # ---------------------------------------------------------------- テスト仕様書を読む
 
 
+# 読み取り結果（どのファイル・シートをどの見出しで読んだか）
+$readLog = New-Object System.Collections.Generic.List[object]
 $records = Read-HeaderRecords -Inputs (Get-InputFiles $Path 'テスト仕様書' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
     -Need @(@('期待結果', 'テスト内容'), @('テストID', '手順', '結果')) -Key @('テストID', '期待結果', 'テスト内容', '手順') -What 'テスト仕様書' `
-    -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel
+    -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
 $allCases = ConvertTo-TestCases $records
 $cases = @($allCases | Where-Object { $_.Kind -ne '対象外' })
 if ($cases.Count -eq 0) { Write-Warning 'テストケースが見つかりません（期待結果か確認内容と、テストID・手順・結果のどれかの見出しがある表を探します）' }
@@ -197,7 +199,7 @@ if ($OutXlsx) {
     try {
         Export-Workbook -FilePath $OutXlsx -Sheets @(
             @{ Name = '指摘'; Columns = @(@{ Header = 'ファイル'; Width = 28 }, @{ Header = '場所'; Width = 18 }, @{ Header = '区分'; Width = 7 }, @{ Header = '項目'; Width = 20 }, @{ Header = '機能'; Width = 18 }, @{ Header = 'テストID'; Width = 10 }, @{ Header = '内容'; Width = 70 }); Rows = $issueRows },
-            @{ Name = '機能別'; Columns = @(@{ Header = '機能'; Width = 24 }, @{ Header = 'ケース'; Width = 7 }, @{ Header = '異常系'; Width = 7 }, @{ Header = '異常系の割合'; Width = 9 }, @{ Header = '異常系の数え方'; Width = 20 }, @{ Header = 'エラー'; Width = 7 }, @{ Header = '警告'; Width = 7 }); Rows = $functionRows })
+            @{ Name = '機能別'; Columns = @(@{ Header = '機能'; Width = 24 }, @{ Header = 'ケース'; Width = 7 }, @{ Header = '異常系'; Width = 7 }, @{ Header = '異常系の割合'; Width = 9 }, @{ Header = '異常系の数え方'; Width = 20 }, @{ Header = 'エラー'; Width = 7 }, @{ Header = '警告'; Width = 7 }); Rows = $functionRows }, (New-ReadLogSheet $readLog))
     }
     catch {
         Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
@@ -210,6 +212,7 @@ Write-Host ('テストケース {0} 件（機能 {1}）: エラー {2} 件 / 警
 $byItem = @($issues | Group-Object Item | Sort-Object @{ e = { $_.Count }; Descending = $true }, Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
 if ($byItem.Count -gt 0) { Write-Host ('内訳: {0}' -f ($byItem -join '・')) }
 if ($DesignPath) { Write-Host ('境界値: 桁数のある入力項目 {0} 件を確かめました' -f $boundaryItems.Count) }
+Write-ReadLogSummary $readLog
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
 # .SYNOPSIS

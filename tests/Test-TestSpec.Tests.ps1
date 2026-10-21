@@ -52,7 +52,7 @@ Test-Case 'Test-TestSpec: -DesignPath の画面項目定義の桁数から、境
     Assert-Match @($boundary | Where-Object { $_.Detail -like '*「顧客コード」*' })[0].Detail '（8 桁。DD02_画面設計書_SCR001_受注一覧\.xlsx 画面項目定義 \d+ 行目）の桁数の境界（8 桁・9 桁）'
     Assert-Equal 0 @($boundary | Where-Object { $_.Detail -like 'SCR003 *' }).Count 'テストの無い画面は確かめない'
     $book = Read-XlsxSheet -Path $out -Index 1
-    Assert-Equal @('指摘', '機能別') $book.Sheets
+    Assert-Equal @('指摘', '機能別', '読み取り結果') $book.Sheets
     Assert-True (@($book.Links | Where-Object { $_.Location -eq "'テストケース'!G4" }).Count -eq 1) '期待結果のセルへのリンク'
     $functions = Read-XlsxSheet -Path $out -Index 2
     Assert-Equal 'SCR001|6|2|0.333|区分の列' ('{0}|{1}|{2}|{3}|{4}' -f $functions.Rows[2]['A'], $functions.Rows[2]['B'], $functions.Rows[2]['C'], $functions.Rows[2]['D'], $functions.Rows[2]['E'])

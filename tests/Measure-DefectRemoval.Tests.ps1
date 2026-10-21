@@ -50,7 +50,7 @@ Test-Case 'Measure-DefectRemoval: 混入工程 × 摘出工程から、工程ご
     Assert-Match $text '原因の上位: コーディングミス 4（31%）・誤り 4（31%）・漏れ 2（15%）'
 
     $book = Read-XlsxSheet -Path $out -Index 2
-    Assert-Equal @('工程別', '工程マトリクス', '原因', '流出') $book.Sheets
+    Assert-Equal @('工程別', '工程マトリクス', '原因', '流出', '読み取り結果') $book.Sheets
     # 読めない混入工程（謎の工程）は、行の最後の「（不明）」に数える
     Assert-Equal '混入工程 ＼ 摘出工程|基本設計|詳細設計|単体テスト|結合テスト|合計' ((@('A', 'B', 'C', 'D', 'E', 'F') | ForEach-Object { $book.Rows[1][$_] }) -join '|')
     Assert-Equal '詳細設計|0|4|2|0|6' ((@('A', 'B', 'C', 'D', 'E', 'F') | ForEach-Object { $book.Rows[3][$_] }) -join '|')
