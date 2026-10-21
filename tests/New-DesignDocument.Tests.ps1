@@ -139,6 +139,64 @@ Test-Case 'New-DesignDocument: -CompareWith で前の版との差分から改訂
     Assert-Throws { & $NewDocTool -Bump -Path $file 6>$null } 'CompareWith'
 }
 
+function Read-BookPart {
+    param([string] $Path, [string] $Name)
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Read)
+        $sr = New-Object System.IO.StreamReader($zip.GetEntry($Name).Open())
+        try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+    }
+    finally { $fs.Dispose() }
+}
+
+Test-Case 'New-DesignDocument: -Book / -TemplateSheet で、一覧の行ごとに雛形のシートをコピーして差し込み欄を置き換える' {
+    $dir = New-TestDir
+    $book = Join-Path $dir 'DD03_テーブル定義書.xlsx'
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD03_テーブル定義書.xlsx') -Destination $book
+    # 受注明細のシートを雛形にする（テーブル ID・名前を差し込み欄にする）
+    $csv = Join-Path $dir 'tpl.csv'
+    @('置換前,置換後,正規表現', '^T_ORDER_DETAIL$,{{テーブルID}},○', '^受注明細$,{{テーブル名}},○') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $null = & (Join-Path $script:ToolsDir 'Replace-Excel.ps1') -ListPath $csv -Path $book -SheetNamePattern '^T_ORDER_DETAIL$' -Force 6>$null
+    $list = Join-Path $dir 'list.csv'
+    @('テーブルID,テーブル名', 'T_SHIPMENT,出荷', 'T_ORDER,受注', ',名前だけ') | Set-Content -LiteralPath $list -Encoding UTF8
+    $opts = @{ Book = $book; TemplateSheet = 'T_ORDER_DETAIL'; List = $list; SheetName = '{{テーブルID}}' }
+    $hash = (Get-FileHash -LiteralPath $book).Hash
+    $null = & $NewDocTool @opts -WhatIf 6>$null
+    Assert-Equal $hash (Get-FileHash -LiteralPath $book).Hash '-WhatIf'
+    $r = @(& $NewDocTool @opts 6>$null)
+    Assert-Equal @('|スキップ', 'T_ORDER|既存', 'T_SHIPMENT|作成') @($r | ForEach-Object { '{0}|{1}' -f $_.File, $_.Status } | Sort-Object)
+    $cells = Get-CellTexts $book 'T_SHIPMENT'
+    Assert-Equal 'T_SHIPMENT|出荷|T_SHIPMENT|出荷' ('{0}|{1}|{2}|{3}' -f $cells['S2'], $cells['AC2'], $cells['I5'], $cells['I6'])
+    Assert-Equal '{{テーブルID}}|ORDER_NO' ('{0}|{1}' -f (Get-CellTexts $book 'T_ORDER_DETAIL')['S2'], $cells['J13']) '雛形はそのまま。ほかのセルは写す'
+    Assert-Equal 'T_ORDER' (Get-CellTexts $book 'T_ORDER')['S2'] 'ほかのシートは変えない'
+    Assert-Match (Read-BookPart $book 'xl/workbook.xml') '<sheet name="T_SHIPMENT" sheetId="8"[^>]*/></sheets>' '末尾に足す'
+    $issues = @(& (Join-Path $script:ToolsDir 'Test-ExcelDeliverable.ps1') -Path $book -Check Error, Link, View 6>$null)
+    Assert-Equal 0 $issues.Count (@($issues | ForEach-Object { $_.Detail }) -join ' / ')
+}
+
+Test-Case 'New-DesignDocument: 雛形のシートの名前（印刷範囲など）も写し、図形などのあるシートは雛形にしない' {
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $dir = New-TestDir
+    $book = Join-Path $dir 'book.xlsx'
+    # Export-Workbook のシートには、オートフィルターの範囲の名前（シートだけの名前）が付く
+    Export-Workbook -FilePath $book -Sheets @(
+        @{ Name = '一覧'; Columns = @(@{ Header = 'ID'; Width = 8 }, @{ Header = '名前'; Width = 10 }); Rows = @(@{ Values = @('A01', '受付') }, @{ Values = @('A02', '出荷') }) },
+        @{ Name = '雛形'; Columns = @(@{ Header = '項目'; Width = 8 }, @{ Header = '値'; Width = 10 }); Rows = @(@{ Values = @('ID', '{{ID}}') }, @{ Values = @('名前', '{{名前}}') }) })
+    $r = @(& $NewDocTool -Book $book -TemplateSheet '雛形' -List $book -ListSheet '^一覧$' -SheetName '{{ID}}_{{名前}}' 6>$null)
+    Assert-Equal @('A01_受付|作成', 'A02_出荷|作成') @($r | ForEach-Object { '{0}|{1}' -f $_.File, $_.Status })
+    Assert-Equal 'A02|出荷' ('{0}|{1}' -f (Get-CellTexts $book 'A02_出荷')['B2'], (Get-CellTexts $book 'A02_出荷')['B3'])
+    $wb = Read-BookPart $book 'xl/workbook.xml'
+    Assert-Match $wb 'localSheetId="3" hidden="1">&apos;A02_出荷&apos;!\$A\$1:\$B\$3</definedName>' 'シートだけの名前を新しいシートにも付ける'
+
+    $grep = Join-Path $dir 'grep.xlsx'
+    Copy-Item -LiteralPath (Join-Path $script:Fixtures 'grep/sample.xlsx') -Destination $grep
+    $list = Join-Path $dir 'list.csv'
+    @('ID', 'X1') | Set-Content -LiteralPath $list -Encoding UTF8
+    Assert-Throws { & $NewDocTool -Book $grep -TemplateSheet '顧客一覧' -List $list -SheetName '{{ID}}' 6>$null } 'コメントがあるため、コピーできません'
+    Assert-Throws { & $NewDocTool -Book $grep -TemplateSheet '無いシート' -List $list -SheetName '{{ID}}' 6>$null } '見つかりません'
+}
+
 Test-Case 'New-DesignDocument: Get-Help でヘルプが表示される' {
     $h = Get-Help $NewDocTool
     Assert-Match $h.Synopsis '雛形'
