@@ -10,7 +10,7 @@
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる） |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、桁数・必須の違いなど）を全件見つける。CRUD 図と影響調査も（Excel 不要） |
 | [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
-| [New-DesignDocument.ps1](#new-designdocumentps1) | 画面一覧などの一覧から、雛形の差し込み欄（`{{画面ID}}` など）を埋めた設計書を一括で作る。設計書の版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする（Excel 不要） |
+| [New-DesignDocument.ps1](#new-designdocumentps1) | 画面一覧などの一覧から、雛形の差し込み欄（`{{画面ID}}` など）を埋めた設計書を一括で作る。テーブル定義書のように 1 件 1 シートの設計書には、雛形のシートからシートを足す。設計書の版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする（Excel 不要） |
 | [Measure-Progress.ps1](#measure-progressps1) | WBS から子のタスクごとの遅れ（営業日）・状態と PV／EV／SPI を出し、遅延タスクと週ごとの完了数をスケジュール遅延リカバリ計画のテンプレートに書き込む（Excel 不要） |
 | [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す。前の版との変更の規模や、実績の工数からの係数表づくりも（Excel 不要） |
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
@@ -18,10 +18,11 @@
 | [Measure-ReviewQuality.ps1](#measure-reviewqualityps1) | レビューの指摘管理表を集計し、設計書ごとの指摘件数・指摘密度（ページ数・規模あたり）・未完了・期限切れを出し、基準値から外れた設計書を知らせる（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
+| [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -944,6 +945,31 @@ DD02_画面設計書_SCR003_受注詳細.xlsx 作成
 - ファイル名（`-FileName`）にも差し込み欄が必要です。**同じ名前のファイルがあれば作りません**
 - `-WhatIf` で、作るファイルを確かめられます
 
+### 雛形のシートからシートを足す（`-Book` / `-TemplateSheet`）
+
+テーブル定義書のように、1 つのブックに 1 件 1 シートで書く設計書では、一覧（テーブル一覧など）の行ごとに**雛形のシートをコピーしてブックの末尾に足し**、そのシートの差し込み欄を置き換えます。
+
+```powershell
+# テーブル一覧のシートの行ごとに、「雛形」シートからテーブル定義のシートを足す
+.\New-DesignDocument.ps1 -Book D:\設計書\DD03_テーブル定義書.xlsx -TemplateSheet '雛形' `
+    -List D:\設計書\DD03_テーブル定義書.xlsx -ListSheet '^テーブル一覧$' -SheetName '{{テーブルID}}' -WhatIf
+```
+
+```
+File       Status Detail
+----       ------ ------
+T_ORDER    既存   同じ名前のシートがあるため作りません
+T_SHIPMENT 作成   雛形のシート「雛形」から作りました
+T_RETURN   作成   雛形のシート「雛形」から作りました
+```
+
+- セル・書式・結合・列幅・印刷の設定・入力規則・条件付き書式をそのまま写し、雛形のシートだけに付いた名前（印刷範囲・印刷タイトルなど）も新しいシートに付けます
+- 差し込み欄は、足したシートだけを置き換えます（雛形のシートはそのまま）。雛形のシートは非表示でもかまいません（足したシートは表示します）
+- **同じ名前のシートがあれば作りません**。シート名に使えない文字（`[ ] : * ? / \`）は `_` にし、31 文字までにします
+- 図形・グラフ・コメント・テーブル・ピボットテーブルのあるシートは、雛形にできません（コピーせずに知らせます）
+- プリンターごとの設定は写しません（用紙・向き・拡大縮小などの印刷の設定は写します）
+- ブックを上書きします。まず `-WhatIf` で、足すシートを確かめてください
+
 ### 版を上げる（`-Bump`）
 
 ```powershell
@@ -996,6 +1022,7 @@ DD03_テーブル定義書_v1.2.xlsx 版上げ 版数 1.1 → 1.2（表紙の版
 | `-List` / `-ListSheet` | 一覧の Excel または CSV / 読むシートの名前の正規表現 |
 | `-FileName` | 作るファイルの名前（差し込み欄を使う）。既定は雛形のファイル名 |
 | `-OutDir` | 作ったファイルを保存するフォルダ |
+| `-Book` / `-TemplateSheet` / `-SheetName` | シートを足すブック / コピーする雛形のシート / 足すシートの名前（差し込み欄を使う） |
 | `-Bump` / `-Path` | 版を上げる / 版を上げる設計書のファイル・フォルダ |
 | `-Description` / `-Section` | 改訂履歴の改訂内容 / 改訂箇所（既定は「全体」） |
 | `-CompareWith` | 前の版のファイル・フォルダ。差分から改訂箇所・改訂内容の行を作る |
@@ -1005,7 +1032,7 @@ DD03_テーブル定義書_v1.2.xlsx 版上げ 版数 1.1 → 1.2（表紙の版
 
 ### 既知の制約
 
-- シート名の差し込み欄は置き換えません（ヘッダー／フッターの差し込み欄は置き換えます）
+- シート名の差し込み欄は置き換えません（ヘッダー／フッターの差し込み欄は置き換えます。シートを足すときのシート名は `-SheetName` で決めます）
 - 版上げでは、各シートのヘッダ（帳票の上部）の「更新者」「更新日」は書き換えません（変えたシートだけ直してください）
 
 ## Measure-Progress.ps1
@@ -1797,3 +1824,62 @@ Copilot は 1 回に貼り付けられる文字数に上限があり、ライセ
 - 設計書の内容を Copilot に送信します。顧客の資料を扱う場合は、社内の Copilot 利用規程に従ってください
 - 設計書か観点表を変えて再実行すると、内容が変わった依頼の古い回答は `answers\R001.txt.old` のように退避され、もう一度依頼し直しになります
 - 図形の中の文字・コメントもテキスト化します。画像（スクリーンショット）の中身は読めません
+
+## Install-SendTo.ps1
+
+エクスプローラーの右クリック →「送る」メニューに、各ツールを登録します。登録は 1 回だけで、PowerShell に慣れていない人でも、**ファイルやフォルダを選んで「送る」から項目を選ぶだけ**でツールを使えます。
+
+```powershell
+# すべての処理を「送る」に登録する（自分の「送る」だけに登録するので、管理者の権限は要りません）
+.\Install-SendTo.ps1
+```
+
+```
+Name                       Status Detail
+----                       ------ ------
+Excel 提出前チェック       作成   体裁・消し忘れ・情報漏れ・印刷のはみ出しなどを確かめ、結果の Excel を開きます
+Excel 表示を整える         作成   開いたときに先頭シートの A1 が倍率 100% で表示される状態に直します（上書きします）
+Excel 差分（2 つ選ぶ）     作成   2 つのブック（またはフォルダ）を比べ、結果の Excel を開きます。版数（ファイル名）か更新日時の古い方を旧にします
+...
+```
+
+| 「送る」の項目 | 実行するツール | 動き |
+| --- | --- | --- |
+| Excel 提出前チェック | Test-ExcelDeliverable.ps1 | 結果の Excel を開く |
+| Excel 表示を整える | Reset-ExcelView.ps1 | 選んだファイルを上書きする |
+| Excel 差分（2 つ選ぶ） | Compare-Excel.ps1 | 2 つ選ぶ。ファイル名の版数（`_v1.1` など）、無ければ更新日時の古い方を旧にして、結果の Excel を開く |
+| Excel 検索 | Search-Excel.ps1 | 探す文字を入力する（入力した文字そのものを探す）。結果の Excel を開く |
+| Excel 表記ゆれ | Test-ExcelTerms.ps1 | 結果の Excel を開く |
+| Excel 設計書の整合性チェック | Test-DesignConsistency.ps1 | 結果の Excel を開く |
+| Excel 規模の見積もり | Measure-DesignSize.ps1 | 結果の Excel を開く |
+| Excel 見積書の検算 | Test-ExcelEstimate.ps1 | 結果の Excel を開く |
+| Excel PDF にする | Export-ExcelToPdf.ps1 | 元のファイルと同じフォルダに PDF を保存する（Excel が必要） |
+
+- 結果の Excel は「ドキュメント\Excel ツールの結果」に `提出前チェック_20261021_101500.xlsx` のような名前で保存します（`-OutDir` で変えられます）
+- 終わったら、Enter キーを押すまでウィンドウを閉じません。エラーのときも内容を読めます
+- 各ツールは既定の設定で動きます。細かい指定が必要なときは、PowerShell から各ツールを使ってください
+- ショートカットは tools フォルダの場所を覚えます。**tools フォルダを動かしたら、もう一度実行してください**
+- 同じ名前のほかのショートカットは置き換えません（`-Force` で置き換えます）
+- ショートカットは `-ExecutionPolicy Bypass` で PowerShell を起動するため、実行ポリシーの設定を変える必要はありません
+
+```powershell
+# 提出前チェックと差分だけを登録し、結果を共有フォルダに保存する
+.\Install-SendTo.ps1 -Action Check, Compare -OutDir \\server\share\チェック結果
+
+# 登録したショートカットを削除する（ほかのショートカットは消しません）
+.\Install-SendTo.ps1 -Uninstall
+
+# 「送る」と同じことを PowerShell から行う
+.\Invoke-SendTo.ps1 -Action Check D:\提出物
+```
+
+| パラメーター | 内容 |
+| --- | --- |
+| `-Action` | 登録する処理（`Check`・`ResetView`・`Compare`・`Search`・`Terms`・`Consistency`・`Size`・`Estimate`・`Pdf`）。既定はすべて |
+| `-SendToDir` | ショートカットを作るフォルダ。既定は、ログインしている人の「送る」のフォルダ（`shell:sendto`） |
+| `-Prefix` | ショートカットの名前の頭に付ける文字（既定は `Excel `） |
+| `-OutDir` | 結果のファイルを保存するフォルダ |
+| `-Shell` | ツールを動かす PowerShell（`powershell`＝Windows PowerShell 5.1、既定 / `pwsh`＝PowerShell 7） |
+| `-Uninstall` | このツールのショートカットを削除する |
+| `-Force` | 同じ名前のほかのショートカットも置き換える |
+| `-WhatIf` | 作る（消す）ショートカットを確かめるだけ |

@@ -4,9 +4,11 @@ param(
     [string] $Template,
 
     [Parameter(ParameterSetName = 'Create', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'AddSheet', Mandatory = $true)]
     [string] $List,
 
     [Parameter(ParameterSetName = 'Create')]
+    [Parameter(ParameterSetName = 'AddSheet')]
     [string] $ListSheet,
 
     [Parameter(ParameterSetName = 'Create')]
@@ -14,6 +16,15 @@ param(
 
     [Parameter(ParameterSetName = 'Create')]
     [string] $OutDir = '.',
+
+    [Parameter(ParameterSetName = 'AddSheet', Mandatory = $true)]
+    [string] $Book,
+
+    [Parameter(ParameterSetName = 'AddSheet', Mandatory = $true)]
+    [string] $TemplateSheet,
+
+    [Parameter(ParameterSetName = 'AddSheet', Mandatory = $true)]
+    [string] $SheetName,
 
     [Parameter(ParameterSetName = 'Bump', Mandatory = $true)]
     [switch] $Bump,
@@ -78,6 +89,65 @@ function Expand-Placeholder {
     })
 }
 
+function Get-Placeholders {
+    #     差し込み欄（{{名前}}）の名前の一覧
+    param([string[]] $Texts)
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($t in $Texts) {
+        foreach ($m in [regex]::Matches([string]$t, '\{\{([^{}]+)\}\}')) { $n = $m.Groups[1].Value.Trim(); if (-not $names.Contains($n)) { $names.Add($n) } }
+    }
+    return , $names
+}
+
+function Read-ListRows {
+    #     一覧（CSV、または画面一覧などの Excel）の行。返り値: @{ Values = 名前 → 値; Where = 一覧の場所 }
+    param([string] $ListPath, [string] $Sheet, $Names)
+    $rows = New-Object System.Collections.Generic.List[object]
+    if ([System.IO.Path]::GetExtension($ListPath).ToLowerInvariant() -eq '.csv') {
+        foreach ($r in (Read-CsvFile $ListPath $Names.ToArray() '一覧')) {
+            $v = @{}
+            foreach ($n in $Names) { $v[$n] = ([string]$r.$n).Trim() }
+            $rows.Add([pscustomobject]@{ Values = $v; Where = '' })
+        }
+        return , $rows
+    }
+    $searchArgs = @{ Pattern = '\S'; Path = [System.Management.Automation.WildcardPattern]::Escape($ListPath); Target = 'Value' }
+    if ($Sheet) { $searchArgs['SheetNamePattern'] = $Sheet }
+    $books = ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null)
+    $labels = @($Names | ForEach-Object { ConvertTo-Label $_ })
+    foreach ($b in $books.Values) {
+        foreach ($sn in $b.Sheets.Keys) {
+            $grid = $b.Sheets[$sn]
+            foreach ($t in (Find-DesignTables $grid $labels $labels[0])) {
+                foreach ($dr in $t.Rows) {
+                    $v = @{}
+                    for ($i = 0; $i -lt $Names.Count; $i++) { $v[$Names[$i]] = ([string]$dr.Cells[$t.ColumnOf[$labels[$i]]]).Trim() }
+                    $rows.Add([pscustomobject]@{ Values = $v; Where = ('{0}!{1}{2}' -f $sn, (ConvertTo-ColumnName $t.ColumnOf[$labels[0]]), $dr.Row) })
+                }
+            }
+        }
+    }
+    if ($rows.Count -eq 0) { throw ("一覧に、見出し（{0}）がそろった表が見つかりません: {1}" -f ($Names -join '・'), $ListPath) }
+    return , $rows
+}
+
+function Invoke-Fill {
+    #     差し込み欄を値に置き換える（Replace-Excel.ps1。セル・図形・コメント・ヘッダー／フッター。セルの書式や部分ごとの書式は保たれる）。
+    #     SheetPattern を指定すると、そのシートだけを置き換える
+    param([string] $FilePath, $Names, [hashtable] $Values, [string] $SheetPattern)
+    $csv = Join-Path ([System.IO.Path]::GetTempPath()) ('placeholders-' + [guid]::NewGuid().ToString('N') + '.csv')
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add('置換前,置換後,正規表現')
+    foreach ($n in $Names) { $lines.Add(('"{0}","{1}",' -f ('{{' + $n + '}}').Replace('"', '""'), ([string]$Values[$n]).Replace('"', '""'))) }
+    [System.IO.File]::WriteAllLines($csv, $lines.ToArray(), (New-Object System.Text.UTF8Encoding($true)))
+    $replaceArgs = @{ ListPath = $csv; Path = [System.Management.Automation.WildcardPattern]::Escape($FilePath); Force = $true; Confirm = $false; WhatIf = $false }
+    if ($SheetPattern) { $replaceArgs['SheetNamePattern'] = $SheetPattern }
+    try { $null = & $replaceScript @replaceArgs 6>$null }
+    finally { Remove-Item -LiteralPath $csv -Force -ErrorAction SilentlyContinue }
+}
+
+$builtin = @{ '作成日' = $dateText; '日付' = $dateText; '作成者' = $Author }
+
 if ($PSCmdlet.ParameterSetName -eq 'Create') {
     $Template = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Template)
     $List = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($List)
@@ -89,45 +159,12 @@ if ($PSCmdlet.ParameterSetName -eq 'Create') {
 
     # 雛形とファイル名の差し込み欄
     $tplHits = @(& $searchScript -Pattern '\{\{[^{}]+\}\}' -Path ([System.Management.Automation.WildcardPattern]::Escape($Template)) -Target Value, Comment, Shape, HeaderFooter -NoExcel 6>$null)
-    $inTemplate = New-Object System.Collections.Generic.List[string]
-    foreach ($h in $tplHits) {
-        foreach ($m in [regex]::Matches([string]$h.Text, '\{\{([^{}]+)\}\}')) { $n = $m.Groups[1].Value.Trim(); if (-not $inTemplate.Contains($n)) { $inTemplate.Add($n) } }
-    }
-    $inName = @([regex]::Matches($FileName, '\{\{([^{}]+)\}\}') | ForEach-Object { $_.Groups[1].Value.Trim() } | Select-Object -Unique)
+    $inTemplate = Get-Placeholders @($tplHits | ForEach-Object { $_.Text })
+    $inName = Get-Placeholders @($FileName)
     if ($inName.Count -eq 0) { throw 'ファイル名に {{画面ID}} のような差し込み欄を入れてください（-FileName）。同じ名前のファイルになってしまうためです' }
-    $builtin = @{ '作成日' = $dateText; '日付' = $dateText; '作成者' = $Author }
     $listNames = New-Object System.Collections.Generic.List[string]
     foreach ($n in @($inName) + @($inTemplate)) { if (-not $builtin.ContainsKey($n) -and -not $listNames.Contains($n)) { $listNames.Add($n) } }
-
-    # 一覧（CSV、または画面一覧などの Excel）
-    $rows = New-Object System.Collections.Generic.List[object]
-    $ext = [System.IO.Path]::GetExtension($List).ToLowerInvariant()
-    if ($ext -eq '.csv') {
-        foreach ($r in (Read-CsvFile $List $listNames.ToArray() '一覧')) {
-            $v = @{}
-            foreach ($n in $listNames) { $v[$n] = ([string]$r.$n).Trim() }
-            $rows.Add([pscustomobject]@{ Values = $v; Where = '' })
-        }
-    }
-    else {
-        $searchArgs = @{ Pattern = '\S'; Path = [System.Management.Automation.WildcardPattern]::Escape($List); Target = 'Value' }
-        if ($ListSheet) { $searchArgs['SheetNamePattern'] = $ListSheet }
-        $books = ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null)
-        $labels = @($listNames | ForEach-Object { ConvertTo-Label $_ })
-        foreach ($book in $books.Values) {
-            foreach ($sheetName in $book.Sheets.Keys) {
-                $grid = $book.Sheets[$sheetName]
-                foreach ($t in (Find-DesignTables $grid $labels $labels[0])) {
-                    foreach ($dr in $t.Rows) {
-                        $v = @{}
-                        for ($i = 0; $i -lt $listNames.Count; $i++) { $v[$listNames[$i]] = ([string]$dr.Cells[$t.ColumnOf[$labels[$i]]]).Trim() }
-                        $rows.Add([pscustomobject]@{ Values = $v; Where = ('{0}!{1}{2}' -f $sheetName, (ConvertTo-ColumnName $t.ColumnOf[$labels[0]]), $dr.Row) })
-                    }
-                }
-            }
-        }
-        if ($rows.Count -eq 0) { throw ("一覧に、見出し（{0}）がそろった表が見つかりません: {1}" -f ($listNames -join '・'), $List) }
-    }
+    $rows = Read-ListRows $List $ListSheet $listNames
 
     if (-not $WhatIfPreference -and -not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
     $invalid = [regex]::Escape(-join [System.IO.Path]::GetInvalidFileNameChars())
@@ -147,21 +184,188 @@ if ($PSCmdlet.ParameterSetName -eq 'Create') {
         if (-not $PSCmdlet.ShouldProcess($outName, '雛形から作成')) { continue }
 
         Copy-Item -LiteralPath $Template -Destination $target
-        if ($inTemplate.Count -gt 0) {
-            # 差し込み欄の置き換えは Replace-Excel.ps1 で行う（セル・図形・コメント・ヘッダー／フッター。セルの書式や部分ごとの書式は保たれる）
-            $csv = Join-Path ([System.IO.Path]::GetTempPath()) ('placeholders-' + [guid]::NewGuid().ToString('N') + '.csv')
-            $lines = New-Object System.Collections.Generic.List[string]
-            $lines.Add('置換前,置換後,正規表現')
-            foreach ($n in $inTemplate) { $lines.Add(('"{0}","{1}",' -f ('{{' + $n + '}}').Replace('"', '""'), ([string]$values[$n]).Replace('"', '""'))) }
-            [System.IO.File]::WriteAllLines($csv, $lines.ToArray(), (New-Object System.Text.UTF8Encoding($true)))
-            try { $null = & $replaceScript -ListPath $csv -Path ([System.Management.Automation.WildcardPattern]::Escape($target)) -Force -Confirm:$false -WhatIf:$false 6>$null }
-            finally { Remove-Item -LiteralPath $csv -Force -ErrorAction SilentlyContinue }
-        }
+        if ($inTemplate.Count -gt 0) { Invoke-Fill $target $inTemplate $values }
         $created++
         New-Result $outName '作成' '' $target
     }
     Write-Host ''
     Write-Host ('{0} ファイルを作りました（一覧の {1} 行）: {2}' -f $created, $rows.Count, $OutDir)
+    return
+}
+
+# ================================================================ 雛形のシートからシートを足す（-Book / -TemplateSheet）
+
+
+# シートと一緒にはコピーできないもの（リレーションの種類 → 表示の名前）
+$uncopyableKinds = @{
+    drawing = '図形・グラフ'; vmlDrawing = 'コメント・フォームのボタン'; comments = 'コメント'; threadedComment = 'コメント'; table = 'テーブル'
+    pivotTable = 'ピボットテーブル'; oleObject = '埋め込みオブジェクト'; control = 'コントロール'; slicer = 'スライサー'; timeline = 'タイムライン'
+}
+
+function Add-SheetCopies {
+    #     雛形のシートの写しを、ブックの末尾に足す（セル・書式・結合・印刷の設定・入力規則・条件付き書式・ハイパーリンクをそのまま写す）。
+    #     プリンターごとの設定（printerSettings）は写さない（用紙・向き・拡大縮小などの印刷の設定はシートに残る）。
+    #     雛形のシートだけに付いた名前（印刷範囲など）は、新しいシートにも付ける
+    param([string] $FilePath, [string] $Template, [string[]] $Names)
+
+    $changes = @{}
+    $newParts = [ordered]@{}
+    $pkg = Open-ZipPackage -FilePath $FilePath
+    try {
+        $read = {
+            param([string] $Part)
+            $e = Get-PackageEntry -Package $pkg -PartName $Part
+            if ($null -eq $e) { return $null }
+            $sr = New-Object System.IO.StreamReader($e.Open(), (New-Object System.Text.UTF8Encoding($false)), $true)
+            try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+        }
+        $wbPart = @((Get-PartRelationships -Package $pkg -PartName '') | Where-Object { $_.Kind -eq 'officeDocument' })[0].Target
+        $wbDir = ''
+        if ($wbPart.Contains('/')) { $wbDir = $wbPart.Substring(0, $wbPart.LastIndexOf('/') + 1) }
+        $wbXml = & $read $wbPart
+        $wbDoc = Read-PartXml -Package $pkg -PartName $wbPart
+        $sheetEls = @($wbDoc.SelectNodes("//*[local-name()='sheets']/*[local-name()='sheet']"))
+        $tplIndex = -1
+        for ($i = 0; $i -lt $sheetEls.Count; $i++) { if ($sheetEls[$i].GetAttribute('name') -eq $Template) { $tplIndex = $i; break } }
+        if ($tplIndex -lt 0) { throw "雛形のシート「$Template」が見つかりません" }
+        $tplRid = Get-RelationshipIdAttribute $sheetEls[$tplIndex]
+        $relsPart = '{0}_rels/{1}.rels' -f $wbDir, $wbPart.Substring($wbDir.Length)
+        $relsXml = & $read $relsPart
+        $relsDoc = Read-PartXml -Package $pkg -PartName $relsPart
+        $tplRel = @($relsDoc.SelectNodes("//*[local-name()='Relationship']") | Where-Object { $_.GetAttribute('Id') -eq $tplRid })[0]
+        $tplPart = Resolve-PartName -SourcePart $wbPart -TargetPath $tplRel.GetAttribute('Target')
+        if ($tplRel.GetAttribute('Type') -notlike '*/worksheet') { throw "「$Template」はワークシートではないため、コピーできません" }
+
+        # 雛形のシートのリレーション（コピーできないものがあれば中止する）
+        $tplSheetXml = & $read $tplPart
+        $slash = $tplPart.LastIndexOf('/')
+        $tplRelsPart = $tplPart.Substring(0, $slash) + '/_rels/' + $tplPart.Substring($slash + 1) + '.rels'
+        $tplRelsXml = & $read $tplRelsPart
+        $dropIds = New-Object System.Collections.Generic.List[string]
+        if ($tplRelsXml) {
+            foreach ($m in [regex]::Matches($tplRelsXml, '<(?:\w+:)?Relationship\b[^>]*>')) {
+                $type = [regex]::Match($m.Value, '\sType="([^"]*)"').Groups[1].Value
+                $kind = $type.Substring($type.LastIndexOf('/') + 1)
+                if ($uncopyableKinds.ContainsKey($kind)) { throw ("雛形のシート「{0}」に{1}があるため、コピーできません（{1}の無いシートを雛形にしてください）" -f $Template, $uncopyableKinds[$kind]) }
+                if ($kind -eq 'printerSettings') { $dropIds.Add([regex]::Match($m.Value, '\sId="([^"]*)"').Groups[1].Value) }
+            }
+        }
+        # 写しのシートの XML: 選択の状態（作業グループ）を外し、プリンターごとの設定への参照を消す
+        $copyXml = [regex]::Replace($tplSheetXml, '\stabSelected="(?:1|true)"', '')
+        foreach ($id in $dropIds) { $copyXml = [regex]::Replace($copyXml, ('\s(?:\w+:)?id="{0}"' -f [regex]::Escape($id)), '') }
+        $copyRelsXml = $null
+        if ($tplRelsXml) {
+            $copyRelsXml = $tplRelsXml
+            foreach ($id in $dropIds) { $copyRelsXml = [regex]::Replace($copyRelsXml, ('<(?:\w+:)?Relationship\b[^>]*\sId="{0}"[^>]*/>' -f [regex]::Escape($id)), '') }
+            if ($copyRelsXml -notmatch '<(?:\w+:)?Relationship\b') { $copyRelsXml = $null }
+        }
+
+        $wpx = [regex]::Match($wbXml, '<(\w+:)?workbook\b').Groups[1].Value
+        $rootTag = [regex]::Match($wbXml, '<(?:\w+:)?workbook\b[^>]*>').Value
+        $rPrefix = [regex]::Match($rootTag, 'xmlns:(\w+)="[^"]*/relationships"').Groups[1].Value
+        $maxId = 0
+        foreach ($m in [regex]::Matches($wbXml, '\ssheetId="(\d+)"')) { $maxId = [math]::Max($maxId, [int]$m.Groups[1].Value) }
+        $ids = @{}
+        foreach ($m in [regex]::Matches($relsXml, '\sId="([^"]*)"')) { $ids[$m.Groups[1].Value] = $true }
+        $wsType = $tplRel.GetAttribute('Type')
+        $ct = & $read '[Content_Types].xml'
+        $sheetEls2 = New-Object System.Text.StringBuilder
+        $relEls = New-Object System.Text.StringBuilder
+        $ctEls = New-Object System.Text.StringBuilder
+        $nameEls = New-Object System.Text.StringBuilder
+        $tplNames = @($wbDoc.SelectNodes("//*[local-name()='definedNames']/*[local-name()='definedName']") | Where-Object { $_.GetAttribute('localSheetId') -eq [string]$tplIndex })
+        $quotedTpl = "'" + $Template.Replace("'", "''") + "'"
+        $n = 1
+        for ($k = 0; $k -lt $Names.Count; $k++) {
+            while ($pkg.Entries.ContainsKey(('{0}worksheets/sheet{1}.xml' -f $wbDir, $n).ToLowerInvariant()) -or $newParts.Contains(('{0}worksheets/sheet{1}.xml' -f $wbDir, $n))) { $n++ }
+            $part = '{0}worksheets/sheet{1}.xml' -f $wbDir, $n
+            $newParts[$part] = $copyXml
+            if ($copyRelsXml) { $newParts[('{0}worksheets/_rels/sheet{1}.xml.rels' -f $wbDir, $n)] = $copyRelsXml }
+            $r = 1
+            while ($ids.ContainsKey("rId$r")) { $r++ }
+            $ids["rId$r"] = $true
+            $rid = "rId$r"
+            [void]$relEls.Append(('<Relationship Id="{0}" Type="{1}" Target="{2}"/>' -f $rid, $wsType, $part.Substring($wbDir.Length)))
+            [void]$ctEls.Append(('<Override PartName="/{0}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' -f $part))
+            $name = ConvertTo-XmlText $Names[$k]
+            # 雛形のシートが非表示でも、足したシートは表示する
+            if ($rPrefix) { [void]$sheetEls2.Append(('<{0}sheet name="{1}" sheetId="{2}" {3}:id="{4}"/>' -f $wpx, $name, ($maxId + 1 + $k), $rPrefix, $rid)) }
+            else { [void]$sheetEls2.Append(('<{0}sheet name="{1}" sheetId="{2}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{3}"/>' -f $wpx, $name, ($maxId + 1 + $k), $rid)) }
+            # 印刷範囲・印刷タイトルなど、雛形のシートだけに付いた名前
+            $quotedNew = "'" + $Names[$k].Replace("'", "''") + "'"
+            foreach ($dn in $tplNames) {
+                $formula = $dn.InnerText.Replace($quotedTpl + '!', $quotedNew + '!')
+                $formula = [regex]::Replace($formula, ('(?<![\w''.])' + [regex]::Escape($Template) + '!'), [System.Text.RegularExpressions.MatchEvaluator] { param($m) $quotedNew + '!' })
+                $attrs = New-Object System.Text.StringBuilder
+                foreach ($a in $dn.Attributes) {
+                    $v = $a.Value
+                    if ($a.LocalName -eq 'localSheetId') { $v = [string]($sheetEls.Count + $k) }
+                    [void]$attrs.Append((' {0}="{1}"' -f $a.Name, (ConvertTo-XmlText $v)))
+                }
+                [void]$nameEls.Append(('<{0}definedName{1}>{2}</{0}definedName>' -f $wpx, $attrs.ToString(), (ConvertTo-XmlText $formula)))
+            }
+        }
+        $at = $wbXml.IndexOf(('</{0}sheets>' -f $wpx))
+        $wbXml = $wbXml.Substring(0, $at) + $sheetEls2.ToString() + $wbXml.Substring($at)
+        if ($nameEls.Length -gt 0) {
+            $end = $wbXml.IndexOf(('</{0}definedNames>' -f $wpx))
+            $wbXml = $wbXml.Substring(0, $end) + $nameEls.ToString() + $wbXml.Substring($end)
+        }
+        # 雛形の数式を、足したシートでも計算させる
+        $changes[$wbPart.ToLowerInvariant()] = Set-FullCalcOnLoad $wbXml
+        $at = $relsXml.LastIndexOf('</Relationships>')
+        $changes[$relsPart.ToLowerInvariant()] = $relsXml.Substring(0, $at) + $relEls.ToString() + $relsXml.Substring($at)
+        $at = $ct.LastIndexOf('</Types>')
+        $changes['[content_types].xml'] = $ct.Substring(0, $at) + $ctEls.ToString() + $ct.Substring($at)
+    }
+    finally { $pkg.Zip.Dispose() }
+    Save-ZipPackage -FilePath $FilePath -Changes $changes -NewParts $newParts
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'AddSheet') {
+    $Book = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Book)
+    $List = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($List)
+    if (-not (Test-Path -LiteralPath $Book)) { throw "ブックが見つかりません: $Book" }
+    if (@('.xlsx', '.xlsm') -notcontains [System.IO.Path]::GetExtension($Book).ToLowerInvariant()) { throw "ブックは .xlsx / .xlsm にしてください: $Book" }
+    if (-not (Test-Path -LiteralPath $List)) { throw "一覧が見つかりません: $List" }
+
+    $pkg = Open-ZipPackage -FilePath $Book
+    try { $existing = @((Get-WorkbookSheetParts $pkg).Sheets.Keys) } finally { $pkg.Zip.Dispose() }
+    if ($existing -notcontains $TemplateSheet) { throw "雛形のシート「$TemplateSheet」が見つかりません（ブックのシート: $($existing -join '・')）" }
+
+    $tplHits = @(& $searchScript -Pattern '\{\{[^{}]+\}\}' -Path ([System.Management.Automation.WildcardPattern]::Escape($Book)) -Target Value, Comment, Shape, HeaderFooter -SheetNamePattern ('^' + [regex]::Escape($TemplateSheet) + '$') -NoExcel 6>$null)
+    $inTemplate = Get-Placeholders @($tplHits | ForEach-Object { $_.Text })
+    $inName = Get-Placeholders @($SheetName)
+    if ($inName.Count -eq 0) { throw 'シート名に {{テーブルID}} のような差し込み欄を入れてください（-SheetName）。同じ名前のシートになってしまうためです' }
+    $listNames = New-Object System.Collections.Generic.List[string]
+    foreach ($n in @($inName) + @($inTemplate)) { if (-not $builtin.ContainsKey($n) -and -not $listNames.Contains($n)) { $listNames.Add($n) } }
+    $rows = Read-ListRows $List $ListSheet $listNames
+
+    $planned = New-Object System.Collections.Generic.List[object]
+    $taken = @{}
+    foreach ($e in $existing) { $taken[$e.ToUpperInvariant()] = $true }
+    foreach ($row in $rows) {
+        $values = @{}
+        foreach ($k in $builtin.Keys) { $values[$k] = $builtin[$k] }
+        foreach ($k in $row.Values.Keys) { $values[$k] = $row.Values[$k] }
+        $empty = @($inName | Where-Object { -not $values[$_] })
+        if ($empty.Count -gt 0) { New-Result '' 'スキップ' ('シート名の差し込み欄（{0}）の値が空です（{1}）' -f ($empty -join '・'), $row.Where) $Book; continue }
+        # シート名に使えない文字は _ にし、31 文字までにする（Excel の決まり）
+        $name = [regex]::Replace((Expand-Placeholder $SheetName $values), '[\[\]:*?/\\]', '_').Trim("'")
+        if ($name.Length -gt 31) { $name = $name.Substring(0, 31) }
+        if ($taken.ContainsKey($name.ToUpperInvariant())) { New-Result $name '既存' '同じ名前のシートがあるため作りません' $Book; continue }
+        $taken[$name.ToUpperInvariant()] = $true
+        $planned.Add([pscustomobject]@{ Name = $name; Values = $values })
+    }
+    if ($planned.Count -gt 0 -and $PSCmdlet.ShouldProcess([System.IO.Path]::GetFileName($Book), ('雛形のシート「{0}」から {1} シートを足す（{2}）' -f $TemplateSheet, $planned.Count, (@($planned | ForEach-Object { $_.Name }) -join '・')))) {
+        Add-SheetCopies $Book $TemplateSheet @($planned | ForEach-Object { $_.Name })
+        foreach ($p in $planned) {
+            if ($inTemplate.Count -gt 0) { Invoke-Fill $Book $inTemplate $p.Values ('^' + [regex]::Escape($p.Name) + '$') }
+            New-Result $p.Name '作成' ('雛形のシート「{0}」から作りました' -f $TemplateSheet) $Book
+        }
+        Write-Host ''
+        Write-Host ('{0} シートを足しました: {1}' -f $planned.Count, $Book)
+    }
     return
 }
 
@@ -276,7 +480,7 @@ foreach ($f in $files) {
     $hits = @(& $searchScript -Pattern '\S' -Path ([System.Management.Automation.WildcardPattern]::Escape($f.FullName)) -Target Value -NoExcel 6>$null)
     $books = ConvertTo-DesignBooks $hits
     if ($books.Count -eq 0) { New-Result $f.Name 'スキップ' '読めませんでした' $f.FullName; continue }
-    $book = @($books.Values)[0]
+    $design = @($books.Values)[0]
 
     $pkg = Open-ZipPackage $f.FullName
     try {
@@ -287,8 +491,8 @@ foreach ($f in $files) {
 
         # ---- 表紙の版数・更新日
         $coverVersion = $null; $coverDate = $null
-        if ($book.Sheets.Contains($coverName)) {
-            $grid = $book.Sheets[$coverName]
+        if ($design.Sheets.Contains($coverName)) {
+            $grid = $design.Sheets[$coverName]
             $pairs = Find-LabelPairs $grid $versionLabel
             foreach ($pair in $pairs) { if (ConvertTo-VersionText $pair.Text) { $coverVersion = $pair; break } }
             if (-not $coverVersion) {
@@ -302,8 +506,8 @@ foreach ($f in $files) {
 
         # ---- 改訂履歴: 版数と日付の見出しがある行のうち、下に版数の行がいちばん多いもの（Test-ExcelDeliverable.ps1 と同じ）
         $hist = $null
-        if ($histName -and $book.Sheets.Contains($histName)) {
-            $grid = $book.Sheets[$histName]
+        if ($histName -and $design.Sheets.Contains($histName)) {
+            $grid = $design.Sheets[$histName]
             foreach ($row in $grid.Rows) {
                 $cols = @{}
                 foreach ($col in $grid.Cols[$row]) {
@@ -321,7 +525,7 @@ foreach ($f in $files) {
         }
 
         $current = $null
-        if ($hist -and $hist.Entries.Count -gt 0) { $current = ConvertTo-VersionText $book.Sheets[$histName].Cells[$hist.Entries[-1]][$hist.Cols['Version']] }
+        if ($hist -and $hist.Entries.Count -gt 0) { $current = ConvertTo-VersionText $design.Sheets[$histName].Cells[$hist.Entries[-1]][$hist.Cols['Version']] }
         elseif ($coverVersion) { $current = ConvertTo-VersionText $coverVersion.Text }
         if (-not $current -and -not $Version) { New-Result $f.Name 'スキップ' '表紙・改訂履歴に版数が見つかりません' $f.FullName; continue }
         $newVersion = $Version
@@ -346,7 +550,7 @@ foreach ($f in $files) {
         $newRow = 0
         $last = 0
         if ($hist) {
-            $grid = $book.Sheets[$histName]
+            $grid = $design.Sheets[$histName]
             $last = $hist.HeaderRow
             foreach ($r in $grid.Rows) {
                 if ($r -le $last) { continue }
@@ -394,7 +598,7 @@ foreach ($f in $files) {
         }
         if ($hist) {
             $doc = $docs[$histName]
-            $grid = $book.Sheets[$histName]
+            $grid = $design.Sheets[$histName]
             # 版数・日付の書き方は最後の版の行に、セルの書式（罫線など）と結合は最後に書いてある行に合わせる
             $srcRow = $hist.HeaderRow
             if ($hist.Entries.Count -gt 0) { $srcRow = $hist.Entries[-1] }
@@ -445,12 +649,17 @@ foreach ($f in $files) {
 }
 
 # .SYNOPSIS
-#     設計書を雛形から一括で作り（-Template / -List）、または設計書の版を上げます（-Bump）。Excel 不要です。
+#     設計書を雛形から一括で作り（-Template / -List）、雛形のシートからシートを足し（-Book / -TemplateSheet）、
+#     または設計書の版を上げます（-Bump）。Excel 不要です。
 #
 # .DESCRIPTION
 #     雛形から作る: 雛形の xlsx に {{画面ID}} {{画面名}} のような差し込み欄を書いておくと、一覧（画面一覧の Excel や CSV）の
 #     行ごとに雛形をコピーし、差し込み欄を一覧の値に置き換えます（セル・図形・コメント・ヘッダー／フッター。Replace-Excel.ps1 を使います）。
 #     {{作成日}}（{{日付}}）と {{作成者}} は -Date・-Author の値になります。同じ名前のファイルがあれば作りません。
+#
+#     シートを足す（-Book / -TemplateSheet）: テーブル定義書のように 1 つのブックに 1 件 1 シートで書く設計書で、
+#     一覧（テーブル一覧など）の行ごとに雛形のシートをコピーしてブックの末尾に足し、そのシートの差し込み欄を置き換えます。
+#     図形・コメント・テーブルなどのあるシートは雛形にできません。同じ名前のシートがあれば作りません。
 #
 #     版を上げる（-Bump）: 表紙の版数と更新日を新しい版数・日付にし、改訂履歴の最後の行の下に
 #     版数・改訂日・改訂箇所・改訂内容・改訂者の行を足します（最後の行の書式と結合を写します）。
@@ -472,6 +681,17 @@ foreach ($f in $files) {
 #
 # .PARAMETER OutDir
 #     作ったファイルを保存するフォルダ。既定はカレントフォルダ。
+#
+# .PARAMETER Book
+#     シートを足すブック（xlsx / xlsm）。ブックを上書きします。
+#
+# .PARAMETER TemplateSheet
+#     コピーする雛形のシートの名前（非表示のシートでもかまいません。足したシートは表示します）。
+#     セル・書式・結合・印刷の設定・入力規則・条件付き書式をそのまま写し、印刷範囲などの名前も付けます。
+#     プリンターごとの設定は写しません。図形・コメント・テーブル・ピボットテーブルのあるシートはコピーできません。
+#
+# .PARAMETER SheetName
+#     足すシートの名前。例: '{{テーブルID}}'。シート名に使えない文字は _ にし、31 文字までにします。
 #
 # .PARAMETER Bump
 #     版を上げます（-Path の設計書の表紙と改訂履歴を書き換えます）。
@@ -510,6 +730,10 @@ foreach ($f in $files) {
 # .EXAMPLE
 #     # 画面一覧の行ごとに、雛形から画面設計書を作る
 #     .\New-DesignDocument.ps1 -Template .\画面設計書_雛形.xlsx -List D:\設計書\DD01_画面一覧.xlsx -ListSheet '^画面一覧$' -FileName 'DD02_画面設計書_{{画面ID}}_{{画面名}}.xlsx' -OutDir D:\設計書 -Author '山田 太郎'
+#
+# .EXAMPLE
+#     # テーブル一覧の行ごとに、雛形のシートからテーブル定義のシートを足す
+#     .\New-DesignDocument.ps1 -Book D:\設計書\DD03_テーブル定義書.xlsx -TemplateSheet '雛形' -List D:\設計書\DD03_テーブル定義書.xlsx -ListSheet '^テーブル一覧$' -SheetName '{{テーブルID}}'
 #
 # .EXAMPLE
 #     # 版を上げる（まず -WhatIf で確かめる）
