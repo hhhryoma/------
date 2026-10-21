@@ -22,9 +22,11 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Measure-ReviewQuality.ps1](tools/README.md#measure-reviewqualityps1) | 指摘管理表を集計し、設計書ごとの指摘件数・指摘密度・未完了・期限切れ、基準値から外れた設計書、起票・完了の推移を出す | 不要 ※1 |
 | [Invoke-DesignReview.ps1](tools/README.md#invoke-designreviewps1) | 設計書を観点表に沿って Microsoft 365 Copilot にレビューさせ、指摘一覧にまとめる | 不要 |
 | [Export-ExcelToPdf.ps1](tools/README.md#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える | 必要 ※2 |
+| [Install-SendTo.ps1](tools/README.md#install-sendtops1) | 右クリックの「送る」に各ツールを登録し、PowerShell を使わずにファイルを選ぶだけで実行できるようにする | 不要 ※3 |
 
 ※1 .xls / .xlsb を扱う場合のみ Excel が必要です。
 ※2 PDF のページ数を数えるだけ（`-CountOnly`）なら不要です。
+※3 「PDF にする」だけは Excel が必要です。
 
 使い方の詳細は [tools/README.md](tools/README.md) を見てください。`tools` フォルダは**まとめて**配置してください（共通部品の `ExcelTools.psm1` を各スクリプトが使います）。
 
@@ -34,6 +36,8 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 ```
 
 実行ポリシーで止まる場合は `powershell -ExecutionPolicy Bypass -File .\tools\Search-Excel.ps1 ...` のように実行してください。
+
+PowerShell に慣れていない人には、`.\tools\Install-SendTo.ps1` を 1 回実行してもらうと、エクスプローラーでファイルやフォルダを選んで右クリック →「送る」→「Excel 提出前チェック」などから使えます（結果の Excel が開きます）。
 
 ## フォルダ構成
 
