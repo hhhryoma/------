@@ -158,6 +158,13 @@ if ($null -ne $docs) {
         if ($d.Judgement -like '多い*') { $todo = '作成者・工程の問題がないか原因を分析する' }
         Add-Action 'レビュー' $d.Document ('指摘密度 {0}（{1}）' -f $d.Density, $d.Judgement) $todo
     }
+    # レビュー実施率は、レビュー記録と設計書の一覧（規模）があるときだけ（未レビューを決められるのはこのときだけ）
+    if ($ReviewLog -and ($PageCsv -or $DesignPath) -and @($docs).Count -gt 0) {
+        $unreviewed = @($docs | Where-Object { $_.Reviewed -eq $false })
+        $rate = [math]::Round((@($docs).Count - $unreviewed.Count) / @($docs).Count, 3)
+        Add-Metric 'レビュー' 'レビュー実施率' ([double]$rate) (Get-RateJudgement $rate) ('設計書 {0} 件のうち {1} 件。100% なら ○、80% 以上なら △' -f @($docs).Count, (@($docs).Count - $unreviewed.Count)) $file
+        foreach ($d in $unreviewed) { Add-Action 'レビュー' $d.Document '未レビュー（レビュー記録も指摘も無い）' 'レビューを実施する' }
+    }
     if ($ReviewLog) {
         $zoneActions = @($docs | Where-Object { $_.PSObject.Properties['NeedsAction'] -and $_.NeedsAction })
         Add-Metric 'レビュー' '要対応のゾーンの設計書' ([double]$zoneActions.Count) (Get-CountJudgement $zoneActions.Count) 'レビュー工数密度 × 指摘密度。0 件なら ○' $file

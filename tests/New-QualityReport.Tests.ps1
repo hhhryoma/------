@@ -32,19 +32,21 @@ function New-ReportData {
         , @('2', '2026/10/01', 'DD02_画面設計書_SCR001_受注一覧', 'イベントが足りない', '漏れ', '詳細設計レビュー', '2026/10/05', '対応中')
         , @('3', '2026/10/02', 'DD03_テーブル定義書', '型が違う', '誤り', '詳細設計レビュー', '2026/10/30', '未対応'))
     @('要件ID,要件名', 'REQ-001,受注を検索する', 'REQ-003,出荷指示を送る') | Set-Content -LiteralPath (Join-Path $Dir '要件一覧.csv') -Encoding UTF8
+    @('設計書,レビュー工数', 'DD02_画面設計書_SCR001_受注一覧,2', 'DD03_テーブル定義書,1') | Set-Content -LiteralPath (Join-Path $Dir 'レビュー記録.csv') -Encoding UTF8
 }
 
 Test-Case 'New-QualityReport: 各ツールを実行し、指標ごとの実績と判定（○△×）・要対応を 1 冊にまとめる' {
     $dir = New-TestDir
     New-ReportData $dir
     $out = Join-Path $dir '報告'
-    $r = @(& $ReportTool -OutDir $out -DesignPath $reportDesignDir -Findings (Join-Path $dir 'レビュー') -TestPath (Join-Path $dir 'テスト') -BugList (Join-Path $dir '障害管理表.xlsx') -Requirement (Join-Path $dir '要件一覧.csv') -AsOf '2026-10-20' 3>$null 6>$null)
+    $r = @(& $ReportTool -OutDir $out -DesignPath $reportDesignDir -Findings (Join-Path $dir 'レビュー') -ReviewLog (Join-Path $dir 'レビュー記録.csv') -TestPath (Join-Path $dir 'テスト') -BugList (Join-Path $dir '障害管理表.xlsx') -Requirement (Join-Path $dir '要件一覧.csv') -AsOf '2026-10-20' 3>$null 6>$null)
     $got = @{}
     foreach ($m in $r) { $got[$m.Name] = '{0}|{1}' -f $m.Value, $m.Judgement }
     Assert-Equal '3|' $got['指摘件数']
     Assert-Equal '2|△' $got['未完了の指摘']
     Assert-Equal '1|×' $got['期限切れの指摘'] '期限切れが残っていれば ×'
     Assert-Equal '1|○' $got['消化率']
+    Assert-Match $got['レビュー実施率'] '^0\.\d+\|×$' 'レビュー記録か指摘があるのは DD02 の SCR001 と DD03 だけ'
     Assert-Equal '1|△' $got['未完了のバグ']
     Assert-Match $got['バグの収束（信頼度成長曲線）'] '^まだ判定できない（バグ 2 件.*\|$' 'バグが少ないうちは判定しない'
     Assert-Equal '0|' $got['直近 7 日の新規バグ']
@@ -72,6 +74,7 @@ Test-Case 'New-QualityReport: 各ツールを実行し、指標ごとの実績�
     $todoText = @($todo.Rows.Values | ForEach-Object { '{0}|{1}|{2}' -f $_['A'], $_['B'], $_['C'] })
     Assert-True (@($todoText | Where-Object { $_ -like '工程|詳細設計|*1 件が後の工程で見つかった*' }).Count -eq 1) ($todoText -join "`n")
     Assert-True (@($todoText | Where-Object { $_ -like '網羅|テストの無い要素*' }).Count -eq 1) ($todoText -join "`n")
+    Assert-True (@($todoText | Where-Object { $_ -like 'レビュー|DD05_メッセージ一覧*|未レビュー*' }).Count -eq 1) ($todoText -join "`n")
 }
 
 Test-Case 'New-QualityReport: 失敗したツールがあっても、ほかのツールの結果でまとめる' {
