@@ -87,7 +87,7 @@ function Add-Defect {
     $defects.Add([pscustomobject]@{
         Source = $Source; Content = $Content.Trim(); Cause = $Cause.Trim(); Severity = $Severity.Trim()
         Injected = $(if ($injected) { $injected.Name } else { $unknown }); Detected = $(if ($detected) { $detected.Name } else { $unknown })
-        InjectedPhase = $injected; DetectedPhase = $detected; Place = $Record
+        InjectedPhase = $injected; DetectedPhase = $detected; Place = $Record; Seq = $defects.Count
     })
 }
 
@@ -193,7 +193,7 @@ if ($OutXlsx) {
     $paretoRows = New-Object System.Collections.Generic.List[object]
     foreach ($p in $pareto) { $paretoRows.Add(@{ Values = @($p.Cause, [double]$p.Count, [double]$p.Ratio, [double]$p.Cumulative) }) }
     $leakRows = New-Object System.Collections.Generic.List[object]
-    foreach ($d in @($defects | Where-Object { $_.InTime -eq $false } | Sort-Object @{ e = { $_.InjectedPhase.Index } }, @{ e = { $_.DetectedPhase.Index } })) {
+    foreach ($d in @($defects | Where-Object { $_.InTime -eq $false } | Sort-Object @{ e = { $_.InjectedPhase.Index } }, @{ e = { $_.DetectedPhase.Index } }, Seq)) {
         $where = '{0} {1} 行目' -f $d.Place.File, $d.Place.Row
         if ($d.Place.Sheet) { $where = '{0} {1}!{2}{3}' -f $d.Place.File, $d.Place.Sheet, (ConvertTo-ColumnName $d.Place.Column), $d.Place.Row }
         $row = @{ Values = @($d.Source, $d.Injected, $d.Detected, $d.Content, $d.Cause, $d.Severity, $where) }
