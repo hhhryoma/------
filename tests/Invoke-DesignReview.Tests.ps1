@@ -111,6 +111,31 @@ Test-Case 'Invoke-DesignReview: プロンプトにセル番地付きの設計書
     Assert-True (-not $p.Contains("`r")) 'プロンプトに CR が含まれています'
 }
 
+Test-Case 'Invoke-DesignReview: -TextFormat Markdown で、表に行番号と列を付けた Markdown の設計書を渡す' {
+    $dir = New-TestDir
+    $null = & $Review -Path $designDir -OutDir $dir -PromptOnly -TextFormat Markdown 6>$null
+    $p = [System.IO.File]::ReadAllText((Join-Path $dir 'prompts/R002.txt'))
+    Assert-Match $p '【設計書】DD02_画面設計書_SCR001_受注一覧\.xlsx'
+    Assert-Match $p '箇条書きの「K12: 必須」はセル K12 です。表は 1 列目が行番号で、見出しの「K:桁数」の K が列です'
+    Assert-NotMatch $p '「12\| K:必須」'
+    Assert-Match $p '\n## 画面項目定義\n\n（1～3行目の帳票ヘッダは前のシートと同じため省略）\n\n### ■ 画面項目定義\n'
+    Assert-Match $p '\n\| 行 \| A:No \| C:項目名 \| I:項目ID \| P:区分 \|'
+    Assert-Match $p '\n\| 6 \| 1 \| 受注番号 \| orderNo \| テキスト \| I \| 半角英数 \| 12 \|  \|  \| 半角英数（E0003） \|'
+    Assert-Match $p '\n- Q22: 文書番号 \| X22: ODR-DD-02-01\n'
+    $all = (Get-ChildItem -LiteralPath (Join-Path $dir 'prompts') -Filter 'R*.txt' | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) }) -join "`n"
+    Assert-Match $all '【参照資料】DD05_メッセージ一覧\.xlsx（判定の参考。指摘の対象外）\n## 表紙\n'
+    Assert-True (-not $p.Contains("`r")) 'プロンプトに CR が含まれています'
+
+    # 長いシートを分けたときは、表の続きに表の見出しを付け直す。上限も守る
+    $dir = New-TestDir
+    $null = & $Review -Path $designDir -OutDir $dir -PromptOnly -TextFormat Markdown -MaxChars 4000 6>$null
+    $m = Get-Manifest $dir
+    Assert-Equal 0 @($m.Requests | Where-Object { $_.Chars -gt 4000 }).Count '上限 4000 を超える依頼'
+    $continued = @(Get-ChildItem -LiteralPath (Join-Path $dir 'prompts') -Filter 'R*.txt' | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) } | Where-Object { $_.Contains('## 画面項目定義（続き）') })
+    Assert-True ($continued.Count -gt 0) '表の途中で分けた依頼がない'
+    foreach ($c in $continued) { Assert-Match $c '## 画面項目定義（続き）\n\| 行 \| A:No \| C:項目名 [^\n]*\|\n\| --- \|' }
+}
+
 Test-Case 'Invoke-DesignReview: 3 形式の回答を取り込んでレビュー結果を作る' {
     $dir = New-TestDir
     $null = & $Review -Path $designDir -OutDir $dir -PromptOnly 6>$null

@@ -70,131 +70,8 @@ foreach ($f in $files) {
     $todo.Add($f)
 }
 
-# ---------------------------------------------------------------- Markdown にする
+# ---------------------------------------------------------------- Markdown にする（ExcelTools.psm1 の ConvertTo-BookMarkdown）
 
-
-function ConvertTo-MarkdownText {
-    #     セルの文字を Markdown の 1 行に収める（改行は <br>、表の中の | はエスケープ）
-    param([string] $Text, [switch] $InTable)
-    # Search-Excel はセル内の改行を ↵ で表す
-    $t = ([string]$Text).Trim() -replace "\r\n|\r|\n|↵", '<br>'
-    if ($InTable) { $t = $t.Replace('|', '\|') }
-    return $t
-}
-
-function ConvertTo-SheetMarkdown {
-    #     1 シートの値を Markdown にする。
-    #       見出しの行（3 つ以上の値）の下に、見出しの列だけを使う行が続くところは表に、それ以外の行は箇条書きに、
-    #       「■」で始まる行は小見出しにする
-    param($Rows, [System.Collections.Generic.List[string]] $Lines)
-    $rowNums = [int[]]@($Rows.Keys)
-    [Array]::Sort($rowNums)
-    $last = ''
-    $i = 0
-    while ($i -lt $rowNums.Count) {
-        $cells = $Rows[$rowNums[$i]]
-        if ($cells[0].Text.TrimStart().StartsWith('■')) {
-            if ($last) { $Lines.Add('') }
-            $Lines.Add('### ' + (ConvertTo-MarkdownText (@($cells | ForEach-Object { $_.Text.Trim() }) -join ' ')))
-            $Lines.Add('')
-            $last = ''
-            $i++
-            continue
-        }
-        $headerCols = @{}
-        foreach ($c in $cells) { $headerCols[$c.Col] = $true }
-        $j = $i + 1
-        if ($cells.Count -ge 3) {
-            while ($j -lt $rowNums.Count -and $rowNums[$j] -eq $rowNums[$j - 1] + 1) {
-                $next = $Rows[$rowNums[$j]]
-                if ($next[0].Text.TrimStart().StartsWith('■')) { break }
-                $inside = $true
-                foreach ($c in $next) { if (-not $headerCols.ContainsKey($c.Col)) { $inside = $false; break } }
-                if (-not $inside) { break }
-                $j++
-            }
-        }
-        if ($j - $i -ge 2) {
-            if ($last) { $Lines.Add('') }
-            $cols = @($cells | ForEach-Object { $_.Col })
-            $head = @($cells | ForEach-Object { ConvertTo-MarkdownText $_.Text -InTable })
-            $sep = @($cols | ForEach-Object { '---' })
-            if ($CellAddress) { $head = @('行') + $head; $sep = @('---') + $sep }
-            $Lines.Add('| ' + ($head -join ' | ') + ' |')
-            $Lines.Add('| ' + ($sep -join ' | ') + ' |')
-            for ($k = $i + 1; $k -lt $j; $k++) {
-                $byCol = @{}
-                foreach ($c in $Rows[$rowNums[$k]]) { $byCol[$c.Col] = $c.Text }
-                $vals = @($cols | ForEach-Object { ConvertTo-MarkdownText $byCol[$_] -InTable })
-                if ($CellAddress) { $vals = @([string]$rowNums[$k]) + $vals }
-                $Lines.Add('| ' + ($vals -join ' | ') + ' |')
-            }
-            $Lines.Add('')
-            $last = ''
-            $i = $j
-            continue
-        }
-        if ($last -ne 'list' -and $Lines.Count -gt 0 -and $Lines[$Lines.Count - 1] -ne '') { $Lines.Add('') }
-        if ($CellAddress) { $parts = @($cells | ForEach-Object { '{0}{1}: {2}' -f (ConvertTo-ColumnName $_.Col), $rowNums[$i], (ConvertTo-MarkdownText $_.Text) }) }
-        else { $parts = @($cells | ForEach-Object { ConvertTo-MarkdownText $_.Text }) }
-        $Lines.Add('- ' + ($parts -join ' | '))
-        $last = 'list'
-        $i++
-    }
-}
-
-function ConvertTo-BookMarkdown {
-    param([string] $Title, $Hits)
-    $lines = New-Object System.Collections.Generic.List[string]
-    if ($Title) { $lines.Add('# ' + $Title); $lines.Add('') }
-    # シート → 行番号 → セル（列の順）。図形・コメントはシートごとに後ろへまとめる
-    $sheets = [ordered]@{}
-    foreach ($h in $Hits) {
-        if (-not $sheets.Contains($h.Sheet)) { $sheets[$h.Sheet] = [pscustomobject]@{ Rows = @{}; Shapes = (New-Object System.Collections.Generic.List[object]); Comments = (New-Object System.Collections.Generic.List[object]) } }
-        $s = $sheets[$h.Sheet]
-        switch ($h.Kind) {
-            '値' {
-                $m = [regex]::Match([string]$h.Cell, '^([A-Z]+)(\d+)$')
-                if (-not $m.Success) { break }
-                $row = [int]$m.Groups[2].Value
-                if (-not $s.Rows.ContainsKey($row)) { $s.Rows[$row] = New-Object System.Collections.Generic.List[object] }
-                $s.Rows[$row].Add([pscustomobject]@{ Col = (Get-ColumnIndex $m.Groups[1].Value); Text = [string]$h.Text })
-            }
-            '図形' { $s.Shapes.Add($h) }
-            'コメント' { $s.Comments.Add($h) }
-        }
-    }
-    foreach ($name in $sheets.Keys) {
-        $s = $sheets[$name]
-        $lines.Add('## ' + $name)
-        $lines.Add('')
-        if ($s.Rows.Count -eq 0 -and $s.Shapes.Count -eq 0 -and $s.Comments.Count -eq 0) { $lines.Add('（空）'); $lines.Add(''); continue }
-        foreach ($row in @($s.Rows.Keys)) {
-            $sorted = @($s.Rows[$row] | Sort-Object Col)
-            $s.Rows[$row] = $sorted
-        }
-        ConvertTo-SheetMarkdown $s.Rows $lines
-        if ($lines[$lines.Count - 1] -ne '') { $lines.Add('') }
-        if ($s.Shapes.Count -gt 0) {
-            $lines.Add('### 図形')
-            $lines.Add('')
-            foreach ($h in $s.Shapes) {
-                $label = $h.Name
-                if ($CellAddress) { $label = '{0}（{1} 付近）' -f $h.Name, $h.Cell }
-                $lines.Add(('- {0}: {1}' -f $label, (ConvertTo-MarkdownText $h.Text)))
-            }
-            $lines.Add('')
-        }
-        if ($s.Comments.Count -gt 0) {
-            $lines.Add('### コメント')
-            $lines.Add('')
-            foreach ($h in $s.Comments) { $lines.Add(('- {0}: {1}' -f $h.Cell, (ConvertTo-MarkdownText $h.Text))) }
-            $lines.Add('')
-        }
-    }
-    while ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
-    return (($lines -join "`n") + "`n")
-}
 
 $converted = 0
 if ($todo.Count -gt 0) {
@@ -216,14 +93,14 @@ if ($todo.Count -gt 0) {
         if (-not $bookHits) { continue }   # 読めなかったファイル（Search-Excel が警告済み）
         if ($TextConv) {
             # 一時ファイルの名前は毎回変わるので、見出しにファイル名を入れない
-            $md = ConvertTo-BookMarkdown '' $bookHits
+            $md = ConvertTo-BookMarkdown '' $bookHits -CellAddress:$CellAddress
             $bytes = $utf8.GetBytes($md)
             $stdout = [Console]::OpenStandardOutput()
             $stdout.Write($bytes, 0, $bytes.Length)
             $stdout.Flush()
             return
         }
-        $md = ConvertTo-BookMarkdown $f.Relative.Replace('\', '/') $bookHits
+        $md = ConvertTo-BookMarkdown $f.Relative.Replace('\', '/') $bookHits -CellAddress:$CellAddress
         if ($OutDir) {
             $dir = [System.IO.Path]::GetDirectoryName($f.Target)
             if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
