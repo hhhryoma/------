@@ -66,7 +66,7 @@ function Add-Issue {
     if ($Field -and $p.Columns[$Field]) { $col = $p.Columns[$Field] }
     $location = '{0} 行目' -f $p.Row
     if ($p.Sheet) { $location = '{0}!{1}{2}' -f $p.Sheet, (ConvertTo-ColumnName $col), $p.Row }
-    $i = [pscustomobject]@{ File = $p.File; Location = $location; Level = $Level; Item = $Item; Function = $Case.Function; Id = $Case.Id; Detail = $Detail; Path = $p.Path; Sheet = $p.Sheet; Row = $p.Row; Col = $col; Cell = $(if ($p.Sheet) { '{0}{1}' -f (ConvertTo-ColumnName $col), $p.Row } else { '' }) }
+    $i = [pscustomobject]@{ File = $p.File; Location = $location; Level = $Level; Item = $Item; Function = $Case.Function; Id = $Case.Id; Detail = $Detail; Path = $p.Path; Sheet = $p.Sheet; Row = $p.Row; Col = $col; Seq = $issues.Count; Cell = $(if ($p.Sheet) { '{0}{1}' -f (ConvertTo-ColumnName $col), $p.Row } else { '' }) }
     $i.PSObject.TypeNames.Insert(0, 'TestSpec.Issue')
     $issues.Add($i)
 }
@@ -179,7 +179,7 @@ if ($DesignPath) {
 # ---------------------------------------------------------------- 結果
 
 
-$sorted = @($issues | Sort-Object @{ e = { @{ 'エラー' = 0; '警告' = 1; '情報' = 2 }[$_.Level] } }, File, Sheet, Row, Col)
+$sorted = @($issues | Sort-Object @{ e = { @{ 'エラー' = 0; '警告' = 1; '情報' = 2 }[$_.Level] } }, File, Sheet, Row, Col, Seq)
 $sorted
 
 if ($OutXlsx) {
