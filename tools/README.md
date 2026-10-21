@@ -21,6 +21,7 @@
 | [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系や境界値のケースの不足を見つける（Excel 不要） |
 | [Measure-DefectRemoval.ps1](#measure-defectremovalps1) | 障害管理表とレビューの指摘から、欠陥の混入工程 × 摘出工程と、工程ごとの摘出率・後の工程への流出・原因の多い順を出す（Excel 不要） |
 | [Compare-ReviewFindings.ps1](#compare-reviewfindingsps1) | AI のレビュー（Invoke-DesignReview）と人のレビューの指摘を突き合わせ、一致・AI だけ・人だけと、観点ごとの一致率を出す（Excel 不要） |
+| [Measure-CodeSize.ps1](#measure-codesizeps1) | ソースコードのステップ数（コメント・空行を除いた行数）を機能（フォルダ）ごとに数え、前の版との新規・修正・削除も出す。バグ密度・テスト密度の分母（KLOC）に（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 | [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
@@ -1812,6 +1813,54 @@ AI の指摘 5 件: 人と一致 2（40.0%）・AI だけ 3
 | 突き合わせ | 一致・AI だけ・人だけの一覧（人の指摘管理表、無ければ AI のレビュー結果の該当行へのリンク付き） |
 | 観点別 | 観点ごとの AI の指摘の数・人と一致した数・一致率（判定基準の見直しに使う） |
 | 設計書別 | 設計書ごとの AI・人の指摘の数・一致・AI だけ・人だけ |
+
+## Measure-CodeSize.ps1
+
+ソースコードの**ステップ数**（コメント・空行を除いた行数）を数えるステップカウンターです。Excel は不要です。
+機能（フォルダ）ごとの KLOC を、Measure-TestQuality.ps1 のテスト密度・バグ密度の分母にそのまま使えます。
+
+```powershell
+.\Measure-CodeSize.ps1 D:\src -OutCsv D:\規模.csv
+.\Measure-TestQuality.ps1 D:\テスト -BugList D:\障害管理表.xlsx -SizeCsv D:\規模.csv
+
+# 前の版との差（新規・修正・削除）
+.\Measure-CodeSize.ps1 D:\src_v1.1 -Baseline D:\src_v1.0 -OutXlsx D:\ステップ数.xlsx
+```
+
+```
+Group    Files Lines Comment Blank Steps Added Changed Deleted
+-----    ----- ----- ------- ----- ----- ----- ------- -------
+（直下）     1     2       1     0     1     0       0       0
+customer     1     4       1     0     3     3       0       0
+old          0     0       0     0     0     0       0       1
+order        2    18       7     1    10     3       1       0
+
+4 ファイル: ステップ数 14（0.014 KLOC）・コメント 9・空行 1
+前の版との差: 新規 6・修正 1・削除 1 ステップ（ファイル: 修正 1・削除 1・変更なし 2・新規 1）
+```
+
+| 言語 | 拡張子 | コメント |
+| --- | --- | --- |
+| C 系 | .c .h .cpp .cs .java .js .ts .tsx .go .kt .swift .scala .rs .css など | `//`、`/* */` |
+| PHP | .php | `//`・`#`、`/* */` |
+| SQL | .sql .pls .pks .pkb | `--`、`/* */` |
+| VB | .vb .vbs .bas .cls .frm | `'`・`REM` |
+| Python・シェル | .py .sh .bash .pl | `#` |
+| Ruby | .rb | `#`、`=begin` 〜 `=end` |
+| PowerShell | .ps1 .psm1 .psd1 | `#`、`<# #>` |
+| HTML・XML | .html .xml .jsp .aspx .vue など | `<!-- -->` |
+| COBOL（固定形式） | .cob .cbl .cpy | 7 桁目が `*` か `/` |
+
+- コードの後ろのコメント（`x = 1; // ...`）がある行はステップに数えます。行の途中から始まって閉じないブロックコメントは、次の行からコメントです
+- **前の版との差**: 同じ相対パスのファイルどうしで、ステップの行の増減を数えます。増えた行と減った行のうち少ない方を**修正**、残りを**新規**・**削除**とします（行の並べ替えだけの変更は数えません）。前の版にだけあるファイルは削除です
+- まとめる単位は `-GroupBy Folder`（既定。`-Depth` 階層目までのフォルダ。直下のファイルは「（直下）」）か `-GroupBy File` です
+- `.git`・`node_modules`・`bin`・`obj`・`target`・`build`・`dist` などのフォルダは数えません（`-Exclude` で変えられます）
+- 文字列の中の `/*` なども、コメントの始まりとして数えることがあります（行単位で判定する目安です）
+
+| 出力 | 内容 |
+| --- | --- |
+| `-OutCsv` | 機能・KLOC・ステップ数・ファイル数・行数・コメント・空行（・新規・修正・削除）。UTF-8（BOM 付き）。Measure-TestQuality.ps1 の `-SizeCsv` にそのまま渡せる |
+| `-OutXlsx` | 機能別・ファイル別（言語・状態（新規・修正・変更なし・削除）付き） |
 
 ## Export-ExcelToPdf.ps1
 
