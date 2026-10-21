@@ -168,6 +168,33 @@ Test-Case 'Test-ExcelDeliverable: 詳細設計サンプルは印刷・版数を�
     Assert-Equal 0 $issues.Count ((@($issues | ForEach-Object { '{0} {1}' -f $_.File, $_.Detail })) -join ' / ')
 }
 
+Test-Case 'Test-ExcelDeliverable: LibreOffice で保存したブック（pane の無い選択範囲）も表示の状態を確かめられる' {
+    # LibreOffice は <pane> が無くても <selection pane="topLeft"> を書く
+    $dir = New-TestDir
+    $path = Join-Path $dir '見積書.xlsx'
+    Copy-Item -LiteralPath (Join-Path $script:Fixtures 'estimate/lo/見積書.xlsx') -Destination $path
+    $issues = Invoke-Check @{ Path = $path; Check = 'View' }
+    Assert-Equal 0 $issues.Count ((@($issues | ForEach-Object { $_.Detail })) -join ' / ')
+
+    # 選択セルを C5 にすると、読み取りのエラーではなく選択セルの警告になる
+    $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Update)
+        $entry = $zip.GetEntry('xl/worksheets/sheet1.xml')
+        $sr = New-Object System.IO.StreamReader($entry.Open())
+        $xml = $sr.ReadToEnd(); $sr.Dispose()
+        Assert-Match $xml '<selection pane="topLeft" activeCell="A1"'
+        $xml = $xml.Replace('<selection pane="topLeft" activeCell="A1" activeCellId="0" sqref="A1"/>', '<selection pane="topLeft" activeCell="C5" activeCellId="0" sqref="C5"/>')
+        $entry.Delete()
+        $sw = New-Object System.IO.StreamWriter($zip.CreateEntry('xl/worksheets/sheet1.xml').Open())
+        $sw.Write($xml); $sw.Dispose()
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+    $issues = Invoke-Check @{ Path = $path; Check = 'View' }
+    Assert-Equal @('警告|選択セル|見積!C5') (Get-IssueKeys $issues) ((@($issues | ForEach-Object { $_.Detail })) -join ' / ')
+}
+
 function Read-ZipText {
     param([string] $Path, [string] $Name)
     $fs = [System.IO.File]::OpenRead($Path)
