@@ -626,7 +626,7 @@ function Test-Workbook {
                     $activePane = ''
                     if ($f.Pane) { $activePane = $f.Pane.ActivePane }
                     $sel = @($f.Selections | Where-Object { $_.Pane -eq $activePane })
-                    if ($sel.Count -eq 0) { $sel = @($f.Selections) }
+                    if ($sel.Count -eq 0) { $sel = $f.Selections.ToArray() }
                     if ($sel.Count -gt 0) { $active = $sel[0].ActiveCell }
                     if ($okCells -notcontains $active) {
                         Add-Issue '警告' '体裁' '選択セル' "選択セルが $active です（A1 にしてください）" -Sheet $s.Name -Cell $active
