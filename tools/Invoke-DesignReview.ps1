@@ -16,6 +16,9 @@ param(
 
     [string] $SheetNameExclude,
 
+    [ValidateSet('Rows', 'Markdown')]
+    [string] $TextFormat = 'Rows',
+
     [switch] $NoRecurse
 )
 
@@ -78,6 +81,8 @@ function ConvertTo-DesignText {
     #     返り値: シート名 → テキスト の順序付き辞書
     param($Cells)
 
+    if ($TextFormat -eq 'Markdown') { return ConvertTo-DesignMarkdown $Cells }
+
     $sheets = [ordered]@{}
     foreach ($c in $Cells) {
         if (-not $sheets.Contains($c.Sheet)) { $sheets[$c.Sheet] = New-Object System.Collections.Generic.List[object] }
@@ -133,6 +138,53 @@ function ConvertTo-DesignText {
             }
         }
         $result[$name] = $sb.ToString()
+    }
+    return $result
+}
+
+function ConvertTo-DesignMarkdown {
+    #     -TextFormat Markdown: Export-ExcelToMarkdown と同じ形（表・「■」の小見出し・箇条書き）にする。
+    #     AI がセル番地を引用できるよう、表に行番号と列（K:桁数）、箇条書きにセル番地を付ける。
+    #     行形式と同じく、帳票ヘッダ（各シート 1〜3 行目）が前のシートと同じなら省略する。
+    #     返り値: シート名 → テキスト の順序付き辞書
+    param($Cells)
+
+    # 1〜3 行目の「列:値」の並びが前のシートと同じ行を、シート|行 で覚える
+    $headerRows = [ordered]@{}
+    foreach ($c in $Cells) {
+        if ($c.Kind -ne '値') { continue }
+        $m = [regex]::Match([string]$c.Cell, '^([A-Z]+)(\d+)$')
+        if (-not $m.Success -or [int]$m.Groups[2].Value -gt 3) { continue }
+        $key = $c.Sheet + '|' + $m.Groups[2].Value
+        if (-not $headerRows.Contains($key)) { $headerRows[$key] = New-Object System.Collections.Generic.List[string] }
+        $headerRows[$key].Add($m.Groups[1].Value + ':' + $c.Text)
+    }
+    $seen = @{}
+    $omitRows = @{}
+    $omitSheets = @{}
+    foreach ($key in $headerRows.Keys) {
+        $sheet = $key.Substring(0, $key.LastIndexOf('|'))
+        $line = $key.Substring($key.LastIndexOf('|') + 1) + '|' + ($headerRows[$key] -join ' | ')
+        if ($seen.ContainsKey($line)) { $omitRows[$key] = $true; $omitSheets[$sheet] = $true }
+        else { $seen[$line] = $true }
+    }
+    $kept = @($Cells | Where-Object {
+            if ($_.Kind -ne '値') { return $true }
+            $m = [regex]::Match([string]$_.Cell, '^[A-Z]+(\d+)$')
+            -not ($m.Success -and $omitRows.ContainsKey($_.Sheet + '|' + $m.Groups[1].Value))
+        })
+
+    $result = [ordered]@{}
+    $sheets = ConvertTo-SheetMarkdownLines $kept -CellAddress -ColumnLetter
+    foreach ($name in $sheets.Keys) {
+        $lines = $sheets[$name]
+        if ($omitSheets.ContainsKey($name)) {
+            $lines.Insert(2, '（1～3行目の帳票ヘッダは前のシートと同じため省略）')
+            $lines.Insert(3, '')
+            if ($lines.Count -gt 4 -and $lines[4] -eq '（空）') { $lines.RemoveRange(4, 2) }
+        }
+        while ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
+        $result[$name] = ($lines -join "`n") + "`n`n"
     }
     return $result
 }
@@ -397,6 +449,10 @@ V02 | OK | - | - | -
 # プロンプトの改行は OS によらず LF にそろえる。AppendLine や CRLF のスクリプトファイルのままだと
 # Windows では 1 行ごとに 1 文字多く数えられ、同じ設計書でも依頼の分割数が変わってしまう
 $promptHeader = $promptHeader.Replace("`r`n", "`n")
+if ($TextFormat -eq 'Markdown') {
+    $promptHeader = $promptHeader.Replace('設計書の各行は「行番号| 列:値」の形で、例えば「12| K:必須」なら K12 です。',
+        '設計書は Markdown で、「## 」の見出しがシート名です。箇条書きの「K12: 必須」はセル K12 です。表は 1 列目が行番号で、見出しの「K:桁数」の K が列です（例えば 12 行目の桁数なら K12）。')
+}
 
 function New-PromptText {
     param($Points, [string] $FileName, [string] $Body, [string] $PartNote, [string] $RefText)
@@ -433,14 +489,23 @@ function Split-SheetTexts {
         }
         if ($text.Length -le $Budget) { [void]$current.Append($text); continue }
 
-        # 長いシートは行で分割し、続きには見出しを付け直す
+        # 長いシートは行で分割し、続きには見出しを付け直す（Markdown の表の途中で分けたときは、表の見出しも付け直す）
+        $prev = ''
+        $tableHead = ''
         foreach ($line in ($text -split "`r?`n")) {
             if (-not $line) { continue }
+            $isSeparator = $line -match '^\|(\s*---\s*\|)+$'
+            if (-not $line.StartsWith('|')) { $tableHead = '' }
+            elseif ($isSeparator) { $tableHead = $prev + "`n" + $line }
             if ($current.Length + $line.Length + 2 -gt $Budget -and $current.Length -gt 0) {
                 $chunks.Add($current.ToString()); [void]$current.Clear()
-                [void]$current.Append("### シート: $name（続き）").Append("`n")
+                if ($TextFormat -eq 'Markdown') { [void]$current.Append("## $name（続き）").Append("`n") }
+                else { [void]$current.Append("### シート: $name（続き）").Append("`n") }
+                if ($isSeparator) { [void]$current.Append($prev).Append("`n") }
+                elseif ($tableHead) { [void]$current.Append($tableHead).Append("`n") }
             }
             [void]$current.Append($line).Append("`n")
+            $prev = $line
         }
     }
     if ($current.Length -gt 0) { $chunks.Add($current.ToString()) }
@@ -882,6 +947,11 @@ Write-Host "レビュー結果: $reportPath"
 #
 # .PARAMETER SheetNameExclude
 #     テキスト化しないシート名の正規表現（例: '表紙|改訂履歴'）。文字数の節約に使います。
+#
+# .PARAMETER TextFormat
+#     設計書を AI に渡すときのテキストの形。Rows（既定）は「行番号| 列:値 | 列:値」の行の形、Markdown は
+#     Export-ExcelToMarkdown.ps1 と同じ形（項目定義などの表は Markdown の表、「■」の行は小見出し、それ以外は箇条書き）に、
+#     行番号・列・セル番地を付けたものです。Markdown は表の列と見出しの対応が AI に伝わりやすい代わりに、文字数が 1 割ほど増えます。
 #
 # .PARAMETER NoRecurse
 #     サブフォルダの設計書を対象にしません。
