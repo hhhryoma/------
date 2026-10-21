@@ -23,13 +23,14 @@
 | [Compare-ReviewFindings.ps1](#compare-reviewfindingsps1) | AI のレビュー（Invoke-DesignReview）と人のレビューの指摘を突き合わせ、一致・AI だけ・人だけと、観点ごとの一致率を出す（Excel 不要） |
 | [Measure-CodeSize.ps1](#measure-codesizeps1) | ソースコードのステップ数（コメント・空行を除いた行数）を機能（フォルダ）ごとに数え、前の版との新規・修正・削除も出す。バグ密度・テスト密度の分母（KLOC）に（Excel 不要） |
 | [New-QualityLimits.ps1](#new-qualitylimitsps1) | 過去のプロジェクトの品質の実績（指摘密度・バグ密度など）から、社内の基準値（下限・上限）の CSV を作る（Excel 不要） |
+| [New-QualityReport.ps1](#new-qualityreportps1) | レビュー・テスト・工程・網羅・設計書の整合性の各ツールをまとめて実行し、工程完了判定（品質会議）に使う品質評価のブック（指標・実績・判定 ○△×・要対応）を作る |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 | [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -1900,6 +1901,50 @@ Metric   Unit     Process  Count  Mean  Low  High
 - 指標 × 分母 × 工程の組ごとに求めます。工程の列が空の行は、工程を問わない基準値になります
 - 実績が `-MinSamples`（既定 3）件未満の組は、備考に「参考値」と書きます
 - 列の名前は「実績」「実績値」（値）、「単位」（分母）、「案件」（プロジェクト）なども読めます。数値でない値は数えません
+
+## New-QualityReport.ps1
+
+レビュー・テストの品質の各ツールをまとめて実行し、**工程完了判定（品質会議）に使う品質評価のブック**を作ります。Excel は不要です。
+指標ごとに実績・判定（○△×）・判定の考え方を 1 枚に並べ、「定性分析（原因）」「対策」の列は会議の前に記入できるよう空けておきます。各ツールの結果は「詳細」フォルダに保存し、リンクから開けます。
+
+```powershell
+.\New-QualityReport.ps1 -OutDir D:\品質報告 -DesignPath D:\設計書 -Findings D:\レビュー -TestPath D:\テスト仕様書 -BugList D:\障害管理表.xlsx
+```
+
+```
+  Measure-ReviewQuality を実行しています…
+  Measure-TestQuality を実行しています…
+  Test-TestSpec を実行しています…
+  Measure-DefectRemoval を実行しています…
+  Test-Traceability を実行しています…
+  Test-DesignConsistency を実行しています…
+
+指標 20 件（× 5・△ 6・○ 6）・要対応 16 件
+品質評価を保存しました: D:\品質報告\品質評価_20261020.xlsx
+各ツールの詳細: D:\品質報告\詳細
+```
+
+渡した資料に応じて、次のツールを実行します（渡さなかった資料の指標は出しません）。
+
+| 資料 | 実行するツール | 指標 |
+| --- | --- | --- |
+| `-Findings`（指摘管理表） | Measure-ReviewQuality.ps1 | 指摘件数・未完了・期限切れ・指摘密度が基準外の設計書。`-ReviewLog` で要対応のゾーンの設計書 |
+| `-TestPath`（テスト仕様書） | Measure-TestQuality.ps1・Test-TestSpec.ps1 | 消化率・未完了のバグ・バグの収束・テスト密度とバグ密度が基準外の機能・食い違い、テスト仕様書のエラーと警告 |
+| `-BugList`・`-Findings` | Measure-DefectRemoval.ps1 | 摘出すべき工程までに見つかった割合・後の工程への流出 |
+| `-DesignPath` と `-TestPath` | Test-Traceability.ps1 | テストのある画面・イベント・メッセージ・IF の割合。`-Requirement` で設計とテストのある要件の割合 |
+| `-DesignPath`（設計書） | Test-DesignConsistency.ps1 | 参照の食い違い（エラー・警告） |
+
+品質評価のブックのシート:
+
+| シート | 内容 |
+| --- | --- |
+| 品質評価 | 区分・指標・実績・判定（○△×）・判定の考え方・定性分析（原因）・対策・詳細（各ツールの結果を開くリンク） |
+| 要対応 | 基準から外れた設計書・機能、要対応のゾーン、流出のあった工程、テストの抜け。対応の例と、担当・期限の空欄 |
+| 対象 | 時点・読んだ資料・実行したツール（失敗したツールがあれば、その理由） |
+
+- 判定は機械的な目安です（未完了は 0 件なら ○、期限切れが残っていれば ×、割合は 100% なら ○・80% 以上なら △ など）。指摘密度・テスト密度・バグ密度の基準値は `-ReviewLimits`・`-TestLimits`（New-QualityLimits.ps1 で作れます）で決めます
+- 規模（密度の分母）は、`-PageCsv`（設計書のページ数）・`-SizeCsv`（機能ごとの KLOC など。Measure-CodeSize.ps1 の `-OutCsv`）を渡さなければ、`-DesignPath` の設計書の規模を使います
+- ツールが失敗しても（資料の見出しが読めないなど）、ほかのツールの結果でまとめます
 
 ## Export-ExcelToPdf.ps1
 
