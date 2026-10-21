@@ -55,6 +55,9 @@ Test-Case 'Measure-DefectRemoval: 混入工程 × 摘出工程から、工程ご
     Assert-Equal '混入工程 ＼ 摘出工程|基本設計|詳細設計|単体テスト|結合テスト|合計' ((@('A', 'B', 'C', 'D', 'E', 'F') | ForEach-Object { $book.Rows[1][$_] }) -join '|')
     Assert-Equal '詳細設計|0|4|2|0|6' ((@('A', 'B', 'C', 'D', 'E', 'F') | ForEach-Object { $book.Rows[3][$_] }) -join '|')
     Assert-Equal '（不明）|0|0|1|0|1' ((@('A', 'B', 'C', 'D', 'E', 'F') | ForEach-Object { $book.Rows[5][$_] }) -join '|')
+    $charts = @(Read-XlsxCharts $out)
+    Assert-Equal '原因（パレート図）' $charts[0].Title
+    Assert-True ($charts[0].Xml -match '<c:barChart>.*<c:lineChart>.*<c:valAx><c:axId val="5004"/><c:scaling><c:orientation val="minMax"/><c:max val="1"/>') '件数の縦棒と、右の軸（%）の累積の割合の折れ線'
     $leak = Read-XlsxSheet -Path $out -Index 4
     Assert-Equal 4 $leak.Rows.Count '見出しと流出 3 件'
     Assert-Equal '基本設計|結合テスト' ('{0}|{1}' -f $leak.Rows[2]['B'], $leak.Rows[2]['C'])

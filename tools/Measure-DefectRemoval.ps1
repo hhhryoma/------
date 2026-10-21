@@ -206,7 +206,7 @@ if ($OutXlsx) {
         Export-Workbook -FilePath $OutXlsx -Sheets @(
             @{ Name = '工程別'; Columns = @(@{ Header = '工程'; Width = 12 }, @{ Header = '摘出すべき工程'; Width = 12 }, @{ Header = '混入'; Width = 7 }, @{ Header = 'それまでに摘出'; Width = 10 }, @{ Header = '流出'; Width = 7 }, @{ Header = '摘出率'; Width = 8 }, @{ Header = 'この工程で摘出'; Width = 10 }, @{ Header = 'うち前の工程から流出'; Width = 12 }); Rows = $phaseRows },
             @{ Name = '工程マトリクス'; Columns = $matrixColumns; Rows = $matrixRows },
-            @{ Name = '原因'; Columns = @(@{ Header = '原因'; Width = 24 }, @{ Header = '件数'; Width = 7 }, @{ Header = '割合'; Width = 8 }, @{ Header = '累積の割合'; Width = 10 }); Rows = $paretoRows },
+            @{ Name = '原因'; Columns = @(@{ Header = '原因'; Width = 24 }, @{ Header = '件数'; Width = 7 }, @{ Header = '割合'; Width = 8 }, @{ Header = '累積の割合'; Width = 10 }); Rows = $paretoRows; Charts = @(@{ Type = 'Column'; Title = '原因（パレート図）'; Category = 0; Series = @(@{ Column = 1 }, @{ Column = 3; Type = 'Line'; Secondary = $true }); YTitle = '件数'; SecondaryTitle = '累積の割合'; SecondaryPercent = $true }) },
             @{ Name = '流出'; Columns = @(@{ Header = '種類'; Width = 6 }, @{ Header = '混入工程'; Width = 10 }, @{ Header = '摘出工程'; Width = 10 }, @{ Header = '内容'; Width = 50 }, @{ Header = '原因'; Width = 14 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '場所'; Width = 40 }); Rows = $leakRows }, (New-ReadLogSheet $readLog))
     }
     catch {

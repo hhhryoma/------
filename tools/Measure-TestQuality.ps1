@@ -477,12 +477,21 @@ if ($OutXlsx) {
         if ($i.Place.Sheet) { $row.Link = @{ Column = 4; Path = $i.Place.Path; Location = ("'{0}'!{1}{2}" -f $i.Place.Sheet.Replace("'", "''"), (ConvertTo-ColumnName $i.Place.Column), $i.Place.Row) } }
         $issueRows.Add($row)
     }
+    # グラフ: テストの消化とバグの累計・信頼度成長曲線（推移）、テスト密度 × バグ密度（機能別。両方ある機能を最大 50）
+    $trendCharts = @(@{ Type = 'Line'; Title = 'テストの消化（累計）'; Category = 0; Series = @(@{ Column = 1 }, @{ Column = 2 }, @{ Column = 3 }); YTitle = 'ケース' })
+    if ($BugList) { $trendCharts += @{ Type = 'Line'; Title = 'バグの累計と信頼度成長曲線'; Category = 0; Series = @(@{ Column = 6 }, @{ Column = 7 }, @{ Column = 9 }); YTitle = 'バグ' } }
+    $funcCharts = @()
+    $plotted = @(for ($i = 0; $i -lt $results.Count; $i++) { if ($null -ne $results[$i].TestDensity -and $null -ne $results[$i].BugDensity) { $i } }) | Select-Object -First 50
+    if (@($plotted).Count -gt 0) {
+        $funcCharts = @(@{ Type = 'Scatter'; Title = 'テスト密度 × バグ密度'; Category = 12; Labels = $true; XTitle = 'テスト密度'; YTitle = 'バグ密度'; Width = 10; Height = 20
+                Series = @($plotted | ForEach-Object { @{ Column = 14; Rows = @($_); Name = $results[$_].Function } }) })
+    }
     try {
         Export-Workbook -FilePath $OutXlsx -Sheets @(
             @{ Name = 'サマリー'; Columns = @(@{ Header = '項目'; Width = 30 }, @{ Header = '値'; Width = 50 }); Rows = $summary },
-            @{ Name = '機能別'; Columns = @(@{ Header = '機能'; Width = 30 }, @{ Header = 'ケース'; Width = 7 }, @{ Header = '実施'; Width = 7 }, @{ Header = 'OK'; Width = 6 }, @{ Header = 'NG'; Width = 6 }, @{ Header = '保留'; Width = 6 }, @{ Header = '未実施'; Width = 7 }, @{ Header = '消化率'; Width = 7 }, @{ Header = 'バグ'; Width = 6 }, @{ Header = '未完了のバグ'; Width = 8 }, @{ Header = '規模'; Width = 8 }, @{ Header = '分母'; Width = 8 }, @{ Header = 'テスト密度'; Width = 9 }, @{ Header = 'テスト密度の判定'; Width = 9 }, @{ Header = 'バグ密度'; Width = 9 }, @{ Header = 'バグ密度の判定'; Width = 9 }, @{ Header = 'ゾーン'; Width = 18 }, @{ Header = '見方'; Width = 40 }, @{ Header = '対応の例'; Width = 40 }); Rows = $funcRows },
+            @{ Name = '機能別'; Columns = @(@{ Header = '機能'; Width = 30 }, @{ Header = 'ケース'; Width = 7 }, @{ Header = '実施'; Width = 7 }, @{ Header = 'OK'; Width = 6 }, @{ Header = 'NG'; Width = 6 }, @{ Header = '保留'; Width = 6 }, @{ Header = '未実施'; Width = 7 }, @{ Header = '消化率'; Width = 7 }, @{ Header = 'バグ'; Width = 6 }, @{ Header = '未完了のバグ'; Width = 8 }, @{ Header = '規模'; Width = 8 }, @{ Header = '分母'; Width = 8 }, @{ Header = 'テスト密度'; Width = 9 }, @{ Header = 'テスト密度の判定'; Width = 9 }, @{ Header = 'バグ密度'; Width = 9 }, @{ Header = 'バグ密度の判定'; Width = 9 }, @{ Header = 'ゾーン'; Width = 18 }, @{ Header = '見方'; Width = 40 }, @{ Header = '対応の例'; Width = 40 }); Rows = $funcRows; Charts = $funcCharts },
             @{ Name = 'ゾーン分析'; Columns = @(@{ Header = 'テスト密度 ＼ バグ密度'; Width = 18 }, @{ Header = 'バグ密度が少ない'; Width = 40 }, @{ Header = 'バグ密度が基準内'; Width = 40 }, @{ Header = 'バグ密度が多い'; Width = 40 }); Rows = $zoneRows },
-            @{ Name = '推移'; Columns = @(@{ Header = '日付'; Width = 11 }, @{ Header = '予定（累計）'; Width = 10 }, @{ Header = '実施（累計）'; Width = 10 }, @{ Header = 'OK（累計）'; Width = 10 }, @{ Header = 'バグの発見'; Width = 9 }, @{ Header = 'バグの完了'; Width = 9 }, @{ Header = '発見の累計'; Width = 9 }, @{ Header = '完了の累計'; Width = 9 }, @{ Header = '未完了のバグ'; Width = 9 }, @{ Header = '信頼度成長曲線'; Width = 11 }); Rows = $trendRows },
+            @{ Name = '推移'; Columns = @(@{ Header = '日付'; Width = 11 }, @{ Header = '予定（累計）'; Width = 10 }, @{ Header = '実施（累計）'; Width = 10 }, @{ Header = 'OK（累計）'; Width = 10 }, @{ Header = 'バグの発見'; Width = 9 }, @{ Header = 'バグの完了'; Width = 9 }, @{ Header = '発見の累計'; Width = 9 }, @{ Header = '完了の累計'; Width = 9 }, @{ Header = '未完了のバグ'; Width = 9 }, @{ Header = '信頼度成長曲線'; Width = 11 }); Rows = $trendRows; Charts = $trendCharts },
             @{ Name = 'バグの内訳'; Columns = @(@{ Header = '項目'; Width = 10 }, @{ Header = '値'; Width = 24 }, @{ Header = 'バグ'; Width = 7 }, @{ Header = '未完了'; Width = 7 }); Rows = $breakRows },
             @{ Name = '食い違い'; Columns = @(@{ Header = '種類'; Width = 22 }, @{ Header = '機能'; Width = 24 }, @{ Header = 'テストID'; Width = 10 }, @{ Header = '内容'; Width = 60 }, @{ Header = '場所'; Width = 40 }); Rows = $issueRows }, (New-ReadLogSheet $readLog))
     }

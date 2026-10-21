@@ -325,17 +325,132 @@ function ConvertTo-InlineStringXml {
     return ('<is><t xml:space="preserve">{0}</t></is>' -f (ConvertTo-XmlText $v))
 }
 
+function ConvertTo-ChartXml {
+    #     Export-Workbook のシートの表から作るグラフの XML（Excel 不要。DrawingML のグラフ）
+    #     Chart: @{ Type = 'Line' | 'Scatter' | 'Column'; Title; Category（0 始まりの列。Line・Column の項目、Scatter の X）;
+    #               Series = @(@{ Column（0 始まりの列）; Name（無ければ見出し）; Type = 'Line'（Column のグラフに重ねる折れ線）; Secondary（右の軸）; Rows = @(行の位置) }) ;
+    #               XTitle; YTitle; SecondaryTitle; SecondaryPercent（右の軸を % にする）; Labels（Scatter で系列の名前を点に表示）; Width; Height（セルの数） }
+    #     データは 2 行目から LastRow 行目まで（Series の Rows を渡すと、その行だけ。1 行目が 2 行目にあたる）
+    param($Chart, [string] $SheetName, [int] $LastRow)
+    $sheetRef = "'" + $SheetName.Replace("'", "''") + "'"
+    $range = {
+        param([int] $Col, $Rows)
+        $c = ConvertTo-ColumnName ($Col + 1)
+        # @(0) は if では偽になるため、数で確かめる
+        if ($null -ne $Rows -and @($Rows).Count -gt 0) { return '{0}!${1}${2}' -f $sheetRef, $c, ([int]@($Rows)[0] + 2) }
+        return '{0}!${1}$2:${1}${2}' -f $sheetRef, $c, $LastRow
+    }
+    $text = {
+        param([string] $Value, [int] $Size, [bool] $Bold)
+        $b = ''
+        if ($Bold) { $b = ' b="1"' }
+        return ('<c:tx><c:rich><a:bodyPr/><a:p><a:pPr><a:defRPr sz="{0}"{1}/></a:pPr><a:r><a:rPr lang="ja-JP" sz="{0}"{1}/><a:t>{2}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/>' -f $Size, $b, (ConvertTo-XmlText $Value))
+    }
+    $seriesName = {
+        param($Ser)
+        if ($Ser.Name) { return '<c:tx><c:v>{0}</c:v></c:tx>' -f (ConvertTo-XmlText $Ser.Name) }
+        return '<c:tx><c:strRef><c:f>{0}!${1}$1</c:f></c:strRef></c:tx>' -f $sheetRef, (ConvertTo-ColumnName ($Ser.Column + 1))
+    }
+    $valueAxis = {
+        param([int] $Id, [int] $Cross, [string] $Pos, [string] $Title, [bool] $Grid, [bool] $Percent, [bool] $AtMax)
+        $x = '<c:valAx><c:axId val="{0}"/><c:scaling><c:orientation val="minMax"/>' -f $Id
+        if ($Percent) { $x += '<c:max val="1"/><c:min val="0"/>' }
+        $x += '</c:scaling><c:delete val="0"/><c:axPos val="{0}"/>' -f $Pos
+        if ($Grid) { $x += '<c:majorGridlines><c:spPr><a:ln w="6350"><a:solidFill><a:srgbClr val="D9D9D9"/></a:solidFill></a:ln></c:spPr></c:majorGridlines>' }
+        if ($Title) { $x += '<c:title>' + (& $text $Title 900 $false) + '</c:title>' }
+        if ($Percent) { $x += '<c:numFmt formatCode="0%" sourceLinked="0"/>' } else { $x += '<c:numFmt formatCode="General" sourceLinked="1"/>' }
+        $x += '<c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="{0}"/>' -f $Cross
+        if ($AtMax) { $x += '<c:crosses val="max"/>' } else { $x += '<c:crosses val="autoZero"/>' }
+        $x += '<c:crossBetween val="between"/></c:valAx>'
+        return $x
+    }
+    $categoryAxis = {
+        param([int] $Id, [int] $Cross, [string] $Title, [bool] $Hidden)
+        $x = '<c:catAx><c:axId val="{0}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="{1}"/><c:axPos val="b"/>' -f $Id, $(if ($Hidden) { 1 } else { 0 })
+        if ($Title) { $x += '<c:title>' + (& $text $Title 900 $false) + '</c:title>' }
+        $x += '<c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="{0}"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:noMultiLvlLbl val="0"/></c:catAx>' -f $Cross
+        return $x
+    }
+
+    # 系列の色（テーマの色に頼ると、テーマの無いブックでは色が付かないアプリがあるため、色を書く）
+    $palette = @('4472C4', 'ED7D31', 'A5A5A5', 'FFC000', '5B9BD5', '70AD47', '264478', '9E480E')
+    $plot = New-Object System.Text.StringBuilder
+    $series = @($Chart.Series)
+    $index = 0
+    if ($Chart.Type -eq 'Scatter') {
+        [void]$plot.Append('<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>')
+        foreach ($ser in $series) {
+            [void]$plot.Append(('<c:ser><c:idx val="{0}"/><c:order val="{0}"/>' -f $index) + (& $seriesName $ser))
+            # 点だけ（線を引かない）
+            [void]$plot.Append(('<c:spPr><a:ln w="19050"><a:noFill/></a:ln></c:spPr><c:marker><c:symbol val="circle"/><c:size val="7"/><c:spPr><a:solidFill><a:srgbClr val="{0}"/></a:solidFill><a:ln><a:noFill/></a:ln></c:spPr></c:marker>' -f $palette[0]))
+            if ($Chart.Labels) { [void]$plot.Append('<c:dLbls><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="800"/></a:pPr><a:endParaRPr lang="ja-JP"/></a:p></c:txPr><c:dLblPos val="r"/><c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/><c:showSerName val="1"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbls>') }
+            [void]$plot.Append(('<c:xVal><c:numRef><c:f>{0}</c:f></c:numRef></c:xVal><c:yVal><c:numRef><c:f>{1}</c:f></c:numRef></c:yVal><c:smooth val="0"/></c:ser>' -f (& $range $Chart.Category $ser.Rows), (& $range $ser.Column $ser.Rows)))
+            $index++
+        }
+        [void]$plot.Append('<c:axId val="5001"/><c:axId val="5002"/></c:scatterChart>')
+        [void]$plot.Append((& $valueAxis 5001 5002 'b' $Chart.XTitle $false $false $false))
+        [void]$plot.Append((& $valueAxis 5002 5001 'l' $Chart.YTitle $true $false $false))
+    }
+    else {
+        $main = @($series | Where-Object { -not $_.Secondary -and -not ($Chart.Type -eq 'Column' -and $_.Type -eq 'Line') })
+        $overlay = @($series | Where-Object { $_.Secondary -or ($Chart.Type -eq 'Column' -and $_.Type -eq 'Line') })
+        $writeSeries = {
+            param($List, [bool] $AsLine)
+            foreach ($ser in $List) {
+                [void]$plot.Append(('<c:ser><c:idx val="{0}"/><c:order val="{0}"/>' -f $script:chartSeriesIndex) + (& $seriesName $ser))
+                $color = $palette[$script:chartSeriesIndex % $palette.Count]
+                if ($AsLine) { [void]$plot.Append(('<c:spPr><a:ln w="22225" cap="rnd"><a:solidFill><a:srgbClr val="{0}"/></a:solidFill><a:round/></a:ln></c:spPr><c:marker><c:symbol val="none"/></c:marker>' -f $color)) }
+                else { [void]$plot.Append(('<c:spPr><a:solidFill><a:srgbClr val="{0}"/></a:solidFill></c:spPr><c:invertIfNegative val="0"/>' -f $color)) }
+                [void]$plot.Append(('<c:cat><c:strRef><c:f>{0}</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>{1}</c:f></c:numRef></c:val>' -f (& $range $Chart.Category $null), (& $range $ser.Column $null)))
+                if ($AsLine) { [void]$plot.Append('<c:smooth val="0"/>') }
+                [void]$plot.Append('</c:ser>')
+                $script:chartSeriesIndex++
+            }
+        }
+        $script:chartSeriesIndex = 0
+        if ($Chart.Type -eq 'Column') {
+            [void]$plot.Append('<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/>')
+            & $writeSeries $main $false
+            [void]$plot.Append('<c:gapWidth val="60"/><c:axId val="5001"/><c:axId val="5002"/></c:barChart>')
+        }
+        else {
+            [void]$plot.Append('<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>')
+            & $writeSeries $main $true
+            [void]$plot.Append('<c:marker val="1"/><c:axId val="5001"/><c:axId val="5002"/></c:lineChart>')
+        }
+        if ($overlay.Count -gt 0) {
+            [void]$plot.Append('<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>')
+            & $writeSeries $overlay $true
+            $ids = '<c:axId val="5001"/><c:axId val="5002"/>'
+            if (@($overlay | Where-Object Secondary).Count -gt 0) { $ids = '<c:axId val="5003"/><c:axId val="5004"/>' }
+            [void]$plot.Append('<c:marker val="1"/>' + $ids + '</c:lineChart>')
+        }
+        [void]$plot.Append((& $categoryAxis 5001 5002 $Chart.XTitle $false))
+        [void]$plot.Append((& $valueAxis 5002 5001 'l' $Chart.YTitle $true $false $false))
+        if (@($overlay | Where-Object Secondary).Count -gt 0) {
+            [void]$plot.Append((& $categoryAxis 5003 5004 '' $true))
+            [void]$plot.Append((& $valueAxis 5004 5003 'r' $Chart.SecondaryTitle $false ([bool]$Chart.SecondaryPercent) $true))
+        }
+    }
+    $legend = '<c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend>'
+    if ($Chart.Type -eq 'Scatter' -and $Chart.Labels) { $legend = '' }
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:roundedCorners val="0"/><c:chart><c:title>{0}</c:title><c:autoTitleDeleted val="0"/><c:plotArea><c:layout/>{1}</c:plotArea>{2}<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="900"><a:latin typeface="游ゴシック"/><a:ea typeface="游ゴシック"/></a:defRPr></a:pPr><a:endParaRPr lang="ja-JP"/></a:p></c:txPr></c:chartSpace>' -f (& $text $Chart.Title 1200 $true), $plot.ToString(), $legend)
+}
+
 function Export-Workbook {
     #     複数シートの表を xlsx に書き出す（Excel 不要）。各シートは見出し行の固定とオートフィルター付き。
     #     Sheets: @(@{ Name; Columns = @(@{ Header; Width }); Rows = @(@{ Values = @(...); Link = @{ Column; Path; Location; Tooltip } }) })
     #       Values の数値（int / long / double）は数値のセルとして書く
     #       Values に @{ Runs = @(@{ Text; Style }) } を渡すと、部分ごとに書式を付けた文字列にする（Style: Deleted / Inserted / なし）
     #       Link は Values の Column 番目（0 始まり）のセルに付ける外部リンク。Path のファイルの Location（'シート'!セル）を開く
+    #       Charts: そのシートの表から作るグラフ（ConvertTo-ChartXml）。表の右に縦に並べて置く
     param($Sheets, [string] $FilePath)
 
     $font = '<sz val="10"/><name val="游ゴシック"/><family val="3"/><charset val="128"/>'
     $sheetEntries = New-Object System.Collections.Generic.List[object]
     $definedNames = New-Object System.Text.StringBuilder
+    $chartParts = [ordered]@{}   # パーツの名前 → XML（グラフと、その置き場所の描画）
+    $chartCount = 0; $drawingCount = 0
 
     $index = 0
     foreach ($s in $Sheets) {
@@ -404,10 +519,40 @@ function Export-Workbook {
         [void]$xml.Append('</sheetData>')
         [void]$xml.Append(('<autoFilter ref="A1:{0}{1}"/>' -f $lastCol, $rowCount))
         if ($linkCount -gt 0) { [void]$xml.Append('<hyperlinks>').Append($links.ToString()).Append('</hyperlinks>') }
-        [void]$xml.Append('<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="landscape"/></worksheet>')
+        [void]$xml.Append('<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="landscape"/>')
+        $charts = @($s.Charts | Where-Object { $_ })
+        if ($charts.Count -gt 0 -and $s.Rows.Count -gt 0) {
+            # グラフは描画（drawing）に置き、描画からグラフを参照する
+            $drawingCount++
+            $anchors = New-Object System.Text.StringBuilder
+            $drawingRels = New-Object System.Text.StringBuilder
+            [void]$drawingRels.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">')
+            $top = 1
+            for ($ci = 0; $ci -lt $charts.Count; $ci++) {
+                $chartCount++
+                $chart = $charts[$ci]
+                $chartParts["xl/charts/chart$chartCount.xml"] = ConvertTo-ChartXml $chart $s.Name ($s.Rows.Count + 1)
+                [void]$drawingRels.Append(('<Relationship Id="rId{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart{1}.xml"/>' -f ($ci + 1), $chartCount))
+                $width = 9; $height = 18
+                if ($chart.Width) { $width = $chart.Width }
+                if ($chart.Height) { $height = $chart.Height }
+                $left = $colCount + 1
+                [void]$anchors.Append(('<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>{0}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{2}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{3}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>' -f $left, $top, ($left + $width), ($top + $height)))
+                [void]$anchors.Append(('<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId{2}"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>' -f ($ci + 2), (ConvertTo-XmlText $chart.Title), ($ci + 1)))
+                $top += $height + 1
+            }
+            [void]$drawingRels.Append('</Relationships>')
+            $chartParts["xl/drawings/drawing$drawingCount.xml"] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' + $anchors.ToString() + '</xdr:wsDr>'
+            $chartParts["xl/drawings/_rels/drawing$drawingCount.xml.rels"] = $drawingRels.ToString()
+            [void]$rels.Append(('<Relationship Id="rIdD1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing{0}.xml"/>' -f $drawingCount))
+            [void]$xml.Append('<drawing r:id="rIdD1"/>')
+            $hasDrawing = $true
+        }
+        else { $hasDrawing = $false }
+        [void]$xml.Append('</worksheet>')
         [void]$rels.Append('</Relationships>')
 
-        $sheetEntries.Add([pscustomobject]@{ Name = $s.Name; Xml = $xml.ToString(); Rels = $rels.ToString(); HasLinks = ($linkCount -gt 0) })
+        $sheetEntries.Add([pscustomobject]@{ Name = $s.Name; Xml = $xml.ToString(); Rels = $rels.ToString(); HasLinks = ($linkCount -gt 0 -or $hasDrawing) })
         [void]$definedNames.Append(('<definedName name="_xlnm._FilterDatabase" localSheetId="{0}" hidden="1">''{1}''!$A$1:${2}${3}</definedName>' -f ($index - 1), (ConvertTo-XmlText $s.Name.Replace("'", "''")), $lastCol, $rowCount))
     }
 
@@ -420,6 +565,10 @@ function Export-Workbook {
         [void]$ct.Append(('<Override PartName="/xl/worksheets/sheet{0}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' -f $i))
         [void]$wbSheets.Append(('<sheet name="{0}" sheetId="{1}" r:id="rId{1}"/>' -f (ConvertTo-XmlText $sheetEntries[$i - 1].Name), $i))
         [void]$wbRels.Append(('<Relationship Id="rId{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{0}.xml"/>' -f $i))
+    }
+    foreach ($name in $chartParts.Keys) {
+        if ($name -match '^xl/charts/.+\.xml$') { [void]$ct.Append(('<Override PartName="/{0}" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>' -f $name)) }
+        elseif ($name -match '^xl/drawings/[^/]+\.xml$') { [void]$ct.Append(('<Override PartName="/{0}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>' -f $name)) }
     }
     [void]$ct.Append('</Types>')
     [void]$wbRels.Append(('<Relationship Id="rId{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>' -f ($sheetEntries.Count + 1)))
@@ -436,6 +585,7 @@ function Export-Workbook {
         $parts["xl/worksheets/sheet$i.xml"] = $sheetEntries[$i - 1].Xml
         if ($sheetEntries[$i - 1].HasLinks) { $parts["xl/worksheets/_rels/sheet$i.xml.rels"] = $sheetEntries[$i - 1].Rels }
     }
+    foreach ($name in $chartParts.Keys) { $parts[$name] = $chartParts[$name] }
 
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     $stream = New-Object System.IO.FileStream($FilePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
