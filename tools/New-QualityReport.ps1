@@ -23,6 +23,8 @@ param(
 
     [string] $TestLimits,
 
+    [string] $Criteria,
+
     [string] $Title = '品質評価',
 
     [datetime] $AsOf = (Get-Date).Date,
@@ -40,6 +42,8 @@ $OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPat
 $detailDir = Join-Path $OutDir '詳細'
 New-Item -ItemType Directory -Force -Path $detailDir | Out-Null
 $reportPath = Join-Path $OutDir ('{0}_{1}.xlsx' -f $Title, $AsOf.ToString('yyyyMMdd'))
+if (-not $Criteria) { $Criteria = Join-Path $PSScriptRoot 'quality-report/判定基準.csv' }
+$Criteria = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Criteria)
 
 # ---------------------------------------------------------------- ヘルパー
 
@@ -49,8 +53,71 @@ $actions = New-Object System.Collections.Generic.List[object]   # 要対応の�
 $ran = New-Object System.Collections.Generic.List[string]
 $failed = New-Object System.Collections.Generic.List[string]
 
+# 判定基準: 指標（* で複数の指標にも書ける）ごとに、向き（以上・以下）と ○・△ のしきい値。△ が空なら × にはしない
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
+$criteriaRows = New-Object System.Collections.Generic.List[object]
+foreach ($r in (Read-CsvFile $Criteria @('指標', '向き', '○', '△') '判定基準の CSV')) {
+    $pattern = ([string]$r.'指標').Trim()
+    if (-not $pattern) { continue }
+    $direction = ([string]$r.'向き').Trim()
+    if (@('以上', '以下') -notcontains $direction) { throw ("判定基準の CSV の向きは「以上」か「以下」にしてください（{0}: {1}）: {2}" -f $pattern, $direction, $Criteria) }
+    $limits = @{}
+    $percent = $false
+    foreach ($k in @('○', '△')) {
+        $t = ([string]$r.$k).Trim()
+        $limits[$k] = $null
+        if (-not $t) { continue }
+        if ($t.EndsWith('%')) { $percent = $true }
+        $v = 0.0
+        if (-not [double]::TryParse($t.TrimEnd('%').Trim(), [System.Globalization.NumberStyles]::Float, $invariant, [ref]$v)) { throw ("判定基準の CSV の {0} が数値ではありません（{1}: {2}）: {3}" -f $k, $pattern, $t, $Criteria) }
+        if ($t.EndsWith('%')) { $v = $v / 100.0 }
+        $limits[$k] = $v
+    }
+    if ($null -eq $limits['○']) { throw ("判定基準の CSV の ○ が空です（{0}）: {1}" -f $pattern, $Criteria) }
+    $format = { param($v) if ($percent) { '{0}% ' -f [math]::Round($v * 100, 1) } else { '{0} 件' -f $v } }.GetNewClosure()
+    if ($direction -eq '以上') {
+        $text = '{0}以上なら ○' -f (& $format $limits['○'])
+        if ($null -ne $limits['△']) { $text += '、{0}以上なら △、それ未満は ×' -f (& $format $limits['△']) } else { $text += '、それ未満は △' }
+    }
+    else {
+        $text = '{0}以下なら ○' -f (& $format $limits['○'])
+        if ($null -ne $limits['△'] -and $limits['△'] -gt $limits['○']) { $text += '、{0}以下なら △、それより多ければ ×' -f (& $format $limits['△']) }
+        elseif ($null -ne $limits['△']) { $text += '、それより多ければ ×' }
+        else { $text += '、それより多ければ △' }
+    }
+    $criteriaRows.Add([pscustomobject]@{ Pattern = $pattern; Higher = ($direction -eq '以上'); Good = $limits['○']; Fair = $limits['△']; Text = $text })
+}
+
+function Get-Criterion {
+    #     指標の名前に合う判定基準（最初に合った行）。無ければ $null
+    param([string] $Name)
+    foreach ($c in $criteriaRows) { if ($Name -like $c.Pattern) { return $c } }
+    return $null
+}
+
+function Get-MetricJudgement {
+    param($Criterion, [double] $Value)
+    $ok = { param($limit) if ($Criterion.Higher) { $Value -ge $limit } else { $Value -le $limit } }
+    if (& $ok $Criterion.Good) { return '○' }
+    if ($null -eq $Criterion.Fair -or (& $ok $Criterion.Fair)) { return '△' }
+    return '×'
+}
+
 function Add-Metric {
-    #     品質評価の 1 行（区分・指標・実績・判定・判定の考え方・詳細のファイル）
+    #     品質評価の 1 行（区分・指標・実績・判定・判定の考え方・詳細のファイル）。判定は判定基準の CSV で決める
+    param([string] $Area, [string] $Name, $Value, [string] $Note, [string] $Detail)
+    $judgement = ''
+    $basis = $Note
+    $c = Get-Criterion $Name
+    if ($c -and $Value -is [double]) {
+        $judgement = Get-MetricJudgement $c $Value
+        $basis = (@($Note, $c.Text) | Where-Object { $_ }) -join '。'
+    }
+    $rows.Add([pscustomobject]@{ Area = $Area; Name = $Name; Value = $Value; Judgement = $judgement; Basis = $basis; Detail = $Detail })
+}
+
+function Add-FixedMetric {
+    #     判定を決めて渡す指標（収束の判定など、数値でないもの）
     param([string] $Area, [string] $Name, $Value, [string] $Judgement, [string] $Basis, [string] $Detail)
     $rows.Add([pscustomobject]@{ Area = $Area; Name = $Name; Value = $Value; Judgement = $Judgement; Basis = $Basis; Detail = $Detail })
 }
@@ -58,22 +125,6 @@ function Add-Metric {
 function Add-Action {
     param([string] $Area, [string] $Target, [string] $Content, [string] $Action)
     $actions.Add([pscustomobject]@{ Area = $Area; Target = $Target; Content = $Content; Action = $Action })
-}
-
-function Get-CountJudgement {
-    #     問題の数の判定（0 なら ○、それ以外は △。Severe なら ×）
-    param([int] $Count, [switch] $Severe)
-    if ($Count -eq 0) { return '○' }
-    if ($Severe) { return '×' }
-    return '△'
-}
-
-function Get-RateJudgement {
-    #     割合の判定（1 なら ○、Warn 以上なら △、それ未満は ×）
-    param([double] $Rate, [double] $Warn = 0.8)
-    if ($Rate -ge 1.0) { return '○' }
-    if ($Rate -ge $Warn) { return '△' }
-    return '×'
 }
 
 function Read-SheetPairs {
@@ -147,11 +198,11 @@ if ($null -ne $docs) {
     $overdue = ($docs | Measure-Object -Property Overdue -Sum).Sum
     $judgedDocs = @($docs | Where-Object { $_.Judgement })
     $outside = @($judgedDocs | Where-Object { $_.Judgement -match '^(少ない|多い)' })
-    Add-Metric 'レビュー' '指摘件数' ([double]$total) '' '' $file
-    Add-Metric 'レビュー' '未完了の指摘' ([double]$open) (Get-CountJudgement $open) '0 件なら ○' $file
-    Add-Metric 'レビュー' '期限切れの指摘' ([double]$overdue) (Get-CountJudgement $overdue -Severe) '0 件なら ○、残っていれば ×' $file
+    Add-Metric 'レビュー' '指摘件数' ([double]$total) '' $file
+    Add-Metric 'レビュー' '未完了の指摘' ([double]$open) '' $file
+    Add-Metric 'レビュー' '期限切れの指摘' ([double]$overdue) '' $file
     if ($judgedDocs.Count -gt 0) {
-        Add-Metric 'レビュー' '指摘密度が基準外の設計書' ([double]$outside.Count) (Get-CountJudgement $outside.Count) ('基準値と比べた設計書 {0} 件のうち。0 件なら ○' -f $judgedDocs.Count) $file
+        Add-Metric 'レビュー' '指摘密度が基準外の設計書' ([double]$outside.Count) ('基準値と比べた設計書 {0} 件のうち' -f $judgedDocs.Count) $file
     }
     foreach ($d in $outside) {
         $todo = 'レビューの観点・範囲が足りているか見直す'
@@ -162,12 +213,12 @@ if ($null -ne $docs) {
     if ($ReviewLog -and ($PageCsv -or $DesignPath) -and @($docs).Count -gt 0) {
         $unreviewed = @($docs | Where-Object { $_.Reviewed -eq $false })
         $rate = [math]::Round((@($docs).Count - $unreviewed.Count) / @($docs).Count, 3)
-        Add-Metric 'レビュー' 'レビュー実施率' ([double]$rate) (Get-RateJudgement $rate) ('設計書 {0} 件のうち {1} 件。100% なら ○、80% 以上なら △' -f @($docs).Count, (@($docs).Count - $unreviewed.Count)) $file
+        Add-Metric 'レビュー' 'レビュー実施率' ([double]$rate) ('設計書 {0} 件のうち {1} 件' -f @($docs).Count, (@($docs).Count - $unreviewed.Count)) $file
         foreach ($d in $unreviewed) { Add-Action 'レビュー' $d.Document '未レビュー（レビュー記録も指摘も無い）' 'レビューを実施する' }
     }
     if ($ReviewLog) {
         $zoneActions = @($docs | Where-Object { $_.PSObject.Properties['NeedsAction'] -and $_.NeedsAction })
-        Add-Metric 'レビュー' '要対応のゾーンの設計書' ([double]$zoneActions.Count) (Get-CountJudgement $zoneActions.Count) 'レビュー工数密度 × 指摘密度。0 件なら ○' $file
+        Add-Metric 'レビュー' '要対応のゾーンの設計書' ([double]$zoneActions.Count) 'レビュー工数密度 × 指摘密度' $file
         foreach ($d in $zoneActions) { Add-Action 'レビュー' $d.Document ('ゾーン: {0}（{1}）' -f $d.Zone, $d.ZoneView) $d.ZoneAction }
     }
 }
@@ -187,31 +238,31 @@ if ($null -ne $functions) {
     $summary = Read-SheetPairs $file 'サマリー'
     if ($summary.ContainsKey('消化率')) {
         $rate = [double]::Parse($summary['消化率'], [System.Globalization.CultureInfo]::InvariantCulture)
-        Add-Metric 'テスト' '消化率' $rate (Get-RateJudgement $rate 0.9) '100% なら ○、90% 以上なら △' $file
+        Add-Metric 'テスト' '消化率' $rate '' $file
     }
     if ($BugList) {
-        Add-Metric 'テスト' 'バグ' ([double]$summary['バグ']) '' '' $file
+        Add-Metric 'テスト' 'バグ' ([double]$summary['バグ']) '' $file
         $openBugs = [int]$summary['未完了のバグ']
-        Add-Metric 'テスト' '未完了のバグ' ([double]$openBugs) (Get-CountJudgement $openBugs) '0 件なら ○' $file
+        Add-Metric 'テスト' '未完了のバグ' ([double]$openBugs) '' $file
         $converge = [string]$summary['収束の判定']
         $j = '△'
         if ($converge -like '収束している*') { $j = '○' } elseif ($converge -like '収束していない*') { $j = '×' } elseif ($converge -like 'まだ判定できない*') { $j = '' }
-        Add-Metric 'テスト' 'バグの収束（信頼度成長曲線）' $converge $j '収束していれば ○（バグが少ないうち・テストの前半は判定しない）' $file
+        Add-FixedMetric 'テスト' 'バグの収束（信頼度成長曲線）' $converge $j '収束していれば ○（バグが少ないうち・テストの前半は判定しない）' $file
         foreach ($key in @($summary.Keys | Where-Object { $_ -match '^直近 \d+ 日の新規バグ$' })) {
             $beforeKey = $key -replace '^直近', 'その前の'
-            Add-Metric 'テスト' $key ([double]$summary[$key]) '' ('その前の同じ日数: {0} 件' -f $summary[$beforeKey]) $file
+            Add-Metric 'テスト' $key ([double]$summary[$key]) ('その前の同じ日数: {0} 件' -f $summary[$beforeKey]) $file
         }
         if ($j -eq '×') { Add-Action 'テスト' '全体' $converge 'テストを続け、バグの収束を確かめる' }
     }
     $judged = @($functions | Where-Object { $_.TestJudgement -or $_.BugJudgement })
     if ($judged.Count -gt 0) {
         $outsideFunctions = @($judged | Where-Object { $_.TestJudgement -match '^(少ない|多い)' -or $_.BugJudgement -match '^(少ない|多い)' })
-        Add-Metric 'テスト' 'テスト密度・バグ密度が基準外の機能' ([double]$outsideFunctions.Count) (Get-CountJudgement $outsideFunctions.Count) ('基準値と比べた機能 {0} 件のうち。0 件なら ○' -f $judged.Count) $file
+        Add-Metric 'テスト' 'テスト密度・バグ密度が基準外の機能' ([double]$outsideFunctions.Count) ('基準値と比べた機能 {0} 件のうち' -f $judged.Count) $file
     }
     foreach ($f in @($functions | Where-Object NeedsAction)) { Add-Action 'テスト' $f.Function ('ゾーン: {0}（{1}）' -f $f.Zone, $f.ZoneView) $f.ZoneAction }
     if ($summary.ContainsKey('食い違い')) {
         $mismatch = [int]$summary['食い違い']
-        Add-Metric 'テスト' 'テスト仕様書と障害管理表の食い違い' ([double]$mismatch) (Get-CountJudgement $mismatch) 'NG なのにバグ番号が無い・再テストの結果が無い など。0 件なら ○' $file
+        Add-Metric 'テスト' 'テスト仕様書と障害管理表の食い違い' ([double]$mismatch) 'NG なのにバグ番号が無い・再テストの結果が無い など' $file
     }
 }
 if ($TestPath) {
@@ -223,8 +274,8 @@ if ($TestPath) {
 if ($null -ne $specIssues) {
     $specErrors = @($specIssues | Where-Object Level -eq 'エラー').Count
     $specWarnings = @($specIssues | Where-Object Level -eq '警告').Count
-    Add-Metric 'テスト仕様書' 'エラー（期待結果が空など）' ([double]$specErrors) (Get-CountJudgement $specErrors -Severe) '0 件なら ○' $file
-    Add-Metric 'テスト仕様書' '警告（あいまいな期待結果・異常系や境界値の不足など）' ([double]$specWarnings) (Get-CountJudgement $specWarnings) '0 件なら ○' $file
+    Add-Metric 'テスト仕様書' 'エラー（期待結果が空など）' ([double]$specErrors) '' $file
+    Add-Metric 'テスト仕様書' '警告（あいまいな期待結果・異常系や境界値の不足など）' ([double]$specWarnings) '' $file
 }
 
 # ---------------------------------------------------------------- 工程（混入工程・摘出工程）
@@ -241,8 +292,8 @@ if ($null -ne $phases) {
     $inTime = ($phases | Measure-Object -Property FoundInTime -Sum).Sum
     $leaked = ($phases | Measure-Object -Property Leaked -Sum).Sum
     if (($inTime + $leaked) -gt 0) {
-        Add-Metric '工程' '摘出すべき工程までに見つかった割合' ([double][math]::Round($inTime / ($inTime + $leaked), 3)) '' '社内の基準と比べて判定してください' $file
-        Add-Metric '工程' '後の工程への流出' ([double]$leaked) (Get-CountJudgement $leaked) '0 件なら ○' $file
+        Add-Metric '工程' '摘出すべき工程までに見つかった割合' ([double][math]::Round($inTime / ($inTime + $leaked), 3)) ('{0} / {1} 件' -f $inTime, ($inTime + $leaked)) $file
+        Add-Metric '工程' '後の工程への流出' ([double]$leaked) '' $file
         foreach ($p in @($phases | Where-Object { $_.Leaked -gt 0 })) { Add-Action '工程' $p.Phase ('{0} で入った欠陥のうち {1} 件が後の工程で見つかった（摘出率 {2}）' -f $p.Phase, $p.Leaked, $p.RemovalRate) ('{0}のレビューの観点を見直す' -f $p.Phase) }
     }
 }
@@ -262,7 +313,7 @@ if ($null -ne $gaps) {
         if ($reqs.Count -gt 0) {
             $covered = @($reqs | Where-Object { $_['判定'] -eq '○' }).Count
             $rate = [math]::Round($covered / $reqs.Count, 3)
-            Add-Metric '網羅' '設計とテストのある要件の割合' ([double]$rate) (Get-RateJudgement $rate) ('{0} / {1} 件。100% なら ○、80% 以上なら △' -f $covered, $reqs.Count) $file
+            Add-Metric '網羅' '設計とテストのある要件の割合' ([double]$rate) ('{0} / {1} 件' -f $covered, $reqs.Count) $file
         }
     }
     # 種類（画面・イベント・メッセージ・IF）ごとに、網羅のシートに出てきた順に並べる
@@ -271,7 +322,7 @@ if ($null -ne $gaps) {
         $group = @($coverage | Where-Object { $_['種類'] -eq $kind })
         $covered = @($group | Where-Object { $_['判定'] -eq '○' }).Count
         $rate = [math]::Round($covered / $group.Count, 3)
-        Add-Metric '網羅' ('テストのある{0}の割合' -f $kind) ([double]$rate) (Get-RateJudgement $rate) ('{0} / {1} 件。100% なら ○、80% 以上なら △' -f $covered, $group.Count) $file
+        Add-Metric '網羅' ('テストのある{0}の割合' -f $kind) ([double]$rate) ('{0} / {1} 件' -f $covered, $group.Count) $file
     }
     if ($gaps.Count -gt 0) { Add-Action '網羅' ('テストの無い要素 {0} 件' -f $gaps.Count) ((@($gaps | Group-Object Kind | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・') 'テストケースを追加する（詳細\網羅.xlsx の抜けのシート）' }
 }
@@ -286,8 +337,8 @@ if ($DesignPath) {
 if ($null -ne $issues) {
     $errors = @($issues | Where-Object Level -eq 'エラー').Count
     $warnings = @($issues | Where-Object Level -eq '警告').Count
-    Add-Metric '設計書' '参照の食い違い（エラー）' ([double]$errors) (Get-CountJudgement $errors -Severe) '定義されていない参照・重複した定義など。0 件なら ○' $file
-    Add-Metric '設計書' '参照の食い違い（警告）' ([double]$warnings) (Get-CountJudgement $warnings) '桁数・必須の違い、一覧との違いなど。0 件なら ○' $file
+    Add-Metric '設計書' '参照の食い違い（エラー）' ([double]$errors) '定義されていない参照・重複した定義など' $file
+    Add-Metric '設計書' '参照の食い違い（警告）' ([double]$warnings) '桁数・必須の違い、一覧との違いなど' $file
 }
 
 # ---------------------------------------------------------------- 品質評価のブック
@@ -367,6 +418,9 @@ Write-Host "各ツールの詳細: $detailDir"
 # .PARAMETER TestLimits
 #     テストの基準値の CSV（Measure-TestQuality.ps1 の -Limits）。
 #
+# .PARAMETER Criteria
+#     判定（○△×）の基準の CSV（指標・向き・○・△）。既定は tools\quality-report\判定基準.csv。
+#
 # .PARAMETER Title
 #     品質評価のブックの名前（既定は「品質評価」）。
 #
@@ -382,4 +436,4 @@ Write-Host "各ツールの詳細: $detailDir"
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに各ツールと ExcelTools.psm1 が必要です。
-#     判定（○△×）は機械的な目安です。基準値は Measure-ReviewQuality.ps1・Measure-TestQuality.ps1 の基準値の CSV で決めます。
+#     判定（○△×）は機械的な目安です。基準は -Criteria の CSV で、密度の基準値は Measure-ReviewQuality.ps1・Measure-TestQuality.ps1 の基準値の CSV で決めます。
