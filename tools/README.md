@@ -22,6 +22,7 @@
 | [Measure-DefectRemoval.ps1](#measure-defectremovalps1) | 障害管理表とレビューの指摘から、欠陥の混入工程 × 摘出工程と、工程ごとの摘出率・後の工程への流出・原因の多い順を出す（Excel 不要） |
 | [Compare-ReviewFindings.ps1](#compare-reviewfindingsps1) | AI のレビュー（Invoke-DesignReview）と人のレビューの指摘を突き合わせ、一致・AI だけ・人だけと、観点ごとの一致率を出す（Excel 不要） |
 | [Measure-CodeSize.ps1](#measure-codesizeps1) | ソースコードのステップ数（コメント・空行を除いた行数）を機能（フォルダ）ごとに数え、前の版との新規・修正・削除も出す。バグ密度・テスト密度の分母（KLOC）に（Excel 不要） |
+| [New-QualityLimits.ps1](#new-qualitylimitsps1) | 過去のプロジェクトの品質の実績（指摘密度・バグ密度など）から、社内の基準値（下限・上限）の CSV を作る（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 | [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
@@ -1861,6 +1862,44 @@ order        2    18       7     1    10     3       1       0
 | --- | --- |
 | `-OutCsv` | 機能・KLOC・ステップ数・ファイル数・行数・コメント・空行（・新規・修正・削除）。UTF-8（BOM 付き）。Measure-TestQuality.ps1 の `-SizeCsv` にそのまま渡せる |
 | `-OutXlsx` | 機能別・ファイル別（言語・状態（新規・修正・変更なし・削除）付き） |
+
+## New-QualityLimits.ps1
+
+過去のプロジェクトの品質の実績から、**社内の基準値**（下限・上限）の CSV を作ります。Excel は不要です。
+作った CSV は、Measure-ReviewQuality.ps1（指摘密度・レビュー工数密度）と Measure-TestQuality.ps1（テスト密度・バグ密度）の `-Limits` にそのまま渡せます。サンプルの基準値（数値は例）を、自社の実績に置き換えるときに使います。
+
+```powershell
+.\New-QualityLimits.ps1 D:\品質実績\実績.csv -OutCsv D:\品質実績\基準値.csv
+.\Measure-ReviewQuality.ps1 D:\レビュー -SizeCsv D:\pages.csv -Limits D:\品質実績\基準値.csv
+```
+
+実績の CSV（1 行が 1 プロジェクト・1 指標）:
+
+```
+プロジェクト,指標,分母,工程,値
+A,指摘密度,ページ数,詳細設計,0.5
+B,指摘密度,ページ数,詳細設計,1.0
+C,指摘密度,ページ数,詳細設計,1.5
+D,指摘密度,ページ数,詳細設計,2.0
+A,バグ密度,KLOC,,10
+B,バグ密度,KLOC,,12
+```
+
+```
+Metric   Unit     Process  Count  Mean  Low  High
+------   ----     -------  -----  ----  ---  ----
+バグ密度 KLOC                  2 11.00 9.59 12.41
+指摘密度 ページ数 詳細設計     4  1.25 0.60  1.90
+```
+
+| 求め方 | 内容 |
+| --- | --- |
+| `-Method Sigma`（既定） | 平均 ± `-Sigma`（既定 1）× 標準偏差。下限は 0 未満にしない |
+| `-Method Percentile` | `-Percentiles`（既定 25, 75）のパーセント点。外れ値に引きずられにくい |
+
+- 指標 × 分母 × 工程の組ごとに求めます。工程の列が空の行は、工程を問わない基準値になります
+- 実績が `-MinSamples`（既定 3）件未満の組は、備考に「参考値」と書きます
+- 列の名前は「実績」「実績値」（値）、「単位」（分母）、「案件」（プロジェクト）なども読めます。数値でない値は数えません
 
 ## Export-ExcelToPdf.ps1
 
