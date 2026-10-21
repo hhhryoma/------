@@ -16,6 +16,15 @@ param(
     [ValidateRange(0.5, 1.0)]
     [double] $ConvergenceRate = 0.9,
 
+    [ValidateRange(0, 100000)]
+    [int] $MinBugs = 10,
+
+    [ValidateRange(0.0, 1.0)]
+    [double] $MinProgress = 0.5,
+
+    [ValidateRange(1, 365)]
+    [int] $RecentDays = 7,
+
     [datetime] $AsOf = (Get-Date).Date,
 
     [switch] $NoRecurse,
@@ -341,7 +350,7 @@ if ($trend.Count -gt 0) {
 $fit = $null
 if ($points.Count -ge 4) { $fit = Get-GompertzFit @($points.Values | ForEach-Object { $_[0] }) @($points.Values | ForEach-Object { $_[1] }) }
 $totalFound = $bugs.Count
-$growth = [pscustomobject]@{ Axis = $axisName; Points = $points.Count; Potential = $null; Rate = $null; Remaining = $null; RSquared = $null; Judgement = '' }
+$growth = [pscustomobject]@{ Axis = $axisName; Points = $points.Count; Potential = $null; Rate = $null; Remaining = $null; RSquared = $null; Judgement = ''; Recent = $null; Before = $null }
 if (-not $BugList) { $growth.Judgement = '' }
 elseif (-not $fit) { $growth.Judgement = '判定できません（起票日のあるバグが少ないため、曲線を当てはめられません）' }
 elseif ($fit.AtLowerBound -or $fit.K -gt $totalFound * 10) {
@@ -360,6 +369,19 @@ else {
         if ($useCases) { $x = $t.Executed }
         if ($x -gt 0) { $t.Fitted = [math]::Round((Get-GompertzValue $fit $x), 1) }
     }
+}
+
+# バグが少ないうち・テストの消化が進まないうちは曲線の形が定まらないため、収束を判定しない
+$progressAll = 0.0
+if ($countedCases.Count -gt 0) { $progressAll = @($countedCases | Where-Object { $_.Kind -eq 'OK' -or $_.Kind -eq 'NG' }).Count / $countedCases.Count }
+if ($BugList -and ($totalFound -lt $MinBugs -or $progressAll -lt $MinProgress)) {
+    $growth.Judgement = 'まだ判定できない（バグ {0} 件・消化率 {1:0}%。バグ {2} 件以上・消化率 {3:0}% 以上で判定します）' -f $totalFound, ($progressAll * 100), $MinBugs, ($MinProgress * 100)
+}
+# 直近の新規バグ（曲線とは別に、増え方が落ち着いてきたかを見る）
+if ($BugList) {
+    $recentFrom = $AsOf.AddDays(-$RecentDays)
+    $growth.Recent = @($bugs | Where-Object { $_.Found -and $_.Found -gt $recentFrom -and $_.Found -le $AsOf }).Count
+    $growth.Before = @($bugs | Where-Object { $_.Found -and $_.Found -gt $recentFrom.AddDays(-$RecentDays) -and $_.Found -le $recentFrom }).Count
 }
 
 # ---------------------------------------------------------------- 食い違い
@@ -411,6 +433,8 @@ if ($OutXlsx) {
         }
         if ($null -ne $growth.RSquared) { & $add '当てはまり（決定係数）' ([double]$growth.RSquared) }
         & $add '収束の判定' ('{0}（基準: 収束率 {1}）' -f $growth.Judgement, $ConvergenceRate)
+        & $add ('直近 {0} 日の新規バグ' -f $RecentDays) ([double]$growth.Recent)
+        & $add ('その前の {0} 日の新規バグ' -f $RecentDays) ([double]$growth.Before)
     }
     & $add '食い違い' ([double]$issues.Count)
 
@@ -477,6 +501,7 @@ if ($BugList) {
         Write-Host ('信頼度成長曲線（横軸: {0}）: 潜在バグ数 {1} 件（推定）・収束率 {2:0.0}% → {3}（基準 {4:0}%）' -f $growth.Axis, $growth.Potential, ($growth.Rate * 100), $growth.Judgement, ($ConvergenceRate * 100))
     }
     else { Write-Host ('信頼度成長曲線: {0}' -f $growth.Judgement) }
+    Write-Host ('直近 {0} 日の新規バグ: {1} 件（その前の {0} 日: {2} 件）' -f $RecentDays, $growth.Recent, $growth.Before)
 }
 $zoned = @($results | Where-Object { $_.Zone })
 if ($zoned.Count -gt 0) { Write-Host ('ゾーン: {0}' -f (Format-Breakdown $zoned 'Zone')) }
@@ -519,6 +544,15 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER ConvergenceRate
 #     収束とみなす収束率（バグの累計 ÷ 潜在バグ数の推定）。既定は 0.9。
+#
+# .PARAMETER MinBugs
+#     収束を判定するのに要るバグの数（既定 10）。これより少ないうちは「まだ判定できない」とします。
+#
+# .PARAMETER MinProgress
+#     収束を判定するのに要る消化率（既定 0.5）。テストの前半は「まだ判定できない」とします。
+#
+# .PARAMETER RecentDays
+#     直近の新規バグを数える日数（既定 7）。直近とその前の同じ日数の新規バグを並べて出します。
 #
 # .PARAMETER AsOf
 #     集計の時点（予定日を過ぎても未実施の判定などに使う）。既定は今日。

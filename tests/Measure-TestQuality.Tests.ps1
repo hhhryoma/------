@@ -116,6 +116,29 @@ Test-Case 'Measure-TestQuality: シートごとの機能・同じフォルダの
     Assert-Match $text '収束していない'
 }
 
+Test-Case 'Measure-TestQuality: バグが少ないうち・消化が進まないうちは収束を判定せず、直近の新規バグを並べる' {
+    $dir = New-TestDir
+    $rows = @(1..40 | ForEach-Object {
+            $done = ''; $result = ''
+            if ($_ -le 30) { $done = (Get-Date '2026-11-01').AddDays([math]::Floor(($_ - 1) / 5)).ToString('yyyy/MM/dd'); $result = 'OK' }
+            , @([string]$_, "確認 $_", $done, $result) })
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'SCR201'; Header = @('項番', 'テスト項目', '実施日', '判定'); Rows = $rows })
+    $lines = @('No,件名,起票日,状態')
+    foreach ($d in @('2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06')) { $lines += ('{0},障害 {0},{0},完了' -f $d) }
+    $lines | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $options = @{ Path = (Join-Path $dir 'UT.xlsx'); BugList = (Join-Path $dir 'bugs.csv'); AsOf = '2026-11-06' }
+
+    $text = Get-HostText { & $TestQualityTool @options 3>$null | Out-Null }
+    Assert-Match $text 'まだ判定できない（バグ 6 件・消化率 75%。バグ 10 件以上・消化率 50% 以上で判定します）'
+    # 直近 3 日（11/04〜11/06）と、その前の 3 日（11/01〜11/03）
+    $text = Get-HostText { & $TestQualityTool @options -RecentDays 3 3>$null | Out-Null }
+    Assert-Match $text '直近 3 日の新規バグ: 3 件（その前の 3 日: 3 件）'
+    $text = Get-HostText { & $TestQualityTool @options -MinBugs 5 -MinProgress 0.9 3>$null | Out-Null }
+    Assert-Match $text 'まだ判定できない（バグ 6 件・消化率 75%。バグ 5 件以上・消化率 90% 以上で判定します）'
+    $text = Get-HostText { & $TestQualityTool @options -MinBugs 5 3>$null | Out-Null }
+    Assert-NotMatch $text 'まだ判定できない'
+}
+
 Test-Case 'Measure-TestQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestQualityTool
     Assert-Match $h.Synopsis 'テスト'
