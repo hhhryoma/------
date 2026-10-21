@@ -160,10 +160,12 @@ function Get-GompertzValue {
 # ---------------------------------------------------------------- テスト仕様書を読む
 
 
+# 読み取り結果（どのファイル・シートをどの見出しで読んだか）
+$readLog = New-Object System.Collections.Generic.List[object]
 # 障害管理表を同じフォルダに置いても、テスト仕様書としては読まない
 $bugFiles = $null
 if ($BugList) { $bugFiles = Get-FilePathSet $BugList -NoRecurse:$NoRecurse }
-$readArgs = @{ Candidates = $candidates; Exclude = $OutXlsx; NoRecurse = $NoRecurse; NoExcel = $NoExcel }
+$readArgs = @{ Candidates = $candidates; Exclude = $OutXlsx; NoRecurse = $NoRecurse; NoExcel = $NoExcel; ReadLog = $readLog }
 $caseRecords = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $Path 'テスト仕様書' -NoRecurse:$NoRecurse) -Fields $caseFields -Need @('結果', @('テストID', 'テスト内容')) -Key @('テストID', 'テスト内容') -What 'テスト仕様書' -Skip $bugFiles
 $cases = ConvertTo-TestCases $caseRecords $AsOf
 if ($cases.Count -eq 0) { Write-Warning 'テストケースが見つかりません（結果と、テストIDか確認内容の見出しがある表を探します）' }
@@ -482,7 +484,7 @@ if ($OutXlsx) {
             @{ Name = 'ゾーン分析'; Columns = @(@{ Header = 'テスト密度 ＼ バグ密度'; Width = 18 }, @{ Header = 'バグ密度が少ない'; Width = 40 }, @{ Header = 'バグ密度が基準内'; Width = 40 }, @{ Header = 'バグ密度が多い'; Width = 40 }); Rows = $zoneRows },
             @{ Name = '推移'; Columns = @(@{ Header = '日付'; Width = 11 }, @{ Header = '予定（累計）'; Width = 10 }, @{ Header = '実施（累計）'; Width = 10 }, @{ Header = 'OK（累計）'; Width = 10 }, @{ Header = 'バグの発見'; Width = 9 }, @{ Header = 'バグの完了'; Width = 9 }, @{ Header = '発見の累計'; Width = 9 }, @{ Header = '完了の累計'; Width = 9 }, @{ Header = '未完了のバグ'; Width = 9 }, @{ Header = '信頼度成長曲線'; Width = 11 }); Rows = $trendRows },
             @{ Name = 'バグの内訳'; Columns = @(@{ Header = '項目'; Width = 10 }, @{ Header = '値'; Width = 24 }, @{ Header = 'バグ'; Width = 7 }, @{ Header = '未完了'; Width = 7 }); Rows = $breakRows },
-            @{ Name = '食い違い'; Columns = @(@{ Header = '種類'; Width = 22 }, @{ Header = '機能'; Width = 24 }, @{ Header = 'テストID'; Width = 10 }, @{ Header = '内容'; Width = 60 }, @{ Header = '場所'; Width = 40 }); Rows = $issueRows })
+            @{ Name = '食い違い'; Columns = @(@{ Header = '種類'; Width = 22 }, @{ Header = '機能'; Width = 24 }, @{ Header = 'テストID'; Width = 10 }, @{ Header = '内容'; Width = 60 }, @{ Header = '場所'; Width = 40 }); Rows = $issueRows }, (New-ReadLogSheet $readLog))
     }
     catch {
         Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
@@ -507,6 +509,7 @@ $zoned = @($results | Where-Object { $_.Zone })
 if ($zoned.Count -gt 0) { Write-Host ('ゾーン: {0}' -f (Format-Breakdown $zoned 'Zone')) }
 foreach ($r in @($results | Where-Object NeedsAction)) { Write-Host ('  要対応: {0}（{1}）{2}' -f $r.Function, $r.Zone, $r.ZoneAction) }
 if ($issues.Count -gt 0) { Write-Host ('食い違い: {0} 件（{1}）' -f $issues.Count, (Format-Breakdown $issues 'Kind')) }
+Write-ReadLogSummary $readLog
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
 # .SYNOPSIS

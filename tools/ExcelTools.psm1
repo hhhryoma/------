@@ -624,9 +624,10 @@ function Read-HeaderRecords {
     #       Need: 見出しの行の条件。文字は必ず要る項目、配列はそのうちどれか 1 つが要る項目
     #       Key: 行があるかを決める項目（前から順に、見出しにあるもの）
     #       Skip: 読まないファイルのフルパスの集合。Exclude: 読まないファイル（結果の xlsx など）
+    #       ReadLog: 渡すと、ファイル・シートごとの読み取り結果（Add-ReadLog）を足す
     #     戻り値: @{ Values = 項目 → 文字; Labels = 項目 → 見出し; Columns = 項目 → 列番号（CSV は 0）; File; Path; Sheet; Row;
     #             Column（Key の列）; SheetCount（そのブックで表のあるシートの数） }
-    param($Inputs, [hashtable] $Candidates, [string[]] $Fields, [object[]] $Need, [string[]] $Key, [string] $What, $Skip, [string] $Exclude, [switch] $NoRecurse, [switch] $NoExcel)
+    param($Inputs, [hashtable] $Candidates, [string[]] $Fields, [object[]] $Need, [string[]] $Key, [string] $What, $Skip, [string] $Exclude, [switch] $NoRecurse, [switch] $NoExcel, $ReadLog)
     $records = New-Object System.Collections.Generic.List[object]
     $test = {
         param($m)
@@ -658,10 +659,12 @@ function Read-HeaderRecords {
                     if (& $test $m) { $found.Add([pscustomobject]@{ Sheet = $sheetName; Grid = $grid; Map = $m }); break }
                 }
             }
+            if ($found.Count -eq 0) { Add-ReadLog $ReadLog $What $book.File '' $null 0 $null $Fields '表が見つかりません（必要な見出しの行がありません）' }
             foreach ($entry in $found) {
                 $map = $entry.Map
                 $keyField = @($Key | Where-Object { $map[$_] })[0]
                 foreach ($t in (Find-DesignTables $entry.Grid @($map.Values | Sort-Object -Unique) $map[$keyField])) {
+                    Add-ReadLog $ReadLog $What $book.File $entry.Sheet $t.HeaderRow $t.Rows.Count $map $Fields ''
                     $cols = @{}
                     foreach ($f in $map.Keys) { $cols[$f] = $t.ColumnOf[$map[$f]] }
                     foreach ($dr in $t.Rows) {
@@ -680,8 +683,13 @@ function Read-HeaderRecords {
         $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
         $map = @{}
         foreach ($f in $Fields) { foreach ($n in $names) { if (-not $map[$f] -and $Candidates[$f] -contains (ConvertTo-Label $n)) { $map[$f] = $n } } }
-        if (-not (& $test $map)) { Write-Warning ("{0}: {1}の列が見つかりません" -f $c.Name, $What); continue }
+        if (-not (& $test $map)) {
+            Write-Warning ("{0}: {1}の列が見つかりません" -f $c.Name, $What)
+            Add-ReadLog $ReadLog $What $c.Name '' $null 0 $null $Fields '表が見つかりません（必要な見出しの列がありません）'
+            continue
+        }
         $keyField = @($Key | Where-Object { $map[$_] })[0]
+        $before = $records.Count
         $line = 1
         foreach ($r in $rows) {
             $line++
@@ -690,8 +698,53 @@ function Read-HeaderRecords {
             if (-not ([string]$v[$keyField]).Trim()) { continue }
             $records.Add([pscustomobject]@{ Values = $v; Labels = $map; Columns = @{}; File = $c.Name; Path = $c.FullName; Sheet = ''; Row = $line; Column = 0; SheetCount = 1 })
         }
+        Add-ReadLog $ReadLog $What $c.Name '' 1 ($records.Count - $before) $map $Fields ''
     }
     return , $records
+}
+
+function Add-ReadLog {
+    #     読み取り結果（どのファイル・シートの表を、どの見出しで何行読んだか）を ReadLog に足す。ReadLog が $null なら何もしない
+    #       Map: 項目 → 読んだ見出し（表が見つからなければ $null）。Fields: 読もうとした項目
+    param($ReadLog, [string] $What, [string] $File, [string] $Sheet, $HeaderRow, [int] $Rows, $Map, [string[]] $Fields, [string] $Note)
+    if ($null -eq $ReadLog) { return }
+    $found = New-Object System.Collections.Generic.List[string]
+    $missing = New-Object System.Collections.Generic.List[string]
+    foreach ($f in $Fields) {
+        if ($Map -and $Map[$f]) {
+            if ($Map[$f] -eq (ConvertTo-Label $f)) { $found.Add($f) } else { $found.Add(('{0}（{1}）' -f $f, $Map[$f])) }
+        }
+        elseif ($Map) { $missing.Add($f) }
+    }
+    $ReadLog.Add([pscustomobject]@{ What = $What; File = $File; Sheet = $Sheet; HeaderRow = $HeaderRow; Rows = $Rows; Found = $found.ToArray(); Missing = $missing.ToArray(); Note = $Note })
+}
+
+function New-ReadLogSheet {
+    #     読み取り結果のシート（Export-Workbook の 1 シートの定義）
+    param($ReadLog)
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($l in $ReadLog) {
+        $header = ''
+        if ($null -ne $l.HeaderRow) { $header = [double]$l.HeaderRow }
+        $rows.Add(@{ Values = @($l.What, $l.File, $l.Sheet, $header, [double]$l.Rows, ($l.Found -join '、'), ($l.Missing -join '、'), $l.Note) })
+    }
+    return @{ Name = '読み取り結果'; Columns = @(@{ Header = '種類'; Width = 12 }, @{ Header = 'ファイル'; Width = 30 }, @{ Header = 'シート'; Width = 16 }, @{ Header = '見出しの行'; Width = 9 }, @{ Header = '読んだ行数'; Width = 9 }, @{ Header = '読んだ項目（見出し）'; Width = 50 }, @{ Header = '見出しが無い項目'; Width = 30 }, @{ Header = '備考'; Width = 36 }); Rows = $rows }
+}
+
+function Write-ReadLogSummary {
+    #     読み取り結果の要約を表示する（表が見つからないファイルと、見出しが無い項目）
+    param($ReadLog)
+    foreach ($g in @($ReadLog | Group-Object What)) {
+        $tables = @($g.Group | Where-Object { -not $_.Note })
+        $files = @($tables | ForEach-Object { $_.File } | Select-Object -Unique)
+        $notFound = @($g.Group | Where-Object { $_.Note } | ForEach-Object { $_.File } | Select-Object -Unique)
+        $line = '読み取り（{0}）: {1} ファイル・{2} 行' -f $g.Name, $files.Count, (($tables | Measure-Object -Property Rows -Sum).Sum + 0)
+        $missingCounts = [ordered]@{}
+        foreach ($t in $tables) { foreach ($m in $t.Missing) { if (-not $missingCounts.Contains($m)) { $missingCounts[$m] = 0 }; $missingCounts[$m]++ } }
+        if ($missingCounts.Count -gt 0) { $line += '。見出しが無い項目: ' + ((@($missingCounts.Keys | ForEach-Object { '{0}（{1}/{2} 表）' -f $_, $missingCounts[$_], $tables.Count })) -join '・') }
+        Write-Host $line
+        if ($notFound.Count -gt 0) { Write-Host ('  表が見つからないファイル: {0}' -f ($notFound -join '・')) }
+    }
 }
 
 function ConvertTo-NameKey {

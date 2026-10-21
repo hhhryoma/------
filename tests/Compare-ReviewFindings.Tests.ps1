@@ -49,7 +49,7 @@ Test-Case 'Compare-ReviewFindings: AI と人の指摘を、場所の近さと内
     Assert-Match $text '人の指摘 4 件: AI と一致 2（50\.0%）・人だけ 2'
 
     $points = Read-XlsxSheet -Path $out -Index 2
-    Assert-Equal @('突き合わせ', '観点別', '設計書別') $points.Sheets
+    Assert-Equal @('突き合わせ', '観点別', '設計書別', '読み取り結果') $points.Sheets
     Assert-Equal 'C03|1|1|1' ('{0}|{1}|{2}|{3}' -f $points.Rows[2]['A'], $points.Rows[2]['B'], $points.Rows[2]['C'], $points.Rows[2]['D'])
     $pairsSheet = Read-XlsxSheet -Path $out -Index 1
     Assert-True (@($pairsSheet.Links | Where-Object { $_.Location -eq "'指摘'!E2" }).Count -eq 1) '人の指摘管理表の行へのリンク'

@@ -73,7 +73,7 @@ Test-Case 'Measure-ReviewQuality: CSV の指摘管理表も読み、-OutXlsx に
     $r = @(& $QualityTool -Path $dir -SizeCsv $csv -AsOf '2026-10-20' -OutXlsx $out 6>$null)
     Assert-Equal '1|1|1' @($r | Where-Object { $_.Document -like 'DD05*' } | ForEach-Object { '{0}|{1}|{2}' -f $_.Findings, $_.Open, $_.Overdue })[0]
     $docs = Read-XlsxSheet -Path $out -Index 1
-    Assert-Equal @('設計書別', '内訳', '未完了', '推移') $docs.Sheets
+    Assert-Equal @('設計書別', '内訳', '未完了', '推移', '読み取り結果') $docs.Sheets
     $open = Read-XlsxSheet -Path $out -Index 3
     Assert-Equal 4 $open.Rows.Count '見出しと未完了 3 件'
     Assert-Equal '期限切れ' $open.Rows[2]['G'] '期限切れから順'
@@ -123,7 +123,7 @@ Test-Case 'Measure-ReviewQuality: -ReviewLog でレビュー工数密度を出�
     Assert-Match $text '要対応: DD03_テーブル定義書（レビュー不足）観点を決めて追加のレビューをする'
 
     $book = Read-XlsxSheet -Path $out -Index 1
-    Assert-Equal @('設計書別', '内訳', '未完了', '推移', 'ゾーン分析') $book.Sheets
+    Assert-Equal @('設計書別', '内訳', '未完了', '推移', 'ゾーン分析', '読み取り結果') $book.Sheets
     Assert-Equal 'レビュー不足' @($book.Rows.Values | Where-Object { $_['A'] -eq 'DD03_テーブル定義書' })[0]['N']
     $zone = Read-XlsxSheet -Path $out -Index 5
     Assert-Equal '工数密度が多い' $zone.Rows[2]['A']
