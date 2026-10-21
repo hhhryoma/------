@@ -9,6 +9,7 @@
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる） |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、桁数・必須の違いなど）を全件見つける。CRUD 図と影響調査も（Excel 不要） |
+| [Test-Traceability.ps1](#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、設計の要素（画面・イベント・メッセージ・IF）にテストがあるかを確かめる。テストの抜けを全件、機械で見つける（Excel 不要） |
 | [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
 | [New-DesignDocument.ps1](#new-designdocumentps1) | 画面一覧などの一覧から、雛形の差し込み欄（`{{画面ID}}` など）を埋めた設計書を一括で作る。設計書の版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする（Excel 不要） |
 | [Measure-Progress.ps1](#measure-progressps1) | WBS から子のタスクごとの遅れ（営業日）・状態と PV／EV／SPI を出し、遅延タスクと週ごとの完了数をスケジュール遅延リカバリ計画のテンプレートに書き込む（Excel 不要） |
@@ -21,7 +22,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
 
 ## Search-Excel.ps1
 
@@ -793,6 +794,72 @@ T_ORDER.DELIVERY_TIME_KBN: 定義 1 か所・一覧 0 か所・参照 3 か所�
 - 処理概要などの文章の中の参照は、「書き方」の正規表現に一致するものだけを見つけます
 - 画面項目の「型」（テキスト・半角英数など）は、カラムのデータ型と書き方が違うので比べません
 - 未使用は、参照を探した種類（参照のルールに当てはまる設計書があったもの）だけを確かめます。カラムは、監査用の列（登録日時など）が多く挙がるため、既定では確かめません
+
+## Test-Traceability.ps1
+
+**テストの抜け**を、設計書とテスト仕様書を突き合わせて全件見つけます。Excel は不要です。
+
+- 設計の要素（画面・イベント・メッセージ・IF）ごとに、テスト仕様書にテストがあるか（**画面ごとの範囲**で確かめる）
+- 要件一覧（`-Requirement`）の要件ごとに、設計書とテスト仕様書に出てくるか（トレーサビリティ）。一覧に無い要件 ID も知らせる
+
+```powershell
+.\Test-Traceability.ps1 D:\設計書 D:\テスト仕様書 -Requirement D:\要件一覧.xlsx -OutXlsx D:\網羅.xlsx
+```
+
+```
+Kind       Scope  Id    Name           Judgement
+----       -----  --    ----           ---------
+イベント   SCR001 EV03  クリア         テストなし（名前が出てこない）
+イベント   SCR001 EV04  新規登録       テストなし（名前が出てこない）
+メッセージ SCR001 E0004                テストなし
+...
+
+テストの網羅: 画面 3/3（100%）・イベント 5/17（29%）・メッセージ 1/24（4%）・IF 0/1（0%）
+要件 3 件: 設計とテストあり 1・設計なし 0・テストなし 1・設計・テストなし 1。要件一覧に無い要件 ID 2 件
+抜け: 40 件
+```
+
+### 確かめる要素（網羅のルール）
+
+`tools\traceability\網羅のルール.csv` に、設計書から集める要素と探し方を書きます。既定は詳細設計サンプル（`docs/design-sample`）の書き方です。
+
+| 種類 | 集める要素 | テストにあるとみなす条件 |
+| --- | --- | --- |
+| 画面 | 画面一覧の画面 ID | 画面 ID がテスト仕様書のどこかに出てくる |
+| イベント | 画面設計書のイベント定義のイベント（画面ごと） | **イベントの名前**（検索・クリアなど）が、その画面のテストに出てくる |
+| メッセージ | 画面設計書で使うメッセージ ID（画面ごと） | メッセージ ID（E0003 など）が、その画面のテストに出てくる |
+| IF | IF 定義書の IF ID | IF ID がテスト仕様書のどこかに出てくる |
+
+| 列 | 内容 |
+| --- | --- |
+| 種類 | 要素の種類（結果に出る名前） |
+| ファイル名 / シート名 | 要素を集める設計書のファイル名・シート名（正規表現） |
+| 見出し / 列 / 名前 | 表から集めるとき: 表の見出し（`/` 区切り）と、ID・名前の列。`@画面ID` のように `@` を付けると、シートの見出しの右の値（1 ファイル 1 つ） |
+| 範囲 | `@画面ID` のように書くと、要素はその画面のもの（その画面のテストだけを探す） |
+| 探し方 | `ID`（ID を探す）・`名前`（名前を探す）、または正規表現（シートのすべてのセルから ID を集め、ID を探す） |
+
+**「その画面のテスト」**: ファイル名・シート名・シートの上の「画面ID」などの値・行の機能（「機能」「画面ID」などの列。空なら上の行の値）・行の文字のどれかに、画面 ID が出てくるテスト仕様書のセルです。
+
+### 要件一覧
+
+「要件ID」（要件No・要求ID・ID など）と「要件名」（要件・要求名・内容など）の見出しがある表（Excel・CSV）を読みます。
+
+- 要件 ID ごとに、設計書とテスト仕様書に出てくるかを確かめ、「設計なし」「テストなし」「設計・テストなし」を知らせます
+- 一覧の ID の形（`REQ-001` なら `REQ-` と 3 桁の数字）で設計書・テスト仕様書を探し、**一覧に無い要件 ID** も知らせます
+- 要件一覧が設計書・テスト仕様書のフォルダの中にあっても、そちらとしては読みません
+
+### -OutXlsx の内容
+
+| シート | 内容 |
+| --- | --- |
+| 抜け | テストの無い要素・設計やテストの無い要件・一覧に無い要件 ID（設計書の該当セルへのリンク付き） |
+| 網羅 | すべての要素と、テストの数・最初のテストの場所（リンク）・判定 |
+| 要件 | （`-Requirement` のとき）要件ごとの設計書・テスト仕様書・判定（トレーサビリティマトリクス） |
+
+### 注意
+
+- テストに「出てくる」かを**文字で**確かめます。テストの内容が正しいか、十分かまでは確かめません
+- イベントは名前で探すため、「登録」のような短い名前は、別のイベント（「新規登録」）のテストでもあるとみなすことがあります
 
 ## Export-TableDdl.ps1
 
