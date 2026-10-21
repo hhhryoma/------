@@ -188,8 +188,12 @@ if ($null -ne $functions) {
         Add-Metric 'テスト' '未完了のバグ' ([double]$openBugs) (Get-CountJudgement $openBugs) '0 件なら ○' $file
         $converge = [string]$summary['収束の判定']
         $j = '△'
-        if ($converge -like '収束している*') { $j = '○' } elseif ($converge -like '収束していない*') { $j = '×' }
-        Add-Metric 'テスト' 'バグの収束（信頼度成長曲線）' $converge $j '収束していれば ○' $file
+        if ($converge -like '収束している*') { $j = '○' } elseif ($converge -like '収束していない*') { $j = '×' } elseif ($converge -like 'まだ判定できない*') { $j = '' }
+        Add-Metric 'テスト' 'バグの収束（信頼度成長曲線）' $converge $j '収束していれば ○（バグが少ないうち・テストの前半は判定しない）' $file
+        foreach ($key in @($summary.Keys | Where-Object { $_ -match '^直近 \d+ 日の新規バグ$' })) {
+            $beforeKey = $key -replace '^直近', 'その前の'
+            Add-Metric 'テスト' $key ([double]$summary[$key]) '' ('その前の同じ日数: {0} 件' -f $summary[$beforeKey]) $file
+        }
         if ($j -eq '×') { Add-Action 'テスト' '全体' $converge 'テストを続け、バグの収束を確かめる' }
     }
     $judged = @($functions | Where-Object { $_.TestJudgement -or $_.BugJudgement })

@@ -46,6 +46,8 @@ Test-Case 'New-QualityReport: 各ツールを実行し、指標ごとの実績�
     Assert-Equal '1|×' $got['期限切れの指摘'] '期限切れが残っていれば ×'
     Assert-Equal '1|○' $got['消化率']
     Assert-Equal '1|△' $got['未完了のバグ']
+    Assert-Match $got['バグの収束（信頼度成長曲線）'] '^まだ判定できない（バグ 2 件.*\|$' 'バグが少ないうちは判定しない'
+    Assert-Equal '0|' $got['直近 7 日の新規バグ']
     Assert-Equal '0|○' $got['テスト仕様書と障害管理表の食い違い']
     Assert-Equal '0|○' $got['エラー（期待結果が空など）']
     Assert-Equal '1|△' $got['後の工程への流出'] '詳細設計で入り単体テストで見つかった B002'
