@@ -13,6 +13,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Reset-ExcelView.ps1](tools/README.md#reset-excelviewps1) | 開いたときに先頭シートの A1 が表示される状態に一括で直す | 不要 |
 | [Compare-Excel.ps1](tools/README.md#compare-excelps1) | 2 つのブック・フォルダのセル単位の差分（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる） | 不要 ※1 |
 | [Test-DesignConsistency.ps1](tools/README.md#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、画面遷移の食い違い、桁数・必須の違い）。CRUD 図と影響調査（使っている場所の一覧）も作る | 不要 ※1 |
+| [Test-Traceability.ps1](tools/README.md#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、画面・イベント・メッセージ・IF にテストがあるか（テストの抜け）を全件確かめる | 不要 ※1 |
 | [Export-TableDdl.ps1](tools/README.md#export-tableddlps1) | テーブル定義書から DDL（Oracle・PostgreSQL・SQL Server・MySQL）を作り、DB の列の一覧との食い違い（型・桁数・NULL）も確かめる | 不要 ※1 |
 | [New-DesignDocument.ps1](tools/README.md#new-designdocumentps1) | 一覧から雛形の差し込み欄を埋めた設計書を一括で作る（1 件 1 シートの設計書には、雛形のシートからシートを足す）。版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もし、前の版との差分から改訂内容を書ける | 不要 |
 | [Measure-Progress.ps1](tools/README.md#measure-progressps1) | WBS から遅延タスク（営業日）と PV／EV／SPI を出し、スケジュール遅延リカバリ計画のテンプレートに書き込む | 不要 ※1 |
