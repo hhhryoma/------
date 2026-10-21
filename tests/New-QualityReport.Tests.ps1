@@ -92,3 +92,25 @@ Test-Case 'New-QualityReport: 失敗したツールがあっても、ほかの�
 
     Assert-Throws { & $ReportTool -OutDir $out 6>$null } '-Findings'
 }
+
+Test-Case 'New-QualityReport: 判定基準の CSV で ○△× の基準を変えられ、判定の考え方に基準を書く' {
+    $dir = New-TestDir
+    New-ReportData $dir
+    $criteria = Join-Path $dir '判定基準.csv'
+    @('指標,向き,○,△', '未完了の指摘,以下,0,1', '摘出すべき工程までに見つかった割合,以上,80%,') | Set-Content -LiteralPath $criteria -Encoding UTF8
+    $out = Join-Path $dir '報告'
+    $r = @(& $ReportTool -OutDir $out -Findings (Join-Path $dir 'レビュー') -BugList (Join-Path $dir '障害管理表.xlsx') -Criteria $criteria -AsOf '2026-10-20' 3>$null 6>$null)
+    $got = @{}
+    foreach ($m in $r) { $got[$m.Name] = '{0}|{1}' -f $m.Value, $m.Judgement }
+    Assert-Equal '2|×' $got['未完了の指摘'] '未完了 2 件は △ の上限（1 件）を超える'
+    Assert-Equal '0.8|○' $got['摘出すべき工程までに見つかった割合']
+    Assert-Equal '1|' $got['期限切れの指摘'] '判定基準に無い指標は判定しない'
+    $book = Read-XlsxSheet -Path (Join-Path $out '品質評価_20261020.xlsx')
+    $basis = @{}
+    foreach ($row in $book.Rows.Values) { $basis[$row['B']] = $row['E'] }
+    Assert-Equal '0 件以下なら ○、1 件以下なら △、それより多ければ ×' $basis['未完了の指摘']
+    Assert-Equal '4 / 5 件。80% 以上なら ○、それ未満は △' $basis['摘出すべき工程までに見つかった割合']
+
+    @('指標,向き,○,△', '未完了の指摘,多い,0,') | Set-Content -LiteralPath $criteria -Encoding UTF8
+    Assert-Throws { & $ReportTool -OutDir $out -Findings (Join-Path $dir 'レビュー') -Criteria $criteria 6>$null } '向きは「以上」か「以下」'
+}
