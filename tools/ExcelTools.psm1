@@ -1024,6 +1024,8 @@ function ConvertTo-BookMarkdown {
     foreach ($name in $sheets.Keys) { $lines.AddRange($sheets[$name]) }
     while ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
     return (($lines -join "`n") + "`n")
+}
+
 # ---------------------------------------------------------------- 品質の分析（Measure-ReviewQuality など）
 
 
