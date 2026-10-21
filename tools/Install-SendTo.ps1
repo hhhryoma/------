@@ -43,60 +43,131 @@ else {
     $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 }
 
-$wsh = New-Object -ComObject WScript.Shell
+# ショートカット（.lnk）の読み書き。WScript.Shell はファイル名を ANSI のコードページで扱うため、
+# 日本語の名前は日本語版以外の Windows で保存できない。Unicode の IShellLinkW を直接使う
+if (-not ('ExcelTools.ShellLink' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Text;
+
+namespace ExcelTools {
+    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IShellLinkW {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile, int cch, IntPtr pfd, uint fFlags);
+        void GetIDList(out IntPtr ppidl);
+        void SetIDList(IntPtr pidl);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszName, int cch);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszDir, int cch);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszArgs, int cch);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+        void GetHotkey(out short pwHotkey);
+        void SetHotkey(short wHotkey);
+        void GetShowCmd(out int piShowCmd);
+        void SetShowCmd(int iShowCmd);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszIconPath, int cch, out int piIcon);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, uint dwReserved);
+        void Resolve(IntPtr hwnd, uint fFlags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+    }
+
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+    class CShellLink { }
+
+    public class ShellLinkInfo {
+        public string TargetPath;
+        public string Arguments;
+        public string WorkingDirectory;
+        public string Description;
+    }
+
+    public static class ShellLink {
+        public static void Save(string path, string targetPath, string arguments, string workingDirectory, string description) {
+            IShellLinkW link = (IShellLinkW)new CShellLink();
+            try {
+                link.SetPath(targetPath);
+                link.SetArguments(arguments);
+                link.SetWorkingDirectory(workingDirectory);
+                link.SetDescription(description);
+                ((IPersistFile)link).Save(path, true);
+            }
+            finally { Marshal.FinalReleaseComObject(link); }
+        }
+
+        public static ShellLinkInfo Read(string path) {
+            IShellLinkW link = (IShellLinkW)new CShellLink();
+            try {
+                ((IPersistFile)link).Load(path, 0);
+                ShellLinkInfo info = new ShellLinkInfo();
+                StringBuilder sb = new StringBuilder(32768);
+                link.GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
+                info.TargetPath = sb.ToString();
+                sb.Length = 0;
+                link.GetArguments(sb, sb.Capacity);
+                info.Arguments = sb.ToString();
+                sb.Length = 0;
+                link.GetWorkingDirectory(sb, sb.Capacity);
+                info.WorkingDirectory = sb.ToString();
+                sb.Length = 0;
+                link.GetDescription(sb, sb.Capacity);
+                info.Description = sb.ToString();
+                return info;
+            }
+            finally { Marshal.FinalReleaseComObject(link); }
+        }
+    }
+}
+'@
+}
+
 $results = New-Object System.Collections.Generic.List[object]
 
 function Get-LauncherAction {
-    #     このツールのショートカットなら、その -Action を返す（ほかのショートカットは $null）
+    #     このツールのショートカットなら、その -Action を返す（ほかのショートカット・読めないファイルは $null）
     param([string] $LinkPath)
-    $link = $wsh.CreateShortcut($LinkPath)
+    try { $link = [ExcelTools.ShellLink]::Read($LinkPath) } catch { return $null }
     $m = [regex]::Match($link.Arguments, 'Invoke-SendTo\.ps1"?\s+-Action\s+(\w+)')
     if ($m.Success) { return $m.Groups[1].Value }
     return $null
 }
 
-try {
-    if ($Uninstall) {
-        foreach ($f in @(Get-ChildItem -LiteralPath $SendToDir -Filter '*.lnk' -File)) {
-            $act = Get-LauncherAction $f.FullName
-            if (-not $act) { continue }
-            if ($Action -and $Action -notcontains $act) { continue }
-            $status = '削除'
-            if ($PSCmdlet.ShouldProcess($f.Name, 'ショートカットを削除')) { Remove-Item -LiteralPath $f.FullName -Force }
-            else { $status = '削除予定' }
-            $results.Add([pscustomobject]@{ Name = $f.BaseName; Status = $status; Detail = ''; Path = $f.FullName })
-        }
-    }
-    else {
-        # 引数の最後が \" だと引用符の終わりと解釈されないため、末尾の \ は外す
-        $argText = ''
-        if ($OutDir) { $argText = ' -OutDir "{0}"' -f $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir).TrimEnd('\') }
-        foreach ($a in $selected) {
-            $name = $Prefix + $a.Label
-            $linkPath = Join-Path $SendToDir ($name + '.lnk')
-            $status = '作成'
-            if (Test-Path -LiteralPath $linkPath) {
-                if (-not (Get-LauncherAction $linkPath) -and -not $Force) {
-                    $results.Add([pscustomobject]@{ Name = $name; Status = 'スキップ'; Detail = '同じ名前のほかのショートカットがあります（-Force で置き換えます）'; Path = $linkPath })
-                    continue
-                }
-                $status = '更新'
-            }
-            if ($PSCmdlet.ShouldProcess($name, "ショートカットを$status")) {
-                $link = $wsh.CreateShortcut($linkPath)
-                $link.TargetPath = $exe
-                $link.Arguments = ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -Action {1}{2}' -f $launcher, $a.Action, $argText)
-                $link.WorkingDirectory = $PSScriptRoot
-                $link.Description = $a.Detail
-                $link.Save()
-            }
-            else { $status += '予定' }
-            $results.Add([pscustomobject]@{ Name = $name; Status = $status; Detail = $a.Detail; Path = $linkPath })
-        }
+if ($Uninstall) {
+    foreach ($f in @(Get-ChildItem -LiteralPath $SendToDir -Filter '*.lnk' -File)) {
+        $act = Get-LauncherAction $f.FullName
+        if (-not $act) { continue }
+        if ($Action -and $Action -notcontains $act) { continue }
+        $status = '削除'
+        if ($PSCmdlet.ShouldProcess($f.Name, 'ショートカットを削除')) { Remove-Item -LiteralPath $f.FullName -Force }
+        else { $status = '削除予定' }
+        $results.Add([pscustomobject]@{ Name = $f.BaseName; Status = $status; Detail = ''; Path = $f.FullName })
     }
 }
-finally {
-    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh)
+else {
+    # 引数の最後が \" だと引用符の終わりと解釈されないため、末尾の \ は外す
+    $argText = ''
+    if ($OutDir) { $argText = ' -OutDir "{0}"' -f $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir).TrimEnd('\') }
+    foreach ($a in $selected) {
+        $name = $Prefix + $a.Label
+        $linkPath = Join-Path $SendToDir ($name + '.lnk')
+        $status = '作成'
+        if (Test-Path -LiteralPath $linkPath) {
+            if (-not (Get-LauncherAction $linkPath) -and -not $Force) {
+                $results.Add([pscustomobject]@{ Name = $name; Status = 'スキップ'; Detail = '同じ名前のほかのショートカットがあります（-Force で置き換えます）'; Path = $linkPath })
+                continue
+            }
+            $status = '更新'
+        }
+        if ($PSCmdlet.ShouldProcess($name, "ショートカットを$status")) {
+            $linkArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Action {1}{2}' -f $launcher, $a.Action, $argText
+            [ExcelTools.ShellLink]::Save($linkPath, $exe, $linkArgs, $PSScriptRoot, $a.Detail)
+        }
+        else { $status += '予定' }
+        $results.Add([pscustomobject]@{ Name = $name; Status = $status; Detail = $a.Detail; Path = $linkPath })
+    }
 }
 
 $results

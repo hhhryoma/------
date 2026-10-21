@@ -113,46 +113,42 @@ Test-Case 'Install-SendTo: Windows 以外では使えないと知らせる' -Non
 
 Test-Case 'Install-SendTo: 「送る」にショートカットを作り、ほかのショートカットは置き換えない。-Uninstall で自分のものだけ消す' -WindowsOnly {
     $sendTo = New-TestDir
-    $wsh = New-Object -ComObject WScript.Shell
-    # 同じ名前のほかのショートカット
-    $other = $wsh.CreateShortcut((Join-Path $sendTo 'Excel 差分（2 つ選ぶ）.lnk'))
-    $other.TargetPath = Join-Path $env:SystemRoot 'notepad.exe'
-    $other.Save()
-
+    # -WhatIf では作らない（ショートカットを読み書きする型もここで読み込まれる）
     $results = @(& $InstallSendTo -SendToDir $sendTo -WhatIf 6>$null)
-    Assert-Equal 1 @(Get-ChildItem -LiteralPath $sendTo -Filter '*.lnk').Count '-WhatIf で作った'
-    Assert-Equal 8 @($results | Where-Object Status -eq '作成予定').Count
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $sendTo -Filter '*.lnk').Count '-WhatIf で作った'
+    Assert-Equal 9 @($results | Where-Object Status -eq '作成予定').Count
+
+    # 同じ名前のほかのショートカット
+    $notepad = Join-Path $env:SystemRoot 'notepad.exe'
+    [ExcelTools.ShellLink]::Save((Join-Path $sendTo 'Excel 差分（2 つ選ぶ）.lnk'), $notepad, '', '', '')
 
     $results = @(& $InstallSendTo -SendToDir $sendTo -Action Check, Compare, Search 6>$null)
     Assert-Equal @('Excel 提出前チェック|作成', 'Excel 差分（2 つ選ぶ）|スキップ', 'Excel 検索|作成') @($results | ForEach-Object { '{0}|{1}' -f $_.Name, $_.Status })
-    $link = $wsh.CreateShortcut((Join-Path $sendTo 'Excel 提出前チェック.lnk'))
+    $link = [ExcelTools.ShellLink]::Read((Join-Path $sendTo 'Excel 提出前チェック.lnk'))
     Assert-Match $link.TargetPath '\\WindowsPowerShell\\v1\.0\\powershell\.exe$'
     Assert-Equal ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -Action Check' -f $SendTo) $link.Arguments
     Assert-Equal $script:ToolsDir $link.WorkingDirectory
+    Assert-Match $link.Description '^体裁・消し忘れ・情報漏れ'
 
     # もう一度実行すると更新、-Force でほかのショートカットも置き換える
     $results = @(& $InstallSendTo -SendToDir $sendTo -Action Check, Compare -Force -OutDir 'C:\結果\' 6>$null)
     Assert-Equal @('Excel 提出前チェック|更新', 'Excel 差分（2 つ選ぶ）|更新') @($results | ForEach-Object { '{0}|{1}' -f $_.Name, $_.Status })
-    $link = $wsh.CreateShortcut((Join-Path $sendTo 'Excel 差分（2 つ選ぶ）.lnk'))
+    $link = [ExcelTools.ShellLink]::Read((Join-Path $sendTo 'Excel 差分（2 つ選ぶ）.lnk'))
     Assert-Equal ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -Action Compare -OutDir "C:\結果"' -f $SendTo) $link.Arguments
 
     # 自分のものだけを消す
-    $other = $wsh.CreateShortcut((Join-Path $sendTo 'メモ帳.lnk'))
-    $other.TargetPath = Join-Path $env:SystemRoot 'notepad.exe'
-    $other.Save()
+    [ExcelTools.ShellLink]::Save((Join-Path $sendTo 'メモ帳.lnk'), $notepad, '', '', '')
     $results = @(& $InstallSendTo -SendToDir $sendTo -Uninstall 6>$null)
     Assert-Equal 3 $results.Count
     Assert-Equal @('メモ帳.lnk') @(Get-ChildItem -LiteralPath $sendTo -Filter '*.lnk' | ForEach-Object { $_.Name })
 
     Assert-Throws { & $InstallSendTo -SendToDir $sendTo -Action Nothing 6>$null } '登録できない -Action'
-    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh)
 }
 
 Test-Case 'Install-SendTo: 作ったショートカットのコマンドで、空白や日本語を含むパスのファイルをチェックできる' -WindowsOnly {
     $sendTo = New-TestDir
     $null = & $InstallSendTo -SendToDir $sendTo -Action Check 6>$null
-    $wsh = New-Object -ComObject WScript.Shell
-    $link = $wsh.CreateShortcut((Join-Path $sendTo 'Excel 提出前チェック.lnk'))
+    $link = [ExcelTools.ShellLink]::Read((Join-Path $sendTo 'Excel 提出前チェック.lnk'))
     $dir = Join-Path (New-TestDir) '提出 物'
     New-Item -ItemType Directory -Path $dir | Out-Null
     Copy-Item -LiteralPath (Join-Path $script:Fixtures 'deliverable/bad.xlsx') -Destination (Join-Path $dir '設計書 v1.0.xlsx')
@@ -174,7 +170,6 @@ Test-Case 'Install-SendTo: 作ったショートカットのコマンドで、�
 
     # ファイルを選ばずに起動したとき（失敗）は終了コードで知らせる
     Assert-Equal 1 $failed.ExitCode
-    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh)
 }
 
 Test-Case 'Invoke-SendTo / Install-SendTo: Get-Help でヘルプが表示される' {
