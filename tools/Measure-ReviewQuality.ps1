@@ -7,6 +7,8 @@ param(
 
     [string] $SizeCsv,
 
+    [string[]] $ReviewLog,
+
     [string] $Limits,
 
     [string] $Headers,
@@ -27,7 +29,9 @@ $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
 $sizeScript = Join-Path $PSScriptRoot 'Measure-DesignSize.ps1'
 
 if (-not $Limits) { $Limits = Join-Path $PSScriptRoot 'review-quality/基準値_サンプル.csv' }
-if (-not $Headers) { $Headers = Join-Path $PSScriptRoot 'review-quality/指摘管理表の見出し.csv' }
+$defaultHeaders = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $PSScriptRoot 'review-quality/指摘管理表の見出し.csv'))
+if (-not $Headers) { $Headers = $defaultHeaders }
+$zoneCsv = Join-Path $PSScriptRoot 'review-quality/ゾーン分析.csv'
 foreach ($name in @('Limits', 'Headers', 'SizeCsv', 'OutXlsx')) {
     $v = Get-Variable -Name $name -ValueOnly
     if ($v) { Set-Variable -Name $name -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($v) }
@@ -46,25 +50,35 @@ $excludedPattern = '取下げ|取り下げ|取消|却下|対象外|重複|誤指
 # ---------------------------------------------------------------- 設定
 
 
+# 見出しの候補。-Headers に無い項目（レビュー記録の工数など）は、既定の CSV の候補を使う
 $candidates = @{}
-foreach ($r in (Read-CsvFile $Headers @('項目', '見出し') '指摘管理表の見出し')) {
-    $field = ([string]$r.'項目').Trim()
-    if ($field) { $candidates[$field] = @(([string]$r.'見出し') -split '\|' | ForEach-Object { ConvertTo-Label $_ } | Where-Object { $_ }) }
+$headerFiles = @($defaultHeaders)
+if ($Headers -ne $defaultHeaders) { $headerFiles += $Headers }
+foreach ($file in $headerFiles) {
+    if ($file -eq $defaultHeaders -and $Headers -ne $defaultHeaders -and -not (Test-Path -LiteralPath $file)) { continue }
+    foreach ($r in (Read-CsvFile $file @('項目', '見出し') '指摘管理表の見出し')) {
+        $field = ([string]$r.'項目').Trim()
+        if ($field) { $candidates[$field] = @(([string]$r.'見出し') -split '\|' | ForEach-Object { ConvertTo-Label $_ } | Where-Object { $_ }) }
+    }
 }
 $fields = @('設計書', '指摘内容', '分類', '重要度', '状態', '対応要否', '起票日', '期限', '完了日', '対応者', '工程')
-foreach ($f in $fields) { if (-not $candidates.ContainsKey($f)) { $candidates[$f] = @() } }
+$logFields = @('設計書', '工数', '時間', '人数', '参加者')
+foreach ($f in ($fields + $logFields)) { if (-not $candidates.ContainsKey($f)) { $candidates[$f] = @() } }
 if ($candidates['指摘内容'].Count -eq 0) { throw "指摘管理表の見出しに「指摘内容」の行がありません: $Headers" }
 
+# 基準値。「指標」の列が無い CSV（以前の形）は、すべて指摘密度の基準値とみなす
 $limitRows = New-Object System.Collections.Generic.List[object]
 foreach ($r in (Read-CsvFile $Limits @('分母', '下限', '上限') '基準値')) {
     $unit = ([string]$r.'分母').Trim()
     if (-not $unit) { continue }
+    $metric = 'Findings'
+    if ($r.PSObject.Properties['指標'] -and ([string]$r.'指標') -match '工数') { $metric = 'Effort' }
     $process = ''
     if ($r.PSObject.Properties['工程']) { $process = ([string]$r.'工程').Trim() }
     $low = $null; $high = $null
     if (([string]$r.'下限').Trim()) { $low = [double]$r.'下限' }
     if (([string]$r.'上限').Trim()) { $high = [double]$r.'上限' }
-    $limitRows.Add([pscustomobject]@{ Unit = $unit; Process = $process; Low = $low; High = $high })
+    $limitRows.Add([pscustomobject]@{ Metric = $metric; Unit = $unit; Process = $process; Low = $low; High = $high })
 }
 
 function ConvertTo-DocKey {
@@ -183,6 +197,146 @@ foreach ($c in $csvFiles) {
     }
 }
 
+# ---------------------------------------------------------------- レビュー記録を読む（レビュー工数）
+
+
+$efforts = New-Object System.Collections.Generic.List[object]
+
+function ConvertTo-Hours {
+    #     時間の文字（1.5・1.5h・2時間・90分・1時間30分・3人時・1:30・10:00～11:30）を時間の数にする。読めなければ $null。
+    #     Minutes: 数字だけのときに分とみなす（見出しが「レビュー時間(分)」など）
+    param([string] $Text, [bool] $Minutes)
+    $t = ([string]$Text).Normalize($nfkc).Trim()
+    if (-not $t) { return $null }
+    $m = [regex]::Match($t, '^(\d{1,2}):(\d{2})\s*[~\-〜]\s*(\d{1,2}):(\d{2})$')
+    if ($m.Success) {
+        $span = ([int]$m.Groups[3].Value * 60 + [int]$m.Groups[4].Value) - ([int]$m.Groups[1].Value * 60 + [int]$m.Groups[2].Value)
+        if ($span -gt 0) { return $span / 60.0 }
+        return $null
+    }
+    $m = [regex]::Match($t, '^(\d+):(\d{2})$')
+    if ($m.Success) { return [int]$m.Groups[1].Value + [int]$m.Groups[2].Value / 60.0 }
+    $m = [regex]::Match($t, '^(?:(\d+(?:\.\d+)?)\s*(?:人時|時間|hrs|hr|h))?\s*(?:(\d+(?:\.\d+)?)\s*分)?$', 'IgnoreCase')
+    if ($m.Success -and ($m.Groups[1].Success -or $m.Groups[2].Success)) {
+        $hours = 0.0
+        if ($m.Groups[1].Success) { $hours += [double]::Parse($m.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture) }
+        if ($m.Groups[2].Success) { $hours += [double]::Parse($m.Groups[2].Value, [System.Globalization.CultureInfo]::InvariantCulture) / 60 }
+        return $hours
+    }
+    $n = 0.0
+    if ([double]::TryParse($t, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$n)) {
+        if ($Minutes) { return $n / 60 }
+        return $n
+    }
+    return $null
+}
+
+function Get-PersonCount {
+    #     参加人数（「3」「3名」）か、参加者の名前の数（「山田、佐藤」）
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($nfkc).Trim()
+    if (-not $t) { return 0 }
+    $m = [regex]::Match($t, '^(\d+)\s*(?:名|人)?$')
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+    return @($t -split '[、,/・;\r\n↵]+' | Where-Object { $_.Trim() }).Count
+}
+
+function Add-Effort {
+    #     レビュー 1 回分の工数（人時）を足す。工数が無ければ、時間 × 人数（参加者の数）
+    param([hashtable] $Values, [hashtable] $Labels, $Place)
+    $doc = ([string]$Values['設計書']).Trim()
+    if (-not $doc) { return }
+    $hours = ConvertTo-Hours $Values['工数'] ($Labels['工数'] -match '分')
+    if ($null -eq $hours) {
+        $time = ConvertTo-Hours $Values['時間'] ($Labels['時間'] -match '分')
+        if ($null -eq $time) { return }
+        $persons = 0
+        if (([string]$Values['人数']).Trim()) { $persons = Get-PersonCount $Values['人数'] }
+        if ($persons -eq 0) { $persons = Get-PersonCount $Values['参加者'] }
+        if ($persons -eq 0) { $persons = 1 }
+        $hours = $time * $persons
+    }
+    $efforts.Add([pscustomobject]@{ Document = $doc; Key = (ConvertTo-DocKey $doc); Hours = [double]$hours; Place = $Place })
+}
+
+if ($ReviewLog) {
+    $logExcel = New-Object System.Collections.Generic.List[string]
+    $logCsv = New-Object System.Collections.Generic.List[object]
+    foreach ($p in $ReviewLog) {
+        $items = @(Get-Item -Path $p -ErrorAction SilentlyContinue)
+        if ($items.Count -eq 0) { Write-Warning "レビュー記録が見つかりません: $p"; continue }
+        foreach ($item in $items) {
+            if ($item.PSIsContainer) {
+                if (@(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.xls[xmb]?$' -and -not $_.Name.StartsWith('~$') }).Count -gt 0) { $logExcel.Add($item.FullName) }
+                foreach ($c in @(Get-ChildItem -LiteralPath $item.FullName -File -Filter '*.csv' -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue)) { $logCsv.Add($c) }
+            }
+            elseif ($item.Extension -eq '.csv') { $logCsv.Add($item) }
+            else { $logExcel.Add([System.Management.Automation.WildcardPattern]::Escape($item.FullName)) }
+        }
+    }
+    if ($logExcel.Count -gt 0) {
+        $searchArgs = @{ Pattern = '\S'; Path = $logExcel.ToArray(); Target = 'Value' }
+        if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
+        if ($NoExcel) { $searchArgs['NoExcel'] = $true }
+        $books = ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
+        foreach ($book in $books.Values) {
+            foreach ($sheetName in $book.Sheets.Keys) {
+                $grid = $book.Sheets[$sheetName]
+                # 表の形: 設計書と、工数か時間の見出しがある行の下を、1 行 1 回のレビューとして読む
+                $map = $null
+                foreach ($row in $grid.Rows) {
+                    $labels = @($grid.Labels[$row].Values)
+                    $m = @{}
+                    foreach ($f in $logFields) { $l = Find-FirstLabel $labels $candidates[$f]; if ($l) { $m[$f] = $l } }
+                    if ($m['設計書'] -and ($m['工数'] -or $m['時間'])) { $map = $m; break }
+                }
+                if ($map) {
+                    foreach ($t in (Find-DesignTables $grid @($map.Values) $map['設計書'])) {
+                        foreach ($dr in $t.Rows) {
+                            $v = @{}
+                            foreach ($f in $map.Keys) { $v[$f] = [string]$dr.Cells[$t.ColumnOf[$map[$f]]] }
+                            Add-Effort $v $map ([pscustomobject]@{ File = $book.File; Sheet = $sheetName; Row = $dr.Row })
+                        }
+                    }
+                    continue
+                }
+                # 記録票の形: 「対象成果物」「レビュー時間」などの見出しの右の値を、1 シート 1 回のレビューとして読む
+                $v = @{}; $found = @{}
+                foreach ($f in $logFields) {
+                    foreach ($cand in $candidates[$f]) {
+                        $cell = Find-LabelCell $grid $cand
+                        if (-not ($cell -and $cell.Value)) { continue }
+                        $v[$f] = $cell.Value
+                        # 参加者は、右に 1 人ずつ並べて書くことがある
+                        if ($f -eq '参加者') { $v[$f] = (@($grid.Cols[$cell.Row] | Where-Object { $_ -ge $cell.Col } | ForEach-Object { $grid.Cells[$cell.Row][$_] }) -join '、') }
+                        $found[$f] = $cand
+                        break
+                    }
+                }
+                if ($v['設計書'] -and ($v['工数'] -or $v['時間'])) { Add-Effort $v $found ([pscustomobject]@{ File = $book.File; Sheet = $sheetName; Row = 0 }) }
+            }
+        }
+    }
+    foreach ($c in $logCsv) {
+        $rows = Read-CsvFile $c.FullName @() 'レビュー記録'
+        if ($rows.Count -eq 0) { continue }
+        $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
+        $map = @{}
+        foreach ($f in $logFields) { foreach ($n in $names) { if (-not $map[$f] -and $candidates[$f] -contains (ConvertTo-Label $n)) { $map[$f] = $n } } }
+        if (-not $map['設計書'] -or -not ($map['工数'] -or $map['時間'])) { Write-Warning ("{0}: 設計書と、工数か時間の列が見つかりません" -f $c.Name); continue }
+        $labels = @{}
+        foreach ($f in $map.Keys) { $labels[$f] = ConvertTo-Label $map[$f] }
+        $line = 1
+        foreach ($r in $rows) {
+            $line++
+            $v = @{}
+            foreach ($f in $map.Keys) { $v[$f] = [string]$r.($map[$f]) }
+            Add-Effort $v $labels ([pscustomobject]@{ File = $c.Name; Sheet = ''; Row = $line })
+        }
+    }
+    if ($efforts.Count -eq 0) { Write-Warning 'レビュー記録から工数を読めませんでした（設計書と、工数か時間の見出しを確かめてください）' }
+}
+
 # ---------------------------------------------------------------- 規模（分母）
 
 
@@ -234,43 +388,85 @@ function Format-Breakdown {
     return (@($groups | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }) -join '・')
 }
 
+function New-Doc {
+    param([string] $Name, $SizeKey)
+    return [pscustomobject]@{ Name = $Name; SizeKey = $SizeKey; Items = (New-Object System.Collections.Generic.List[object]); Effort = $null; Reviews = 0 }
+}
+
 $docs = [ordered]@{}
 foreach ($f in $findings) {
     $sk = Find-SizeKey $f.Key
     $k = $f.Key
     if ($sk) { $k = $sk }
-    if (-not $docs.Contains($k)) { $docs[$k] = [pscustomobject]@{ Name = $f.Document; SizeKey = $sk; Items = (New-Object System.Collections.Generic.List[object]) } }
+    if (-not $docs.Contains($k)) { $docs[$k] = New-Doc $f.Document $sk }
     $docs[$k].Items.Add($f)
 }
-foreach ($k in $sizes.Keys) { if (-not $docs.Contains($k)) { $docs[$k] = [pscustomobject]@{ Name = $sizes[$k].Name; SizeKey = $k; Items = (New-Object System.Collections.Generic.List[object]) } } }
+foreach ($k in $sizes.Keys) { if (-not $docs.Contains($k)) { $docs[$k] = New-Doc $sizes[$k].Name $k } }
+foreach ($e in $efforts) {
+    # 規模の名前、指摘の設計書の名前（同じ名前か、どちらかがもう一方を含む名前がただ 1 つ）の順に対応付ける
+    $sk = Find-SizeKey $e.Key
+    $k = $sk
+    if (-not $k) {
+        if ($docs.Contains($e.Key)) { $k = $e.Key }
+        else {
+            $hit = @($docs.Keys | Where-Object { $_.Contains($e.Key) -or $e.Key.Contains($_) })
+            if ($hit.Count -eq 1) { $k = $hit[0] } else { $k = $e.Key }
+        }
+    }
+    if (-not $docs.Contains($k)) { $docs[$k] = New-Doc $e.Document $sk }
+    if ($null -eq $docs[$k].Effort) { $docs[$k].Effort = 0.0 }
+    $docs[$k].Effort += $e.Hours
+    $docs[$k].Reviews++
+}
+
+function Get-Judgement {
+    #     基準値（指標・分母・工程）と比べて「少ない」「基準内」「多い」。基準値が無ければ ''
+    param([string] $Metric, [string] $Unit, [string] $Process, [double] $Value)
+    $limit = @($limitRows | Where-Object { $_.Metric -eq $Metric -and $_.Unit -eq $Unit -and $Process -and $_.Process -eq $Process })[0]
+    if (-not $limit) { $limit = @($limitRows | Where-Object { $_.Metric -eq $Metric -and $_.Unit -eq $Unit -and -not $_.Process })[0] }
+    if (-not $limit) { return '' }
+    if ($null -ne $limit.Low -and $Value -lt $limit.Low) { return '少ない' }
+    if ($null -ne $limit.High -and $Value -gt $limit.High) { return '多い' }
+    return '基準内'
+}
+
+$zones = @{}
+if ($ReviewLog) { $zones = Read-ZoneTable $zoneCsv '工数密度' '指摘密度' }
 
 $results = New-Object System.Collections.Generic.List[object]
 foreach ($k in $docs.Keys) {
     $d = $docs[$k]
     $items = $d.Items
     $size = $null; $unit = ''; $density = $null; $judgement = ''
+    $effortDensity = $null; $effortJudgement = ''; $zone = $null
     if ($d.SizeKey) { $size = $sizes[$d.SizeKey].Size; $unit = $sizes[$d.SizeKey].Unit }
     $process = @($items | Where-Object { $_.Process } | Group-Object Process | Sort-Object Count -Descending | ForEach-Object { $_.Name })[0]
     if ($null -ne $size -and $size -gt 0) {
         $density = [math]::Round($items.Count / $size, 3)
-        $limit = @($limitRows | Where-Object { $_.Unit -eq $unit -and $process -and $_.Process -eq $process })[0]
-        if (-not $limit) { $limit = @($limitRows | Where-Object { $_.Unit -eq $unit -and -not $_.Process })[0] }
-        if ($limit) {
-            if ($null -ne $limit.Low -and $density -lt $limit.Low) { $judgement = '少ない（レビュー不足の疑い）' }
-            elseif ($null -ne $limit.High -and $density -gt $limit.High) { $judgement = '多い（品質に問題の疑い）' }
-            else { $judgement = '基準内' }
+        $level = Get-Judgement 'Findings' $unit $process $density
+        $judgement = @{ '少ない' = '少ない（レビュー不足の疑い）'; '多い' = '多い（品質に問題の疑い）'; '基準内' = '基準内'; '' = '' }[$level]
+        if ($null -ne $d.Effort) {
+            $effortDensity = [math]::Round($d.Effort / $size, 3)
+            $effortJudgement = Get-Judgement 'Effort' $unit $process $effortDensity
+            if ($level -and $effortJudgement) { $zone = $zones[('{0}|{1}' -f $effortJudgement, $level)] }
         }
     }
     elseif ($sizes.Count -gt 0) { $judgement = '規模なし' }
+    $effort = $null
+    if ($null -ne $d.Effort) { $effort = [math]::Round($d.Effort, 2) }
     $r = [pscustomobject]@{
         Document = $d.Name; Findings = $items.Count; Open = @($items | Where-Object { -not $_.Closed }).Count; Overdue = @($items | Where-Object Overdue).Count
         Size = $size; Unit = $unit; Density = $density; Judgement = $judgement; Process = $process
+        Effort = $effort; Reviews = $d.Reviews; EffortDensity = $effortDensity; EffortJudgement = $effortJudgement
+        Zone = $(if ($zone) { $zone.Zone } else { '' }); ZoneView = $(if ($zone) { $zone.View } else { '' }); ZoneAction = $(if ($zone) { $zone.Action } else { '' })
+        NeedsAction = [bool]($zone -and $zone.NeedsAction)
         BySeverity = (Format-Breakdown $items 'Severity'); ByCategory = (Format-Breakdown $items 'Category')
     }
     $r.PSObject.TypeNames.Insert(0, 'ReviewQuality.Document')
     $results.Add($r)
 }
 $results = @($results | Sort-Object @{ e = { $_.Findings }; Descending = $true }, Document)
+if ($ReviewLog) { Update-TypeData -TypeName 'ReviewQuality.Document' -DefaultDisplayPropertySet Document, Findings, Open, Density, Effort, EffortDensity, Zone -Force -WhatIf:$false }
 $results
 
 # 日ごとの起票・完了（収束の確認）
@@ -290,7 +486,34 @@ if ($OutXlsx) {
         $size = ''; $density = ''
         if ($null -ne $r.Size) { $size = [double]$r.Size }
         if ($null -ne $r.Density) { $density = [double]$r.Density }
-        $docRows.Add(@{ Values = @($r.Document, [double]$r.Findings, [double]$r.Open, [double]$r.Overdue, $size, $r.Unit, $density, $r.Judgement, $r.BySeverity, $r.ByCategory) })
+        $values = @($r.Document, [double]$r.Findings, [double]$r.Open, [double]$r.Overdue, $size, $r.Unit, $density, $r.Judgement, $r.BySeverity, $r.ByCategory)
+        if ($ReviewLog) {
+            $effort = ''; $effortDensity = ''
+            if ($null -ne $r.Effort) { $effort = [double]$r.Effort }
+            if ($null -ne $r.EffortDensity) { $effortDensity = [double]$r.EffortDensity }
+            $values += @($effort, $effortDensity, $r.EffortJudgement, $r.Zone, $r.ZoneView, $r.ZoneAction)
+        }
+        $docRows.Add(@{ Values = $values })
+    }
+    $docColumns = @(@{ Header = '設計書'; Width = 40 }, @{ Header = '指摘'; Width = 7 }, @{ Header = '未完了'; Width = 7 }, @{ Header = '期限切れ'; Width = 8 }, @{ Header = '規模'; Width = 8 }, @{ Header = '分母'; Width = 9 }, @{ Header = '指摘密度'; Width = 9 }, @{ Header = '判定'; Width = 26 }, @{ Header = '重要度'; Width = 20 }, @{ Header = '分類'; Width = 30 })
+    if ($ReviewLog) { $docColumns += @(@{ Header = 'レビュー工数の合計（人時）'; Width = 11 }, @{ Header = '工数密度'; Width = 9 }, @{ Header = '工数の判定'; Width = 9 }, @{ Header = 'ゾーン'; Width = 18 }, @{ Header = '見方'; Width = 40 }, @{ Header = '対応の例'; Width = 40 }) }
+    # ゾーン分析: 縦が工数密度、横が指摘密度の 3 × 3 のマス。マスにはゾーンの名前と設計書を書く
+    $zoneRows = New-Object System.Collections.Generic.List[object]
+    if ($ReviewLog) {
+        foreach ($effortLevel in @('多い', '基準内', '少ない')) {
+            $values = @("工数密度が$effortLevel")
+            foreach ($findingLevel in @('少ない', '基準内', '多い')) {
+                $z = $zones[('{0}|{1}' -f $effortLevel, $findingLevel)]
+                $lines = New-Object System.Collections.Generic.List[string]
+                if ($z) { $lines.Add('【' + $z.Zone + '】') }
+                foreach ($r in $results) {
+                    if ($r.EffortJudgement -ne $effortLevel -or -not $r.Judgement.StartsWith($findingLevel)) { continue }
+                    $lines.Add(('{0}（指摘 {1} / 工数 {2}）' -f $r.Document, $r.Density, $r.EffortDensity))
+                }
+                $values += ($lines -join "`n")
+            }
+            $zoneRows.Add(@{ Values = $values })
+        }
     }
     $breakRows = New-Object System.Collections.Generic.List[object]
     foreach ($p in @(@('分類', 'Category'), @('重要度', 'Severity'), @('対応者', 'Owner'), @('工程', 'Process'), @('状態', 'Status'))) {
@@ -311,11 +534,15 @@ if ($OutXlsx) {
     $trendRows = New-Object System.Collections.Generic.List[object]
     foreach ($t in $trend) { $trendRows.Add(@{ Values = @($t.Date.ToString('yyyy/MM/dd'), [double]$t.Opened, [double]$t.Closed, [double]$t.TotalOpened, [double]$t.TotalClosed, [double]$t.Remaining) }) }
     try {
-        Export-Workbook -FilePath $OutXlsx -Sheets @(
-            @{ Name = '設計書別'; Columns = @(@{ Header = '設計書'; Width = 40 }, @{ Header = '指摘'; Width = 7 }, @{ Header = '未完了'; Width = 7 }, @{ Header = '期限切れ'; Width = 8 }, @{ Header = '規模'; Width = 8 }, @{ Header = '分母'; Width = 9 }, @{ Header = '指摘密度'; Width = 9 }, @{ Header = '判定'; Width = 26 }, @{ Header = '重要度'; Width = 20 }, @{ Header = '分類'; Width = 30 }); Rows = $docRows },
+        $sheets = @(
+            @{ Name = '設計書別'; Columns = $docColumns; Rows = $docRows },
             @{ Name = '内訳'; Columns = @(@{ Header = '項目'; Width = 10 }, @{ Header = '値'; Width = 20 }, @{ Header = '指摘'; Width = 7 }, @{ Header = '未完了'; Width = 7 }, @{ Header = '期限切れ'; Width = 8 }); Rows = $breakRows },
             @{ Name = '未完了'; Columns = @(@{ Header = '設計書'; Width = 30 }, @{ Header = '指摘内容'; Width = 50 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '分類'; Width = 10 }, @{ Header = '対応者'; Width = 10 }, @{ Header = '期限'; Width = 11 }, @{ Header = '期限切れ'; Width = 8 }, @{ Header = '状態'; Width = 9 }, @{ Header = '指摘管理表'; Width = 36 }); Rows = $openRows },
             @{ Name = '推移'; Columns = @(@{ Header = '日付'; Width = 11 }, @{ Header = '起票'; Width = 7 }, @{ Header = '完了'; Width = 7 }, @{ Header = '起票の累計'; Width = 10 }, @{ Header = '完了の累計'; Width = 10 }, @{ Header = '未完了'; Width = 7 }); Rows = $trendRows })
+        if ($ReviewLog) {
+            $sheets += @{ Name = 'ゾーン分析'; Columns = @(@{ Header = '工数密度 ＼ 指摘密度'; Width = 18 }, @{ Header = '指摘密度が少ない'; Width = 40 }, @{ Header = '指摘密度が基準内'; Width = 40 }, @{ Header = '指摘密度が多い'; Width = 40 }); Rows = $zoneRows }
+        }
+        Export-Workbook -FilePath $OutXlsx -Sheets $sheets
     }
     catch {
         Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
@@ -333,6 +560,16 @@ foreach ($p in @(@('重要度', 'Severity'), @('分類', 'Category'))) {
 }
 $flagged = @($results | Where-Object { $_.Judgement -like '少ない*' -or $_.Judgement -like '多い*' })
 if ($flagged.Count -gt 0) { Write-Host ('基準値から外れた設計書: {0} 件' -f $flagged.Count) }
+if ($ReviewLog) {
+    $reviewed = @($results | Where-Object { $null -ne $_.Effort })
+    Write-Host ('レビュー工数 {0} 人時（レビュー {1} 回・設計書 {2} 件）' -f [math]::Round((@($efforts | ForEach-Object { $_.Hours }) | Measure-Object -Sum).Sum, 2), $efforts.Count, $reviewed.Count)
+    $zoned = @($results | Where-Object { $_.Zone })
+    if ($zoned.Count -gt 0) { Write-Host ('ゾーン: {0}' -f (Format-Breakdown $zoned 'Zone')) }
+    foreach ($r in @($results | Where-Object NeedsAction)) { Write-Host ('  要対応: {0}（{1}）{2}' -f $r.Document, $r.Zone, $r.ZoneAction) }
+    $noEffort = @($results | Where-Object { $null -eq $_.Effort -and $null -ne $_.Density })
+    if ($noEffort.Count -gt 0) { Write-Host ('レビューの記録が無い設計書: {0} 件（ゾーンを決められません）' -f $noEffort.Count) }
+    if (@($limitRows | Where-Object { $_.Metric -eq 'Effort' }).Count -eq 0) { Write-Warning ('基準値の CSV にレビュー工数密度の行がありません（指標の列に「レビュー工数密度」と書いた行を足してください）: {0}' -f $Limits) }
+}
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
 # .SYNOPSIS
@@ -350,6 +587,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     指摘密度の分母は、-SizeCsv（Export-ExcelToPdf.ps1 -LogPath のページ数など）か、-DesignPath（Measure-DesignSize.ps1 の規模）で渡します。
 #     基準値（下限・上限）から外れた設計書は「少ない（レビュー不足の疑い）」「多い（品質に問題の疑い）」と判定します。
 #
+#     -ReviewLog でレビュー記録（レビューの時間・参加者、または工数）を渡すと、レビュー工数密度（規模あたりの人時）も出し、
+#     指摘密度との 2 軸で設計書を 9 つのゾーンに分けます（ゾーン分析）。指摘が少ないのが「レビューが足りない」のか
+#     「十分にレビューして品質が良い」のかを分けられます。ゾーンの名前・見方・対応の例は tools\review-quality\ゾーン分析.csv で変えられます。
+#
 # .PARAMETER Path
 #     指摘管理表のファイルまたはフォルダ（Excel・CSV。複数可・ワイルドカード可）。既定はカレントフォルダ。
 #
@@ -359,11 +600,18 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .PARAMETER SizeCsv
 #     設計書ごとの規模の CSV（ファイル・ページ数などの列）。Export-ExcelToPdf.ps1 -CountOnly -LogPath の CSV をそのまま使えます。
 #
+# .PARAMETER ReviewLog
+#     レビュー記録のファイルまたはフォルダ（Excel・CSV。複数可）。1 行 1 回のレビューの表（対象成果物・レビュー時間・参加者など）か、
+#     1 シート 1 回の記録票（「対象成果物」「レビュー時間」などの見出しの右に値）を読みます。工数の列があれば工数を、
+#     無ければ時間 × 人数（参加者の数）をレビュー工数（人時）にします。時間は 1.5・1.5h・90分・1時間30分・10:00～11:30 などを読めます。
+#
 # .PARAMETER Limits
-#     指摘密度の基準値の CSV（分母・工程・下限・上限）。既定は tools\review-quality\基準値_サンプル.csv（数値は例です）。
+#     基準値の CSV（指標・分母・工程・下限・上限）。指標は「指摘密度」か「レビュー工数密度」（指標の列が無ければすべて指摘密度）。
+#     既定は tools\review-quality\基準値_サンプル.csv（数値は例です）。
 #
 # .PARAMETER Headers
-#     指摘管理表の見出しの CSV（項目と、見出しの候補）。既定は tools\review-quality\指摘管理表の見出し.csv。
+#     指摘管理表・レビュー記録の見出しの CSV（項目と、見出しの候補）。既定は tools\review-quality\指摘管理表の見出し.csv。
+#     指定した CSV に無い項目は、既定の CSV の候補を使います。
 #
 # .PARAMETER AsOf
 #     期限切れを判定する日。既定は今日。
@@ -375,10 +623,14 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     Excel を起動しません（.xls / .xlsb は読まなくなります）。
 #
 # .PARAMETER OutXlsx
-#     結果を xlsx に保存します（設計書別・内訳・未完了・推移）。
+#     結果を xlsx に保存します（設計書別・内訳・未完了・推移。-ReviewLog を付けるとゾーン分析も）。
 #
 # .EXAMPLE
 #     .\Measure-ReviewQuality.ps1 D:\レビュー\指摘管理表.xlsx -DesignPath D:\設計書 -OutXlsx D:\品質分析.xlsx
+#
+# .EXAMPLE
+#     # レビュー記録の工数も読み、ゾーン分析をする
+#     .\Measure-ReviewQuality.ps1 D:\レビュー\指摘管理表.xlsx -ReviewLog D:\レビュー\レビュー記録 -DesignPath D:\設計書 -OutXlsx D:\品質分析.xlsx
 #
 # .EXAMPLE
 #     # PDF のページ数を分母にする

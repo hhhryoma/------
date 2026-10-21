@@ -881,4 +881,20 @@ function Get-ValidationRange {
     return $sqref.Trim()
 }
 
+# ---------------------------------------------------------------- 品質の分析（Measure-ReviewQuality など）
+
+
+function Read-ZoneTable {
+    #     ゾーン分析の表（CSV）を読む。RowAxis・ColumnAxis は 2 つの軸の列名（例: 工数密度・指摘密度）で、
+    #     値は「少ない」「基準内」「多い」。戻り値: '行の値|列の値' → @{ Zone; View; Action; NeedsAction }
+    param([string] $FilePath, [string] $RowAxis, [string] $ColumnAxis)
+    $table = @{}
+    foreach ($r in (Read-CsvFile $FilePath @($RowAxis, $ColumnAxis, 'ゾーン') 'ゾーン分析の表')) {
+        $get = { param($name) if ($r.PSObject.Properties[$name]) { ([string]$r.$name).Trim() } else { '' } }
+        $key = '{0}|{1}' -f (& $get $RowAxis), (& $get $ColumnAxis)
+        $table[$key] = [pscustomobject]@{ Zone = (& $get 'ゾーン'); View = (& $get '見方'); Action = (& $get '対応の例'); NeedsAction = ((& $get '要対応') -match '^(○|〇|要|Y|yes|1)$') }
+    }
+    return $table
+}
+
 Export-ModuleMember -Function *

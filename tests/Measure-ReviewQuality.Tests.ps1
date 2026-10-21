@@ -82,6 +82,74 @@ Test-Case 'Measure-ReviewQuality: CSV の指摘管理表も読み、-OutXlsx に
     Assert-Equal @('2026/10/01|2|0|2', '2026/10/02|1|0|3', '2026/10/03|1|0|4', '2026/10/05|0|2|2') @(2..5 | ForEach-Object { '{0}|{1}|{2}|{3}' -f $trend.Rows[$_]['A'], $trend.Rows[$_]['B'], $trend.Rows[$_]['C'], $trend.Rows[$_]['F'] })
 }
 
+function New-ReviewLogs {
+    #     レビュー記録（表の形の Excel・記録票の形の Excel・CSV）
+    param([string] $Dir)
+    $logDir = Join-Path $Dir 'レビュー記録'
+    New-Item -ItemType Directory -Path $logDir | Out-Null
+    New-FindingBook (Join-Path $logDir 'レビュー記録一覧.xlsx') '記録' @('No', 'レビュー日', '対象成果物', 'レビュー時間（分）', '参加者') @(
+        @('1', '2026/10/01', 'DD02_画面設計書_SCR001_受注一覧', '60', '山田、佐藤'),
+        @('2', '2026/10/02', 'DD03_テーブル定義書.xlsx', '60', '鈴木'))
+    # 記録票: 見出しの右に値。参加者は右に 1 人ずつ
+    New-FindingBook (Join-Path $logDir 'DD05記録票.xlsx') '記録票' @('レビュー記録票', '', '') @(
+        @('対象成果物', 'DD05_メッセージ一覧', ''),
+        @('レビュー工数', '3人時', ''),
+        @('参加者', '山田', '佐藤'))
+    @('設計書,レビュー時間,人数', 'DD02_画面設計書_SCR001_受注一覧,10:00～10:30,2', 'DD09_未知の設計書,1.5h,1') | Set-Content -LiteralPath (Join-Path $logDir 'log.csv') -Encoding UTF8
+    return $logDir
+}
+
+Test-Case 'Measure-ReviewQuality: -ReviewLog でレビュー工数密度を出し、指摘密度との 2 軸でゾーンに分ける' {
+    $dir = New-TestDir
+    $csv = New-Findings $dir
+    $logDir = New-ReviewLogs $dir
+    $out = Join-Path $dir 'quality.xlsx'
+    $r = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -ReviewLog $logDir -AsOf '2026-10-20' -OutXlsx $out 6>$null)
+    $got = @($r | ForEach-Object { '{0}|{1}|{2}|{3}|{4}|{5}' -f $_.Document, $_.Density, $_.Effort, $_.EffortDensity, $_.EffortJudgement, $_.Zone })
+    Assert-Equal @(
+        'DD02_画面設計書_SCR001_受注一覧|0.75|3|0.75|基準内|良好',
+        'DD03_テーブル定義書|0.1|1|0.1|少ない|レビュー不足',
+        'DD05_メッセージ一覧.pdf|0|3|1.5|多い|良好',
+        'DD09_未知の設計書||1.5|||') $got '分の時間 × 参加者・時刻の範囲 × 人数・記録票の人時'
+    Assert-Equal 2 @($r | Where-Object { $_.Document -like 'DD02*' })[0].Reviews
+    $dd03 = @($r | Where-Object { $_.Document -like 'DD03*' })[0]
+    Assert-True $dd03.NeedsAction
+    Assert-Equal '観点を決めて追加のレビューをする' $dd03.ZoneAction
+
+    $text = Get-HostText { & $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -ReviewLog $logDir -AsOf '2026-10-20' | Out-Null }
+    Assert-Match $text 'レビュー工数 8\.5 人時（レビュー 5 回・設計書 4 件）'
+    Assert-Match $text 'ゾーン: 良好 2・レビュー不足 1'
+    Assert-Match $text '要対応: DD03_テーブル定義書（レビュー不足）観点を決めて追加のレビューをする'
+
+    $book = Read-XlsxSheet -Path $out -Index 1
+    Assert-Equal @('設計書別', '内訳', '未完了', '推移', 'ゾーン分析') $book.Sheets
+    Assert-Equal 'レビュー不足' @($book.Rows.Values | Where-Object { $_['A'] -eq 'DD03_テーブル定義書' })[0]['N']
+    $zone = Read-XlsxSheet -Path $out -Index 5
+    Assert-Equal '工数密度が多い' $zone.Rows[2]['A']
+    Assert-Match $zone.Rows[2]['B'] '^【良好】\nDD05_メッセージ一覧\.pdf（指摘 0 / 工数 1\.5）$'
+    Assert-Match $zone.Rows[3]['C'] '^【良好】\nDD02_画面設計書_SCR001_受注一覧（指摘 0\.75 / 工数 0\.75）$'
+    Assert-Match $zone.Rows[4]['B'] '^【レビュー不足】\nDD03_テーブル定義書（指摘 0\.1 / 工数 0\.1）$'
+    Assert-Equal '【品質に問題】' $zone.Rows[4]['D']
+
+    # 結果のブックを同じフォルダに置いて読み直しても、レビュー記録として数えない
+    Copy-Item -LiteralPath $out -Destination (Join-Path $logDir 'old-result.xlsx')
+    $again = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -ReviewLog $logDir -AsOf '2026-10-20' 6>$null)
+    Assert-Equal 3 @($again | Where-Object { $_.Document -like 'DD02*' })[0].Effort
+}
+
+Test-Case 'Measure-ReviewQuality: 指標の列が無い基準値（以前の形）は指摘密度の基準値とし、ゾーンは決めずに知らせる' {
+    $dir = New-TestDir
+    $csv = New-Findings $dir
+    $logDir = New-ReviewLogs $dir
+    $limits = Join-Path $dir 'limits.csv'
+    @('分母,下限,上限', 'ページ数,0.5,2.0') | Set-Content -LiteralPath $limits -Encoding UTF8
+    $r = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -ReviewLog $logDir -Limits $limits -AsOf '2026-10-20' 6>$null 3>$null)
+    $dd02 = @($r | Where-Object { $_.Document -like 'DD02*' })[0]
+    Assert-Equal '基準内|0.75||' ('{0}|{1}|{2}|{3}' -f $dd02.Judgement, $dd02.EffortDensity, $dd02.EffortJudgement, $dd02.Zone)
+    $warn = (& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -ReviewLog $logDir -Limits $limits -AsOf '2026-10-20' 6>$null 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message }) -join ' '
+    Assert-Match $warn 'レビュー工数密度の行がありません'
+}
+
 Test-Case 'Measure-ReviewQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityTool
     Assert-Match $h.Synopsis '指摘'
