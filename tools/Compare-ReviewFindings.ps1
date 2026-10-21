@@ -103,7 +103,7 @@ function Read-Findings {
         $list.Add([pscustomobject]@{
             Source = $Source; Document = $document; DocKey = (ConvertTo-NameKey $v['設計書']); Content = ([string]$v['指摘内容']).Trim()
             Location = $location; SheetKey = (ConvertTo-Label $sheet).ToUpperInvariant(); Row = $row; Col = $col
-            PointId = ([string]$v['観点ID']).Trim(); Bigrams = (ConvertTo-Bigrams $v['指摘内容']); Place = $rec; Matched = $null
+            PointId = ([string]$v['観点ID']).Trim(); Bigrams = (ConvertTo-Bigrams $v['指摘内容']); Place = $rec; Matched = $null; Seq = $list.Count
         })
     }
     return , $list
@@ -129,7 +129,8 @@ foreach ($a in $ai) {
     }
 }
 $pairs = New-Object System.Collections.Generic.List[object]
-foreach ($p in @($candidatePairs | Sort-Object Score -Descending)) {
+# 同じ良さの組は読んだ順にする（Windows PowerShell 5.1 の Sort-Object は同じ値の順番を保たない）
+foreach ($p in @($candidatePairs | Sort-Object @{ e = 'Score'; Descending = $true }, @{ e = { $_.Ai.Seq } }, @{ e = { $_.Human.Seq } })) {
     if ($p.Ai.Matched -or $p.Human.Matched) { continue }
     $p.Ai.Matched = $p.Human
     $p.Human.Matched = $p.Ai
@@ -137,7 +138,7 @@ foreach ($p in @($candidatePairs | Sort-Object Score -Descending)) {
 }
 
 function New-Pair {
-    param([string] $Status, $Ai, $Human, [string] $Basis, $Similarity)
+    param([string] $Status, $Ai, $Human, [string] $Basis, $Similarity, [int] $Seq)
     $doc = $(if ($Human) { $Human.Document } else { $Ai.Document })
     $similarityValue = $null
     if ($null -ne $Similarity) { $similarityValue = [math]::Round($Similarity, 2) }
@@ -146,17 +147,17 @@ function New-Pair {
         PointId = $(if ($Ai) { $Ai.PointId } else { '' })
         AiLocation = $(if ($Ai) { $Ai.Location } else { '' }); AiContent = $(if ($Ai) { $Ai.Content } else { '' })
         HumanLocation = $(if ($Human) { $Human.Location } else { '' }); HumanContent = $(if ($Human) { $Human.Content } else { '' })
-        AiPlace = $(if ($Ai) { $Ai.Place } else { $null }); HumanPlace = $(if ($Human) { $Human.Place } else { $null })
+        AiPlace = $(if ($Ai) { $Ai.Place } else { $null }); HumanPlace = $(if ($Human) { $Human.Place } else { $null }); Seq = $Seq
     }
     $o.PSObject.TypeNames.Insert(0, 'ReviewCompare.Pair')
     return $o
 }
 
 $results = New-Object System.Collections.Generic.List[object]
-foreach ($p in $pairs) { $results.Add((New-Pair '一致' $p.Ai $p.Human $p.Basis $p.Similarity)) }
-foreach ($a in @($ai | Where-Object { -not $_.Matched })) { $results.Add((New-Pair 'AI だけ' $a $null '' $null)) }
-foreach ($h in @($human | Where-Object { -not $_.Matched })) { $results.Add((New-Pair '人だけ' $null $h '' $null)) }
-$sorted = @($results | Sort-Object @{ e = { ConvertTo-NameKey $_.Document } }, @{ e = { @{ '一致' = 0; 'AI だけ' = 1; '人だけ' = 2 }[$_.Status] } })
+foreach ($p in $pairs) { $results.Add((New-Pair '一致' $p.Ai $p.Human $p.Basis $p.Similarity $results.Count)) }
+foreach ($a in @($ai | Where-Object { -not $_.Matched })) { $results.Add((New-Pair 'AI だけ' $a $null '' $null $results.Count)) }
+foreach ($h in @($human | Where-Object { -not $_.Matched })) { $results.Add((New-Pair '人だけ' $null $h '' $null $results.Count)) }
+$sorted = @($results | Sort-Object @{ e = { ConvertTo-NameKey $_.Document } }, @{ e = { @{ '一致' = 0; 'AI だけ' = 1; '人だけ' = 2 }[$_.Status] } }, Seq)
 $sorted
 
 # ---------------------------------------------------------------- 集計
