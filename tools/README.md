@@ -18,10 +18,11 @@
 | [Measure-ReviewQuality.ps1](#measure-reviewqualityps1) | レビューの指摘管理表を集計し、設計書ごとの指摘件数・指摘密度（ページ数・規模あたり）・未完了・期限切れを出し、基準値から外れた設計書を知らせる（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
+| [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Test-DesignConsistency.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -1803,3 +1804,62 @@ Copilot は 1 回に貼り付けられる文字数に上限があり、ライセ
 - 設計書の内容を Copilot に送信します。顧客の資料を扱う場合は、社内の Copilot 利用規程に従ってください
 - 設計書か観点表を変えて再実行すると、内容が変わった依頼の古い回答は `answers\R001.txt.old` のように退避され、もう一度依頼し直しになります
 - 図形の中の文字・コメントもテキスト化します。画像（スクリーンショット）の中身は読めません
+
+## Install-SendTo.ps1
+
+エクスプローラーの右クリック →「送る」メニューに、各ツールを登録します。登録は 1 回だけで、PowerShell に慣れていない人でも、**ファイルやフォルダを選んで「送る」から項目を選ぶだけ**でツールを使えます。
+
+```powershell
+# すべての処理を「送る」に登録する（自分の「送る」だけに登録するので、管理者の権限は要りません）
+.\Install-SendTo.ps1
+```
+
+```
+Name                       Status Detail
+----                       ------ ------
+Excel 提出前チェック       作成   体裁・消し忘れ・情報漏れ・印刷のはみ出しなどを確かめ、結果の Excel を開きます
+Excel 表示を整える         作成   開いたときに先頭シートの A1 が倍率 100% で表示される状態に直します（上書きします）
+Excel 差分（2 つ選ぶ）     作成   2 つのブック（またはフォルダ）を比べ、結果の Excel を開きます。版数（ファイル名）か更新日時の古い方を旧にします
+...
+```
+
+| 「送る」の項目 | 実行するツール | 動き |
+| --- | --- | --- |
+| Excel 提出前チェック | Test-ExcelDeliverable.ps1 | 結果の Excel を開く |
+| Excel 表示を整える | Reset-ExcelView.ps1 | 選んだファイルを上書きする |
+| Excel 差分（2 つ選ぶ） | Compare-Excel.ps1 | 2 つ選ぶ。ファイル名の版数（`_v1.1` など）、無ければ更新日時の古い方を旧にして、結果の Excel を開く |
+| Excel 検索 | Search-Excel.ps1 | 探す文字を入力する（入力した文字そのものを探す）。結果の Excel を開く |
+| Excel 表記ゆれ | Test-ExcelTerms.ps1 | 結果の Excel を開く |
+| Excel 設計書の整合性チェック | Test-DesignConsistency.ps1 | 結果の Excel を開く |
+| Excel 規模の見積もり | Measure-DesignSize.ps1 | 結果の Excel を開く |
+| Excel 見積書の検算 | Test-ExcelEstimate.ps1 | 結果の Excel を開く |
+| Excel PDF にする | Export-ExcelToPdf.ps1 | 元のファイルと同じフォルダに PDF を保存する（Excel が必要） |
+
+- 結果の Excel は「ドキュメント\Excel ツールの結果」に `提出前チェック_20261021_101500.xlsx` のような名前で保存します（`-OutDir` で変えられます）
+- 終わったら、Enter キーを押すまでウィンドウを閉じません。エラーのときも内容を読めます
+- 各ツールは既定の設定で動きます。細かい指定が必要なときは、PowerShell から各ツールを使ってください
+- ショートカットは tools フォルダの場所を覚えます。**tools フォルダを動かしたら、もう一度実行してください**
+- 同じ名前のほかのショートカットは置き換えません（`-Force` で置き換えます）
+- ショートカットは `-ExecutionPolicy Bypass` で PowerShell を起動するため、実行ポリシーの設定を変える必要はありません
+
+```powershell
+# 提出前チェックと差分だけを登録し、結果を共有フォルダに保存する
+.\Install-SendTo.ps1 -Action Check, Compare -OutDir \\server\share\チェック結果
+
+# 登録したショートカットを削除する（ほかのショートカットは消しません）
+.\Install-SendTo.ps1 -Uninstall
+
+# 「送る」と同じことを PowerShell から行う
+.\Invoke-SendTo.ps1 -Action Check D:\提出物
+```
+
+| パラメーター | 内容 |
+| --- | --- |
+| `-Action` | 登録する処理（`Check`・`ResetView`・`Compare`・`Search`・`Terms`・`Consistency`・`Size`・`Estimate`・`Pdf`）。既定はすべて |
+| `-SendToDir` | ショートカットを作るフォルダ。既定は、ログインしている人の「送る」のフォルダ（`shell:sendto`） |
+| `-Prefix` | ショートカットの名前の頭に付ける文字（既定は `Excel `） |
+| `-OutDir` | 結果のファイルを保存するフォルダ |
+| `-Shell` | ツールを動かす PowerShell（`powershell`＝Windows PowerShell 5.1、既定 / `pwsh`＝PowerShell 7） |
+| `-Uninstall` | このツールのショートカットを削除する |
+| `-Force` | 同じ名前のほかのショートカットも置き換える |
+| `-WhatIf` | 作る（消す）ショートカットを確かめるだけ |
