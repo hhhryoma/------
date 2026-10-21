@@ -20,13 +20,14 @@
 | [Measure-TestQuality.ps1](#measure-testqualityps1) | テスト仕様書と障害管理表を集計し、機能ごとのテスト密度・バグ密度とゾーン分析、テストの消化とバグの収束の推移、信頼度成長曲線（潜在バグ数の推定・収束の判定）、NG なのにバグ番号が無いなどの食い違いを出す（Excel 不要） |
 | [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系や境界値のケースの不足を見つける（Excel 不要） |
 | [Measure-DefectRemoval.ps1](#measure-defectremovalps1) | 障害管理表とレビューの指摘から、欠陥の混入工程 × 摘出工程と、工程ごとの摘出率・後の工程への流出・原因の多い順を出す（Excel 不要） |
+| [Compare-ReviewFindings.ps1](#compare-reviewfindingsps1) | AI のレビュー（Invoke-DesignReview）と人のレビューの指摘を突き合わせ、一致・AI だけ・人だけと、観点ごとの一致率を出す（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 | [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -1776,6 +1777,41 @@ Phase      Injected FoundInTime Leaked RemovalRate Detected FromEarlier
 | 工程マトリクス | 混入工程 × 摘出工程の件数（行・列の合計付き） |
 | 原因 | 原因の多い順・割合・累積の割合（Excel でパレート図にできます） |
 | 流出 | 摘出すべき工程より後で見つかった欠陥の一覧（障害管理表・指摘管理表の該当行へのリンク付き） |
+
+## Compare-ReviewFindings.ps1
+
+AI のレビュー（Invoke-DesignReview.ps1 のレビュー結果）と、人のレビューの指摘管理表を突き合わせ、**一致・AI だけ・人だけ**に分けます。Excel は不要です。
+AI のレビューがどれだけ人の指摘と重なるか、観点表や `-TextFormat`（Rows / Markdown）を変えたときに良くなったかを、数字で確かめられます。
+
+```powershell
+.\Compare-ReviewFindings.ps1 D:\design-review\レビュー結果.xlsx D:\レビュー\指摘管理表.xlsx -OutXlsx D:\AIと人の比較.xlsx
+```
+
+```
+Status  Document                        AiLocation        HumanLocation     Basis
+------  --------                        ----------        -------------     -----
+一致    DD02_画面設計書_SCR001_受注一覧 画面項目定義!AB11 画面項目定義!AB12 場所
+一致    DD02_画面設計書_SCR001_受注一覧 イベント定義!J9   イベント定義!J20  内容
+AI だけ DD02_画面設計書_SCR001_受注一覧 画面項目定義!AK7
+AI だけ DD02_画面設計書_SCR001_受注一覧 イベント定義!P8
+人だけ  DD02_画面設計書_SCR001_受注一覧                   画面概要!C5
+AI だけ DD03_テーブル定義書             T_ORDER!E7
+人だけ  DD05_メッセージ一覧                               メッセージ一覧!K6
+
+AI の指摘 5 件: 人と一致 2（40.0%）・AI だけ 3
+人の指摘 4 件: AI と一致 2（50.0%）・人だけ 2
+```
+
+- 同じ設計書の指摘どうしを、**場所が近い**（同じシートで行の差が `-RowTolerance`（既定 2）以内）か、**指摘内容が似ている**（2 文字ずつの組の重なりが `-MinSimilarity`（既定 0.35）以上）組から順に、1 対 1 で対応付けます
+- 場所は「シート!セル」（`画面項目定義!AB11`）、「シート セル」、シートの列とセルの列のどの書き方でも読めます。設計書の名前は拡張子・フォルダを無視して比べます
+- AI のレビュー結果は、判定が OK の行を数えません。人の指摘は「取下げ」「重複」などを数えません
+- 「AI だけ」には、人が見落とした正しい指摘と、AI の誤った指摘の両方が入ります。対応付けは機械的な目安です
+
+| シート（`-OutXlsx`） | 内容 |
+| --- | --- |
+| 突き合わせ | 一致・AI だけ・人だけの一覧（人の指摘管理表、無ければ AI のレビュー結果の該当行へのリンク付き） |
+| 観点別 | 観点ごとの AI の指摘の数・人と一致した数・一致率（判定基準の見直しに使う） |
+| 設計書別 | 設計書ごとの AI・人の指摘の数・一致・AI だけ・人だけ |
 
 ## Export-ExcelToPdf.ps1
 
