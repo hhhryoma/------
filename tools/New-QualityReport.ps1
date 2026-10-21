@@ -25,6 +25,10 @@ param(
 
     [string] $Criteria,
 
+    [string] $HistoryCsv,
+
+    [string] $Project,
+
     [string] $Title = '品質評価',
 
     [datetime] $AsOf = (Get-Date).Date,
@@ -44,6 +48,8 @@ New-Item -ItemType Directory -Force -Path $detailDir | Out-Null
 $reportPath = Join-Path $OutDir ('{0}_{1}.xlsx' -f $Title, $AsOf.ToString('yyyyMMdd'))
 if (-not $Criteria) { $Criteria = Join-Path $PSScriptRoot 'quality-report/判定基準.csv' }
 $Criteria = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Criteria)
+if ($HistoryCsv) { $HistoryCsv = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($HistoryCsv) }
+if (-not $Project) { $Project = Split-Path -Path $OutDir -Leaf }
 
 # ---------------------------------------------------------------- ヘルパー
 
@@ -105,7 +111,8 @@ function Get-MetricJudgement {
 
 function Add-Metric {
     #     品質評価の 1 行（区分・指標・実績・判定・判定の考え方・詳細のファイル）。判定は判定基準の CSV で決める
-    param([string] $Area, [string] $Name, $Value, [string] $Note, [string] $Detail)
+    #       Key・Unit: 実績の CSV（-HistoryCsv）に書く指標の名前と分母（密度は New-QualityLimits.ps1 で基準値にできる名前にする）
+    param([string] $Area, [string] $Name, $Value, [string] $Note, [string] $Detail, [string] $Key, [string] $Unit)
     $judgement = ''
     $basis = $Note
     $c = Get-Criterion $Name
@@ -113,13 +120,14 @@ function Add-Metric {
         $judgement = Get-MetricJudgement $c $Value
         $basis = (@($Note, $c.Text) | Where-Object { $_ }) -join '。'
     }
-    $rows.Add([pscustomobject]@{ Area = $Area; Name = $Name; Value = $Value; Judgement = $judgement; Basis = $basis; Detail = $Detail })
+    if (-not $Key) { $Key = $Name }
+    $rows.Add([pscustomobject]@{ Area = $Area; Name = $Name; Value = $Value; Judgement = $judgement; Basis = $basis; Detail = $Detail; Key = $Key; Unit = $Unit })
 }
 
 function Add-FixedMetric {
     #     判定を決めて渡す指標（収束の判定など、数値でないもの）
     param([string] $Area, [string] $Name, $Value, [string] $Judgement, [string] $Basis, [string] $Detail)
-    $rows.Add([pscustomobject]@{ Area = $Area; Name = $Name; Value = $Value; Judgement = $Judgement; Basis = $Basis; Detail = $Detail })
+    $rows.Add([pscustomobject]@{ Area = $Area; Name = $Name; Value = $Value; Judgement = $Judgement; Basis = $Basis; Detail = $Detail; Key = $Name; Unit = '' })
 }
 
 function Add-Action {
@@ -209,6 +217,20 @@ if ($null -ne $docs) {
         if ($d.Judgement -like '多い*') { $todo = '作成者・工程の問題がないか原因を分析する' }
         Add-Action 'レビュー' $d.Document ('指摘密度 {0}（{1}）' -f $d.Density, $d.Judgement) $todo
     }
+    # 全体の指摘密度・レビュー工数密度（未レビューの設計書は除く）。実績の CSV では New-QualityLimits.ps1 で基準値にできる名前で残す
+    $sized = @($docs | Where-Object { $null -ne $_.Size -and $_.Size -gt 0 -and $_.Reviewed -ne $false })
+    if ($sized.Count -gt 0) {
+        $unit = $sized[0].Unit
+        $sizeSum = ($sized | Measure-Object -Property Size -Sum).Sum
+        $findingSum = ($sized | Measure-Object -Property Findings -Sum).Sum
+        Add-Metric 'レビュー' '指摘密度（全体）' ([double][math]::Round($findingSum / $sizeSum, 3)) ('指摘 {0} 件 ÷ {1} {2}' -f $findingSum, [math]::Round($sizeSum, 2), $unit) $file '指摘密度' $unit
+        $withEffort = @($sized | Where-Object { $null -ne $_.Effort })
+        if ($withEffort.Count -gt 0) {
+            $effortSum = ($withEffort | Measure-Object -Property Effort -Sum).Sum
+            $effortSize = ($withEffort | Measure-Object -Property Size -Sum).Sum
+            Add-Metric 'レビュー' 'レビュー工数密度（全体）' ([double][math]::Round($effortSum / $effortSize, 3)) ('{0} 人時 ÷ {1} {2}' -f [math]::Round($effortSum, 2), [math]::Round($effortSize, 2), $unit) $file 'レビュー工数密度' $unit
+        }
+    }
     # レビュー実施率は、レビュー記録と設計書の一覧（規模）があるときだけ（未レビューを決められるのはこのときだけ）
     if ($ReviewLog -and ($PageCsv -or $DesignPath) -and @($docs).Count -gt 0) {
         $unreviewed = @($docs | Where-Object { $_.Reviewed -eq $false })
@@ -260,6 +282,18 @@ if ($null -ne $functions) {
         Add-Metric 'テスト' 'テスト密度・バグ密度が基準外の機能' ([double]$outsideFunctions.Count) ('基準値と比べた機能 {0} 件のうち' -f $judged.Count) $file
     }
     foreach ($f in @($functions | Where-Object NeedsAction)) { Add-Action 'テスト' $f.Function ('ゾーン: {0}（{1}）' -f $f.Zone, $f.ZoneView) $f.ZoneAction }
+    # 全体のテスト密度・バグ密度（規模のある機能の合計）
+    $sizedFunctions = @($functions | Where-Object { $null -ne $_.Size -and $_.Size -gt 0 })
+    if ($sizedFunctions.Count -gt 0) {
+        $unit = $sizedFunctions[0].Unit
+        $sizeSum = ($sizedFunctions | Measure-Object -Property Size -Sum).Sum
+        $caseSum = ($sizedFunctions | Measure-Object -Property Cases -Sum).Sum
+        Add-Metric 'テスト' 'テスト密度（全体）' ([double][math]::Round($caseSum / $sizeSum, 3)) ('ケース {0} 件 ÷ {1} {2}' -f $caseSum, [math]::Round($sizeSum, 2), $unit) $file 'テスト密度' $unit
+        if ($BugList) {
+            $bugSum = ($sizedFunctions | Measure-Object -Property Bugs -Sum).Sum
+            Add-Metric 'テスト' 'バグ密度（全体）' ([double][math]::Round($bugSum / $sizeSum, 3)) ('バグ {0} 件 ÷ {1} {2}' -f $bugSum, [math]::Round($sizeSum, 2), $unit) $file 'バグ密度' $unit
+        }
+    }
     if ($summary.ContainsKey('食い違い')) {
         $mismatch = [int]$summary['食い違い']
         Add-Metric 'テスト' 'テスト仕様書と障害管理表の食い違い' ([double]$mismatch) 'NG なのにバグ番号が無い・再テストの結果が無い など' $file
@@ -344,22 +378,86 @@ if ($null -ne $issues) {
 # ---------------------------------------------------------------- 品質評価のブック
 
 
+# ---------------------------------------------------------------- 実績の CSV（前回との比較と、推移）
+
+
+$dateText = $AsOf.ToString('yyyy/MM/dd')
+$history = New-Object System.Collections.Generic.List[object]
+$previous = @{}; $previousDate = $null
+$historyDates = @()
+if ($HistoryCsv -and (Test-Path -LiteralPath $HistoryCsv)) {
+    foreach ($h in (Read-CsvFile $HistoryCsv @('プロジェクト', '時点', '区分', '指標', '分母', '値') '実績の CSV')) { $history.Add($h) }
+    $mine = @($history | Where-Object { ([string]$_.'プロジェクト') -eq $Project -and ([string]$_.'時点') -ne $dateText })
+    # 時点は yyyy/MM/dd なので、文字の順で日付の順になる
+    $historyDates = @($mine | ForEach-Object { [string]$_.'時点' } | Where-Object { $_ -lt $dateText } | Sort-Object -Unique)
+    if ($historyDates.Count -gt 0) {
+        $previousDate = $historyDates[-1]
+        foreach ($h in @($mine | Where-Object { ([string]$_.'時点') -eq $previousDate })) { $previous[('{0}|{1}|{2}' -f $h.'区分', $h.'指標', $h.'分母')] = [string]$h.'値' }
+    }
+}
+$invariantNumber = { param($t) $v = 0.0; if ([double]::TryParse([string]$t, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$v)) { $v } else { $null } }
+
 $metricRows = New-Object System.Collections.Generic.List[object]
 foreach ($r in $rows) {
-    $row = @{ Values = @($r.Area, $r.Name, $r.Value, $r.Judgement, $r.Basis, '', '', [System.IO.Path]::GetFileName($r.Detail)) }
-    if ($r.Detail) { $row.Link = @{ Column = 7; Path = $r.Detail; Location = '' } }
+    $values = @($r.Area, $r.Name, $r.Value)
+    $detailColumn = 7
+    if ($HistoryCsv) {
+        $before = $null
+        $k = '{0}|{1}|{2}' -f $r.Area, $r.Key, $r.Unit
+        if ($previous.ContainsKey($k)) { $before = & $invariantNumber $previous[$k] }
+        $change = ''
+        if ($null -ne $before -and $r.Value -is [double]) { $change = [double][math]::Round($r.Value - $before, 3) }
+        $values += @($(if ($null -ne $before) { [double]$before } else { '' }), $change)
+        $detailColumn = 9
+    }
+    $values += @($r.Judgement, $r.Basis, '', '', [System.IO.Path]::GetFileName($r.Detail))
+    $row = @{ Values = $values }
+    if ($r.Detail) { $row.Link = @{ Column = $detailColumn; Path = $r.Detail; Location = '' } }
     $metricRows.Add($row)
 }
+$metricColumns = @(@{ Header = '区分'; Width = 12 }, @{ Header = '指標'; Width = 36 }, @{ Header = '実績'; Width = 14 })
+if ($HistoryCsv) { $metricColumns += @(@{ Header = $(if ($previousDate) { '前回（' + $previousDate + '）' } else { '前回' }); Width = 14 }, @{ Header = '増減'; Width = 9 }) }
+$metricColumns += @(@{ Header = '判定'; Width = 6 }, @{ Header = '判定の考え方'; Width = 40 }, @{ Header = '定性分析（原因）'; Width = 40 }, @{ Header = '対策'; Width = 40 }, @{ Header = '詳細'; Width = 24 })
 $actionRows = New-Object System.Collections.Generic.List[object]
 foreach ($a in $actions) { $actionRows.Add(@{ Values = @($a.Area, $a.Target, $a.Content, $a.Action, '', '') }) }
 $scope = New-Object System.Collections.Generic.List[object]
 foreach ($pair in @(@('時点', $AsOf.ToString('yyyy/MM/dd')), @('設計書', ($DesignPath -join '、')), @('レビューの指摘管理表', ($Findings -join '、')), @('レビュー記録', ($ReviewLog -join '、')), @('テスト仕様書', ($TestPath -join '、')), @('障害管理表', ($BugList -join '、')), @('要件一覧', ($Requirement -join '、')), @('実行したツール', ($ran -join '、')), @('失敗したツール', ($failed -join '、')))) {
     if ($pair[1]) { $scope.Add(@{ Values = $pair }) }
 }
-Export-Workbook -FilePath $reportPath -Sheets @(
-    @{ Name = '品質評価'; Columns = @(@{ Header = '区分'; Width = 12 }, @{ Header = '指標'; Width = 36 }, @{ Header = '実績'; Width = 14 }, @{ Header = '判定'; Width = 6 }, @{ Header = '判定の考え方'; Width = 40 }, @{ Header = '定性分析（原因）'; Width = 40 }, @{ Header = '対策'; Width = 40 }, @{ Header = '詳細'; Width = 24 }); Rows = $metricRows },
+$reportSheets = @(
+    @{ Name = '品質評価'; Columns = $metricColumns; Rows = $metricRows },
     @{ Name = '要対応'; Columns = @(@{ Header = '区分'; Width = 12 }, @{ Header = '対象'; Width = 30 }, @{ Header = '内容'; Width = 60 }, @{ Header = '対応の例'; Width = 40 }, @{ Header = '担当'; Width = 12 }, @{ Header = '期限'; Width = 12 }); Rows = $actionRows },
     @{ Name = '対象'; Columns = @(@{ Header = '項目'; Width = 20 }, @{ Header = '内容'; Width = 80 }); Rows = $scope })
+
+# 推移: 今回の指標ごとに、このプロジェクトの直近の時点（最大 12 回）の値を並べる
+$numeric = @($rows | Where-Object { $_.Value -is [double] })
+if ($HistoryCsv) {
+    $dates = @(@($historyDates | Select-Object -Last 11) + $dateText)
+    $byDate = @{}
+    foreach ($h in @($history | Where-Object { ([string]$_.'プロジェクト') -eq $Project })) { $byDate[('{0}|{1}|{2}|{3}' -f $h.'時点', $h.'区分', $h.'指標', $h.'分母')] = [string]$h.'値' }
+    $trendRows = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $numeric) {
+        $values = @($r.Area, $r.Name)
+        foreach ($d in $dates) {
+            if ($d -eq $dateText) { $values += $r.Value; continue }
+            $v = $byDate[('{0}|{1}|{2}|{3}' -f $d, $r.Area, $r.Key, $r.Unit)]
+            $n = & $invariantNumber $v
+            $values += $(if ($null -ne $n) { [double]$n } else { '' })
+        }
+        $trendRows.Add(@{ Values = $values })
+    }
+    $reportSheets += @{ Name = '推移'; Columns = @(@(@{ Header = '区分'; Width = 12 }, @{ Header = '指標'; Width = 36 }) + @($dates | ForEach-Object { @{ Header = $_; Width = 11 } })); Rows = $trendRows }
+}
+Export-Workbook -FilePath $reportPath -Sheets $reportSheets
+
+# 実績の CSV に今回の値を足す（同じプロジェクト・同じ時点の行は置き換える）。New-QualityLimits.ps1 にそのまま渡せる
+if ($HistoryCsv) {
+    $kept = @($history | Where-Object { -not (([string]$_.'プロジェクト') -eq $Project -and ([string]$_.'時点') -eq $dateText) } | ForEach-Object {
+            [pscustomobject][ordered]@{ 'プロジェクト' = $_.'プロジェクト'; '時点' = $_.'時点'; '区分' = $_.'区分'; '指標' = $_.'指標'; '分母' = $_.'分母'; '工程' = $(if ($_.PSObject.Properties['工程']) { $_.'工程' } else { '' }); '値' = $_.'値' } })
+    $added = @($numeric | ForEach-Object { [pscustomobject][ordered]@{ 'プロジェクト' = $Project; '時点' = $dateText; '区分' = $_.Area; '指標' = $_.Key; '分母' = $_.Unit; '工程' = ''; '値' = ([double]$_.Value).ToString($invariant) } })
+    $all = @($kept + $added)
+    [System.IO.File]::WriteAllText($HistoryCsv, (((@($all) | ConvertTo-Csv -NoTypeInformation) -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
+}
 
 $rows | ForEach-Object { [pscustomobject]@{ Area = $_.Area; Name = $_.Name; Value = $_.Value; Judgement = $_.Judgement } }
 
@@ -367,6 +465,11 @@ Write-Host ''
 $counts = @($rows | Where-Object { $_.Judgement } | Group-Object Judgement | Sort-Object Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
 Write-Host ('指標 {0} 件（{1}）・要対応 {2} 件' -f $rows.Count, ($counts -join '・'), $actions.Count)
 if ($failed.Count -gt 0) { Write-Host ('失敗したツール: {0}' -f ($failed -join '、')) }
+if ($HistoryCsv) {
+    $prevText = '前回の実績はありません'
+    if ($previousDate) { $prevText = '前回 ' + $previousDate + ' と比べました' }
+    Write-Host ('実績の CSV に {0} 件を足しました（プロジェクト「{1}」・{2}。{3}）: {4}' -f $numeric.Count, $Project, $dateText, $prevText, $HistoryCsv)
+}
 Write-Host "品質評価を保存しました: $reportPath"
 Write-Host "各ツールの詳細: $detailDir"
 
@@ -420,6 +523,14 @@ Write-Host "各ツールの詳細: $detailDir"
 #
 # .PARAMETER Criteria
 #     判定（○△×）の基準の CSV（指標・向き・○・△）。既定は tools\quality-report\判定基準.csv。
+#
+# .PARAMETER HistoryCsv
+#     実績の CSV（プロジェクト・時点・区分・指標・分母・工程・値）。指定すると、今回の数値の指標を足し（同じ時点は置き換える）、
+#     品質評価に前回の値と増減の列、推移のシート（直近 12 回）を加えます。New-QualityLimits.ps1 にそのまま渡せます
+#     （密度は「指摘密度」「テスト密度」などの名前と分母で書く）。
+#
+# .PARAMETER Project
+#     実績の CSV に書くプロジェクトの名前。既定は -OutDir のフォルダの名前。
 #
 # .PARAMETER Title
 #     品質評価のブックの名前（既定は「品質評価」）。

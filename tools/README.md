@@ -1924,6 +1924,7 @@ Metric   Unit     Process  Count  Mean  Low  High
 - 指標 × 分母 × 工程の組ごとに求めます。工程の列が空の行は、工程を問わない基準値になります
 - 実績が `-MinSamples`（既定 3）件未満の組は、備考に「参考値」と書きます
 - 列の名前は「実績」「実績値」（値）、「単位」（分母）、「案件」（プロジェクト）なども読めます。数値でない値は数えません
+- 時点の列があり、同じプロジェクトの値が時点ごとにあるとき（New-QualityReport.ps1 の `-HistoryCsv` の CSV）は、最後の時点の値だけを使います
 
 ## New-QualityReport.ps1
 
@@ -1976,6 +1977,18 @@ Metric   Unit     Process  Count  Mean  Low  High
 - 指摘密度・テスト密度・バグ密度の基準値は `-ReviewLimits`・`-TestLimits`（New-QualityLimits.ps1 で作れます）で決めます
 - 規模（密度の分母）は、`-PageCsv`（設計書のページ数）・`-SizeCsv`（機能ごとの KLOC など。Measure-CodeSize.ps1 の `-OutCsv`）を渡さなければ、`-DesignPath` の設計書の規模を使います
 - ツールが失敗しても（資料の見出しが読めないなど）、ほかのツールの結果でまとめます
+
+### 実績の蓄積と前回との比較（`-HistoryCsv`）
+
+```powershell
+.\New-QualityReport.ps1 -OutDir D:\品質報告 -Findings D:\レビュー -TestPath D:\テスト仕様書 -BugList D:\障害管理表.xlsx `
+    -HistoryCsv D:\品質実績\実績.csv -Project 受注システム
+```
+
+- 実行のたびに、数値の指標を実績の CSV（`プロジェクト,時点,区分,指標,分母,工程,値`）に足します。同じプロジェクト・同じ時点の行は置き換えます
+- 品質評価のシートに**前回（前の時点）の値と増減**の列を、**推移**のシートに直近 12 回の値を加えます
+- 全体の指摘密度・レビュー工数密度・テスト密度・バグ密度も、「指摘密度」「テスト密度」などの名前と分母（ページ数・KLOC など）で残します。プロジェクトが終わったら、この CSV を **New-QualityLimits.ps1 にそのまま渡して**、次の案件の基準値を作れます（同じプロジェクトは最後の時点の値だけを使います）
+- `-Project` を省くと、`-OutDir` のフォルダの名前をプロジェクトの名前にします
 
 ## Export-ExcelToPdf.ps1
 
