@@ -43,7 +43,6 @@ if ($DesignPath -and $SizeCsv) { throw '-DesignPath と -SizeCsv は、どちら
 
 Update-TypeData -TypeName 'TestQuality.Function' -DefaultDisplayPropertySet Function, Cases, Executed, NG, Bugs, OpenBugs, TestDensity, BugDensity, Zone -Force -WhatIf:$false
 
-$nfkc = [System.Text.NormalizationForm]::FormKC
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
 # 障害の状態: 対応が終わった・障害として数えない
@@ -53,14 +52,9 @@ $excludedPattern = '取下げ|取り下げ|取消|却下|対象外|重複|仕様
 # ---------------------------------------------------------------- 設定
 
 
-$candidates = @{}
-foreach ($r in (Read-CsvFile $Headers @('項目', '見出し') '見出しの候補')) {
-    $field = ([string]$r.'項目').Trim()
-    if ($field) { $candidates[$field] = @(([string]$r.'見出し') -split '\|' | ForEach-Object { ConvertTo-Label $_ } | Where-Object { $_ }) }
-}
 $caseFields = @('機能', 'テストID', 'テスト内容', '結果', '予定日', '実施日', 'バグ番号', '工程')
 $bugFields = @('機能', '障害ID', '障害内容', '起票日', '完了日', '状態', '重要度', '原因', '混入工程', '摘出工程')
-foreach ($f in ($caseFields + $bugFields)) { if (-not $candidates.ContainsKey($f)) { $candidates[$f] = @() } }
+$candidates = Read-HeaderCandidates $Headers ($caseFields + $bugFields)
 foreach ($f in @('結果', '障害内容')) { if ($candidates[$f].Count -eq 0) { throw "見出しの候補に「$f」の行がありません: $Headers" } }
 
 # 基準値。指標は「テスト密度」「バグ密度」
@@ -82,146 +76,6 @@ $zones = Read-ZoneTable $zoneCsv 'テスト密度' 'バグ密度'
 
 # ---------------------------------------------------------------- ヘルパー
 
-
-function ConvertTo-NameKey {
-    #     機能・設計書の名前を比べる形（フォルダと拡張子を除き、全角・半角と空白をそろえる）
-    param([string] $Name)
-    $n = ([string]$Name).Trim()
-    $n = $n.Split(@('\', '/'))[-1]
-    if ($n -match '\.(xlsx|xlsm|xls|xlsb|csv|pdf|docx?)$') { $n = [System.IO.Path]::GetFileNameWithoutExtension($n) }
-    return (ConvertTo-Label $n).ToUpperInvariant()
-}
-
-function ConvertTo-Date {
-    #     日付の文字（2026/10/1・2026-10-01・2026年10月1日・10/1）を日付にする（無ければ $null）
-    param([string] $Text)
-    $t = ([string]$Text).Normalize($nfkc).Trim()
-    if (-not $t) { return $null }
-    $m = [regex]::Match($t, '(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})')
-    try {
-        if ($m.Success) { return New-Object DateTime ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value), ([int]$m.Groups[3].Value) }
-        $m = [regex]::Match($t, '^(\d{1,2})\s*[/月]\s*(\d{1,2})日?$')
-        if ($m.Success) { return New-Object DateTime $AsOf.Year, ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value) }
-    }
-    catch { }
-    return $null
-}
-
-function Get-ResultKind {
-    #     テストの結果を OK・NG・保留・対象外・未実施にする
-    param([string] $Text)
-    $t = ([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant()
-    if (-not $t) { return '未実施' }
-    if ($t -match '^(OK|○|〇|合格|PASS|良)') { return 'OK' }
-    if ($t -match '^(NG|×|✕|不合格|FAIL|不可)') { return 'NG' }
-    if ($t -match '^(対象外|-|―|N/?A|スキップ|SKIP|削除|欠番)') { return '対象外' }
-    if ($t -match '保留|中断|ブロック|BLOCK') { return '保留' }
-    return '未実施'
-}
-
-function ConvertTo-BugIds {
-    #     バグ番号のセル（「B-001、B-002」「#12」など）を、比べる形の番号の並びにする
-    param([string] $Text)
-    return @(([string]$Text).Normalize($nfkc) -split '[、,;/\s↵]+' | ForEach-Object { $_.Trim().TrimStart('#').ToUpperInvariant() } | Where-Object { $_ -and $_ -notmatch '^[-―]$' })
-}
-
-function Find-FirstLabel {
-    param($Labels, [string[]] $Names)
-    foreach ($n in $Names) { if ($Labels -contains $n) { return $n } }
-    return $null
-}
-
-function Get-InputFiles {
-    #     ファイル・フォルダを、Excel（Search-Excel に渡すパス）と CSV に分ける
-    param([string[]] $Paths, [string] $What)
-    $excel = New-Object System.Collections.Generic.List[string]
-    $csv = New-Object System.Collections.Generic.List[object]
-    foreach ($p in $Paths) {
-        $items = @(Get-Item -Path $p -ErrorAction SilentlyContinue)
-        if ($items.Count -eq 0) { Write-Warning "${What}が見つかりません: $p"; continue }
-        foreach ($item in $items) {
-            if ($item.PSIsContainer) {
-                if (@(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.xls[xmb]?$' -and -not $_.Name.StartsWith('~$') }).Count -gt 0) { $excel.Add($item.FullName) }
-                foreach ($c in @(Get-ChildItem -LiteralPath $item.FullName -File -Filter '*.csv' -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue)) { $csv.Add($c) }
-            }
-            elseif ($item.Extension -eq '.csv') { $csv.Add($item) }
-            else { $excel.Add([System.Management.Automation.WildcardPattern]::Escape($item.FullName)) }
-        }
-    }
-    return [pscustomobject]@{ Excel = $excel; Csv = $csv }
-}
-
-function Get-FilePaths {
-    #     ファイル・フォルダの中の Excel・CSV のフルパス（大文字小文字を区別しない集合）
-    param([string[]] $Paths)
-    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($p in $Paths) {
-        foreach ($item in @(Get-Item -Path $p -ErrorAction SilentlyContinue)) {
-            if ($item.PSIsContainer) { foreach ($f in @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue)) { [void]$set.Add($f.FullName) } }
-            else { [void]$set.Add($item.FullName) }
-        }
-    }
-    return , $set
-}
-
-function Read-Records {
-    #     見出しの候補で表を探し、1 行ずつ読む。
-    #       Required: 見出しの行に必ず要る項目。AnyOf: どれか 1 つが要る項目。Key: 行があるかを決める項目（前から順に、見出しにあるもの）
-    #       Skip: 読まないファイルのフルパスの集合
-    #     戻り値: @{ Values = 項目 → 文字; Labels = 項目 → 見出し; File; Path; Sheet; Row; Column; SheetCount（そのブックで表のあるシートの数） }
-    param($Inputs, [string[]] $Fields, [string[]] $Required, [string[]] $AnyOf, [string[]] $Key, [string] $What, $Skip)
-    $records = New-Object System.Collections.Generic.List[object]
-    $test = { param($m) @($Required | Where-Object { -not $m[$_] }).Count -eq 0 -and @($AnyOf | Where-Object { $m[$_] }).Count -gt 0 }
-    if ($Inputs.Excel.Count -gt 0) {
-        $searchArgs = @{ Pattern = '\S'; Path = $Inputs.Excel.ToArray(); Target = 'Value' }
-        if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
-        if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-        $books = ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) -and -not ($Skip -and $Skip.Contains($_.Path)) })
-        foreach ($book in $books.Values) {
-            # 先に表のあるシートを数える（シートごとに機能を分けたブックでは、シート名を機能にするため）
-            $found = New-Object System.Collections.Generic.List[object]
-            foreach ($sheetName in $book.Sheets.Keys) {
-                $grid = $book.Sheets[$sheetName]
-                foreach ($row in $grid.Rows) {
-                    $labels = @($grid.Labels[$row].Values)
-                    $m = @{}
-                    foreach ($f in $Fields) { $l = Find-FirstLabel $labels $candidates[$f]; if ($l) { $m[$f] = $l } }
-                    if (& $test $m) { $found.Add([pscustomobject]@{ Sheet = $sheetName; Grid = $grid; Map = $m }); break }
-                }
-            }
-            foreach ($entry in $found) {
-                $map = $entry.Map
-                $keyField = @($Key | Where-Object { $map[$_] })[0]
-                foreach ($t in (Find-DesignTables $entry.Grid @($map.Values | Sort-Object -Unique) $map[$keyField])) {
-                    foreach ($dr in $t.Rows) {
-                        $v = @{}
-                        foreach ($f in $map.Keys) { $v[$f] = [string]$dr.Cells[$t.ColumnOf[$map[$f]]] }
-                        $records.Add([pscustomobject]@{ Values = $v; Labels = $map; File = $book.File; Path = $book.Path; Sheet = $entry.Sheet; Row = $dr.Row; Column = $t.ColumnOf[$map[$keyField]]; SheetCount = $found.Count })
-                    }
-                }
-            }
-        }
-    }
-    foreach ($c in $Inputs.Csv) {
-        if ($Skip -and $Skip.Contains($c.FullName)) { continue }
-        $rows = Read-CsvFile $c.FullName @() $What
-        if ($rows.Count -eq 0) { continue }
-        $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
-        $map = @{}
-        foreach ($f in $Fields) { foreach ($n in $names) { if (-not $map[$f] -and $candidates[$f] -contains (ConvertTo-Label $n)) { $map[$f] = $n } } }
-        if (-not (& $test $map)) { Write-Warning ("{0}: {1}の列が見つかりません（{2}）" -f $c.Name, $What, (($Required + $AnyOf) -join '・')); continue }
-        $keyField = @($Key | Where-Object { $map[$_] })[0]
-        $line = 1
-        foreach ($r in $rows) {
-            $line++
-            $v = @{}
-            foreach ($f in $map.Keys) { $v[$f] = [string]$r.($map[$f]) }
-            if (-not ([string]$v[$keyField]).Trim()) { continue }
-            $records.Add([pscustomobject]@{ Values = $v; Labels = $map; File = $c.Name; Path = $c.FullName; Sheet = ''; Row = $line; Column = 0; SheetCount = 1 })
-        }
-    }
-    return , $records
-}
 
 function Get-Judgement {
     #     基準値（指標・分母・工程）と比べて「少ない」「基準内」「多い」。基準値が無ければ ''
@@ -299,31 +153,10 @@ function Get-GompertzValue {
 
 # 障害管理表を同じフォルダに置いても、テスト仕様書としては読まない
 $bugFiles = $null
-if ($BugList) { $bugFiles = Get-FilePaths $BugList }
-$caseRecords = Read-Records (Get-InputFiles $Path 'テスト仕様書') $caseFields @('結果') @('テストID', 'テスト内容') @('テストID', 'テスト内容') 'テスト仕様書' $bugFiles
-$cases = New-Object System.Collections.Generic.List[object]
-$lastFunction = @{}
-foreach ($rec in $caseRecords) {
-    $v = $rec.Values
-    # 機能の列は、グループの最初の行だけに書くことがあるので、空なら上の行の機能を使う
-    $function = ([string]$v['機能']).Trim()
-    $tableKey = $rec.Path + '|' + $rec.Sheet
-    if ($rec.Labels['機能']) {
-        if ($function) { $lastFunction[$tableKey] = $function }
-        elseif ($lastFunction.ContainsKey($tableKey)) { $function = $lastFunction[$tableKey] }
-    }
-    if (-not $function) {
-        if ($rec.SheetCount -gt 1) { $function = $rec.Sheet }
-        else { $function = [System.IO.Path]::GetFileNameWithoutExtension($rec.File) }
-    }
-    $id = ([string]$v['テストID']).Trim()
-    if (-not $id) { $id = '{0} 行目' -f $rec.Row }
-    $cases.Add([pscustomobject]@{
-        Function = $function; Key = (ConvertTo-NameKey $function); Id = $id; Kind = (Get-ResultKind $v['結果'])
-        Planned = (ConvertTo-Date $v['予定日']); Done = (ConvertTo-Date $v['実施日']); BugIds = @(ConvertTo-BugIds $v['バグ番号'])
-        Process = ([string]$v['工程']).Trim(); HasBugColumn = [bool]$rec.Labels['バグ番号']; HasDoneColumn = [bool]$rec.Labels['実施日']; Place = $rec
-    })
-}
+if ($BugList) { $bugFiles = Get-FilePathSet $BugList -NoRecurse:$NoRecurse }
+$readArgs = @{ Candidates = $candidates; Exclude = $OutXlsx; NoRecurse = $NoRecurse; NoExcel = $NoExcel }
+$caseRecords = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $Path 'テスト仕様書' -NoRecurse:$NoRecurse) -Fields $caseFields -Need @('結果', @('テストID', 'テスト内容')) -Key @('テストID', 'テスト内容') -What 'テスト仕様書' -Skip $bugFiles
+$cases = ConvertTo-TestCases $caseRecords $AsOf
 if ($cases.Count -eq 0) { Write-Warning 'テストケースが見つかりません（結果と、テストIDか確認内容の見出しがある表を探します）' }
 
 # ---------------------------------------------------------------- 障害管理表を読む
@@ -333,16 +166,16 @@ $bugs = New-Object System.Collections.Generic.List[object]
 $excludedBugs = 0
 $bugListHasFunction = $false
 if ($BugList) {
-    $bugRecords = Read-Records (Get-InputFiles $BugList '障害管理表') $bugFields @('障害内容') @('起票日', '状態', '重要度', '障害ID') @('障害内容') '障害管理表'
+    $bugRecords = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $BugList '障害管理表' -NoRecurse:$NoRecurse) -Fields $bugFields -Need @('障害内容', @('起票日', '状態', '重要度', '障害ID')) -Key @('障害内容') -What '障害管理表'
     foreach ($rec in $bugRecords) {
         $v = $rec.Values
         $status = ([string]$v['状態']).Trim()
         if ($status -match $excludedPattern) { $excludedBugs++; continue }
         if ($rec.Labels['機能']) { $bugListHasFunction = $true }
-        $closedOn = ConvertTo-Date $v['完了日']
+        $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
         $bugs.Add([pscustomobject]@{
             Id = @(ConvertTo-BugIds $v['障害ID'])[0]; Function = ([string]$v['機能']).Trim(); Content = ([string]$v['障害内容']).Trim()
-            Found = (ConvertTo-Date $v['起票日']); ClosedOn = $closedOn; Closed = [bool](($status -match $closedPattern) -or ((-not $status) -and $closedOn))
+            Found = (ConvertTo-DateValue $v['起票日'] $AsOf); ClosedOn = $closedOn; Closed = [bool](($status -match $closedPattern) -or ((-not $status) -and $closedOn))
             Status = $status; Severity = ([string]$v['重要度']).Trim(); Cause = ([string]$v['原因']).Trim()
             Injected = ([string]$v['混入工程']).Trim(); Detected = ([string]$v['摘出工程']).Trim(); Place = $rec
         })
