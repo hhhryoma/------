@@ -569,6 +569,204 @@ function Find-DesignTables {
     return , $tables
 }
 
+# ---------------------------------------------------------------- 表を見出しの候補で読む（テスト仕様書・障害管理表など）
+
+
+function Read-HeaderCandidates {
+    #     見出しの候補の CSV（項目・見出し。見出しは | 区切り）を、項目 → ConvertTo-Label 済みの候補の配列にする。
+    #     Fields のうち CSV に無い項目は空の配列
+    param([string] $FilePath, [string[]] $Fields)
+    $candidates = @{}
+    foreach ($r in (Read-CsvFile $FilePath @('項目', '見出し') '見出しの候補')) {
+        $field = ([string]$r.'項目').Trim()
+        if ($field) { $candidates[$field] = @(([string]$r.'見出し') -split '\|' | ForEach-Object { ConvertTo-Label $_ } | Where-Object { $_ }) }
+    }
+    foreach ($f in $Fields) { if (-not $candidates.ContainsKey($f)) { $candidates[$f] = @() } }
+    return $candidates
+}
+
+function Get-InputFiles {
+    #     ファイル・フォルダを、Excel（Search-Excel に渡すパス）と CSV に分ける
+    param([string[]] $Paths, [string] $What, [switch] $NoRecurse)
+    $excel = New-Object System.Collections.Generic.List[string]
+    $csv = New-Object System.Collections.Generic.List[object]
+    foreach ($p in $Paths) {
+        $items = @(Get-Item -Path $p -ErrorAction SilentlyContinue)
+        if ($items.Count -eq 0) { Write-Warning "${What}が見つかりません: $p"; continue }
+        foreach ($item in $items) {
+            if ($item.PSIsContainer) {
+                if (@(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.xls[xmb]?$' -and -not $_.Name.StartsWith('~$') }).Count -gt 0) { $excel.Add($item.FullName) }
+                foreach ($c in @(Get-ChildItem -LiteralPath $item.FullName -File -Filter '*.csv' -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue)) { $csv.Add($c) }
+            }
+            elseif ($item.Extension -eq '.csv') { $csv.Add($item) }
+            else { $excel.Add([System.Management.Automation.WildcardPattern]::Escape($item.FullName)) }
+        }
+    }
+    return [pscustomobject]@{ Excel = $excel; Csv = $csv }
+}
+
+function Get-FilePathSet {
+    #     ファイル・フォルダの中のファイルのフルパス（大文字小文字を区別しない集合）
+    param([string[]] $Paths, [switch] $NoRecurse)
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in $Paths) {
+        foreach ($item in @(Get-Item -Path $p -ErrorAction SilentlyContinue)) {
+            if ($item.PSIsContainer) { foreach ($f in @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue)) { [void]$set.Add($f.FullName) } }
+            else { [void]$set.Add($item.FullName) }
+        }
+    }
+    return , $set
+}
+
+function Read-HeaderRecords {
+    #     見出しの候補で表を探し、1 行ずつ読む（Excel は Search-Excel.ps1 で、CSV はそのまま）。
+    #       Candidates: 項目 → 見出しの候補（Read-HeaderCandidates）。Fields: 読む項目
+    #       Need: 見出しの行の条件。文字は必ず要る項目、配列はそのうちどれか 1 つが要る項目
+    #       Key: 行があるかを決める項目（前から順に、見出しにあるもの）
+    #       Skip: 読まないファイルのフルパスの集合。Exclude: 読まないファイル（結果の xlsx など）
+    #     戻り値: @{ Values = 項目 → 文字; Labels = 項目 → 見出し; Columns = 項目 → 列番号（CSV は 0）; File; Path; Sheet; Row;
+    #             Column（Key の列）; SheetCount（そのブックで表のあるシートの数） }
+    param($Inputs, [hashtable] $Candidates, [string[]] $Fields, [object[]] $Need, [string[]] $Key, [string] $What, $Skip, [string] $Exclude, [switch] $NoRecurse, [switch] $NoExcel)
+    $records = New-Object System.Collections.Generic.List[object]
+    $test = {
+        param($m)
+        foreach ($g in $Need) { if (@(@($g) | Where-Object { $m[$_] }).Count -eq 0) { return $false } }
+        return $true
+    }
+    $findLabel = {
+        param($labels, $names)
+        foreach ($n in $names) { if ($labels -contains $n) { return $n } }
+        return $null
+    }
+    if ($Inputs.Excel.Count -gt 0) {
+        $searchArgs = @{ Pattern = '\S'; Path = $Inputs.Excel.ToArray(); Target = 'Value' }
+        if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
+        if ($NoExcel) { $searchArgs['NoExcel'] = $true }
+        $hits = @(& (Join-Path $PSScriptRoot 'Search-Excel.ps1') @searchArgs 6>$null | Where-Object {
+                -not ($Exclude -and [string]::Equals($_.Path, $Exclude, [System.StringComparison]::OrdinalIgnoreCase)) -and -not ($Skip -and $Skip.Contains($_.Path))
+            })
+        $books = ConvertTo-DesignBooks $hits
+        foreach ($book in $books.Values) {
+            # 先に表のあるシートを数える（シートごとに機能を分けたブックでは、シート名を機能にするため）
+            $found = New-Object System.Collections.Generic.List[object]
+            foreach ($sheetName in $book.Sheets.Keys) {
+                $grid = $book.Sheets[$sheetName]
+                foreach ($row in $grid.Rows) {
+                    $labels = @($grid.Labels[$row].Values)
+                    $m = @{}
+                    foreach ($f in $Fields) { $l = & $findLabel $labels $Candidates[$f]; if ($l) { $m[$f] = $l } }
+                    if (& $test $m) { $found.Add([pscustomobject]@{ Sheet = $sheetName; Grid = $grid; Map = $m }); break }
+                }
+            }
+            foreach ($entry in $found) {
+                $map = $entry.Map
+                $keyField = @($Key | Where-Object { $map[$_] })[0]
+                foreach ($t in (Find-DesignTables $entry.Grid @($map.Values | Sort-Object -Unique) $map[$keyField])) {
+                    $cols = @{}
+                    foreach ($f in $map.Keys) { $cols[$f] = $t.ColumnOf[$map[$f]] }
+                    foreach ($dr in $t.Rows) {
+                        $v = @{}
+                        foreach ($f in $map.Keys) { $v[$f] = [string]$dr.Cells[$cols[$f]] }
+                        $records.Add([pscustomobject]@{ Values = $v; Labels = $map; Columns = $cols; File = $book.File; Path = $book.Path; Sheet = $entry.Sheet; Row = $dr.Row; Column = $cols[$keyField]; SheetCount = $found.Count })
+                    }
+                }
+            }
+        }
+    }
+    foreach ($c in $Inputs.Csv) {
+        if ($Skip -and $Skip.Contains($c.FullName)) { continue }
+        $rows = Read-CsvFile $c.FullName @() $What
+        if ($rows.Count -eq 0) { continue }
+        $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
+        $map = @{}
+        foreach ($f in $Fields) { foreach ($n in $names) { if (-not $map[$f] -and $Candidates[$f] -contains (ConvertTo-Label $n)) { $map[$f] = $n } } }
+        if (-not (& $test $map)) { Write-Warning ("{0}: {1}の列が見つかりません" -f $c.Name, $What); continue }
+        $keyField = @($Key | Where-Object { $map[$_] })[0]
+        $line = 1
+        foreach ($r in $rows) {
+            $line++
+            $v = @{}
+            foreach ($f in $map.Keys) { $v[$f] = [string]$r.($map[$f]) }
+            if (-not ([string]$v[$keyField]).Trim()) { continue }
+            $records.Add([pscustomobject]@{ Values = $v; Labels = $map; Columns = @{}; File = $c.Name; Path = $c.FullName; Sheet = ''; Row = $line; Column = 0; SheetCount = 1 })
+        }
+    }
+    return , $records
+}
+
+function ConvertTo-NameKey {
+    #     機能・設計書の名前を比べる形（フォルダと拡張子を除き、全角・半角と空白をそろえる）
+    param([string] $Name)
+    $n = ([string]$Name).Trim()
+    $n = $n.Split(@('\', '/'))[-1]
+    if ($n -match '\.(xlsx|xlsm|xls|xlsb|csv|pdf|docx?)$') { $n = [System.IO.Path]::GetFileNameWithoutExtension($n) }
+    return (ConvertTo-Label $n).ToUpperInvariant()
+}
+
+function ConvertTo-DateValue {
+    #     日付の文字（2026/10/1・2026-10-01・2026年10月1日・10/1）を日付にする（無ければ $null）。年の無い日付は AsOf の年
+    param([string] $Text, [datetime] $AsOf = (Get-Date))
+    $t = ([string]$Text).Normalize($script:Nfkc).Trim()
+    if (-not $t) { return $null }
+    $m = [regex]::Match($t, '(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})')
+    try {
+        if ($m.Success) { return New-Object DateTime ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value), ([int]$m.Groups[3].Value) }
+        $m = [regex]::Match($t, '^(\d{1,2})\s*[/月]\s*(\d{1,2})日?$')
+        if ($m.Success) { return New-Object DateTime $AsOf.Year, ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value) }
+    }
+    catch { }
+    return $null
+}
+
+function Get-TestResultKind {
+    #     テストの結果を OK・NG・保留・対象外・未実施にする（読めない値は未実施）
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($script:Nfkc).Trim().ToUpperInvariant()
+    if (-not $t) { return '未実施' }
+    if ($t -match '^(OK|○|〇|合格|PASS|良)') { return 'OK' }
+    if ($t -match '^(NG|×|✕|不合格|FAIL|不可)') { return 'NG' }
+    if ($t -match '^(対象外|-|―|N/?A|スキップ|SKIP|削除|欠番)') { return '対象外' }
+    if ($t -match '保留|中断|ブロック|BLOCK') { return '保留' }
+    return '未実施'
+}
+
+function ConvertTo-BugIds {
+    #     バグ番号のセル（「B-001、B-002」「#12」など）を、比べる形の番号の並びにする
+    param([string] $Text)
+    return @(([string]$Text).Normalize($script:Nfkc) -split '[、,;/\s↵]+' | ForEach-Object { $_.Trim().TrimStart('#').ToUpperInvariant() } | Where-Object { $_ -and $_ -notmatch '^[-―]$' })
+}
+
+function ConvertTo-TestCases {
+    #     Read-HeaderRecords で読んだテストケースの行に、機能を付ける。
+    #     機能は、機能の列（グループの最初の行だけに書くことがあるので、空なら上の行の値）、
+    #     無ければシート名（表のあるシートが複数のブック）かファイル名
+    param($Records, [datetime] $AsOf = (Get-Date))
+    $cases = New-Object System.Collections.Generic.List[object]
+    $lastFunction = @{}
+    foreach ($rec in $Records) {
+        $v = $rec.Values
+        $function = ([string]$v['機能']).Trim()
+        $tableKey = $rec.Path + '|' + $rec.Sheet
+        if ($rec.Labels['機能']) {
+            if ($function) { $lastFunction[$tableKey] = $function }
+            elseif ($lastFunction.ContainsKey($tableKey)) { $function = $lastFunction[$tableKey] }
+        }
+        if (-not $function) {
+            if ($rec.SheetCount -gt 1) { $function = $rec.Sheet }
+            else { $function = [System.IO.Path]::GetFileNameWithoutExtension($rec.File) }
+        }
+        $id = ([string]$v['テストID']).Trim()
+        if (-not $id) { $id = '{0} 行目' -f $rec.Row }
+        $cases.Add([pscustomobject]@{
+            Function = $function; Key = (ConvertTo-NameKey $function); Id = $id; Kind = (Get-TestResultKind $v['結果'])
+            Planned = (ConvertTo-DateValue $v['予定日'] $AsOf); Done = (ConvertTo-DateValue $v['実施日'] $AsOf); BugIds = @(ConvertTo-BugIds $v['バグ番号'])
+            Process = ([string]$v['工程']).Trim(); HasBugColumn = [bool]$rec.Labels['バグ番号']; HasDoneColumn = [bool]$rec.Labels['実施日']
+            Values = $v; Place = $rec
+        })
+    }
+    return , $cases
+}
+
 # ---------------------------------------------------------------- シートの XML のセルを書き換える
 
 

@@ -18,13 +18,14 @@
 | [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
 | [Measure-ReviewQuality.ps1](#measure-reviewqualityps1) | レビューの指摘管理表を集計し、設計書ごとの指摘件数・指摘密度（ページ数・規模あたり）・未完了・期限切れを出し、基準値から外れた設計書を知らせる。レビュー記録の工数も使うと、レビュー工数密度 × 指摘密度のゾーン分析もする（Excel 不要） |
 | [Measure-TestQuality.ps1](#measure-testqualityps1) | テスト仕様書と障害管理表を集計し、機能ごとのテスト密度・バグ密度とゾーン分析、テストの消化とバグの収束の推移、信頼度成長曲線（潜在バグ数の推定・収束の判定）、NG なのにバグ番号が無いなどの食い違いを出す（Excel 不要） |
+| [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系や境界値のケースの不足を見つける（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 | [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -1659,6 +1660,59 @@ SCR003      20       10  0    3        3       20.00       3.00 テスト不足
 | `-ConvergenceRate` | 収束とみなす収束率（既定 0.9） |
 | `-AsOf` | 集計の時点（予定日を過ぎても未実施の判定。既定は今日） |
 | `-OutXlsx` | サマリー・機能別・ゾーン分析・推移・バグの内訳・食い違いを保存する |
+
+## Test-TestSpec.ps1
+
+**テスト仕様書**（テストケースの一覧）を、テストの実施前に機械で確かめます。Excel は不要です。
+
+```powershell
+.\Test-TestSpec.ps1 D:\テスト仕様書 -DesignPath D:\設計書 -OutXlsx D:\テスト仕様書のチェック.xlsx
+```
+
+```
+テストケース 12 件（機能 2）: エラー 2 件 / 警告 17 件
+内訳: 境界値のテストが無い 12・あいまいな期待結果 1・テストIDの重複 1・同じ内容のケース 1・手順が空 1・期待結果が空 1・異常系が少ない 1・結果の値が読めない 1
+
+Location : テストケース!G4
+Level    : エラー
+Item     : 期待結果が空
+Detail   : 期待結果が書かれていません
+
+Location : テストケース!A2
+Level    : 警告
+Item     : 境界値のテストが無い
+Detail   : SCR001 の入力項目「顧客コード」（8 桁。DD02_画面設計書_SCR001_受注一覧.xlsx 画面項目定義 9 行目）の桁数の境界（8 桁・9 桁）を確かめるケースが見つかりません
+
+Location : テストケース!G3
+Level    : 警告
+Item     : あいまいな期待結果
+Detail   : 「正しく」では、何を確かめれば合格かが分かりません（表示される値・メッセージなどを具体的に書いてください）: 正しく表示されること
+...
+```
+
+| 区分 | 項目 | 内容 |
+| --- | --- | --- |
+| エラー | 期待結果が空 | 期待結果の列が空欄 |
+| エラー | テストIDの重複 | 同じ表の中で同じテスト ID |
+| 警告 | あいまいな期待結果 | 「正しく」「正常に」「適切に」「問題なく」「仕様どおり」など（`-VagueWords` で変えられる） |
+| 警告 | 手順が空 | 手順（操作）の列が空欄 |
+| 警告 | 同じ内容のケース | 同じ機能で、前提条件・手順・入力値・期待結果がすべて同じ |
+| 警告 | 結果の値が読めない | 結果が OK・NG・保留・対象外・未実施のどれとも読めない（Measure-TestQuality.ps1 で数え漏れになる） |
+| 警告 | 異常系が少ない | ケースが 5 件以上の機能で、異常系の割合が `-MinErrorRatio`（既定 0.2）未満。区分の列（異常・エラー・準正常など）、無ければ期待結果の言葉（エラー・E0001・できない など）から数える |
+| 警告 | 境界値のテストが無い | （`-DesignPath` のとき）画面項目定義の入力項目（入出力が I・IO）の桁数について、項目名と「桁」「文字」「最大」などの言葉か桁数の数字が出てくるケースが無い |
+
+- 列は見出しの文字で探します（Measure-TestQuality.ps1 と同じ `tools\test-quality\見出し.csv`。期待結果・手順・前提条件・入力値・区分の候補も入っています）
+- 機能は、機能の列（空なら上の行の値）、無ければシート名かファイル名です。境界値は、機能・ファイル名・シート名に画面 ID が出てくるケースから探します
+- 異常系・境界値は書かれた言葉から機械的に判定します。最終的にはレビューで確かめてください
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | テスト仕様書のファイル・フォルダ（Excel・CSV） |
+| `-DesignPath` | 設計書のフォルダ。画面項目定義の桁数から境界値のケースを確かめる |
+| `-MinErrorRatio` | 異常系のケースの割合の下限（既定 0.2） |
+| `-VagueWords` | あいまいな期待結果とみなす言葉 |
+| `-Headers` | 見出しの候補の CSV |
+| `-OutXlsx` | 指摘（該当セルへのリンク付き）・機能別（ケース数・異常系の割合）を保存する |
 
 ## Export-ExcelToPdf.ps1
 
