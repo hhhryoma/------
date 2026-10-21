@@ -19,13 +19,14 @@
 | [Measure-ReviewQuality.ps1](#measure-reviewqualityps1) | レビューの指摘管理表を集計し、設計書ごとの指摘件数・指摘密度（ページ数・規模あたり）・未完了・期限切れを出し、基準値から外れた設計書を知らせる。レビュー記録の工数も使うと、レビュー工数密度 × 指摘密度のゾーン分析もする（Excel 不要） |
 | [Measure-TestQuality.ps1](#measure-testqualityps1) | テスト仕様書と障害管理表を集計し、機能ごとのテスト密度・バグ密度とゾーン分析、テストの消化とバグの収束の推移、信頼度成長曲線（潜在バグ数の推定・収束の判定）、NG なのにバグ番号が無いなどの食い違いを出す（Excel 不要） |
 | [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系や境界値のケースの不足を見つける（Excel 不要） |
+| [Measure-DefectRemoval.ps1](#measure-defectremovalps1) | 障害管理表とレビューの指摘から、欠陥の混入工程 × 摘出工程と、工程ごとの摘出率・後の工程への流出・原因の多い順を出す（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 | [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -1713,6 +1714,68 @@ Detail   : 「正しく」では、何を確かめれば合格かが分かりま
 | `-VagueWords` | あいまいな期待結果とみなす言葉 |
 | `-Headers` | 見出しの候補の CSV |
 | `-OutXlsx` | 指摘（該当セルへのリンク付き）・機能別（ケース数・異常系の割合）を保存する |
+
+## Measure-DefectRemoval.ps1
+
+欠陥（テストのバグとレビューの指摘）を、**どの工程で入り（混入工程）、どの工程で見つかったか（摘出工程）**で数え、工程ごとの**摘出率**と、後の工程への**流出**を出します。Excel は不要です。
+「設計で入った誤りがテストまで残っている」「どの工程のレビューを強めるべきか」を数字で示せます。
+
+```powershell
+.\Measure-DefectRemoval.ps1 -BugList D:\テスト\障害管理表.xlsx -Findings D:\レビュー -OutXlsx D:\工程別の欠陥.xlsx
+```
+
+```
+Phase      Injected FoundInTime Leaked RemovalRate Detected FromEarlier
+-----      -------- ----------- ------ ----------- -------- -----------
+基本設計          3           2      1        0.67        2           0
+詳細設計          6           4      2        0.67        4           0
+製造              3           3      0        1.00        0           0
+単体テスト        0           0      0                    6           5
+結合テスト        0           0      0                    1           1
+
+欠陥 13 件（バグ 7・レビューの指摘 6。取下げなどで数えなかったもの 1 件）
+摘出すべき工程までに見つかった欠陥: 9 / 12 件（75.0%）。流出 3 件
+  設計で入り、テストで見つかった欠陥: 3 件（詳細設計 2・基本設計 1）
+原因の上位: コーディングミス 4（31%）・誤り 4（31%）・漏れ 2（15%）
+```
+
+| 列 | 内容 |
+| --- | --- |
+| Injected | その工程で入った欠陥の数 |
+| FoundInTime / Leaked | そのうち、摘出すべき工程までに見つかったもの / それより後で見つかったもの（流出） |
+| RemovalRate | 摘出率（FoundInTime ÷ (FoundInTime + Leaked)） |
+| Detected / FromEarlier | その工程で見つかった欠陥の数 / そのうち前の工程で入ったもの（前の工程から流出してきたもの） |
+
+### 読む表
+
+| 表 | 読み方 |
+| --- | --- |
+| 障害管理表（`-BugList`） | 「障害内容」と、「混入工程」（作り込み工程・原因工程）か「摘出工程」（発見工程・検出工程）の見出しがある表。原因（原因分類）・重要度・状態も読む |
+| 指摘管理表（`-Findings`） | 「指摘内容」と「工程」（レビュー工程）の見出しがある表。工程を摘出工程にし、混入工程の列が無ければレビューした工程で入ったものとみなす。分類を原因として数える |
+
+- 「取下げ」「重複」「仕様どおり」などの状態は数えません
+- 見出しの候補は、障害管理表は `tools\test-quality\見出し.csv`、指摘管理表は `tools\review-quality\指摘管理表の見出し.csv` です
+
+### 工程（`tools\test-quality\工程.csv`）
+
+工程の並び・別名・**摘出すべき工程**を決めます。既定は 要件定義 → 基本設計 → 詳細設計 → 製造 → 単体テスト → 結合テスト → 総合テスト → 運用テスト です。
+
+| 列 | 内容 |
+| --- | --- |
+| 工程 | 工程の名前（この順に並べる） |
+| 別名 | 表に書かれる別の名前（`|` 区切り）。「詳細設計レビュー」のような「レビュー」「工程」付きの名前と、「UT」「IT」のような英字の略称も読める |
+| 摘出すべき工程 | その工程で入った欠陥を、遅くともこの工程までに見つけるもの（既定では、製造で入った欠陥は単体テスト、それ以外は同じ工程） |
+
+工程として読めない値は警告し、「（不明）」として数えます（摘出率には入れません）。
+
+### -OutXlsx の内容
+
+| シート | 内容 |
+| --- | --- |
+| 工程別 | 上の表と同じ |
+| 工程マトリクス | 混入工程 × 摘出工程の件数（行・列の合計付き） |
+| 原因 | 原因の多い順・割合・累積の割合（Excel でパレート図にできます） |
+| 流出 | 摘出すべき工程より後で見つかった欠陥の一覧（障害管理表・指摘管理表の該当行へのリンク付き） |
 
 ## Export-ExcelToPdf.ps1
 
