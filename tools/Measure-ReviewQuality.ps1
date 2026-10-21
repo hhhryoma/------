@@ -204,18 +204,23 @@ $efforts = New-Object System.Collections.Generic.List[object]
 
 function ConvertTo-Hours {
     #     時間の文字（1.5・1.5h・2時間・90分・1時間30分・3人時・1:30・10:00～11:30）を時間の数にする。読めなければ $null。
+    #     時刻の書式のセルは Search-Excel が「01:30:00」の形で返すので、秒も読む
     #     Minutes: 数字だけのときに分とみなす（見出しが「レビュー時間(分)」など）
     param([string] $Text, [bool] $Minutes)
     $t = ([string]$Text).Normalize($nfkc).Trim()
     if (-not $t) { return $null }
-    $m = [regex]::Match($t, '^(\d{1,2}):(\d{2})\s*[~\-〜]\s*(\d{1,2}):(\d{2})$')
+    $m = [regex]::Match($t, '^(\d{1,2}):(\d{2})(?::\d{2})?\s*[~\-〜]\s*(\d{1,2}):(\d{2})(?::\d{2})?$')
     if ($m.Success) {
         $span = ([int]$m.Groups[3].Value * 60 + [int]$m.Groups[4].Value) - ([int]$m.Groups[1].Value * 60 + [int]$m.Groups[2].Value)
         if ($span -gt 0) { return $span / 60.0 }
         return $null
     }
-    $m = [regex]::Match($t, '^(\d+):(\d{2})$')
-    if ($m.Success) { return [int]$m.Groups[1].Value + [int]$m.Groups[2].Value / 60.0 }
+    $m = [regex]::Match($t, '^(\d+):(\d{2})(?::(\d{2}))?$')
+    if ($m.Success) {
+        $hours = [int]$m.Groups[1].Value + [int]$m.Groups[2].Value / 60.0
+        if ($m.Groups[3].Success) { $hours += [int]$m.Groups[3].Value / 3600.0 }
+        return $hours
+    }
     $m = [regex]::Match($t, '^(?:(\d+(?:\.\d+)?)\s*(?:人時|時間|hrs|hr|h))?\s*(?:(\d+(?:\.\d+)?)\s*分)?$', 'IgnoreCase')
     if ($m.Success -and ($m.Groups[1].Success -or $m.Groups[2].Success)) {
         $hours = 0.0

@@ -95,7 +95,8 @@ function New-ReviewLogs {
         @('対象成果物', 'DD05_メッセージ一覧', ''),
         @('レビュー工数', '3人時', ''),
         @('参加者', '山田', '佐藤'))
-    @('設計書,レビュー時間,人数', 'DD02_画面設計書_SCR001_受注一覧,10:00～10:30,2', 'DD09_未知の設計書,1.5h,1') | Set-Content -LiteralPath (Join-Path $logDir 'log.csv') -Encoding UTF8
+    # 時刻の書式のセルは「01:30:00」の形で読まれる
+    @('設計書,レビュー時間,人数', 'DD02_画面設計書_SCR001_受注一覧,10:00～10:30,2', 'DD09_未知の設計書,01:30:00,1') | Set-Content -LiteralPath (Join-Path $logDir 'log.csv') -Encoding UTF8
     return $logDir
 }
 
