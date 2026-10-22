@@ -114,3 +114,40 @@ Test-Case 'New-QualityReport: 判定基準の CSV で ○△× の基準を変�
     @('指標,向き,○,△', '未完了の指摘,多い,0,') | Set-Content -LiteralPath $criteria -Encoding UTF8
     Assert-Throws { & $ReportTool -OutDir $out -Findings (Join-Path $dir 'レビュー') -Criteria $criteria 6>$null } '向きは「以上」か「以下」'
 }
+
+Test-Case 'New-QualityReport: -HistoryCsv に実績を足し、前回の値・増減と推移を出す（New-QualityLimits にそのまま渡せる）' {
+    $dir = New-TestDir
+    New-ReportData $dir
+    $pages = Join-Path $dir 'pages.csv'
+    @('"ファイル","ページ数"', '"DD02_画面設計書_SCR001_受注一覧.pdf","4"', '"DD03_テーブル定義書.pdf","10"') | Set-Content -LiteralPath $pages -Encoding UTF8
+    $history = Join-Path $dir '実績.csv'
+    $base = @{ Findings = (Join-Path $dir 'レビュー'); PageCsv = $pages; BugList = (Join-Path $dir '障害管理表.xlsx'); HistoryCsv = $history; Project = 'A' }
+    & $ReportTool @base -OutDir (Join-Path $dir '1') -AsOf '2026-10-06' 3>$null 6>$null | Out-Null
+    $text = Get-HostText { & $ReportTool @base -OutDir (Join-Path $dir '2') -AsOf '2026-10-20' 3>$null | Out-Null }
+    Assert-Match $text '実績の CSV に \d+ 件を足しました（プロジェクト「A」・2026/10/20。前回 2026/10/06 と比べました）'
+
+    $rows = @(Import-Csv -LiteralPath $history)
+    Assert-Equal @('2026/10/06', '2026/10/20') @($rows | ForEach-Object { $_.'時点' } | Sort-Object -Unique)
+    $density = @($rows | Where-Object { $_.'指標' -eq '指摘密度' -and $_.'時点' -eq '2026/10/20' })[0]
+    Assert-Equal 'ページ数|0.214' ('{0}|{1}' -f $density.'分母', $density.'値') '指摘 3 件 ÷ 14 ページ'
+
+    $book = Read-XlsxSheet -Path (Join-Path $dir '2\品質評価_20261020.xlsx')
+    Assert-Equal @('品質評価', '要対応', '対象', '推移') $book.Sheets
+    Assert-Equal '実績|前回（2026/10/06）|増減|判定' ((@('C', 'D', 'E', 'F') | ForEach-Object { $book.Rows[1][$_] }) -join '|')
+    # 期限切れの指摘: 10/06 は 1 件（10/05 期限）、10/20 も 1 件で増減 0
+    $overdue = @($book.Rows.Values | Where-Object { $_['B'] -eq '期限切れの指摘' })[0]
+    Assert-Equal '1|1|0' ('{0}|{1}|{2}' -f $overdue['C'], $overdue['D'], $overdue['E'])
+    Assert-True (@($book.Links | Where-Object { $_.Ref -like 'J*' }).Count -gt 0) '詳細のリンクは右にずれる'
+    $trend = Read-XlsxSheet -Path (Join-Path $dir '2\品質評価_20261020.xlsx') -Index 4
+    Assert-Equal '区分|指標|2026/10/06|2026/10/20' ((@('A', 'B', 'C', 'D') | ForEach-Object { $trend.Rows[1][$_] }) -join '|')
+
+    # 同じ時点で実行し直すと置き換える
+    $count = $rows.Count
+    & $ReportTool @base -OutDir (Join-Path $dir '2') -AsOf '2026-10-20' 3>$null 6>$null | Out-Null
+    Assert-Equal $count @(Import-Csv -LiteralPath $history).Count
+
+    # New-QualityLimits はプロジェクトごとに最後の時点だけを使う
+    $limits = @(& (Join-Path $script:ToolsDir 'New-QualityLimits.ps1') $history 6>$null)
+    $l = @($limits | Where-Object { $_.Metric -eq '指摘密度' })[0]
+    Assert-Equal 'ページ数|1|0.214' ('{0}|{1}|{2}' -f $l.Unit, $l.Count, $l.Mean)
+}

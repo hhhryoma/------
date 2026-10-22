@@ -34,6 +34,7 @@ $headerOf = @{
     '工程' = @('工程', 'フェーズ', 'テスト工程', 'レビュー工程')
     '値'   = @('値', '実績', '実績値', '測定値')
     'プロジェクト' = @('プロジェクト', '案件', 'プロジェクト名', '案件名')
+    '時点' = @('時点', '集計日', '日付')
 }
 
 # ---------------------------------------------------------------- 実績を読む
@@ -63,12 +64,30 @@ foreach ($p in $Path) {
                 if ($col['工程']) { $process = ([string]$r.($col['工程'])).Trim() }
                 $project = ''
                 if ($col['プロジェクト']) { $project = ([string]$r.($col['プロジェクト'])).Trim() }
-                $samples.Add([pscustomobject]@{ Metric = ([string]$r.($col['指標'])).Trim(); Unit = ([string]$r.($col['分母'])).Trim(); Process = $process; Value = $value; Project = $project })
+                $date = ''
+                if ($col['時点']) { $date = ([string]$r.($col['時点'])).Trim() }
+                $samples.Add([pscustomobject]@{ Metric = ([string]$r.($col['指標'])).Trim(); Unit = ([string]$r.($col['分母'])).Trim(); Process = $process; Value = $value; Project = $project; Date = $date })
             }
         }
     }
 }
 if ($samples.Count -eq 0) { throw '実績が見つかりません（指標・分母・値の列がある CSV を指定してください）' }
+
+# New-QualityReport.ps1 の実績の CSV のように、同じプロジェクトの値が時点ごとにあるときは、最後の時点の値だけを使う
+$latest = @{}
+foreach ($x in $samples) {
+    if (-not ($x.Project -and $x.Date)) { continue }
+    $k = '{0}|{1}|{2}|{3}' -f $x.Project, $x.Metric, $x.Unit, $x.Process
+    if (-not $latest.ContainsKey($k) -or [string]::CompareOrdinal($x.Date, $latest[$k]) -gt 0) { $latest[$k] = $x.Date }
+}
+if ($latest.Count -gt 0) {
+    $kept = New-Object System.Collections.Generic.List[object]
+    foreach ($x in $samples) {
+        if ($x.Project -and $x.Date -and $x.Date -ne $latest[('{0}|{1}|{2}|{3}' -f $x.Project, $x.Metric, $x.Unit, $x.Process)]) { continue }
+        $kept.Add($x)
+    }
+    $samples = $kept
+}
 
 # ---------------------------------------------------------------- 基準値を求める
 
@@ -126,7 +145,8 @@ if ($OutCsv) { Write-Host "基準値の CSV を保存しました: $OutCsv" }
 #     過去のプロジェクトの品質の実績（指摘密度・バグ密度など）から、社内の基準値（下限・上限）の CSV を作ります（Excel 不要）。
 #
 # .DESCRIPTION
-#     実績の CSV（指標・分母・工程・値の列。プロジェクトの列は任意）を読み、指標 × 分母 × 工程の組ごとに下限・上限を求めます。
+#     実績の CSV（指標・分母・工程・値の列。プロジェクト・時点の列は任意）を読み、指標 × 分母 × 工程の組ごとに下限・上限を求めます。
+#     同じプロジェクトの値が時点ごとにあるとき（New-QualityReport.ps1 -HistoryCsv の CSV）は、最後の時点の値だけを使います。
 #
 #       Sigma（既定）   平均 ± -Sigma × 標準偏差（下限は 0 未満にしない）
 #       Percentile      -Percentiles のパーセント点（既定 25〜75。外れ値に引きずられにくい）
