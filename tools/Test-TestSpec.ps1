@@ -146,6 +146,21 @@ foreach ($g in @($cases | Group-Object Key)) {
     }
 }
 
+function Get-NameVariants {
+    #     項目名（ConvertTo-Label・大文字にしたもの）の、よくある別の書き方（語尾の 番号↔No・コード↔CD・区分↔KBN・日付↔日・名称↔名・長音）
+    param([string] $Name)
+    $pairs = @(@('番号', 'NO'), @('番号', '№'), @('番号', 'ナンバー'), @('コード', 'CD'), @('区分', 'KBN'), @('日付', '日'), @('名称', '名'))
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($p in $pairs) {
+        foreach ($d in @(@($p[0], $p[1]), @($p[1], $p[0]))) {
+            if ($Name.Length -gt $d[0].Length -and $Name.EndsWith($d[0])) { $list.Add($Name.Substring(0, $Name.Length - $d[0].Length) + $d[1]) }
+        }
+    }
+    if ($Name.EndsWith('ー') -and $Name.Length -gt 2) { $list.Add($Name.Substring(0, $Name.Length - 1)) }
+    elseif ($Name -match '[ザバタダラリパ]$') { $list.Add($Name + 'ー') }
+    return @($list | Where-Object { $_.Length -ge 2 -and $_ -ne $Name } | Select-Object -Unique)
+}
+
 # ---------------------------------------------------------------- 入力項目の観点（-DesignPath の画面項目の必須・型・桁数とコード値）
 
 
@@ -197,6 +212,12 @@ if ($DesignPath) {
             }
         }
     }
+    # 画面ごとの項目名（揺れとみなさないため）
+    $screenItems = @{}
+    foreach ($item in $inputItems) {
+        if (-not $screenItems.ContainsKey($item.Screen)) { $screenItems[$item.Screen] = New-Object 'System.Collections.Generic.HashSet[string]' }
+        [void]$screenItems[$item.Screen].Add((ConvertTo-Label $item.Item).ToUpperInvariant())
+    }
     foreach ($item in $inputItems) {
         $screenRx = New-Object System.Text.RegularExpressions.Regex(('(?<![A-Za-z0-9]){0}(?![A-Za-z0-9])' -f [regex]::Escape($item.Screen)), 'IgnoreCase')
         $screenCases = @($cases | Where-Object { $screenRx.IsMatch(('{0} {1} {2}' -f $_.Function, $_.Place.File, $_.Place.Sheet).Normalize($nfkc)) })
@@ -205,6 +226,23 @@ if ($DesignPath) {
         # その項目の名前が出てくるケースの文字
         $itemTexts = @($screenCases | ForEach-Object { (@($_.Values.Values) -join ' ').Normalize($nfkc) } | Where-Object { (ConvertTo-Label $_).Contains($itemLabel) })
         $where = '{0} {1} {2} 行目' -f $item.File, $item.Sheet, $item.Row
+
+        # 項目名の揺れ: 設計書の項目名と違う書き方（受注番号 → 受注No など）がケースに出てくる
+        $upper = $itemLabel.ToUpperInvariant()
+        foreach ($variant in (Get-NameVariants $upper)) {
+            if ($screenItems[$item.Screen].Contains($variant)) { continue }
+            # 別の書き方が設計書の項目名より短いときは、項目名の部分を除いて探す（「顧客名称」の中の「顧客名」を揺れとしない）
+            $hit = @($screenCases | Where-Object {
+                    $t = (ConvertTo-Label (@($_.Values.Values) -join ' ').Normalize($nfkc)).ToUpperInvariant()
+                    if (-not $variant.Contains($upper)) { $t = $t.Replace($upper, '') }
+                    $t.Contains($variant)
+                })
+            if ($hit.Count -gt 0) {
+                $more = $(if ($hit.Count -gt 1) { '。ほかに {0} 件' -f ($hit.Count - 1) } else { '' })
+                Add-Issue '警告' '項目名の揺れ' $hit[0] '' ("{0} のケースに「{1}」と書かれています。設計書の項目名は「{2}」です（{3}{4}）" -f $item.Screen, $variant, $item.Item, $where, $more)
+                break
+            }
+        }
 
         # 必須の項目: 未入力のケース
         if ($item.Required -and @($itemTexts | Where-Object { $_ -match $requiredPattern }).Count -eq 0) {
@@ -319,6 +357,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       型のテストが無い入力項目（型が日付・数値・半角の項目。項目名と、その型として正しくない値の言葉が出てくるケースを探す）
 #       コード値のテストが無い入力項目（コード定義書に同じ名前のコード区分がある項目。表示名ごとに、項目名と表示名が出てくるケースを探す）
 #       メッセージ一覧に無いメッセージ ID と、メッセージ一覧と違う文言（-DesignPath のメッセージ一覧。「」で書いた文言を比べる）
+#       項目名の揺れ（画面のケースに、画面項目定義の項目名の別の書き方（受注番号 → 受注No・顧客コード → 顧客CD など）が出てくる）
 #
 #     見出しの候補は tools\test-quality\見出し.csv（Measure-TestQuality.ps1 と同じ）で足せます。
 #
