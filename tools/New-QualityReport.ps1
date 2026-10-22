@@ -19,6 +19,8 @@ param(
 
     [string] $SizeCsv,
 
+    [string] $FunctionMap,
+
     [string] $ReviewLimits,
 
     [string] $TestLimits,
@@ -254,6 +256,7 @@ if ($TestPath) {
     if ($BugList) { $args2['BugList'] = $BugList }
     if ($SizeCsv) { $args2['SizeCsv'] = $SizeCsv } elseif ($DesignPath) { $args2['DesignPath'] = $DesignPath }
     if ($TestLimits) { $args2['Limits'] = $TestLimits }
+    if ($FunctionMap) { $args2['FunctionMap'] = $FunctionMap }
     $functions = Invoke-Tool 'Measure-TestQuality' $args2
 }
 if ($null -ne $functions) {
@@ -514,6 +517,9 @@ Write-Host "各ツールの詳細: $detailDir"
 #
 # .PARAMETER SizeCsv
 #     機能ごとの規模の CSV（テスト密度・バグ密度の分母。Measure-CodeSize.ps1 -OutCsv の KLOC など）。
+#
+# .PARAMETER FunctionMap
+#     機能の対応表の CSV（機能・別名・設計書。Measure-TestQuality.ps1 の -FunctionMap）。
 #
 # .PARAMETER ReviewLimits
 #     レビューの基準値の CSV（Measure-ReviewQuality.ps1 の -Limits）。

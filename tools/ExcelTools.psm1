@@ -897,6 +897,35 @@ function Write-ReadLogSummary {
     }
 }
 
+function Read-FunctionMap {
+    #     機能の対応表の CSV（機能・別名・設計書。別名と設計書は | で区切って複数書ける）を、名前（ConvertTo-NameKey）→ 機能の名前 にする
+    #     テスト仕様書・障害管理表・規模・設計書で機能の書き方が違うとき（SCR001 / 受注一覧 / DD02_画面設計書_SCR001_受注一覧 など）にそろえる
+    param([string] $FilePath)
+    $map = @{}
+    if (-not $FilePath) { return $map }
+    foreach ($r in (Read-CsvFile $FilePath @('機能') '機能の対応表')) {
+        $name = ([string]$r.'機能').Trim()
+        if (-not $name) { continue }
+        $names = @($name)
+        foreach ($col in @('別名', '設計書')) { if ($r.PSObject.Properties[$col]) { $names += @(([string]$r.$col) -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } }
+        foreach ($n in $names) {
+            $k = ConvertTo-NameKey $n
+            if ($map.ContainsKey($k) -and $map[$k] -ne $name) { Write-Warning ("機能の対応表で「{0}」が 2 つの機能（{1}・{2}）にあります。先の行を使います: {3}" -f $n, $map[$k], $name, $FilePath); continue }
+            $map[$k] = $name
+        }
+    }
+    return $map
+}
+
+function Resolve-FunctionName {
+    #     名前を機能の対応表の機能の名前にする（対応表に無ければ $null）
+    param([hashtable] $Map, [string] $Name)
+    if (-not $Map -or $Map.Count -eq 0 -or -not ([string]$Name).Trim()) { return $null }
+    $k = ConvertTo-NameKey $Name
+    if ($Map.ContainsKey($k)) { return $Map[$k] }
+    return $null
+}
+
 function ConvertTo-NameKey {
     #     機能・設計書の名前を比べる形（フォルダと拡張子を除き、全角・半角と空白をそろえる）
     param([string] $Name)
