@@ -200,7 +200,7 @@ $global:ExcelToolsSearchCache = @{ '__Reused' = 0 }
 # 途中でエラー・中断（Ctrl+C）になっても、使い回しの結果は残さない
 try {
     # ツールの結果（実行しなかった・失敗したものは $null）
-    $docs = $null; $functions = $null; $specIssues = $null; $phases = $null; $gaps = $null; $issues = $null; $effect = $null; $pairs = $null
+    $docs = $null; $functions = $null; $specIssues = $null; $phases = $null; $gaps = $null; $issues = $null; $effect = $null; $pairs = $null; $pointRates = @()
     $common = @{}
     if ($NoExcel) { $common['NoExcel'] = $true }
 
@@ -386,6 +386,11 @@ try {
         $aiCount = $matched + @($pairs | Where-Object Status -eq 'AI だけ').Count
         if ($humanCount -gt 0) { Add-Metric 'AI レビュー' '人の指摘のうち AI も見つけた割合' ([double][math]::Round($matched / $humanCount, 3)) ('{0} / {1} 件' -f $matched, $humanCount) $file }
         if ($aiCount -gt 0) { Add-Metric 'AI レビュー' 'AI の指摘のうち人と一致した割合' ([double][math]::Round($matched / $aiCount, 3)) ('{0} / {1} 件。AI だけの指摘には、人が見落とした正しい指摘も入る' -f $matched, $aiCount) $file }
+        # 観点ごとの、AI の指摘のうち人と一致した割合（実績の CSV に残し、「観点別の一致率」のシートで推移を見る）
+        $pointRates = @($pairs | Where-Object { $_.PointId -and $_.Status -ne '人だけ' } | Group-Object PointId | Sort-Object Name | ForEach-Object {
+                $hit = @($_.Group | Where-Object Status -eq '一致').Count
+                [pscustomobject]@{ Point = $_.Name; Ai = $_.Count; Matched = $hit; Rate = [double][math]::Round($hit / $_.Count, 3) }
+            })
         # 観点表への反映案（Compare-ReviewFindings の結果のシート）は、要対応にも並べる
         $proposals = @()
         if (Test-Path -LiteralPath $file) { $proposals = Read-SheetTable $file '観点表への反映案' }
@@ -518,6 +523,23 @@ if ($HistoryCsv) {
     }
     $reportSheets += @{ Name = '推移'; Columns = @(@(@{ Header = '区分'; Width = 12 }, @{ Header = '指標'; Width = 36 }) + @($dates | ForEach-Object { @{ Header = $_; Width = 11 } })); Rows = $trendRows }
 }
+# 観点別の一致率: AI レビューの観点ごとに、今回と、このプロジェクトの直近の時点の一致率を並べる（観点表を直した効果を見る）
+$pointArea = 'AI レビュー（観点別）'
+if ($pointRates.Count -gt 0) {
+    $pointDates = @($dateText)
+    if ($HistoryCsv) { $pointDates = $dates }
+    $pointRows = New-Object System.Collections.Generic.List[object]
+    foreach ($p in $pointRates) {
+        $values = @($p.Point, [double]$p.Ai, [double]$p.Matched)
+        foreach ($d in $pointDates) {
+            if ($d -eq $dateText) { $values += $p.Rate; continue }
+            $n = & $invariantNumber $byDate[('{0}|{1}|{2}|{3}' -f $d, $pointArea, $p.Point, '一致率')]
+            $values += $(if ($null -ne $n) { [double]$n } else { '' })
+        }
+        $pointRows.Add(@{ Values = $values })
+    }
+    $reportSheets += @{ Name = '観点別の一致率'; Columns = @(@(@{ Header = '観点ID'; Width = 10 }, @{ Header = 'AI の指摘'; Width = 9 }, @{ Header = '人と一致'; Width = 9 }) + @($pointDates | ForEach-Object { @{ Header = $_; Width = 11 } })); Rows = $pointRows }
+}
 Export-Workbook -FilePath $reportPath -Sheets $reportSheets
 
 # 実績の CSV に今回の値を足す（同じプロジェクト・同じ時点の行は置き換える）。New-QualityLimits.ps1 にそのまま渡せる
@@ -525,6 +547,7 @@ if ($HistoryCsv) {
     $kept = @($history | Where-Object { -not (([string]$_.'プロジェクト') -eq $Project -and ([string]$_.'時点') -eq $dateText) } | ForEach-Object {
             [pscustomobject][ordered]@{ 'プロジェクト' = $_.'プロジェクト'; '時点' = $_.'時点'; '区分' = $_.'区分'; '指標' = $_.'指標'; '分母' = $_.'分母'; '工程' = $(if ($_.PSObject.Properties['工程']) { $_.'工程' } else { '' }); '値' = $_.'値' } })
     $added = @($numeric | ForEach-Object { [pscustomobject][ordered]@{ 'プロジェクト' = $Project; '時点' = $dateText; '区分' = $_.Area; '指標' = $_.Key; '分母' = $_.Unit; '工程' = ''; '値' = ([double]$_.Value).ToString($invariant) } })
+    $added += @($pointRates | ForEach-Object { [pscustomobject][ordered]@{ 'プロジェクト' = $Project; '時点' = $dateText; '区分' = $pointArea; '指標' = $_.Point; '分母' = '一致率'; '工程' = ''; '値' = $_.Rate.ToString($invariant) } })
     $all = @($kept + $added)
     [System.IO.File]::WriteAllText($HistoryCsv, (((@($all) | ConvertTo-Csv -NoTypeInformation) -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
 }
@@ -557,7 +580,7 @@ if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 
 #       -TestPath        Measure-TestQuality.ps1（消化率・未完了のバグ・収束・テスト密度とバグ密度・食い違い）と Test-TestSpec.ps1
 #       -BugList / -Findings  Measure-DefectRemoval.ps1（摘出すべき工程までに見つかった割合・流出）
 #       -Findings と -BugList  Measure-ReviewEffectiveness.ps1（設計工程の摘出率・レビューで見逃した設計書）
-#       -AiReview と -Findings  Compare-ReviewFindings.ps1（AI と人の指摘の一致率・観点表への反映案）
+#       -AiReview と -Findings  Compare-ReviewFindings.ps1（AI と人の指摘の一致率・観点表への反映案。観点別の一致率のシート）
 #       -DesignPath と -TestPath  Test-Traceability.ps1（テストのある画面・イベント・メッセージ・IF の割合。-Requirement で要件も）
 #       -DesignPath      Test-DesignConsistency.ps1（設計書どうしの参照の食い違い）
 #
