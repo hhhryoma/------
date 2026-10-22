@@ -82,7 +82,21 @@ Test-Case 'Test-TestSpec: -DesignPath の必須・型・コード定義書から
     Assert-True ($boundary -notcontains '支払方法' -and $boundary -notcontains '受注日') '選ぶ項目と日付は桁数の境界を見ない'
     Assert-True ($boundary -contains '備考') ($boundary -join ', ')
     $text = Get-HostText { & $TestSpecTool -Path $path -DesignPath (Join-Path $script:RepoRoot 'docs/design-sample') | Out-Null }
-    Assert-Match $text '入力項目 \d+ 件（必須 \d+・桁数あり \d+）とコード区分 \d+ 件を確かめました'
+    Assert-Match $text '入力項目 \d+ 件（必須 \d+・桁数あり \d+）・コード区分 \d+ 件・メッセージ \d+ 件を確かめました'
+}
+
+Test-Case 'Test-TestSpec: -DesignPath のメッセージ一覧に無いメッセージ ID と、一覧と違う文言を知らせる' {
+    $dir = New-TestDir
+    $rows = @(
+        @('1', 'SCR002', '異常', '', '受注日を未入力で登録する', '', 'E0001「受注日は必須入力です。」が表示される', 'OK'),
+        @('2', '', '異常', '', '受注日に存在しない日付を入れて登録する', '2025/02/30', 'E0004「日付が正しくありません。」が表示される', 'OK'),
+        @('3', '', '異常', '', '顧客コードに「ABC」を入れて登録する（REQ-001）', '', 'E9999 が表示される', 'OK'))
+    $path = Join-Path $dir 'UT_受注登録.xlsx'
+    New-SpecBook $path @('No', '機能', '区分', '前提条件', '手順', '入力値', '期待結果', '結果') $rows
+    $issues = @(& $TestSpecTool -Path $path -DesignPath (Join-Path $script:RepoRoot 'docs/design-sample') 6>$null | Where-Object { $_.Item -match 'メッセージ|あいまい' })
+    Assert-Equal @(
+        'メッセージの文言が違う|テストケース!G3|「日付が正しくありません。」が、メッセージ一覧の E0004「{0}の日付の形式が正しくありません。」（DD05_メッセージ一覧.xlsx メッセージ一覧 9 行目） と合いません',
+        'メッセージIDが一覧に無い|テストケース!G4|メッセージ ID E9999 がメッセージ一覧にありません（誤記か、一覧への追加漏れ）') @($issues | ForEach-Object { '{0}|{1}|{2}' -f $_.Item, $_.Location, $_.Detail })
 }
 
 Test-Case 'Test-TestSpec: 区分の列が無ければ、期待結果の言葉から異常系を推定する' {

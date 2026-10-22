@@ -95,7 +95,8 @@ foreach ($c in $cases) {
     $expected = Get-Text $c '期待結果'
     if ($labels['期待結果'] -and -not $expected) { Add-Issue 'エラー' '期待結果が空' $c '期待結果' '期待結果が書かれていません' }
     elseif ($expected -and $vagueRx) {
-        $m = $vagueRx.Match($expected)
+        # 「」で書いた画面の文言（メッセージなど）の中の「正しく」などは、あいまいな書き方ではない
+        $m = $vagueRx.Match(($expected -replace '「[^「」]*」', ''))
         if ($m.Success) { Add-Issue '警告' 'あいまいな期待結果' $c '期待結果' ("「{0}」では、何を確かめれば合格かが分かりません（表示される値・メッセージなどを具体的に書いてください）: {1}" -f $m.Value, $expected) }
     }
     if ($labels['手順'] -and -not (Get-Text $c '手順')) { Add-Issue '警告' '手順が空' $c '手順' '手順（操作）が書かれていません' }
@@ -150,6 +151,7 @@ foreach ($g in @($cases | Group-Object Key)) {
 
 $inputItems = New-Object System.Collections.Generic.List[object]
 $codeValues = @{}   # コード区分名（ConvertTo-Label 済み）→ 表示名の一覧
+$messages = @{}     # メッセージID（大文字）→ 文言と場所
 if ($DesignPath) {
     $searchArgs = @{ Pattern = '\S'; Path = $DesignPath; Target = 'Value' }
     if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
@@ -166,6 +168,16 @@ if ($DesignPath) {
                     if (-not $k -or -not $name) { continue }
                     if (-not $codeValues.ContainsKey($k)) { $codeValues[$k] = New-Object System.Collections.Generic.List[string] }
                     if (-not $codeValues[$k].Contains($name)) { $codeValues[$k].Add($name) }
+                }
+            }
+            # メッセージ一覧: メッセージID → 文言（テストに書いたメッセージ ID と文言を確かめる）
+            foreach ($t in (Find-DesignTables $grid @('メッセージID', 'メッセージ') 'メッセージID')) {
+                foreach ($dr in $t.Rows) {
+                    $id = ([string]$dr.Cells[$t.ColumnOf['メッセージID']]).Normalize($nfkc).Trim().ToUpperInvariant()
+                    $text = ([string]$dr.Cells[$t.ColumnOf['メッセージ']]).Normalize($nfkc).Trim()
+                    # 画面設計書のメッセージ欄（ID だけを書いた列）は文言ではない
+                    if ($id -notmatch '^[A-Z]+\d+$' -or -not $text -or $text -match '^[A-Za-z]+\d+$' -or $messages.ContainsKey($id)) { continue }
+                    $messages[$id] = [pscustomobject]@{ Text = $text; File = $book.File; Sheet = $sheetName; Row = $dr.Row }
                 }
             }
             $screen = Find-LabelValue $grid '画面ID'
@@ -220,6 +232,42 @@ if ($DesignPath) {
     }
 }
 
+# ---------------------------------------------------------------- メッセージ（-DesignPath のメッセージ一覧）
+
+
+function Test-MessageText {
+    #     テストに書いた文言が、メッセージ一覧の文言（{0} などは何かの文字）と合うか。空白と最後の「。」の違いは見ない
+    param([string] $Template, [string] $Text)
+    $strip = { param($t) ($t -replace '\s', '').TrimEnd('。') }
+    $pattern = [regex]::Escape((& $strip $Template)) -replace '\\\{\d+\}', '.+?'
+    return (& $strip $Text) -match ('^' + $pattern + '$')
+}
+
+if ($messages.Count -gt 0) {
+    # メッセージ一覧の ID の形（E0001 なら E と 4 桁）だけを探す（画面 ID・要件 ID などを拾わないように）
+    $shapes = @($messages.Keys | ForEach-Object { $m = [regex]::Match($_, '^([A-Z]+)(\d+)$'); '{0}\d{{{1}}}' -f $m.Groups[1].Value, $m.Groups[2].Value.Length } | Sort-Object -Unique)
+    $idRx = New-Object System.Text.RegularExpressions.Regex(('(?<![A-Za-z0-9])(?:{0})(?![0-9])' -f ($shapes -join '|')), 'IgnoreCase')
+    foreach ($c in $cases) {
+        $field = ''
+        if ($c.Values.ContainsKey('期待結果')) { $field = '期待結果' }
+        # 同じ列を 2 つの項目として読むこともあるので、同じ文字は 1 回だけ見る
+        $text = (@($c.Values.Values | Select-Object -Unique) -join ' ').Normalize($nfkc)
+        $ids = @($idRx.Matches($text) | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique)
+        foreach ($id in @($ids | Where-Object { -not $messages.ContainsKey($_) })) {
+            Add-Issue '警告' 'メッセージIDが一覧に無い' $c $field ("メッセージ ID {0} がメッセージ一覧にありません（誤記か、一覧への追加漏れ）" -f $id)
+        }
+        $known = @($ids | Where-Object { $messages.ContainsKey($_) })
+        if ($known.Count -eq 0) { continue }
+        # 「」で書いたメッセージらしい文言（。で終わる・ください／ません など）が、ケースのメッセージ ID の文言のどれとも合わない
+        foreach ($quote in @([regex]::Matches($text, '「([^「」]+)」') | ForEach-Object { $_.Groups[1].Value.Trim() } | Select-Object -Unique)) {
+            if ($quote -notmatch '。$|ください|ません|しました|ですか') { continue }
+            if (@($known | Where-Object { Test-MessageText $messages[$_].Text $quote }).Count -gt 0) { continue }
+            $defined = (@($known | ForEach-Object { '{0}「{1}」（{2} {3} {4} 行目）' -f $_, $messages[$_].Text, $messages[$_].File, $messages[$_].Sheet, $messages[$_].Row })) -join '・'
+            Add-Issue '警告' 'メッセージの文言が違う' $c $field ("「{0}」が、メッセージ一覧の {1} と合いません" -f $quote, $defined)
+        }
+    }
+}
+
 # ---------------------------------------------------------------- 結果
 
 
@@ -253,7 +301,7 @@ Write-Host ''
 Write-Host ('テストケース {0} 件（機能 {1}）: エラー {2} 件 / 警告 {3} 件' -f $cases.Count, $functions.Count, @($issues | Where-Object Level -eq 'エラー').Count, @($issues | Where-Object Level -eq '警告').Count)
 $byItem = @($issues | Group-Object Item | Sort-Object @{ e = { $_.Count }; Descending = $true }, Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
 if ($byItem.Count -gt 0) { Write-Host ('内訳: {0}' -f ($byItem -join '・')) }
-if ($DesignPath) { Write-Host ('入力項目 {0} 件（必須 {1}・桁数あり {2}）とコード区分 {3} 件を確かめました' -f $inputItems.Count, @($inputItems | Where-Object Required).Count, @($inputItems | Where-Object { $null -ne $_.Digits }).Count, $codeValues.Count) }
+if ($DesignPath) { Write-Host ('入力項目 {0} 件（必須 {1}・桁数あり {2}）・コード区分 {3} 件・メッセージ {4} 件を確かめました' -f $inputItems.Count, @($inputItems | Where-Object Required).Count, @($inputItems | Where-Object { $null -ne $_.Digits }).Count, $codeValues.Count, $messages.Count) }
 Write-ReadLogSummary $readLog
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
@@ -270,6 +318,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       必須のテストが無い入力項目（必須 ○ の項目。項目名と、未入力・空欄などの言葉が出てくるケースを探す）
 #       型のテストが無い入力項目（型が日付・数値・半角の項目。項目名と、その型として正しくない値の言葉が出てくるケースを探す）
 #       コード値のテストが無い入力項目（コード定義書に同じ名前のコード区分がある項目。表示名ごとに、項目名と表示名が出てくるケースを探す）
+#       メッセージ一覧に無いメッセージ ID と、メッセージ一覧と違う文言（-DesignPath のメッセージ一覧。「」で書いた文言を比べる）
 #
 #     見出しの候補は tools\test-quality\見出し.csv（Measure-TestQuality.ps1 と同じ）で足せます。
 #
@@ -278,6 +327,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER DesignPath
 #     設計書のフォルダ・ファイル。画面項目定義の入力項目の必須・型・桁数とコード定義書から、未入力・不正な値・境界値・選ぶ値ごとのケースがあるかを確かめます。
+#     メッセージ一覧から、ケースに書いたメッセージ ID と文言が一覧と合うかも確かめます。
 #
 # .PARAMETER MinErrorRatio
 #     異常系のケースの割合の下限（既定 0.2）。ケースが 5 件以上の機能で、これより少なければ警告します。
