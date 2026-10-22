@@ -10,6 +10,7 @@
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる） |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、桁数・必須の違いなど）を全件見つける。CRUD 図と影響調査も（Excel 不要） |
 | [Test-Traceability.ps1](#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、設計の要素（画面・イベント・メッセージ・IF）にテストがあるかを確かめる。テストの抜けを全件、機械で見つける（Excel 不要） |
+| [Select-RegressionTests.ps1](#select-regressiontestsps1) | 設計書の旧版と新版の差分から、変更した項目・イベント・メッセージなどが出てくるテストケースを、再テストするケースとして選ぶ（改修の回帰テストの範囲決め。Excel 不要） |
 | [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
 | [New-DesignDocument.ps1](#new-designdocumentps1) | 画面一覧などの一覧から、雛形の差し込み欄（`{{画面ID}}` など）を埋めた設計書を一括で作る。テーブル定義書のように 1 件 1 シートの設計書には、雛形のシートからシートを足す。設計書の版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする（Excel 不要） |
 | [Measure-Progress.ps1](#measure-progressps1) | WBS から子のタスクごとの遅れ（営業日）・状態と PV／EV／SPI を出し、遅延タスクと週ごとの完了数をスケジュール遅延リカバリ計画のテンプレートに書き込む（Excel 不要） |
@@ -32,7 +33,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1` は `Compare-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールを、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -870,6 +871,44 @@ Kind       Scope  Id    Name           Judgement
 
 - テストに「出てくる」かを**文字で**確かめます。テストの内容が正しいか、十分かまでは確かめません
 - イベントは名前で探すため、「登録」のような短い名前は、別のイベント（「新規登録」）のテストでもあるとみなすことがあります
+
+## Select-RegressionTests.ps1
+
+設計書の**旧版と新版の差分**から、**再テストするテストケース**を選びます。改修案件の回帰テストの範囲を決めるときに使います。Excel は不要です。
+
+```powershell
+.\Select-RegressionTests.ps1 -Old D:\設計書_v1.0 -New D:\設計書_v1.1 -TestPath D:\テスト仕様書 -OutXlsx D:\再テスト.xlsx
+```
+
+```
+Priority Function Id Reason
+-------- -------- -- ------
+高       SCR002   1  [高] DD02_画面設計書_SCR002_受注登録.xlsx 画面項目定義!AF9（値）「支払方法・paymentMethod」の初期値を変更
+高       SCR003   5  [高] DD05_メッセージ一覧.xlsx メッセージ一覧!K9（値）「E0004」のメッセージを変更
+中       SCR002   2  [中] DD02_画面設計書_SCR002_受注登録.xlsx 画面項目定義!AF9（値）「支払方法・paymentMethod」の初期値を変更
+
+設計書の変更 2 件（差分 3 件。表紙・改訂履歴・作成日などは除く）: 再テストするケース 4 件（高 3・中 1）/ テストケース 5 件
+```
+
+1. Compare-Excel.ps1 で設計書の差分を取ります
+2. 変更したセルが、表のどの行・列かを調べます（画面項目定義の「支払方法」の「初期値」など）。行の名前は、見出しが 項目名・項目ID・イベント名・メッセージID・コード区分名・表示名・論理名・物理名・画面ID・画面名・テーブル名 の列から取ります
+3. テスト仕様書（見出しは Measure-TestQuality.ps1 と同じ `tools\test-quality\見出し.csv`）のケースを選びます
+
+| 優先 | 選ぶケース |
+| --- | --- |
+| 高 | 変更した行の名前（項目名・メッセージ ID・コードの表示名など）がケースに出てくる |
+| 中 | 画面設計書の変更で、その画面のケース（機能・ファイル名・シート名に画面 ID が出てくる） |
+
+- 表紙・改訂履歴のシートと、作成者・更新日・版数などの欄の変更は除きます
+- ケースごとに、選んだ理由（どの設計書のどのセルの変更か。`[高]`・`[中]` 付き）を並べます
+- **テストが見つからない変更**（テストを足すか、影響が無いことを確かめるもの）も知らせます
+- 選び方は機械的な目安です。共通部品・テーブルの変更の影響などは、最終的には人が確かめてください
+
+| シート（`-OutXlsx`） | 内容 |
+| --- | --- |
+| 再テストするケース | 優先・機能・テストID・期待結果・選んだ理由・テスト仕様書の場所（該当セルへのリンク） |
+| 設計書の変更 | 変更ごとの設計書・画面・場所・名前・列・旧・新と、選んだケースの数（0 はテストが見つからない変更） |
+| 読み取り結果 | テスト仕様書をどの見出しで読んだか |
 
 ## Export-TableDdl.ps1
 
