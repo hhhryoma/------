@@ -2030,6 +2030,7 @@ Metric   Unit     Process  Count  Mean  Low  High
 | `-Findings`（指摘管理表） | Measure-ReviewQuality.ps1 | 指摘件数・未完了・期限切れ・指摘密度が基準外の設計書。`-ReviewLog` で要対応のゾーンの設計書とレビュー実施率（未レビューの設計書は要対応） |
 | `-TestPath`（テスト仕様書） | Measure-TestQuality.ps1・Test-TestSpec.ps1 | 消化率・未完了のバグ・バグの収束・テスト密度とバグ密度が基準外の機能・食い違い、テスト仕様書のエラーと警告 |
 | `-BugList`・`-Findings` | Measure-DefectRemoval.ps1・Measure-ReviewEffectiveness.ps1 | 摘出すべき工程までに見つかった割合・後の工程への流出、設計工程の摘出率・レビューで見逃した設計書 |
+| `-AiReview`（AI のレビュー結果）と `-Findings` | Compare-ReviewFindings.ps1 | 人の指摘のうち AI も見つけた割合・AI の指摘のうち人と一致した割合・観点表への反映案（反映案は要対応にも並べる） |
 | `-DesignPath` と `-TestPath` | Test-Traceability.ps1 | テストのある画面・イベント・メッセージ・IF の割合。`-Requirement` で設計とテストのある要件の割合 |
 | `-DesignPath`（設計書） | Test-DesignConsistency.ps1 | 参照の食い違い（エラー・警告） |
 
@@ -2071,7 +2072,7 @@ Metric   Unit     Process  Count  Mean  Low  High
 .\New-QualityReport.ps1 -Config D:\案件\受注システム
 ```
 
-- 項目は 出力先・プロジェクト・設計書・指摘管理表・レビュー記録・ページ数・テスト仕様書・障害管理表・要件一覧・規模・機能の対応表・レビューの基準値・テストの基準値・判定基準・実績・タイトル です。空の行は使いません
+- 項目は 出力先・プロジェクト・設計書・指摘管理表・AIレビュー・レビュー記録・ページ数・テスト仕様書・障害管理表・要件一覧・規模・機能の対応表・レビューの基準値・テストの基準値・判定基準・実績・タイトル です。空の行は使いません
 - 相対パスは設定ファイルのフォルダから。複数の資料は `|` で区切ります。出力先が無ければ設定ファイルのフォルダの「品質報告」、プロジェクトが無ければそのフォルダの名前です
 - コマンドで指定したパラメーターは、設定ファイルより優先します
 - Install-SendTo.ps1 で登録した「送る」→「Excel 品質評価」に案件のフォルダを送ると、PowerShell を使わずに品質評価を作れます。続けて品質評価のブックを「Excel 品質評価の定性分析」に送ると、定性分析・対策の下書きを書き込めます
