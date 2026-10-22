@@ -506,13 +506,15 @@ if ($HistoryCsv) {
 }
 Write-Host "品質評価を保存しました: $reportPath"
 Write-Host "各ツールの詳細: $detailDir"
+if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 0) { Write-Host ('定性分析（原因）・対策の下書き: .\Invoke-QualityAnalysis.ps1 "{0}"' -f $reportPath) }
 
 # .SYNOPSIS
 #     レビュー・テスト・工程・網羅・設計書の整合性の各ツールを実行し、工程完了判定（品質会議）に使う品質評価のブックにまとめます（Excel 不要）。
 #
 # .DESCRIPTION
 #     渡した資料に応じて次のツールを実行し、指標ごとの実績・判定（○△×）・判定の考え方を 1 枚にまとめます。
-#     定性分析（原因）・対策の列は空欄です。会議の前に記入してください。各ツールの結果は「詳細」フォルダに保存し、リンクから開けます。
+#     定性分析（原因）・対策の列は空欄です。会議の前に記入してください（Invoke-QualityAnalysis.ps1 で AI に下書きを書かせられます）。
+#     各ツールの結果は「詳細」フォルダに保存し、リンクから開けます。
 #
 #       -Findings        Measure-ReviewQuality.ps1（指摘件数・未完了・期限切れ・指摘密度。-ReviewLog でゾーン分析）
 #       -TestPath        Measure-TestQuality.ps1（消化率・未完了のバグ・収束・テスト密度とバグ密度・食い違い）と Test-TestSpec.ps1

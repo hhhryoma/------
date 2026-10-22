@@ -29,6 +29,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Measure-CodeSize.ps1](tools/README.md#measure-codesizeps1) | ソースコードのステップ数（KLOC）を機能ごとに数え、前の版との新規・修正・削除も出す | 不要 |
 | [New-QualityLimits.ps1](tools/README.md#new-qualitylimitsps1) | 過去のプロジェクトの品質の実績から、社内の基準値（下限・上限）の CSV を作る | 不要 |
 | [New-QualityReport.ps1](tools/README.md#new-qualityreportps1) | レビュー・テスト・工程・網羅・整合性の各ツールをまとめて実行し、工程完了判定に使う品質評価のブック（指標・実績・判定 ○△×・要対応）を作る | 不要 ※1 |
+| [Invoke-QualityAnalysis.ps1](tools/README.md#invoke-qualityanalysisps1) | 品質評価のブックの × と △ の指標について、定性分析（原因）と対策の下書きを Microsoft 365 Copilot に書かせ、ブックに書き込む | 不要 |
 | [Invoke-DesignReview.ps1](tools/README.md#invoke-designreviewps1) | 設計書を観点表に沿って Microsoft 365 Copilot にレビューさせ、指摘一覧にまとめる | 不要 |
 | [Export-ExcelToPdf.ps1](tools/README.md#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える | 必要 ※2 |
 | [Install-SendTo.ps1](tools/README.md#install-sendtops1) | 右クリックの「送る」に各ツールを登録し、PowerShell を使わずにファイルを選ぶだけで実行できるようにする | 不要 ※3 |
