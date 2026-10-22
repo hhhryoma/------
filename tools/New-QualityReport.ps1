@@ -197,250 +197,253 @@ function Invoke-Tool {
 
 # 各ツールが同じ Excel（指摘管理表・テスト仕様書・設計書）を読み直さないよう、Search-Excel.ps1 の読み取り結果を使い回す
 $global:ExcelToolsSearchCache = @{ '__Reused' = 0 }
+# 途中でエラー・中断（Ctrl+C）になっても、使い回しの結果は残さない
+try {
+    # ツールの結果（実行しなかった・失敗したものは $null）
+    $docs = $null; $functions = $null; $specIssues = $null; $phases = $null; $gaps = $null; $issues = $null; $effect = $null; $pairs = $null
+    $common = @{}
+    if ($NoExcel) { $common['NoExcel'] = $true }
 
-# ツールの結果（実行しなかった・失敗したものは $null）
-$docs = $null; $functions = $null; $specIssues = $null; $phases = $null; $gaps = $null; $issues = $null; $effect = $null; $pairs = $null
-$common = @{}
-if ($NoExcel) { $common['NoExcel'] = $true }
-
-# ---------------------------------------------------------------- レビュー
+    # ---------------------------------------------------------------- レビュー
 
 
-if ($Findings) {
-    $file = Join-Path $detailDir 'レビュー.xlsx'
-    $args1 = @{ Path = $Findings; AsOf = $AsOf; OutXlsx = $file } + $common
-    if ($PageCsv) { $args1['SizeCsv'] = $PageCsv } elseif ($DesignPath) { $args1['DesignPath'] = $DesignPath }
-    if ($ReviewLog) { $args1['ReviewLog'] = $ReviewLog }
-    if ($ReviewLimits) { $args1['Limits'] = $ReviewLimits }
-    $docs = Invoke-Tool 'Measure-ReviewQuality' $args1
-}
-if ($null -ne $docs) {
-    $total = ($docs | Measure-Object -Property Findings -Sum).Sum
-    $open = ($docs | Measure-Object -Property Open -Sum).Sum
-    $overdue = ($docs | Measure-Object -Property Overdue -Sum).Sum
-    $judgedDocs = @($docs | Where-Object { $_.Judgement })
-    $outside = @($judgedDocs | Where-Object { $_.Judgement -match '^(少ない|多い)' })
-    Add-Metric 'レビュー' '指摘件数' ([double]$total) '' $file
-    Add-Metric 'レビュー' '未完了の指摘' ([double]$open) '' $file
-    Add-Metric 'レビュー' '期限切れの指摘' ([double]$overdue) '' $file
-    if ($judgedDocs.Count -gt 0) {
-        Add-Metric 'レビュー' '指摘密度が基準外の設計書' ([double]$outside.Count) ('基準値と比べた設計書 {0} 件のうち' -f $judgedDocs.Count) $file
+    if ($Findings) {
+        $file = Join-Path $detailDir 'レビュー.xlsx'
+        $args1 = @{ Path = $Findings; AsOf = $AsOf; OutXlsx = $file } + $common
+        if ($PageCsv) { $args1['SizeCsv'] = $PageCsv } elseif ($DesignPath) { $args1['DesignPath'] = $DesignPath }
+        if ($ReviewLog) { $args1['ReviewLog'] = $ReviewLog }
+        if ($ReviewLimits) { $args1['Limits'] = $ReviewLimits }
+        $docs = Invoke-Tool 'Measure-ReviewQuality' $args1
     }
-    foreach ($d in $outside) {
-        $todo = 'レビューの観点・範囲が足りているか見直す'
-        if ($d.Judgement -like '多い*') { $todo = '作成者・工程の問題がないか原因を分析する' }
-        Add-Action 'レビュー' $d.Document ('指摘密度 {0}（{1}）' -f $d.Density, $d.Judgement) $todo
-    }
-    # 全体の指摘密度・レビュー工数密度（未レビューの設計書は除く）。実績の CSV では New-QualityLimits.ps1 で基準値にできる名前で残す
-    $sized = @($docs | Where-Object { $null -ne $_.Size -and $_.Size -gt 0 -and $_.Reviewed -ne $false })
-    if ($sized.Count -gt 0) {
-        $unit = $sized[0].Unit
-        $sizeSum = ($sized | Measure-Object -Property Size -Sum).Sum
-        $findingSum = ($sized | Measure-Object -Property Findings -Sum).Sum
-        Add-Metric 'レビュー' '指摘密度（全体）' ([double][math]::Round($findingSum / $sizeSum, 3)) ('指摘 {0} 件 ÷ {1} {2}' -f $findingSum, [math]::Round($sizeSum, 2), $unit) $file '指摘密度' $unit
-        $withEffort = @($sized | Where-Object { $null -ne $_.Effort })
-        if ($withEffort.Count -gt 0) {
-            $effortSum = ($withEffort | Measure-Object -Property Effort -Sum).Sum
-            $effortSize = ($withEffort | Measure-Object -Property Size -Sum).Sum
-            Add-Metric 'レビュー' 'レビュー工数密度（全体）' ([double][math]::Round($effortSum / $effortSize, 3)) ('{0} 人時 ÷ {1} {2}' -f [math]::Round($effortSum, 2), [math]::Round($effortSize, 2), $unit) $file 'レビュー工数密度' $unit
+    if ($null -ne $docs) {
+        $total = ($docs | Measure-Object -Property Findings -Sum).Sum
+        $open = ($docs | Measure-Object -Property Open -Sum).Sum
+        $overdue = ($docs | Measure-Object -Property Overdue -Sum).Sum
+        $judgedDocs = @($docs | Where-Object { $_.Judgement })
+        $outside = @($judgedDocs | Where-Object { $_.Judgement -match '^(少ない|多い)' })
+        Add-Metric 'レビュー' '指摘件数' ([double]$total) '' $file
+        Add-Metric 'レビュー' '未完了の指摘' ([double]$open) '' $file
+        Add-Metric 'レビュー' '期限切れの指摘' ([double]$overdue) '' $file
+        if ($judgedDocs.Count -gt 0) {
+            Add-Metric 'レビュー' '指摘密度が基準外の設計書' ([double]$outside.Count) ('基準値と比べた設計書 {0} 件のうち' -f $judgedDocs.Count) $file
+        }
+        foreach ($d in $outside) {
+            $todo = 'レビューの観点・範囲が足りているか見直す'
+            if ($d.Judgement -like '多い*') { $todo = '作成者・工程の問題がないか原因を分析する' }
+            Add-Action 'レビュー' $d.Document ('指摘密度 {0}（{1}）' -f $d.Density, $d.Judgement) $todo
+        }
+        # 全体の指摘密度・レビュー工数密度（未レビューの設計書は除く）。実績の CSV では New-QualityLimits.ps1 で基準値にできる名前で残す
+        $sized = @($docs | Where-Object { $null -ne $_.Size -and $_.Size -gt 0 -and $_.Reviewed -ne $false })
+        if ($sized.Count -gt 0) {
+            $unit = $sized[0].Unit
+            $sizeSum = ($sized | Measure-Object -Property Size -Sum).Sum
+            $findingSum = ($sized | Measure-Object -Property Findings -Sum).Sum
+            Add-Metric 'レビュー' '指摘密度（全体）' ([double][math]::Round($findingSum / $sizeSum, 3)) ('指摘 {0} 件 ÷ {1} {2}' -f $findingSum, [math]::Round($sizeSum, 2), $unit) $file '指摘密度' $unit
+            $withEffort = @($sized | Where-Object { $null -ne $_.Effort })
+            if ($withEffort.Count -gt 0) {
+                $effortSum = ($withEffort | Measure-Object -Property Effort -Sum).Sum
+                $effortSize = ($withEffort | Measure-Object -Property Size -Sum).Sum
+                Add-Metric 'レビュー' 'レビュー工数密度（全体）' ([double][math]::Round($effortSum / $effortSize, 3)) ('{0} 人時 ÷ {1} {2}' -f [math]::Round($effortSum, 2), [math]::Round($effortSize, 2), $unit) $file 'レビュー工数密度' $unit
+            }
+        }
+        # レビュー実施率は、レビュー記録と設計書の一覧（規模）があるときだけ（未レビューを決められるのはこのときだけ）
+        if ($ReviewLog -and ($PageCsv -or $DesignPath) -and @($docs).Count -gt 0) {
+            $unreviewed = @($docs | Where-Object { $_.Reviewed -eq $false })
+            $rate = [math]::Round((@($docs).Count - $unreviewed.Count) / @($docs).Count, 3)
+            Add-Metric 'レビュー' 'レビュー実施率' ([double]$rate) ('設計書 {0} 件のうち {1} 件' -f @($docs).Count, (@($docs).Count - $unreviewed.Count)) $file
+            foreach ($d in $unreviewed) { Add-Action 'レビュー' $d.Document '未レビュー（レビュー記録も指摘も無い）' 'レビューを実施する' }
+        }
+        if ($ReviewLog) {
+            $zoneActions = @($docs | Where-Object { $_.PSObject.Properties['NeedsAction'] -and $_.NeedsAction })
+            Add-Metric 'レビュー' '要対応のゾーンの設計書' ([double]$zoneActions.Count) 'レビュー工数密度 × 指摘密度' $file
+            foreach ($d in $zoneActions) { Add-Action 'レビュー' $d.Document ('ゾーン: {0}（{1}）' -f $d.Zone, $d.ZoneView) $d.ZoneAction }
         }
     }
-    # レビュー実施率は、レビュー記録と設計書の一覧（規模）があるときだけ（未レビューを決められるのはこのときだけ）
-    if ($ReviewLog -and ($PageCsv -or $DesignPath) -and @($docs).Count -gt 0) {
-        $unreviewed = @($docs | Where-Object { $_.Reviewed -eq $false })
-        $rate = [math]::Round((@($docs).Count - $unreviewed.Count) / @($docs).Count, 3)
-        Add-Metric 'レビュー' 'レビュー実施率' ([double]$rate) ('設計書 {0} 件のうち {1} 件' -f @($docs).Count, (@($docs).Count - $unreviewed.Count)) $file
-        foreach ($d in $unreviewed) { Add-Action 'レビュー' $d.Document '未レビュー（レビュー記録も指摘も無い）' 'レビューを実施する' }
-    }
-    if ($ReviewLog) {
-        $zoneActions = @($docs | Where-Object { $_.PSObject.Properties['NeedsAction'] -and $_.NeedsAction })
-        Add-Metric 'レビュー' '要対応のゾーンの設計書' ([double]$zoneActions.Count) 'レビュー工数密度 × 指摘密度' $file
-        foreach ($d in $zoneActions) { Add-Action 'レビュー' $d.Document ('ゾーン: {0}（{1}）' -f $d.Zone, $d.ZoneView) $d.ZoneAction }
-    }
-}
 
-# ---------------------------------------------------------------- テスト
+    # ---------------------------------------------------------------- テスト
 
 
-if ($TestPath) {
-    $file = Join-Path $detailDir 'テスト.xlsx'
-    $args2 = @{ Path = $TestPath; AsOf = $AsOf; OutXlsx = $file } + $common
-    if ($BugList) { $args2['BugList'] = $BugList }
-    if ($SizeCsv) { $args2['SizeCsv'] = $SizeCsv } elseif ($DesignPath) { $args2['DesignPath'] = $DesignPath }
-    if ($TestLimits) { $args2['Limits'] = $TestLimits }
-    if ($FunctionMap) { $args2['FunctionMap'] = $FunctionMap }
-    $functions = Invoke-Tool 'Measure-TestQuality' $args2
-}
-if ($null -ne $functions) {
-    $summary = Read-SheetPairs $file 'サマリー'
-    if ($summary.ContainsKey('消化率')) {
-        $rate = [double]::Parse($summary['消化率'], [System.Globalization.CultureInfo]::InvariantCulture)
-        Add-Metric 'テスト' '消化率' $rate '' $file
+    if ($TestPath) {
+        $file = Join-Path $detailDir 'テスト.xlsx'
+        $args2 = @{ Path = $TestPath; AsOf = $AsOf; OutXlsx = $file } + $common
+        if ($BugList) { $args2['BugList'] = $BugList }
+        if ($SizeCsv) { $args2['SizeCsv'] = $SizeCsv } elseif ($DesignPath) { $args2['DesignPath'] = $DesignPath }
+        if ($TestLimits) { $args2['Limits'] = $TestLimits }
+        if ($FunctionMap) { $args2['FunctionMap'] = $FunctionMap }
+        $functions = Invoke-Tool 'Measure-TestQuality' $args2
     }
-    if ($BugList) {
-        Add-Metric 'テスト' 'バグ' ([double]$summary['バグ']) '' $file
-        $openBugs = [int]$summary['未完了のバグ']
-        Add-Metric 'テスト' '未完了のバグ' ([double]$openBugs) '' $file
-        $converge = [string]$summary['収束の判定']
-        $j = '△'
-        if ($converge -like '収束している*') { $j = '○' } elseif ($converge -like '収束していない*') { $j = '×' } elseif ($converge -like 'まだ判定できない*') { $j = '' }
-        Add-FixedMetric 'テスト' 'バグの収束（信頼度成長曲線）' $converge $j '収束していれば ○（バグが少ないうち・テストの前半は判定しない）' $file
-        foreach ($key in @($summary.Keys | Where-Object { $_ -match '^直近 \d+ 日の新規バグ$' })) {
-            $beforeKey = $key -replace '^直近', 'その前の'
-            Add-Metric 'テスト' $key ([double]$summary[$key]) ('その前の同じ日数: {0} 件' -f $summary[$beforeKey]) $file
+    if ($null -ne $functions) {
+        $summary = Read-SheetPairs $file 'サマリー'
+        if ($summary.ContainsKey('消化率')) {
+            $rate = [double]::Parse($summary['消化率'], [System.Globalization.CultureInfo]::InvariantCulture)
+            Add-Metric 'テスト' '消化率' $rate '' $file
         }
-        if ($j -eq '×') { Add-Action 'テスト' '全体' $converge 'テストを続け、バグの収束を確かめる' }
-    }
-    $judged = @($functions | Where-Object { $_.TestJudgement -or $_.BugJudgement })
-    if ($judged.Count -gt 0) {
-        $outsideFunctions = @($judged | Where-Object { $_.TestJudgement -match '^(少ない|多い)' -or $_.BugJudgement -match '^(少ない|多い)' })
-        Add-Metric 'テスト' 'テスト密度・バグ密度が基準外の機能' ([double]$outsideFunctions.Count) ('基準値と比べた機能 {0} 件のうち' -f $judged.Count) $file
-    }
-    foreach ($f in @($functions | Where-Object NeedsAction)) { Add-Action 'テスト' $f.Function ('ゾーン: {0}（{1}）' -f $f.Zone, $f.ZoneView) $f.ZoneAction }
-    # 全体のテスト密度・バグ密度（規模のある機能の合計）
-    $sizedFunctions = @($functions | Where-Object { $null -ne $_.Size -and $_.Size -gt 0 })
-    if ($sizedFunctions.Count -gt 0) {
-        $unit = $sizedFunctions[0].Unit
-        $sizeSum = ($sizedFunctions | Measure-Object -Property Size -Sum).Sum
-        $caseSum = ($sizedFunctions | Measure-Object -Property Cases -Sum).Sum
-        Add-Metric 'テスト' 'テスト密度（全体）' ([double][math]::Round($caseSum / $sizeSum, 3)) ('ケース {0} 件 ÷ {1} {2}' -f $caseSum, [math]::Round($sizeSum, 2), $unit) $file 'テスト密度' $unit
         if ($BugList) {
-            $bugSum = ($sizedFunctions | Measure-Object -Property Bugs -Sum).Sum
-            Add-Metric 'テスト' 'バグ密度（全体）' ([double][math]::Round($bugSum / $sizeSum, 3)) ('バグ {0} 件 ÷ {1} {2}' -f $bugSum, [math]::Round($sizeSum, 2), $unit) $file 'バグ密度' $unit
+            Add-Metric 'テスト' 'バグ' ([double]$summary['バグ']) '' $file
+            $openBugs = [int]$summary['未完了のバグ']
+            Add-Metric 'テスト' '未完了のバグ' ([double]$openBugs) '' $file
+            $converge = [string]$summary['収束の判定']
+            $j = '△'
+            if ($converge -like '収束している*') { $j = '○' } elseif ($converge -like '収束していない*') { $j = '×' } elseif ($converge -like 'まだ判定できない*') { $j = '' }
+            Add-FixedMetric 'テスト' 'バグの収束（信頼度成長曲線）' $converge $j '収束していれば ○（バグが少ないうち・テストの前半は判定しない）' $file
+            foreach ($key in @($summary.Keys | Where-Object { $_ -match '^直近 \d+ 日の新規バグ$' })) {
+                $beforeKey = $key -replace '^直近', 'その前の'
+                Add-Metric 'テスト' $key ([double]$summary[$key]) ('その前の同じ日数: {0} 件' -f $summary[$beforeKey]) $file
+            }
+            if ($j -eq '×') { Add-Action 'テスト' '全体' $converge 'テストを続け、バグの収束を確かめる' }
+        }
+        $judged = @($functions | Where-Object { $_.TestJudgement -or $_.BugJudgement })
+        if ($judged.Count -gt 0) {
+            $outsideFunctions = @($judged | Where-Object { $_.TestJudgement -match '^(少ない|多い)' -or $_.BugJudgement -match '^(少ない|多い)' })
+            Add-Metric 'テスト' 'テスト密度・バグ密度が基準外の機能' ([double]$outsideFunctions.Count) ('基準値と比べた機能 {0} 件のうち' -f $judged.Count) $file
+        }
+        foreach ($f in @($functions | Where-Object NeedsAction)) { Add-Action 'テスト' $f.Function ('ゾーン: {0}（{1}）' -f $f.Zone, $f.ZoneView) $f.ZoneAction }
+        # 全体のテスト密度・バグ密度（規模のある機能の合計）
+        $sizedFunctions = @($functions | Where-Object { $null -ne $_.Size -and $_.Size -gt 0 })
+        if ($sizedFunctions.Count -gt 0) {
+            $unit = $sizedFunctions[0].Unit
+            $sizeSum = ($sizedFunctions | Measure-Object -Property Size -Sum).Sum
+            $caseSum = ($sizedFunctions | Measure-Object -Property Cases -Sum).Sum
+            Add-Metric 'テスト' 'テスト密度（全体）' ([double][math]::Round($caseSum / $sizeSum, 3)) ('ケース {0} 件 ÷ {1} {2}' -f $caseSum, [math]::Round($sizeSum, 2), $unit) $file 'テスト密度' $unit
+            if ($BugList) {
+                $bugSum = ($sizedFunctions | Measure-Object -Property Bugs -Sum).Sum
+                Add-Metric 'テスト' 'バグ密度（全体）' ([double][math]::Round($bugSum / $sizeSum, 3)) ('バグ {0} 件 ÷ {1} {2}' -f $bugSum, [math]::Round($sizeSum, 2), $unit) $file 'バグ密度' $unit
+            }
+        }
+        if ($summary.ContainsKey('食い違い')) {
+            $mismatch = [int]$summary['食い違い']
+            Add-Metric 'テスト' 'テスト仕様書と障害管理表の食い違い' ([double]$mismatch) 'NG なのにバグ番号が無い・再テストの結果が無い など' $file
         }
     }
-    if ($summary.ContainsKey('食い違い')) {
-        $mismatch = [int]$summary['食い違い']
-        Add-Metric 'テスト' 'テスト仕様書と障害管理表の食い違い' ([double]$mismatch) 'NG なのにバグ番号が無い・再テストの結果が無い など' $file
+    if ($TestPath) {
+        $file = Join-Path $detailDir 'テスト仕様書のチェック.xlsx'
+        $specArgs = @{ Path = $TestPath; OutXlsx = $file } + $common
+        if ($DesignPath) { $specArgs['DesignPath'] = $DesignPath }
+        $specIssues = Invoke-Tool 'Test-TestSpec' $specArgs
     }
-}
-if ($TestPath) {
-    $file = Join-Path $detailDir 'テスト仕様書のチェック.xlsx'
-    $specArgs = @{ Path = $TestPath; OutXlsx = $file } + $common
-    if ($DesignPath) { $specArgs['DesignPath'] = $DesignPath }
-    $specIssues = Invoke-Tool 'Test-TestSpec' $specArgs
-}
-if ($null -ne $specIssues) {
-    $specErrors = @($specIssues | Where-Object Level -eq 'エラー').Count
-    $specWarnings = @($specIssues | Where-Object Level -eq '警告').Count
-    Add-Metric 'テスト仕様書' 'エラー（期待結果が空など）' ([double]$specErrors) '' $file
-    Add-Metric 'テスト仕様書' '警告（あいまいな期待結果・異常系や境界値の不足など）' ([double]$specWarnings) '' $file
-}
-
-# ---------------------------------------------------------------- 工程（混入工程・摘出工程）
-
-
-if ($BugList -or $Findings) {
-    $file = Join-Path $detailDir '工程別の欠陥.xlsx'
-    $args3 = @{ OutXlsx = $file } + $common
-    if ($BugList) { $args3['BugList'] = $BugList }
-    if ($Findings) { $args3['Findings'] = $Findings }
-    $phases = Invoke-Tool 'Measure-DefectRemoval' $args3
-}
-if ($null -ne $phases) {
-    $inTime = ($phases | Measure-Object -Property FoundInTime -Sum).Sum
-    $leaked = ($phases | Measure-Object -Property Leaked -Sum).Sum
-    if (($inTime + $leaked) -gt 0) {
-        Add-Metric '工程' '摘出すべき工程までに見つかった割合' ([double][math]::Round($inTime / ($inTime + $leaked), 3)) ('{0} / {1} 件' -f $inTime, ($inTime + $leaked)) $file
-        Add-Metric '工程' '後の工程への流出' ([double]$leaked) '' $file
-        foreach ($p in @($phases | Where-Object { $_.Leaked -gt 0 })) { Add-Action '工程' $p.Phase ('{0} で入った欠陥のうち {1} 件が後の工程で見つかった（摘出率 {2}）' -f $p.Phase, $p.Leaked, $p.RemovalRate) ('{0}のレビューの観点を見直す' -f $p.Phase) }
+    if ($null -ne $specIssues) {
+        $specErrors = @($specIssues | Where-Object Level -eq 'エラー').Count
+        $specWarnings = @($specIssues | Where-Object Level -eq '警告').Count
+        Add-Metric 'テスト仕様書' 'エラー（期待結果が空など）' ([double]$specErrors) '' $file
+        Add-Metric 'テスト仕様書' '警告（あいまいな期待結果・異常系や境界値の不足など）' ([double]$specWarnings) '' $file
     }
-}
 
-# ---------------------------------------------------------------- レビューの効き目（設計で入ったのにテストで見つかったバグ）
+    # ---------------------------------------------------------------- 工程（混入工程・摘出工程）
 
 
-if ($Findings -and $BugList) {
-    $file = Join-Path $detailDir 'レビューの効き目.xlsx'
-    $args5 = @{ Findings = $Findings; BugList = $BugList; AsOf = $AsOf; OutXlsx = $file } + $common
-    if ($PageCsv) { $args5['SizeCsv'] = $PageCsv } elseif ($DesignPath) { $args5['DesignPath'] = $DesignPath }
-    if ($ReviewLog) { $args5['ReviewLog'] = $ReviewLog }
-    if ($ReviewLimits) { $args5['Limits'] = $ReviewLimits }
-    if ($FunctionMap) { $args5['FunctionMap'] = $FunctionMap }
-    $effect = Invoke-Tool 'Measure-ReviewEffectiveness' $args5
-}
-if ($null -ne $effect) {
-    $reviewedDocs = @($effect | Where-Object { $_.Reviewed -ne $false })
-    $findingSum = ($reviewedDocs | Measure-Object -Property Findings -Sum).Sum
-    $bugSum = ($effect | Measure-Object -Property DesignBugs -Sum).Sum
-    if ($findingSum + $bugSum -gt 0) {
-        Add-Metric 'レビュー' '設計工程の摘出率' ([double][math]::Round($findingSum / ($findingSum + $bugSum), 3)) ('レビューの指摘 {0} 件 ÷ (指摘 + 設計で入ったバグ {1} 件)' -f $findingSum, $bugSum) $file
+    if ($BugList -or $Findings) {
+        $file = Join-Path $detailDir '工程別の欠陥.xlsx'
+        $args3 = @{ OutXlsx = $file } + $common
+        if ($BugList) { $args3['BugList'] = $BugList }
+        if ($Findings) { $args3['Findings'] = $Findings }
+        $phases = Invoke-Tool 'Measure-DefectRemoval' $args3
     }
-    $missed = @($effect | Where-Object NeedsAction)
-    Add-Metric 'レビュー' 'レビューで見逃した設計書' ([double]$missed.Count) '設計で入ったバグがテストで見つかった設計書（指摘密度が少ない・基準内）など' $file
-    foreach ($d in $missed) { Add-Action 'レビュー' $d.Document ('{0}（設計で入ったバグ {1} 件: {2}）' -f $d.Zone, $d.DesignBugs, $d.BugIds) $d.Action }
-}
-
-# ---------------------------------------------------------------- AI レビュー（AI と人の指摘の突き合わせ）
-
-
-if ($AiReview -and $Findings) {
-    $file = Join-Path $detailDir 'AIと人の指摘.xlsx'
-    $pairs = Invoke-Tool 'Compare-ReviewFindings' (@{ AiPath = $AiReview; HumanPath = $Findings; OutXlsx = $file } + $common)
-}
-elseif ($AiReview) { Write-Warning '-AiReview（AI のレビュー結果）は、-Findings（人の指摘管理表）と一緒に指定してください' }
-if ($null -ne $pairs) {
-    $matched = @($pairs | Where-Object Status -eq '一致').Count
-    $humanCount = $matched + @($pairs | Where-Object Status -eq '人だけ').Count
-    $aiCount = $matched + @($pairs | Where-Object Status -eq 'AI だけ').Count
-    if ($humanCount -gt 0) { Add-Metric 'AI レビュー' '人の指摘のうち AI も見つけた割合' ([double][math]::Round($matched / $humanCount, 3)) ('{0} / {1} 件' -f $matched, $humanCount) $file }
-    if ($aiCount -gt 0) { Add-Metric 'AI レビュー' 'AI の指摘のうち人と一致した割合' ([double][math]::Round($matched / $aiCount, 3)) ('{0} / {1} 件。AI だけの指摘には、人が見落とした正しい指摘も入る' -f $matched, $aiCount) $file }
-    # 観点表への反映案（Compare-ReviewFindings の結果のシート）は、要対応にも並べる
-    $proposals = @()
-    if (Test-Path -LiteralPath $file) { $proposals = Read-SheetTable $file '観点表への反映案' }
-    Add-Metric 'AI レビュー' '観点表への反映案' ([double]$proposals.Count) '人だけの指摘から観点を足す・判定基準を具体的にする案、AI だけの指摘が多い観点を見直す案' $file
-    foreach ($p in $proposals) {
-        $target = $p['観点ID']
-        if (-not $target) { $target = $(if ($p['分類']) { '観点表（分類 ' + $p['分類'] + '）' } else { '観点表' }) }
-        Add-Action 'AI レビュー' $target ('{0}（{1} 件）: {2}' -f $p['提案'], $p['件数'], $p['指摘の例']) '観点表を直し、Invoke-DesignReview.ps1 -CheckOnly で書き方を確かめる'
-    }
-}
-
-# ---------------------------------------------------------------- 網羅（要件・設計・テストのつながり）
-
-
-if ($DesignPath -and $TestPath) {
-    $file = Join-Path $detailDir '網羅.xlsx'
-    $args4 = @{ DesignPath = $DesignPath; TestPath = $TestPath; OutXlsx = $file } + $common
-    if ($Requirement) { $args4['Requirement'] = $Requirement }
-    $gaps = Invoke-Tool 'Test-Traceability' $args4
-}
-if ($null -ne $gaps) {
-    if ($Requirement) {
-        $reqs = Read-SheetTable $file '要件'
-        if ($reqs.Count -gt 0) {
-            $covered = @($reqs | Where-Object { $_['判定'] -eq '○' }).Count
-            $rate = [math]::Round($covered / $reqs.Count, 3)
-            Add-Metric '網羅' '設計とテストのある要件の割合' ([double]$rate) ('{0} / {1} 件' -f $covered, $reqs.Count) $file
+    if ($null -ne $phases) {
+        $inTime = ($phases | Measure-Object -Property FoundInTime -Sum).Sum
+        $leaked = ($phases | Measure-Object -Property Leaked -Sum).Sum
+        if (($inTime + $leaked) -gt 0) {
+            Add-Metric '工程' '摘出すべき工程までに見つかった割合' ([double][math]::Round($inTime / ($inTime + $leaked), 3)) ('{0} / {1} 件' -f $inTime, ($inTime + $leaked)) $file
+            Add-Metric '工程' '後の工程への流出' ([double]$leaked) '' $file
+            foreach ($p in @($phases | Where-Object { $_.Leaked -gt 0 })) { Add-Action '工程' $p.Phase ('{0} で入った欠陥のうち {1} 件が後の工程で見つかった（摘出率 {2}）' -f $p.Phase, $p.Leaked, $p.RemovalRate) ('{0}のレビューの観点を見直す' -f $p.Phase) }
         }
     }
-    # 種類（画面・イベント・メッセージ・IF）ごとに、網羅のシートに出てきた順に並べる
-    $coverage = Read-SheetTable $file '網羅'
-    foreach ($kind in @($coverage | ForEach-Object { $_['種類'] } | Select-Object -Unique)) {
-        $group = @($coverage | Where-Object { $_['種類'] -eq $kind })
-        $covered = @($group | Where-Object { $_['判定'] -eq '○' }).Count
-        $rate = [math]::Round($covered / $group.Count, 3)
-        Add-Metric '網羅' ('テストのある{0}の割合' -f $kind) ([double]$rate) ('{0} / {1} 件' -f $covered, $group.Count) $file
+
+    # ---------------------------------------------------------------- レビューの効き目（設計で入ったのにテストで見つかったバグ）
+
+
+    if ($Findings -and $BugList) {
+        $file = Join-Path $detailDir 'レビューの効き目.xlsx'
+        $args5 = @{ Findings = $Findings; BugList = $BugList; AsOf = $AsOf; OutXlsx = $file } + $common
+        if ($PageCsv) { $args5['SizeCsv'] = $PageCsv } elseif ($DesignPath) { $args5['DesignPath'] = $DesignPath }
+        if ($ReviewLog) { $args5['ReviewLog'] = $ReviewLog }
+        if ($ReviewLimits) { $args5['Limits'] = $ReviewLimits }
+        if ($FunctionMap) { $args5['FunctionMap'] = $FunctionMap }
+        $effect = Invoke-Tool 'Measure-ReviewEffectiveness' $args5
     }
-    if ($gaps.Count -gt 0) { Add-Action '網羅' ('テストの無い要素 {0} 件' -f $gaps.Count) ((@($gaps | Group-Object Kind | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・') 'テストケースを追加する（詳細\網羅.xlsx の抜けのシート）' }
+    if ($null -ne $effect) {
+        $reviewedDocs = @($effect | Where-Object { $_.Reviewed -ne $false })
+        $findingSum = ($reviewedDocs | Measure-Object -Property Findings -Sum).Sum
+        $bugSum = ($effect | Measure-Object -Property DesignBugs -Sum).Sum
+        if ($findingSum + $bugSum -gt 0) {
+            Add-Metric 'レビュー' '設計工程の摘出率' ([double][math]::Round($findingSum / ($findingSum + $bugSum), 3)) ('レビューの指摘 {0} 件 ÷ (指摘 + 設計で入ったバグ {1} 件)' -f $findingSum, $bugSum) $file
+        }
+        $missed = @($effect | Where-Object NeedsAction)
+        Add-Metric 'レビュー' 'レビューで見逃した設計書' ([double]$missed.Count) '設計で入ったバグがテストで見つかった設計書（指摘密度が少ない・基準内）など' $file
+        foreach ($d in $missed) { Add-Action 'レビュー' $d.Document ('{0}（設計で入ったバグ {1} 件: {2}）' -f $d.Zone, $d.DesignBugs, $d.BugIds) $d.Action }
+    }
+
+    # ---------------------------------------------------------------- AI レビュー（AI と人の指摘の突き合わせ）
+
+
+    if ($AiReview -and $Findings) {
+        $file = Join-Path $detailDir 'AIと人の指摘.xlsx'
+        $pairs = Invoke-Tool 'Compare-ReviewFindings' (@{ AiPath = $AiReview; HumanPath = $Findings; OutXlsx = $file } + $common)
+    }
+    elseif ($AiReview) { Write-Warning '-AiReview（AI のレビュー結果）は、-Findings（人の指摘管理表）と一緒に指定してください' }
+    if ($null -ne $pairs) {
+        $matched = @($pairs | Where-Object Status -eq '一致').Count
+        $humanCount = $matched + @($pairs | Where-Object Status -eq '人だけ').Count
+        $aiCount = $matched + @($pairs | Where-Object Status -eq 'AI だけ').Count
+        if ($humanCount -gt 0) { Add-Metric 'AI レビュー' '人の指摘のうち AI も見つけた割合' ([double][math]::Round($matched / $humanCount, 3)) ('{0} / {1} 件' -f $matched, $humanCount) $file }
+        if ($aiCount -gt 0) { Add-Metric 'AI レビュー' 'AI の指摘のうち人と一致した割合' ([double][math]::Round($matched / $aiCount, 3)) ('{0} / {1} 件。AI だけの指摘には、人が見落とした正しい指摘も入る' -f $matched, $aiCount) $file }
+        # 観点表への反映案（Compare-ReviewFindings の結果のシート）は、要対応にも並べる
+        $proposals = @()
+        if (Test-Path -LiteralPath $file) { $proposals = Read-SheetTable $file '観点表への反映案' }
+        Add-Metric 'AI レビュー' '観点表への反映案' ([double]$proposals.Count) '人だけの指摘から観点を足す・判定基準を具体的にする案、AI だけの指摘が多い観点を見直す案' $file
+        foreach ($p in $proposals) {
+            $target = $p['観点ID']
+            if (-not $target) { $target = $(if ($p['分類']) { '観点表（分類 ' + $p['分類'] + '）' } else { '観点表' }) }
+            Add-Action 'AI レビュー' $target ('{0}（{1} 件）: {2}' -f $p['提案'], $p['件数'], $p['指摘の例']) '観点表を直し、Invoke-DesignReview.ps1 -CheckOnly で書き方を確かめる'
+        }
+    }
+
+    # ---------------------------------------------------------------- 網羅（要件・設計・テストのつながり）
+
+
+    if ($DesignPath -and $TestPath) {
+        $file = Join-Path $detailDir '網羅.xlsx'
+        $args4 = @{ DesignPath = $DesignPath; TestPath = $TestPath; OutXlsx = $file } + $common
+        if ($Requirement) { $args4['Requirement'] = $Requirement }
+        $gaps = Invoke-Tool 'Test-Traceability' $args4
+    }
+    if ($null -ne $gaps) {
+        if ($Requirement) {
+            $reqs = Read-SheetTable $file '要件'
+            if ($reqs.Count -gt 0) {
+                $covered = @($reqs | Where-Object { $_['判定'] -eq '○' }).Count
+                $rate = [math]::Round($covered / $reqs.Count, 3)
+                Add-Metric '網羅' '設計とテストのある要件の割合' ([double]$rate) ('{0} / {1} 件' -f $covered, $reqs.Count) $file
+            }
+        }
+        # 種類（画面・イベント・メッセージ・IF）ごとに、網羅のシートに出てきた順に並べる
+        $coverage = Read-SheetTable $file '網羅'
+        foreach ($kind in @($coverage | ForEach-Object { $_['種類'] } | Select-Object -Unique)) {
+            $group = @($coverage | Where-Object { $_['種類'] -eq $kind })
+            $covered = @($group | Where-Object { $_['判定'] -eq '○' }).Count
+            $rate = [math]::Round($covered / $group.Count, 3)
+            Add-Metric '網羅' ('テストのある{0}の割合' -f $kind) ([double]$rate) ('{0} / {1} 件' -f $covered, $group.Count) $file
+        }
+        if ($gaps.Count -gt 0) { Add-Action '網羅' ('テストの無い要素 {0} 件' -f $gaps.Count) ((@($gaps | Group-Object Kind | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・') 'テストケースを追加する（詳細\網羅.xlsx の抜けのシート）' }
+    }
+
+    # ---------------------------------------------------------------- 設計書の整合性
+
+
+    if ($DesignPath) {
+        $file = Join-Path $detailDir '設計書の整合性.xlsx'
+        $issues = Invoke-Tool 'Test-DesignConsistency' (@{ Path = $DesignPath; OutXlsx = $file } + $common)
+    }
+    if ($null -ne $issues) {
+        $errors = @($issues | Where-Object Level -eq 'エラー').Count
+        $warnings = @($issues | Where-Object Level -eq '警告').Count
+        Add-Metric '設計書' '参照の食い違い（エラー）' ([double]$errors) '定義されていない参照・重複した定義など' $file
+        Add-Metric '設計書' '参照の食い違い（警告）' ([double]$warnings) '桁数・必須の違い、一覧との違いなど' $file
+    }
 }
-
-# ---------------------------------------------------------------- 設計書の整合性
-
-
-if ($DesignPath) {
-    $file = Join-Path $detailDir '設計書の整合性.xlsx'
-    $issues = Invoke-Tool 'Test-DesignConsistency' (@{ Path = $DesignPath; OutXlsx = $file } + $common)
+finally {
+    $reused = [int]$global:ExcelToolsSearchCache['__Reused']
+    Remove-Variable -Name ExcelToolsSearchCache -Scope Global -ErrorAction SilentlyContinue
 }
-if ($null -ne $issues) {
-    $errors = @($issues | Where-Object Level -eq 'エラー').Count
-    $warnings = @($issues | Where-Object Level -eq '警告').Count
-    Add-Metric '設計書' '参照の食い違い（エラー）' ([double]$errors) '定義されていない参照・重複した定義など' $file
-    Add-Metric '設計書' '参照の食い違い（警告）' ([double]$warnings) '桁数・必須の違い、一覧との違いなど' $file
-}
-
-$reused = [int]$global:ExcelToolsSearchCache['__Reused']
-Remove-Variable -Name ExcelToolsSearchCache -Scope Global -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------- 品質評価のブック
 

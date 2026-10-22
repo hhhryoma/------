@@ -96,6 +96,17 @@ Test-Case 'New-QualityReport: 失敗したツールがあっても、ほかの�
     Assert-Throws { & $ReportTool -OutDir $out 6>$null } '-Findings'
 }
 
+Test-Case 'New-QualityReport: ツールの結果をまとめる途中でエラーになっても、読み取り結果の使い回しを残さない' {
+    $dir = New-TestDir
+    # tools を写し、指摘件数が数でない結果を返す Measure-ReviewQuality.ps1 に置き換える（集計の Measure-Object で止まる）
+    $tools = Join-Path $dir 'tools'
+    Copy-Item -LiteralPath $script:ToolsDir -Destination $tools -Recurse
+    Set-Content -LiteralPath (Join-Path $tools 'Measure-ReviewQuality.ps1') -Value "[pscustomobject]@{ Document = 'x'; Findings = 'abc'; Open = 0; Overdue = 0 }" -Encoding UTF8
+    New-Item -ItemType Directory -Path (Join-Path $dir 'レビュー') | Out-Null
+    Assert-Throws { & (Join-Path $tools 'New-QualityReport.ps1') -OutDir (Join-Path $dir '報告') -Findings (Join-Path $dir 'レビュー') 3>$null 6>$null } 'abc'
+    Assert-True ($null -eq (Get-Variable -Name ExcelToolsSearchCache -Scope Global -ErrorAction SilentlyContinue)) '読み取り結果を残している'
+}
+
 Test-Case 'New-QualityReport: 判定基準の CSV で ○△× の基準を変えられ、判定の考え方に基準を書く' {
     $dir = New-TestDir
     New-ReportData $dir
