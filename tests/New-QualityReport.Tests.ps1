@@ -118,6 +118,32 @@ Test-Case 'New-QualityReport: 判定基準の CSV で ○△× の基準を変�
     Assert-Throws { & $ReportTool -OutDir $out -Findings (Join-Path $dir 'レビュー') -Criteria $criteria 6>$null } '向きは「以上」か「以下」'
 }
 
+Test-Case 'New-QualityReport: -AiReview で AI のレビュー結果と人の指摘を突き合わせ、一致率と観点表への反映案を出す' {
+    $dir = New-TestDir
+    New-ReportData $dir
+    $scr = 'DD02_画面設計書_SCR001_受注一覧.xlsx'
+    New-ReportBook (Join-Path $dir 'レビュー結果.xlsx') '指摘一覧' @('No', '判定', '観点ID', '設計書', '場所', '指摘内容') @(
+        , @('1', 'NG', 'S01', $scr, '画面項目定義!AB11', '桁数が違う')
+        , @('2', 'NG', 'S02', $scr, '画面項目定義!AK7', '数量のエラー時のメッセージが無い')
+        , @('3', 'NG', 'S02', $scr, '画面項目定義!AK8', '単価のエラー時のメッセージが無い'))
+    $out = Join-Path $dir '報告'
+    $r = @(& $ReportTool -OutDir $out -Findings (Join-Path $dir 'レビュー') -AiReview (Join-Path $dir 'レビュー結果.xlsx') -AsOf '2026-10-20' 3>$null 6>$null)
+    $got = @{}
+    foreach ($m in @($r | Where-Object Area -eq 'AI レビュー')) { $got[$m.Name] = $m.Value }
+    Assert-Equal 0.333 $got['人の指摘のうち AI も見つけた割合'] '人の指摘 3 件のうち 1 件'
+    Assert-Equal 0.333 $got['AI の指摘のうち人と一致した割合'] 'AI の指摘 3 件のうち 1 件'
+    Assert-Equal 3 $got['観点表への反映案'] '判定基準を具体的にする（S04）・観点を足す（型が違う）・判定基準を見直す（S02）'
+    Assert-True (Test-Path -LiteralPath (Join-Path $out '詳細/AIと人の指摘.xlsx')) '突き合わせの詳細'
+    $actions = Read-XlsxSheet -Path (Join-Path $out '品質評価_20261020.xlsx') -Index 2
+    $s02 = @($actions.Rows.Values | Where-Object { $_['A'] -eq 'AI レビュー' -and $_['B'] -eq 'S02' })
+    Assert-Equal 1 $s02.Count 'AI だけの指摘が多い S02 を要対応に並べる'
+    Assert-Match $s02[0]['C'] '^判定基準を見直す（2 件）: 数量のエラー時のメッセージが無い'
+
+    # -Findings が無ければ突き合わせない
+    $text = Get-HostText { & $ReportTool -OutDir (Join-Path $dir '報告2') -TestPath (Join-Path $dir 'テスト') -AiReview (Join-Path $dir 'レビュー結果.xlsx') -AsOf '2026-10-20' -WarningVariable script:aiWarnings -WarningAction SilentlyContinue | Out-Null }
+    Assert-Match ($script:aiWarnings -join ' ') '-Findings（人の指摘管理表）と一緒に'
+}
+
 Test-Case 'New-QualityReport: -HistoryCsv に実績を足し、前回の値・増減と推移を出す（New-QualityLimits にそのまま渡せる）' {
     $dir = New-TestDir
     New-ReportData $dir

@@ -941,7 +941,7 @@ function Read-QualityReportConfig {
     # 項目 → パラメーター・複数か・パスか
     $keys = [ordered]@{
         '出力先' = @('OutDir', $false, $true); 'タイトル' = @('Title', $false, $false); 'プロジェクト' = @('Project', $false, $false)
-        '設計書' = @('DesignPath', $true, $true); '指摘管理表' = @('Findings', $true, $true); 'レビュー記録' = @('ReviewLog', $true, $true)
+        '設計書' = @('DesignPath', $true, $true); '指摘管理表' = @('Findings', $true, $true); 'AIレビュー' = @('AiReview', $true, $true); 'レビュー記録' = @('ReviewLog', $true, $true)
         'ページ数' = @('PageCsv', $false, $true); 'テスト仕様書' = @('TestPath', $true, $true); '障害管理表' = @('BugList', $true, $true)
         '要件一覧' = @('Requirement', $true, $true); '規模' = @('SizeCsv', $false, $true); '機能の対応表' = @('FunctionMap', $false, $true)
         'レビューの基準値' = @('ReviewLimits', $false, $true); 'テストの基準値' = @('TestLimits', $false, $true); '判定基準' = @('Criteria', $false, $true)

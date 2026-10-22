@@ -8,6 +8,8 @@ param(
 
     [string[]] $Findings,
 
+    [string[]] $AiReview,
+
     [string[]] $ReviewLog,
 
     [string] $PageCsv,
@@ -197,7 +199,7 @@ function Invoke-Tool {
 $global:ExcelToolsSearchCache = @{ '__Reused' = 0 }
 
 # ツールの結果（実行しなかった・失敗したものは $null）
-$docs = $null; $functions = $null; $specIssues = $null; $phases = $null; $gaps = $null; $issues = $null; $effect = $null
+$docs = $null; $functions = $null; $specIssues = $null; $phases = $null; $gaps = $null; $issues = $null; $effect = $null; $pairs = $null
 $common = @{}
 if ($NoExcel) { $common['NoExcel'] = $true }
 
@@ -369,6 +371,31 @@ if ($null -ne $effect) {
     foreach ($d in $missed) { Add-Action 'レビュー' $d.Document ('{0}（設計で入ったバグ {1} 件: {2}）' -f $d.Zone, $d.DesignBugs, $d.BugIds) $d.Action }
 }
 
+# ---------------------------------------------------------------- AI レビュー（AI と人の指摘の突き合わせ）
+
+
+if ($AiReview -and $Findings) {
+    $file = Join-Path $detailDir 'AIと人の指摘.xlsx'
+    $pairs = Invoke-Tool 'Compare-ReviewFindings' (@{ AiPath = $AiReview; HumanPath = $Findings; OutXlsx = $file } + $common)
+}
+elseif ($AiReview) { Write-Warning '-AiReview（AI のレビュー結果）は、-Findings（人の指摘管理表）と一緒に指定してください' }
+if ($null -ne $pairs) {
+    $matched = @($pairs | Where-Object Status -eq '一致').Count
+    $humanCount = $matched + @($pairs | Where-Object Status -eq '人だけ').Count
+    $aiCount = $matched + @($pairs | Where-Object Status -eq 'AI だけ').Count
+    if ($humanCount -gt 0) { Add-Metric 'AI レビュー' '人の指摘のうち AI も見つけた割合' ([double][math]::Round($matched / $humanCount, 3)) ('{0} / {1} 件' -f $matched, $humanCount) $file }
+    if ($aiCount -gt 0) { Add-Metric 'AI レビュー' 'AI の指摘のうち人と一致した割合' ([double][math]::Round($matched / $aiCount, 3)) ('{0} / {1} 件。AI だけの指摘には、人が見落とした正しい指摘も入る' -f $matched, $aiCount) $file }
+    # 観点表への反映案（Compare-ReviewFindings の結果のシート）は、要対応にも並べる
+    $proposals = @()
+    if (Test-Path -LiteralPath $file) { $proposals = Read-SheetTable $file '観点表への反映案' }
+    Add-Metric 'AI レビュー' '観点表への反映案' ([double]$proposals.Count) '人だけの指摘から観点を足す・判定基準を具体的にする案、AI だけの指摘が多い観点を見直す案' $file
+    foreach ($p in $proposals) {
+        $target = $p['観点ID']
+        if (-not $target) { $target = $(if ($p['分類']) { '観点表（分類 ' + $p['分類'] + '）' } else { '観点表' }) }
+        Add-Action 'AI レビュー' $target ('{0}（{1} 件）: {2}' -f $p['提案'], $p['件数'], $p['指摘の例']) '観点表を直し、Invoke-DesignReview.ps1 -CheckOnly で書き方を確かめる'
+    }
+}
+
 # ---------------------------------------------------------------- 網羅（要件・設計・テストのつながり）
 
 
@@ -527,6 +554,7 @@ if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 
 #       -TestPath        Measure-TestQuality.ps1（消化率・未完了のバグ・収束・テスト密度とバグ密度・食い違い）と Test-TestSpec.ps1
 #       -BugList / -Findings  Measure-DefectRemoval.ps1（摘出すべき工程までに見つかった割合・流出）
 #       -Findings と -BugList  Measure-ReviewEffectiveness.ps1（設計工程の摘出率・レビューで見逃した設計書）
+#       -AiReview と -Findings  Compare-ReviewFindings.ps1（AI と人の指摘の一致率・観点表への反映案）
 #       -DesignPath と -TestPath  Test-Traceability.ps1（テストのある画面・イベント・メッセージ・IF の割合。-Requirement で要件も）
 #       -DesignPath      Test-DesignConsistency.ps1（設計書どうしの参照の食い違い）
 #
@@ -545,6 +573,9 @@ if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 
 #
 # .PARAMETER Findings
 #     レビューの指摘管理表のファイル・フォルダ。
+#
+# .PARAMETER AiReview
+#     AI のレビュー結果（Invoke-DesignReview.ps1 のレビュー結果.xlsx など）。-Findings の人の指摘と突き合わせます。
 #
 # .PARAMETER ReviewLog
 #     レビュー記録のファイル・フォルダ（レビュー工数のゾーン分析に使う）。
