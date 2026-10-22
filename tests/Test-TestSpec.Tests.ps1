@@ -99,6 +99,21 @@ Test-Case 'Test-TestSpec: -DesignPath のメッセージ一覧に無いメッセ
         'メッセージIDが一覧に無い|テストケース!G4|メッセージ ID E9999 がメッセージ一覧にありません（誤記か、一覧への追加漏れ）') @($issues | ForEach-Object { '{0}|{1}|{2}' -f $_.Item, $_.Location, $_.Detail })
 }
 
+Test-Case 'Test-TestSpec: -DesignPath の項目名と違う書き方（顧客CD・受注日付など）を、項目名の揺れとして知らせる' {
+    $dir = New-TestDir
+    $rows = @(
+        @('1', 'SCR002', '異常', '', '顧客CD を未入力で登録する', '', 'E0001 が表示される', 'OK'),
+        @('2', '', '異常', '', '受注日付に存在しない日付を入れて登録する', '', 'E0004 が表示される', 'OK'),
+        @('3', '', '異常', '', '顧客CD に全角を入れて登録する', '', 'E0003 が表示される', 'OK'),
+        @('4', '', '正常', '', '顧客コードを入れて顧客名を表示する', '', '顧客名が表示される', 'OK'))
+    $path = Join-Path $dir 'UT_受注登録.xlsx'
+    New-SpecBook $path @('No', '機能', '区分', '前提条件', '手順', '入力値', '期待結果', '結果') $rows
+    $issues = @(& $TestSpecTool -Path $path -DesignPath (Join-Path $script:RepoRoot 'docs/design-sample') 6>$null | Where-Object Item -eq '項目名の揺れ')
+    Assert-Equal @(
+        'テストケース!A2|SCR002 のケースに「顧客CD」と書かれています。設計書の項目名は「顧客コード」です（DD02_画面設計書_SCR002_受注登録.xlsx 画面項目定義 7 行目。ほかに 1 件）',
+        'テストケース!A3|SCR002 のケースに「受注日付」と書かれています。設計書の項目名は「受注日」です（DD02_画面設計書_SCR002_受注登録.xlsx 画面項目定義 6 行目）') @($issues | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Detail }) '設計書どおりの「顧客コード」「顧客名」は揺れにしない'
+}
+
 Test-Case 'Test-TestSpec: 区分の列が無ければ、期待結果の言葉から異常系を推定する' {
     $dir = New-TestDir
     $csv = Join-Path $dir 'cases.csv'
