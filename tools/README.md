@@ -1612,6 +1612,19 @@ SCR003      20       10  0    3        3       20.00       3.00 テスト不足
 読み取り（障害管理表）: 1 ファイル・49 行
 ```
 
+### 機能の対応表（`-FunctionMap`）
+
+テスト仕様書・障害管理表・規模の CSV・設計書で、機能の書き方が違うとき（`SCR002`・`受注登録`・`受注登録画面`・`DD02_画面設計書_SCR002_受注登録` など）にそろえます。
+
+```
+機能,別名,設計書
+SCR002,受注登録|受注登録画面,DD02_画面設計書_SCR002_受注登録
+```
+
+- 別名と設計書は `|` で区切って複数書けます。書いた名前（全角・半角、拡張子の違いは無視）を、機能の列の名前にそろえます
+- 対応表に無い名前は、これまでどおり、同じ名前か、どちらかがもう一方を含む名前がただ 1 つのときに対応付けます
+- New-QualityReport.ps1 の `-FunctionMap` にも渡せます
+
 ### 読み取り結果の確認
 
 品質の各ツール（Measure-ReviewQuality・Measure-TestQuality・Test-TestSpec・Measure-DefectRemoval・Compare-ReviewFindings）は、見出しの文字で表を探して読みます。
@@ -1640,7 +1653,7 @@ SCR003      20       10  0    3        3       20.00       3.00 テスト不足
 | 分母 | 渡し方 |
 | --- | --- |
 | KLOC・ステップ数・FP など | `-SizeCsv`（機能の列と、規模の列。規模の列の見出し（`KLOC` など）が分母の名前になる） |
-| 設計書の規模 | `-DesignPath`（Measure-DesignSize.ps1 の規模。機能の名前と設計書のファイル名で対応付ける） |
+| FP（既定）・設計書の規模 | `-DesignPath`。Measure-DesignSize.ps1 で数えた画面・IF・帳票・バッチ（`-FunctionKinds`）を機能とし、FP（NESMA 試算法のトランザクションファンクション 4 × EI + 5 × EO + 4 × EQ）を分母にする。`-DesignUnit 規模` で Measure-DesignSize.ps1 の規模にもできる。テーブル定義書・メッセージ一覧・コード定義書は機能にしない。機能は「SCR001 受注一覧」の形で、ID でも名前でも対応付く |
 
 基準値は `tools\test-quality\基準値_サンプル.csv`（`指標,分母,工程,下限,上限`。指標は「テスト密度」「バグ密度」）です。**サンプルの数値は例です。** 社内の実績や標準値に合わせて直し、`-Limits` で指定してください。
 ゾーンの名前・見方・対応の例は `tools\test-quality\ゾーン分析.csv` で変えられます。
@@ -1679,7 +1692,9 @@ SCR003      20       10  0    3        3       20.00       3.00 テスト不足
 | --- | --- |
 | `-Path` | テスト仕様書のファイル・フォルダ（Excel・CSV） |
 | `-BugList` | 障害管理表のファイル・フォルダ（Excel・CSV）。無ければテストの消化だけ |
-| `-SizeCsv` / `-DesignPath` | テスト密度・バグ密度の分母（KLOC など / 設計書の規模）。どちらか一方 |
+| `-SizeCsv` / `-DesignPath` | テスト密度・バグ密度の分母（KLOC など / 設計書の FP か規模）。どちらか一方 |
+| `-DesignUnit` / `-FunctionKinds` | `-DesignPath` のときの分母（FP・規模）/ 機能とみなす設計書の種類 |
+| `-FunctionMap` | 機能の対応表の CSV（下） |
 | `-Limits` / `-Headers` | 基準値の CSV / 見出しの候補の CSV |
 | `-ConvergenceRate` | 収束とみなす収束率（既定 0.9） |
 | `-MinBugs` / `-MinProgress` | 収束を判定するのに要るバグの数（既定 10）/ 消化率（既定 0.5） |
@@ -1943,7 +1958,7 @@ Metric   Unit     Process  Count  Mean  Low  High
   Test-Traceability を実行しています…
   Test-DesignConsistency を実行しています…
 
-指標 21 件（× 4・△ 7・○ 6）・要対応 15 件
+指標 24 件（× 4・△ 7・○ 6）・要対応 12 件
 品質評価を保存しました: D:\品質報告\品質評価_20261020.xlsx
 各ツールの詳細: D:\品質報告\詳細
 ```
@@ -1975,7 +1990,7 @@ Metric   Unit     Process  Count  Mean  Low  High
   テストのある*の割合,以上,100%,80%,画面・イベント・メッセージ・IF
   ```
 - 指摘密度・テスト密度・バグ密度の基準値は `-ReviewLimits`・`-TestLimits`（New-QualityLimits.ps1 で作れます）で決めます
-- 規模（密度の分母）は、`-PageCsv`（設計書のページ数）・`-SizeCsv`（機能ごとの KLOC など。Measure-CodeSize.ps1 の `-OutCsv`）を渡さなければ、`-DesignPath` の設計書の規模を使います
+- 規模（密度の分母）は、`-PageCsv`（設計書のページ数）・`-SizeCsv`（機能ごとの KLOC など。Measure-CodeSize.ps1 の `-OutCsv`）を渡さなければ、`-DesignPath` の設計書を使います（指摘密度は設計書の規模、テスト密度・バグ密度は画面・IF などの FP）。機能の書き方がそろわないときは `-FunctionMap` に機能の対応表を渡します
 - ツールが失敗しても（資料の見出しが読めないなど）、ほかのツールの結果でまとめます
 
 ### 実績の蓄積と前回との比較（`-HistoryCsv`）

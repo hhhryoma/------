@@ -149,6 +149,24 @@ Test-Case 'Measure-TestQuality: バグが少ないうち・消化が進まない
     Assert-NotMatch $text 'まだ判定できない'
 }
 
+Test-Case 'Measure-TestQuality: -DesignPath では画面・IF などだけを機能とし、FP を分母にする。機能の対応表で書き方をそろえる' {
+    $dir = New-TestDir
+    $design = Join-Path $script:RepoRoot 'docs/design-sample'
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'ケース'; Header = @('No', '機能', '確認内容', '結果'); Rows = @(
+                , @('1', 'SCR001', '初期表示', 'OK')
+                , @('2', '受注登録', '登録する', 'OK')
+                , @('3', '受注登録画面', '登録の確認', 'OK')) })
+    @('No,件名,機能,起票日,状態', '1,登録できない,受注登録,2026/10/01,完了') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    @('機能,別名,設計書', 'SCR002,受注登録|受注登録画面,DD02_画面設計書_SCR002_受注登録') | Set-Content -LiteralPath (Join-Path $dir 'map.csv') -Encoding UTF8
+    $r = @(& $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'bugs.csv') -DesignPath $design -FunctionMap (Join-Path $dir 'map.csv') -AsOf '2026-10-20' 3>$null 6>$null)
+    $got = @($r | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Function, $_.Cases, $_.Bugs, $_.Size, $_.Unit })
+    # テーブル定義書・メッセージ一覧・コード定義書は機能にしない。SCR002 は対応表で「受注登録」「受注登録画面」と設計書をそろえる
+    # FP = 4 × EI + 5 × EO + 4 × EQ（SCR001: EQ 2 → 8、SCR002: EI 1・EQ 2 → 12、IF001: EO 1 → 5）
+    Assert-Equal @('SCR001|1|0|8|FP', 'SCR002|2|1|12|FP', 'SCR003 受注詳細|0|0|8|FP', 'IF001 出荷指示データ|0|0|5|FP') $got
+    $r = @(& $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -DesignPath $design -DesignUnit '規模' -AsOf '2026-10-20' 3>$null 6>$null)
+    Assert-Equal '17|規模' ('{0}|{1}' -f @($r | Where-Object Function -eq 'SCR001')[0].Size, @($r | Where-Object Function -eq 'SCR001')[0].Unit)
+}
+
 Test-Case 'Measure-TestQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestQualityTool
     Assert-Match $h.Synopsis 'テスト'

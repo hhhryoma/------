@@ -9,6 +9,13 @@ param(
 
     [string] $SizeCsv,
 
+    [ValidateSet('FP', '規模')]
+    [string] $DesignUnit = 'FP',
+
+    [string[]] $FunctionKinds = @('画面', 'IF', '帳票', 'バッチ'),
+
+    [string] $FunctionMap,
+
     [string] $Limits,
 
     [string] $Headers,
@@ -43,7 +50,7 @@ $sizeScript = Join-Path $PSScriptRoot 'Measure-DesignSize.ps1'
 if (-not $Limits) { $Limits = Join-Path $PSScriptRoot 'test-quality/基準値_サンプル.csv' }
 if (-not $Headers) { $Headers = Join-Path $PSScriptRoot 'test-quality/見出し.csv' }
 $zoneCsv = Join-Path $PSScriptRoot 'test-quality/ゾーン分析.csv'
-foreach ($name in @('Limits', 'Headers', 'SizeCsv', 'OutXlsx')) {
+foreach ($name in @('Limits', 'Headers', 'SizeCsv', 'OutXlsx', 'FunctionMap')) {
     $v = Get-Variable -Name $name -ValueOnly
     if ($v) { Set-Variable -Name $name -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($v) }
 }
@@ -168,6 +175,12 @@ if ($BugList) { $bugFiles = Get-FilePathSet $BugList -NoRecurse:$NoRecurse }
 $readArgs = @{ Candidates = $candidates; Exclude = $OutXlsx; NoRecurse = $NoRecurse; NoExcel = $NoExcel; ReadLog = $readLog }
 $caseRecords = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $Path 'テスト仕様書' -NoRecurse:$NoRecurse) -Fields $caseFields -Need @('結果', @('テストID', 'テスト内容')) -Key @('テストID', 'テスト内容') -What 'テスト仕様書' -Skip $bugFiles
 $cases = ConvertTo-TestCases $caseRecords $AsOf
+# 機能の対応表があれば、テスト仕様書の機能の書き方をそろえる
+$functionNames = Read-FunctionMap $FunctionMap
+foreach ($c in $cases) {
+    $canonical = Resolve-FunctionName $functionNames $c.Function
+    if ($canonical) { $c.Function = $canonical; $c.Key = ConvertTo-NameKey $canonical }
+}
 if ($cases.Count -eq 0) { Write-Warning 'テストケースが見つかりません（結果と、テストIDか確認内容の見出しがある表を探します）' }
 
 # ---------------------------------------------------------------- 障害管理表を読む
@@ -184,8 +197,10 @@ if ($BugList) {
         if ($status -match $excludedPattern) { $excludedBugs++; continue }
         if ($rec.Labels['機能']) { $bugListHasFunction = $true }
         $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
+        $functionName = Resolve-FunctionName $functionNames $v['機能']
+        if (-not $functionName) { $functionName = ([string]$v['機能']).Trim() }
         $bugs.Add([pscustomobject]@{
-            Id = @(ConvertTo-BugIds $v['障害ID'])[0]; Function = ([string]$v['機能']).Trim(); Content = ([string]$v['障害内容']).Trim()
+            Id = @(ConvertTo-BugIds $v['障害ID'])[0]; Function = $functionName; Content = ([string]$v['障害内容']).Trim()
             Found = (ConvertTo-DateValue $v['起票日'] $AsOf); ClosedOn = $closedOn; Closed = [bool](($status -match $closedPattern) -or ((-not $status) -and $closedOn))
             Status = $status; Severity = ([string]$v['重要度']).Trim(); Cause = ([string]$v['原因']).Trim()
             Injected = ([string]$v['混入工程']).Trim(); Detected = ([string]$v['摘出工程']).Trim(); Place = $rec
@@ -208,8 +223,11 @@ if ($SizeCsv) {
         foreach ($r in $rows) {
             $n = 0.0
             if (-not [double]::TryParse(([string]$r.$sizeCol).Trim(), [System.Globalization.NumberStyles]::Float, $invariant, [ref]$n)) { continue }
-            $k = ConvertTo-NameKey $r.$nameCol
-            if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = ([string]$r.$nameCol).Trim(); Size = 0.0; Unit = (ConvertTo-Label $sizeCol) } }
+            $name = ([string]$r.$nameCol).Trim()
+            $canonical = Resolve-FunctionName $functionNames $name
+            if ($canonical) { $name = $canonical }
+            $k = ConvertTo-NameKey $name
+            if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = $name; Size = 0.0; Unit = (ConvertTo-Label $sizeCol) } }
             $sizes[$k].Size += $n
         }
     }
@@ -219,9 +237,19 @@ elseif ($DesignPath) {
     if ($NoRecurse) { $sizeArgs['NoRecurse'] = $true }
     if ($NoExcel) { $sizeArgs['NoExcel'] = $true }
     foreach ($item in @(& $sizeScript @sizeArgs 6>$null 3>$null)) {
-        $k = ConvertTo-NameKey $item.File
-        if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = $item.File; Size = 0.0; Unit = '規模' } }
-        $sizes[$k].Size += [double]$item.Size
+        # 機能になるのは画面・IF・帳票・バッチ（テーブル定義書・メッセージ一覧・コード定義書は機能ではない）
+        if ($FunctionKinds -notcontains $item.Kind) { continue }
+        # 分母: FP は NESMA 試算法のトランザクションファンクション（4 × EI + 5 × EO + 4 × EQ）、規模は Measure-DesignSize.ps1 の規模
+        $size = [double]$item.Size
+        if ($DesignUnit -eq 'FP') { $size = 4.0 * $item.EI + 5.0 * $item.EO + 4.0 * $item.EQ }
+        # 機能の名前は「SCR001 受注一覧」の形（ID でも名前でも対応付く）。対応表があれば、その名前か設計書の名前でそろえる
+        $name = $item.Name
+        $canonical = Resolve-FunctionName $functionNames $item.Name
+        if (-not $canonical) { $canonical = Resolve-FunctionName $functionNames $item.File }
+        if ($canonical) { $name = $canonical }
+        $k = ConvertTo-NameKey $name
+        if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = $name; Size = 0.0; Unit = $DesignUnit } }
+        $sizes[$k].Size += $size
     }
 }
 
@@ -547,6 +575,15 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER SizeCsv
 #     機能ごとの規模の CSV（機能の列と、KLOC・ステップ数・FP・規模などの列）。見出しの名前が分母の名前になります。
+#
+# .PARAMETER DesignUnit
+#     -DesignPath のときの分母。FP（既定。NESMA 試算法のトランザクションファンクション 4 × EI + 5 × EO + 4 × EQ）か、規模（Measure-DesignSize.ps1 の規模）。
+#
+# .PARAMETER FunctionKinds
+#     -DesignPath のとき、機能とみなす設計書の種類（既定は 画面・IF・帳票・バッチ。テーブル定義書・メッセージ一覧などは機能にしない）。
+#
+# .PARAMETER FunctionMap
+#     機能の対応表の CSV（機能・別名・設計書。| で区切って複数書ける）。テスト仕様書・障害管理表・規模・設計書で機能の書き方が違うときにそろえる。
 #
 # .PARAMETER Limits
 #     基準値の CSV（指標・分母・工程・下限・上限）。指標は「テスト密度」か「バグ密度」。既定は tools\test-quality\基準値_サンプル.csv（数値は例です）。
