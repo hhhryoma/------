@@ -20,6 +20,7 @@
 | [Measure-TestQuality.ps1](#measure-testqualityps1) | テスト仕様書と障害管理表を集計し、機能ごとのテスト密度・バグ密度とゾーン分析、テストの消化とバグの収束の推移、信頼度成長曲線（潜在バグ数の推定・収束の判定）、NG なのにバグ番号が無いなどの食い違いを出す（Excel 不要） |
 | [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系や境界値のケースの不足を見つける（Excel 不要） |
 | [Measure-DefectRemoval.ps1](#measure-defectremovalps1) | 障害管理表とレビューの指摘から、欠陥の混入工程 × 摘出工程と、工程ごとの摘出率・後の工程への流出・原因の多い順を出す（Excel 不要） |
+| [Measure-ReviewEffectiveness.ps1](#measure-revieweffectivenessps1) | 設計書ごとに、レビューの指摘密度と、設計で入ったのにテストで見つかったバグを並べ、レビューで見逃した設計書と設計工程の摘出率を出す |
 | [Compare-ReviewFindings.ps1](#compare-reviewfindingsps1) | AI のレビュー（Invoke-DesignReview）と人のレビューの指摘を突き合わせ、一致・AI だけ・人だけと、観点ごとの一致率を出す（Excel 不要） |
 | [Measure-CodeSize.ps1](#measure-codesizeps1) | ソースコードのステップ数（コメント・空行を除いた行数）を機能（フォルダ）ごとに数え、前の版との新規・修正・削除も出す。バグ密度・テスト密度の分母（KLOC）に（Excel 不要） |
 | [New-QualityLimits.ps1](#new-qualitylimitsps1) | 過去のプロジェクトの品質の実績（指摘密度・バグ密度など）から、社内の基準値（下限・上限）の CSV を作る（Excel 不要） |
@@ -30,7 +31,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -1818,6 +1819,42 @@ Phase      Injected FoundInTime Leaked RemovalRate Detected FromEarlier
 | 流出 | 摘出すべき工程より後で見つかった欠陥の一覧（障害管理表・指摘管理表の該当行へのリンク付き） |
 | 読み取り結果 | ファイル・シートごとに、見出しの行・読んだ行数・どの見出しを何として読んだか・見出しが無い項目・表が見つからないファイル（[読み取り結果](#読み取り結果の確認)） |
 
+## Measure-ReviewEffectiveness.ps1
+
+設計書ごとに、**レビューの指摘**と、**設計で入ったのにテストで見つかったバグ**を並べ、**レビューで見逃した設計書**を見つけます。Excel は不要です。
+指摘密度だけでは「指摘が少ない＝品質が良い」のか「レビューが見逃している」のかが分かりません。テストで見つかった設計起因のバグと突き合わせると、レビューの効き目が分かります。
+
+```powershell
+.\Measure-ReviewEffectiveness.ps1 -Findings D:\レビュー -BugList D:\テスト\障害管理表.xlsx -SizeCsv D:\pages.csv -OutXlsx D:\レビューの効き目.xlsx
+```
+
+```
+設計書 4 件・設計で入ったバグ 5 件（設計書に対応付けたもの 4 件）
+設計工程の摘出率（レビューの指摘 ÷ (指摘 + 設計で入ったバグ)）: 73.3%（指摘 11 件・バグ 4 件）
+ゾーン: レビューの見逃し 1・レビューの見逃しの疑い 2・良好 1
+  要対応: DD02_画面設計書_SCR002_受注登録（レビューの見逃し。バグ B001、B002）観点を見直して再レビューし、同じ種類の誤りがほかの設計書に無いか確かめる
+設計書に対応付けられなかったバグ: B007（SCR999）（-FunctionMap の対応表に機能と設計書を書くと対応付きます）
+
+Document                           Findings DesignBugs FindingDensity BugDensity RemovalRate Zone
+--------                           -------- ---------- -------------- ---------- ----------- ----
+DD02_画面設計書_SCR001_受注一覧           4          1           1.00       0.25        0.80 レビューの見逃しの疑い
+DD02_画面設計書_SCR003_受注詳細           4          1           1.00       0.25        0.80 レビューの見逃しの疑い
+DD06_IF定義書_IF001_出荷指示データ        2          0           1.00       0.00        1.00 良好
+DD02_画面設計書_SCR002_受注登録           1          2           0.10       0.20        0.33 レビューの見逃し
+```
+
+| 指摘密度（基準値と比べて） ＼ 設計で入ったバグ | あり | なし |
+| --- | --- | --- |
+| 少ない | **レビューの見逃し**（要対応） | テストの確認（テストで見つかっていないだけの可能性） |
+| 基準内 | **レビューの見逃しの疑い**（要対応） | 良好 |
+| 多い | **品質に問題**（要対応） | 良好（レビューで摘出） |
+
+- 指摘管理表は Measure-ReviewQuality.ps1 で集計します（`-DesignPath`・`-SizeCsv`・`-ReviewLog`・`-Limits` も同じ意味）。レビュー記録を渡すと、未レビューの設計書にバグがあれば「未レビュー（設計で入ったバグあり）」とします
+- 障害管理表は、「障害内容」「混入工程」と、「機能」か「設計書」の見出しがある表を読み、混入工程が `-DesignPhases`（既定は 要件定義・基本設計・詳細設計）のバグだけを数えます。工程の書き方（「詳細設計レビュー」「DD」など）は `tools\test-quality\工程.csv` の別名で読みます
+- バグの機能・設計書は、機能の対応表（`-FunctionMap`）で同じ機能になる設計書、同じ名前、どちらかがもう一方を含む名前がただ 1 つの設計書に対応付けます
+- **レビューの摘出率** = レビューの指摘 ÷ (指摘 + 設計で入ったバグ)。設計書ごとと全体（未レビューの設計書を除く）で出します
+- `-OutXlsx`: 設計書別（指摘密度 × バグの密度の**散布図**付き）・設計で入ったバグ（障害管理表の該当行へのリンク付き）・読み取り結果
+
 ## Compare-ReviewFindings.ps1
 
 AI のレビュー（Invoke-DesignReview.ps1 のレビュー結果）と、人のレビューの指摘管理表を突き合わせ、**一致・AI だけ・人だけ**に分けます。Excel は不要です。
@@ -1955,10 +1992,11 @@ Metric   Unit     Process  Count  Mean  Low  High
   Measure-TestQuality を実行しています…
   Test-TestSpec を実行しています…
   Measure-DefectRemoval を実行しています…
+  Measure-ReviewEffectiveness を実行しています…
   Test-Traceability を実行しています…
   Test-DesignConsistency を実行しています…
 
-指標 24 件（× 4・△ 7・○ 6）・要対応 12 件
+指標 26 件（× 5・△ 8・○ 6）・要対応 13 件
 品質評価を保存しました: D:\品質報告\品質評価_20261020.xlsx
 各ツールの詳細: D:\品質報告\詳細
 ```
@@ -1969,7 +2007,7 @@ Metric   Unit     Process  Count  Mean  Low  High
 | --- | --- | --- |
 | `-Findings`（指摘管理表） | Measure-ReviewQuality.ps1 | 指摘件数・未完了・期限切れ・指摘密度が基準外の設計書。`-ReviewLog` で要対応のゾーンの設計書とレビュー実施率（未レビューの設計書は要対応） |
 | `-TestPath`（テスト仕様書） | Measure-TestQuality.ps1・Test-TestSpec.ps1 | 消化率・未完了のバグ・バグの収束・テスト密度とバグ密度が基準外の機能・食い違い、テスト仕様書のエラーと警告 |
-| `-BugList`・`-Findings` | Measure-DefectRemoval.ps1 | 摘出すべき工程までに見つかった割合・後の工程への流出 |
+| `-BugList`・`-Findings` | Measure-DefectRemoval.ps1・Measure-ReviewEffectiveness.ps1 | 摘出すべき工程までに見つかった割合・後の工程への流出、設計工程の摘出率・レビューで見逃した設計書 |
 | `-DesignPath` と `-TestPath` | Test-Traceability.ps1 | テストのある画面・イベント・メッセージ・IF の割合。`-Requirement` で設計とテストのある要件の割合 |
 | `-DesignPath`（設計書） | Test-DesignConsistency.ps1 | 参照の食い違い（エラー・警告） |
 
