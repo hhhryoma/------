@@ -128,6 +128,8 @@ Test-Case 'New-QualityReport: -HistoryCsv に実績を足し、前回の値・�
     & $ReportTool @base -OutDir (Join-Path $dir '1') -AsOf '2026-10-06' 3>$null 6>$null | Out-Null
     $text = Get-HostText { & $ReportTool @base -OutDir (Join-Path $dir '2') -AsOf '2026-10-20' 3>$null | Out-Null }
     Assert-Match $text '実績の CSV に \d+ 件を足しました（プロジェクト「A」・2026/10/20。前回 2026/10/06 と比べました）'
+    Assert-Match $text '同じ Excel の読み直し \d+ 回を省きました' '指摘管理表は 3 つのツールが読む'
+    Assert-True ($null -eq (Get-Variable -Name ExcelToolsSearchCache -Scope Global -ErrorAction SilentlyContinue)) '読み取り結果を残している'
 
     $rows = @(Import-Csv -LiteralPath $history)
     Assert-Equal @('2026/10/06', '2026/10/20') @($rows | ForEach-Object { $_.'時点' } | Sort-Object -Unique)

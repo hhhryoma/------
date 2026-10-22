@@ -2052,6 +2052,7 @@ Metric   Unit     Process  Count  Mean  Low  High
 - 指摘密度・テスト密度・バグ密度の基準値は `-ReviewLimits`・`-TestLimits`（New-QualityLimits.ps1 で作れます）で決めます
 - 規模（密度の分母）は、`-PageCsv`（設計書のページ数）・`-SizeCsv`（機能ごとの KLOC など。Measure-CodeSize.ps1 の `-OutCsv`）を渡さなければ、`-DesignPath` の設計書を使います（指摘密度は設計書の規模、テスト密度・バグ密度は画面・IF などの FP）。機能の書き方がそろわないときは `-FunctionMap` に機能の対応表を渡します
 - ツールが失敗しても（資料の見出しが読めないなど）、ほかのツールの結果でまとめます
+- 同じ Excel（指摘管理表・テスト仕様書・設計書）を複数のツールが読むときは、最初に読んだ結果を使い回します（更新日時・サイズが変わったファイルは読み直す）。使い回した回数は最後に表示します
 
 ### 設定ファイル（`-Config`）
 

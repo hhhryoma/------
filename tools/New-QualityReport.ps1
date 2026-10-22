@@ -193,6 +193,9 @@ function Invoke-Tool {
     }
 }
 
+# 各ツールが同じ Excel（指摘管理表・テスト仕様書・設計書）を読み直さないよう、Search-Excel.ps1 の読み取り結果を使い回す
+$global:ExcelToolsSearchCache = @{ '__Reused' = 0 }
+
 # ツールの結果（実行しなかった・失敗したものは $null）
 $docs = $null; $functions = $null; $specIssues = $null; $phases = $null; $gaps = $null; $issues = $null; $effect = $null
 $common = @{}
@@ -409,6 +412,9 @@ if ($null -ne $issues) {
     Add-Metric '設計書' '参照の食い違い（警告）' ([double]$warnings) '桁数・必須の違い、一覧との違いなど' $file
 }
 
+$reused = [int]$global:ExcelToolsSearchCache['__Reused']
+Remove-Variable -Name ExcelToolsSearchCache -Scope Global -ErrorAction SilentlyContinue
+
 # ---------------------------------------------------------------- 品質評価のブック
 
 
@@ -499,6 +505,7 @@ Write-Host ''
 $counts = @($rows | Where-Object { $_.Judgement } | Group-Object Judgement | Sort-Object Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
 Write-Host ('指標 {0} 件（{1}）・要対応 {2} 件' -f $rows.Count, ($counts -join '・'), $actions.Count)
 if ($failed.Count -gt 0) { Write-Host ('失敗したツール: {0}' -f ($failed -join '、')) }
+if ($reused -gt 0) { Write-Host ('同じ Excel の読み直し {0} 回を省きました（前のツールの読み取り結果を使いました）' -f $reused) }
 if ($HistoryCsv) {
     $prevText = '前回の実績はありません'
     if ($previousDate) { $prevText = '前回 ' + $previousDate + ' と比べました' }
