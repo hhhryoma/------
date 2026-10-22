@@ -59,7 +59,10 @@ Test-Case 'New-QualityReport: 各ツールを実行し、指標ごとの実績�
 
     $report = Join-Path $out '品質評価_20261020.xlsx'
     Assert-True (Test-Path -LiteralPath $report) '品質評価のブック'
-    foreach ($name in @('レビュー.xlsx', 'テスト.xlsx', 'テスト仕様書のチェック.xlsx', '工程別の欠陥.xlsx', '網羅.xlsx', '設計書の整合性.xlsx')) {
+    # 設計で入ったバグ B002（SCR002・詳細設計）は、SCR002 の設計書のレビューの見逃し
+    Assert-Equal '1|△' $got['レビューで見逃した設計書']
+    Assert-Match $got['設計工程の摘出率'] '^0\.75\|×$' '指摘 3 件 ÷ (3 + 1)'
+    foreach ($name in @('レビュー.xlsx', 'テスト.xlsx', 'テスト仕様書のチェック.xlsx', '工程別の欠陥.xlsx', 'レビューの効き目.xlsx', '網羅.xlsx', '設計書の整合性.xlsx')) {
         Assert-True (Test-Path -LiteralPath (Join-Path $out "詳細\$name")) "詳細\$name"
     }
     $book = Read-XlsxSheet -Path $report

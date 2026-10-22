@@ -897,6 +897,37 @@ function Write-ReadLogSummary {
     }
 }
 
+function Read-PhaseList {
+    #     工程の CSV（工程・別名・摘出すべき工程）を読む。戻り値: @{ Name; Aliases（ConvertTo-Label 済み・大文字）; Expected; Index } の一覧（CSV の順）
+    param([string] $FilePath)
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($r in (Read-CsvFile $FilePath @('工程', '別名', '摘出すべき工程') '工程の CSV')) {
+        $name = ([string]$r.'工程').Trim()
+        if (-not $name) { continue }
+        $aliases = @(@($name) + @(([string]$r.'別名') -split '\|') | ForEach-Object { (ConvertTo-Label $_).ToUpperInvariant() } | Where-Object { $_ } | Sort-Object -Unique)
+        $list.Add([pscustomobject]@{ Name = $name; Aliases = $aliases; Expected = ([string]$r.'摘出すべき工程').Trim(); Index = $list.Count })
+    }
+    if ($list.Count -eq 0) { throw "工程の CSV に工程がありません: $FilePath" }
+    return , $list
+}
+
+function Resolve-PhaseName {
+    #     工程の文字（「詳細設計レビュー」「UT」など）を、Read-PhaseList の工程にする。読めなければ $null
+    param($PhaseList, [string] $Text)
+    $t = (ConvertTo-Label $Text).ToUpperInvariant() -replace '(レビュー|工程|フェーズ|段階)$', ''
+    if (-not $t) { return $null }
+    foreach ($p in $PhaseList) { if ($p.Aliases -contains $t) { return $p } }
+    # 英字だけの短い別名（UT・IT など）は完全一致だけ。日本語の別名は含んでいればよい（長い別名を優先）
+    $best = $null; $bestLength = 0
+    foreach ($p in $PhaseList) {
+        foreach ($a in $p.Aliases) {
+            if ($a -match '^[A-Z0-9]+$') { continue }
+            if ($t.Contains($a) -and $a.Length -gt $bestLength) { $best = $p; $bestLength = $a.Length }
+        }
+    }
+    return $best
+}
+
 function Read-FunctionMap {
     #     機能の対応表の CSV（機能・別名・設計書。別名と設計書は | で区切って複数書ける）を、名前（ConvertTo-NameKey）→ 機能の名前 にする
     #     テスト仕様書・障害管理表・規模・設計書で機能の書き方が違うとき（SCR001 / 受注一覧 / DD02_画面設計書_SCR001_受注一覧 など）にそろえる

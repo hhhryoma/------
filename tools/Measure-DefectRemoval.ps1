@@ -41,32 +41,13 @@ $unknown = '（不明）'
 # ---------------------------------------------------------------- 工程
 
 
-$phaseList = New-Object System.Collections.Generic.List[object]
-foreach ($r in (Read-CsvFile $Phases @('工程', '別名', '摘出すべき工程') '工程の CSV')) {
-    $name = ([string]$r.'工程').Trim()
-    if (-not $name) { continue }
-    $aliases = @(@($name) + @(([string]$r.'別名') -split '\|') | ForEach-Object { (ConvertTo-Label $_).ToUpperInvariant() } | Where-Object { $_ } | Sort-Object -Unique)
-    $phaseList.Add([pscustomobject]@{ Name = $name; Aliases = $aliases; Expected = ([string]$r.'摘出すべき工程').Trim(); Index = $phaseList.Count })
-}
-if ($phaseList.Count -eq 0) { throw "工程の CSV に工程がありません: $Phases" }
+$phaseList = Read-PhaseList $Phases
 $phaseByName = @{}
 foreach ($p in $phaseList) { $phaseByName[$p.Name] = $p }
 
 function Resolve-Phase {
-    #     工程の文字（「詳細設計レビュー」「UT」など）を、工程の CSV の工程にする。読めなければ $null
     param([string] $Text)
-    $t = (ConvertTo-Label $Text).ToUpperInvariant() -replace '(レビュー|工程|フェーズ|段階)$', ''
-    if (-not $t) { return $null }
-    foreach ($p in $phaseList) { if ($p.Aliases -contains $t) { return $p } }
-    # 英字だけの短い別名（UT・IT など）は完全一致だけ。日本語の別名は含んでいればよい（長い別名を優先）
-    $best = $null; $bestLength = 0
-    foreach ($p in $phaseList) {
-        foreach ($a in $p.Aliases) {
-            if ($a -match '^[A-Z0-9]+$') { continue }
-            if ($t.Contains($a) -and $a.Length -gt $bestLength) { $best = $p; $bestLength = $a.Length }
-        }
-    }
-    return $best
+    return (Resolve-PhaseName $phaseList $Text)
 }
 
 # ---------------------------------------------------------------- 欠陥を読む

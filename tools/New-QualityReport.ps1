@@ -187,7 +187,7 @@ function Invoke-Tool {
 }
 
 # ツールの結果（実行しなかった・失敗したものは $null）
-$docs = $null; $functions = $null; $specIssues = $null; $phases = $null; $gaps = $null; $issues = $null
+$docs = $null; $functions = $null; $specIssues = $null; $phases = $null; $gaps = $null; $issues = $null; $effect = $null
 $common = @{}
 if ($NoExcel) { $common['NoExcel'] = $true }
 
@@ -333,6 +333,30 @@ if ($null -ne $phases) {
         Add-Metric '工程' '後の工程への流出' ([double]$leaked) '' $file
         foreach ($p in @($phases | Where-Object { $_.Leaked -gt 0 })) { Add-Action '工程' $p.Phase ('{0} で入った欠陥のうち {1} 件が後の工程で見つかった（摘出率 {2}）' -f $p.Phase, $p.Leaked, $p.RemovalRate) ('{0}のレビューの観点を見直す' -f $p.Phase) }
     }
+}
+
+# ---------------------------------------------------------------- レビューの効き目（設計で入ったのにテストで見つかったバグ）
+
+
+if ($Findings -and $BugList) {
+    $file = Join-Path $detailDir 'レビューの効き目.xlsx'
+    $args5 = @{ Findings = $Findings; BugList = $BugList; AsOf = $AsOf; OutXlsx = $file } + $common
+    if ($PageCsv) { $args5['SizeCsv'] = $PageCsv } elseif ($DesignPath) { $args5['DesignPath'] = $DesignPath }
+    if ($ReviewLog) { $args5['ReviewLog'] = $ReviewLog }
+    if ($ReviewLimits) { $args5['Limits'] = $ReviewLimits }
+    if ($FunctionMap) { $args5['FunctionMap'] = $FunctionMap }
+    $effect = Invoke-Tool 'Measure-ReviewEffectiveness' $args5
+}
+if ($null -ne $effect) {
+    $reviewedDocs = @($effect | Where-Object { $_.Reviewed -ne $false })
+    $findingSum = ($reviewedDocs | Measure-Object -Property Findings -Sum).Sum
+    $bugSum = ($effect | Measure-Object -Property DesignBugs -Sum).Sum
+    if ($findingSum + $bugSum -gt 0) {
+        Add-Metric 'レビュー' '設計工程の摘出率' ([double][math]::Round($findingSum / ($findingSum + $bugSum), 3)) ('レビューの指摘 {0} 件 ÷ (指摘 + 設計で入ったバグ {1} 件)' -f $findingSum, $bugSum) $file
+    }
+    $missed = @($effect | Where-Object NeedsAction)
+    Add-Metric 'レビュー' 'レビューで見逃した設計書' ([double]$missed.Count) '設計で入ったバグがテストで見つかった設計書（指摘密度が少ない・基準内）など' $file
+    foreach ($d in $missed) { Add-Action 'レビュー' $d.Document ('{0}（設計で入ったバグ {1} 件: {2}）' -f $d.Zone, $d.DesignBugs, $d.BugIds) $d.Action }
 }
 
 # ---------------------------------------------------------------- 網羅（要件・設計・テストのつながり）
@@ -486,6 +510,7 @@ Write-Host "各ツールの詳細: $detailDir"
 #       -Findings        Measure-ReviewQuality.ps1（指摘件数・未完了・期限切れ・指摘密度。-ReviewLog でゾーン分析）
 #       -TestPath        Measure-TestQuality.ps1（消化率・未完了のバグ・収束・テスト密度とバグ密度・食い違い）と Test-TestSpec.ps1
 #       -BugList / -Findings  Measure-DefectRemoval.ps1（摘出すべき工程までに見つかった割合・流出）
+#       -Findings と -BugList  Measure-ReviewEffectiveness.ps1（設計工程の摘出率・レビューで見逃した設計書）
 #       -DesignPath と -TestPath  Test-Traceability.ps1（テストのある画面・イベント・メッセージ・IF の割合。-Requirement で要件も）
 #       -DesignPath      Test-DesignConsistency.ps1（設計書どうしの参照の食い違い）
 #
