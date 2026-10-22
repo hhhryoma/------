@@ -571,11 +571,21 @@ if ($OutXlsx) {
     $trendRows = New-Object System.Collections.Generic.List[object]
     foreach ($t in $trend) { $trendRows.Add(@{ Values = @($t.Date.ToString('yyyy/MM/dd'), [double]$t.Opened, [double]$t.Closed, [double]$t.TotalOpened, [double]$t.TotalClosed, [double]$t.Remaining) }) }
     try {
+        # グラフ: 指摘の起票・完了の累計と未完了（推移）、レビュー工数密度 × 指摘密度（設計書別。-ReviewLog のとき、両方ある設計書を最大 50）
+        $trendCharts = @(@{ Type = 'Line'; Title = '指摘の起票・完了（累計）と未完了'; Category = 0; Series = @(@{ Column = 3 }, @{ Column = 4 }, @{ Column = 5 }); YTitle = '指摘' })
+        $docCharts = @()
+        if ($ReviewLog) {
+            $plotted = @(for ($i = 0; $i -lt $results.Count; $i++) { if ($null -ne $results[$i].EffortDensity -and $null -ne $results[$i].Density) { $i } }) | Select-Object -First 50
+            if (@($plotted).Count -gt 0) {
+                $docCharts = @(@{ Type = 'Scatter'; Title = 'レビュー工数密度 × 指摘密度'; Category = 11; Labels = $true; XTitle = 'レビュー工数密度'; YTitle = '指摘密度'; Width = 10; Height = 20
+                        Series = @($plotted | ForEach-Object { @{ Column = 6; Rows = @($_); Name = $results[$_].Document } }) })
+            }
+        }
         $sheets = @(
-            @{ Name = '設計書別'; Columns = $docColumns; Rows = $docRows },
+            @{ Name = '設計書別'; Columns = $docColumns; Rows = $docRows; Charts = $docCharts },
             @{ Name = '内訳'; Columns = @(@{ Header = '項目'; Width = 10 }, @{ Header = '値'; Width = 20 }, @{ Header = '指摘'; Width = 7 }, @{ Header = '未完了'; Width = 7 }, @{ Header = '期限切れ'; Width = 8 }); Rows = $breakRows },
             @{ Name = '未完了'; Columns = @(@{ Header = '設計書'; Width = 30 }, @{ Header = '指摘内容'; Width = 50 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '分類'; Width = 10 }, @{ Header = '対応者'; Width = 10 }, @{ Header = '期限'; Width = 11 }, @{ Header = '期限切れ'; Width = 8 }, @{ Header = '状態'; Width = 9 }, @{ Header = '指摘管理表'; Width = 36 }); Rows = $openRows },
-            @{ Name = '推移'; Columns = @(@{ Header = '日付'; Width = 11 }, @{ Header = '起票'; Width = 7 }, @{ Header = '完了'; Width = 7 }, @{ Header = '起票の累計'; Width = 10 }, @{ Header = '完了の累計'; Width = 10 }, @{ Header = '未完了'; Width = 7 }); Rows = $trendRows })
+            @{ Name = '推移'; Columns = @(@{ Header = '日付'; Width = 11 }, @{ Header = '起票'; Width = 7 }, @{ Header = '完了'; Width = 7 }, @{ Header = '起票の累計'; Width = 10 }, @{ Header = '完了の累計'; Width = 10 }, @{ Header = '未完了'; Width = 7 }); Rows = $trendRows; Charts = $trendCharts })
         if ($ReviewLog) {
             $sheets += @{ Name = 'ゾーン分析'; Columns = @(@{ Header = '工数密度 ＼ 指摘密度'; Width = 18 }, @{ Header = '指摘密度が少ない'; Width = 40 }, @{ Header = '指摘密度が基準内'; Width = 40 }, @{ Header = '指摘密度が多い'; Width = 40 }); Rows = $zoneRows }
         }

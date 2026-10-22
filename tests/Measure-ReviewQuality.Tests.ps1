@@ -125,6 +125,9 @@ Test-Case 'Measure-ReviewQuality: -ReviewLog でレビュー工数密度を出�
     $book = Read-XlsxSheet -Path $out -Index 1
     Assert-Equal @('設計書別', '内訳', '未完了', '推移', 'ゾーン分析', '読み取り結果') $book.Sheets
     Assert-Equal 'レビュー不足' @($book.Rows.Values | Where-Object { $_['A'] -eq 'DD03_テーブル定義書' })[0]['N']
+    $charts = @(Read-XlsxCharts $out)
+    Assert-Equal @('レビュー工数密度 × 指摘密度', '指摘の起票・完了（累計）と未完了') @($charts | ForEach-Object { $_.Title })
+    Assert-Equal 3 @([regex]::Matches($charts[0].Xml, '<c:ser>')).Count '工数密度と指摘密度の両方がある設計書（DD09 は規模なし）'
     $zone = Read-XlsxSheet -Path $out -Index 5
     Assert-Equal '工数密度が多い' $zone.Rows[2]['A']
     Assert-Match $zone.Rows[2]['B'] '^【良好】\nDD05_メッセージ一覧\.pdf（指摘 0 / 工数 1\.5）$'

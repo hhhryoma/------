@@ -90,6 +90,10 @@ Test-Case 'Measure-TestQuality: 機能ごとのテスト密度・バグ密度と
     $issueSheet = Read-XlsxSheet -Path $out -Index 6
     Assert-Equal 15 $issueSheet.Rows.Count '見出しと食い違い 14 件'
     Assert-True (@($issueSheet.Links | Where-Object { $_.Location -eq "'テストケース'!A26" }).Count -eq 1) 'NG なのにバグ番号が無いケース（No 25）へのリンク'
+    $charts = @(Read-XlsxCharts $out)
+    Assert-Equal @('テスト密度 × バグ密度', 'テストの消化（累計）', 'バグの累計と信頼度成長曲線') @($charts | ForEach-Object { $_.Title })
+    Assert-Equal @("'機能別'!`$M`$2", "'機能別'!`$O`$2", "'機能別'!`$M`$3", "'機能別'!`$O`$3", "'機能別'!`$M`$4", "'機能別'!`$O`$4") $charts[0].Refs '機能ごとに 1 点（系列の名前を点に表示）'
+    Assert-True ($charts[2].Refs -contains "'推移'!`$J`$2:`$J`$21") '信頼度成長曲線の推定値'
     $readSheet = Read-XlsxSheet -Path $out -Index 7
     $caseRow = @($readSheet.Rows.Values | Where-Object { $_['A'] -eq 'テスト仕様書' })[0]
     Assert-Equal 'UT_受注.xlsx|テストケース|1|200' ('{0}|{1}|{2}|{3}' -f $caseRow['B'], $caseRow['C'], $caseRow['D'], $caseRow['E']) '読み取り結果: ファイル・シート・見出しの行・読んだ行数'

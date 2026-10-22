@@ -163,6 +163,25 @@ function Read-XlsxSheet {
     finally { $fs.Dispose() }
 }
 
+function Read-XlsxCharts {
+    #     xlsx のグラフ（xl/charts/*.xml）を読む（テスト用）。返り値: @{ Title; Refs = 参照する範囲の一覧; Xml }
+    param([string] $Path)
+    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Read)
+        $charts = @()
+        foreach ($e in @($zip.Entries | Where-Object { $_.FullName -like 'xl/charts/*.xml' } | Sort-Object { [int]($_.Name -replace '\D', '') })) {
+            $sr = New-Object System.IO.StreamReader($e.Open())
+            try { $xml = $sr.ReadToEnd() } finally { $sr.Dispose() }
+            [xml]$doc = $xml   # 正しい XML か
+            $title = ([regex]::Match($xml, '<c:title><c:tx><c:rich>.*?<a:t>([^<]*)</a:t>')).Groups[1].Value
+            $charts += [pscustomobject]@{ Title = $title; Refs = @([regex]::Matches($xml, '<c:f>([^<]*)</c:f>') | ForEach-Object { $_.Groups[1].Value }); Xml = $xml }
+        }
+        return $charts
+    }
+    finally { $fs.Dispose() }
+}
+
 function Get-HostText {
     #     Write-Host の出力（情報ストリーム）も含めて文字列で受け取る
     param([scriptblock] $Body)
