@@ -45,6 +45,30 @@ Test-Case 'Search-Excel: フォルダを再帰検索し、値・図形・非表�
     Assert-Equal $expected (Get-HitKeys $hits)
 }
 
+Test-Case 'Search-Excel: $global:ExcelToolsSearchCache があれば、同じファイル・同じ条件の検索は前の結果を使う（更新したファイルは読み直す）' {
+    $dir = Copy-Fixture 'grep'
+    $global:ExcelToolsSearchCache = @{ '__Reused' = 0 }
+    try {
+        $first = Invoke-Search -Pattern 'TODO' -Path $dir -NoExcel
+        Assert-Equal 0 $global:ExcelToolsSearchCache['__Reused']
+        $first[0].Text = '書き換えた'   # 呼び出し側が結果を書き換えても、次の呼び出しには響かない
+        # 別のフォルダから検索しても、ファイルの名前（File）はその検索の場所からのものになる
+        $sub = Invoke-Search -Pattern 'TODO' -Path (Join-Path $dir 'sub') -NoExcel
+        Assert-True ($global:ExcelToolsSearchCache['__Reused'] -ge 3) ([string]$global:ExcelToolsSearchCache['__Reused'])
+        Assert-Equal @($first | Where-Object { $_.File -like 'sub*' } | ForEach-Object { '{0}|{1}' -f (ConvertTo-Slash $_.File).Substring(4), $_.Location } | Sort-Object) @($sub | ForEach-Object { '{0}|{1}' -f (ConvertTo-Slash $_.File), $_.Location } | Sort-Object)
+        $again = Invoke-Search -Pattern 'TODO' -Path $dir -NoExcel
+        Assert-Equal (Get-HitKeys $first) (Get-HitKeys $again)
+        Assert-True (@($again | Where-Object { $_.Text -eq '書き換えた' }).Count -eq 0) '前の呼び出しの書き換えが残っている'
+        # 条件が違えば読み直す。更新したファイルも読み直す
+        $before = $global:ExcelToolsSearchCache['__Reused']
+        $null = Invoke-Search -Pattern 'TODO' -Path (Join-Path $dir 'sample.xlsx') -NoExcel -CaseSensitive
+        (Get-Item -LiteralPath (Join-Path $dir 'sample.xlsx')).LastWriteTime = (Get-Date).AddMinutes(-5)
+        $null = Invoke-Search -Pattern 'TODO' -Path (Join-Path $dir 'sample.xlsx') -NoExcel
+        Assert-Equal $before $global:ExcelToolsSearchCache['__Reused']
+    }
+    finally { Remove-Variable -Name ExcelToolsSearchCache -Scope Global -ErrorAction SilentlyContinue }
+}
+
 Test-Case 'Search-Excel: 暗号化・破損ファイルは警告して処理を続ける' {
     $null = Invoke-Search -Pattern 'TODO' -Path $grep -NoExcel
     $w = $script:LastWarnings -join "`n"

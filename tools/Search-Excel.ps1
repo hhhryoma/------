@@ -1054,6 +1054,12 @@ $failures   = New-Object System.Collections.Generic.List[object]
 $hitFiles   = 0
 $stopwatch  = [System.Diagnostics.Stopwatch]::StartNew()
 
+# 読み取り結果の使い回し（New-QualityReport.ps1 が各ツールを続けて実行するあいだ、$global:ExcelToolsSearchCache に置く）。
+# 同じファイル（パス・更新日時・サイズ）を同じ条件で検索したときは、ファイルを読み直さずに前の結果を使う
+$cache = $null
+if ($global:ExcelToolsSearchCache -is [hashtable]) { $cache = $global:ExcelToolsSearchCache }
+$cacheOptions = @($Pattern, [bool]$SimpleMatch, [bool]$CaseSensitive, [bool]$IgnoreWidth, (@($Target | Sort-Object) -join ','), [bool]$SkipHiddenSheets, $SheetNamePattern, $SheetNameExclude, [bool]$NoExcel) -join "`n"
+
 try {
     $index = 0
     foreach ($entry in $files) {
@@ -1066,21 +1072,34 @@ try {
             -PercentComplete ([int](100 * $index / $files.Count))
 
         try {
-            $ext = $file.Extension.ToLowerInvariant()
-            $sig = Get-FileSignature -FilePath $file.FullName
-
-            if ($ext -eq '.xlsb' -or ($sig -eq 'Ole' -and $ext -eq '.xls') -or $sig -eq 'Unknown') {
-                if ($NoExcel) {
-                    Write-Verbose "スキップ（-NoExcel 指定のため .xls / .xlsb は対象外）: $($entry.Relative)"
-                    continue
+            $cacheKey = $null
+            $hits = $null
+            if ($cache) {
+                $cacheKey = '{0}|{1}|{2}|{3}' -f $file.FullName.ToLowerInvariant(), $file.LastWriteTimeUtc.Ticks, $file.Length, $cacheOptions
+                if ($cache.ContainsKey($cacheKey)) {
+                    $hits = @($cache[$cacheKey] | ForEach-Object { $c = $_.PSObject.Copy(); $c.File = $entry.Relative; $c })
+                    $cache['__Reused'] = [int]$cache['__Reused'] + 1
                 }
-                $hits = @(Search-ComWorkbook -FilePath $file.FullName)
             }
-            elseif ($sig -eq 'Ole') {
-                throw 'パスワードで保護されているため読めません'
-            }
-            else {
-                $hits = @(Search-OpenXmlWorkbook -FilePath $file.FullName)
+            if ($null -eq $hits) {
+                $ext = $file.Extension.ToLowerInvariant()
+                $sig = Get-FileSignature -FilePath $file.FullName
+
+                if ($ext -eq '.xlsb' -or ($sig -eq 'Ole' -and $ext -eq '.xls') -or $sig -eq 'Unknown') {
+                    if ($NoExcel) {
+                        Write-Verbose "スキップ（-NoExcel 指定のため .xls / .xlsb は対象外）: $($entry.Relative)"
+                        continue
+                    }
+                    $hits = @(Search-ComWorkbook -FilePath $file.FullName)
+                }
+                elseif ($sig -eq 'Ole') {
+                    throw 'パスワードで保護されているため読めません'
+                }
+                else {
+                    $hits = @(Search-OpenXmlWorkbook -FilePath $file.FullName)
+                }
+                # 使い回す分は写しを置く（呼び出し側が結果を書き換えても、次の呼び出しに響かないように）
+                if ($cacheKey) { $cache[$cacheKey] = @($hits | ForEach-Object { $_.PSObject.Copy() }) }
             }
 
             if ($hits.Count -gt 0) {
