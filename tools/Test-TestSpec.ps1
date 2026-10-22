@@ -39,6 +39,13 @@ $nfkc = [System.Text.NormalizationForm]::FormKC
 $errorKindPattern = '異常|エラー|準正常|例外|NG系|不正'
 $errorTextPattern = 'エラー|[EW]\d{4}|不正|できない|されない|超え|超過|未入力|異常|警告|拒否|失敗'
 $boundaryPattern = '桁|文字|最大|最小|上限|下限|境界|超え|超過|オーバー|ちょうど|未満|以上|以下'
+# 必須項目の未入力のケース、型（日付・数値・半角）の不正な値のケースとみなす言葉
+$requiredPattern = '未入力|入力なし|入力しない|空欄|空白|空の|空で|ブランク|null|必須'
+$typePatterns = [ordered]@{
+    '日付' = '形式|不正|存在しない|ありえない|日付でない|日付以外|文字|[0-9０-９]+月[0-9０-９]+日|2/30|2/31|13月|閏|うるう'
+    '数値' = '数値以外|数字以外|文字|英字|記号|マイナス|負|小数|不正|範囲|0を|ゼロ|全角'
+    '半角' = '全角|記号|不正|半角以外|カナ|漢字'
+}
 # 結果の欄に書かれる、未実施を表す言葉（これ以外の読めない値を知らせる）
 $notRunPattern = '^(未実施|未|未着手|実施前|予定|-)$'
 
@@ -138,10 +145,11 @@ foreach ($g in @($cases | Group-Object Key)) {
     }
 }
 
-# ---------------------------------------------------------------- 境界値（-DesignPath の画面項目の桁数）
+# ---------------------------------------------------------------- 入力項目の観点（-DesignPath の画面項目の必須・型・桁数とコード値）
 
 
-$boundaryItems = New-Object System.Collections.Generic.List[object]
+$inputItems = New-Object System.Collections.Generic.List[object]
+$codeValues = @{}   # コード区分名（ConvertTo-Label 済み）→ 表示名の一覧
 if ($DesignPath) {
     $searchArgs = @{ Pattern = '\S'; Path = $DesignPath; Target = 'Value' }
     if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
@@ -150,28 +158,62 @@ if ($DesignPath) {
     foreach ($book in $designBooks.Values) {
         foreach ($sheetName in $book.Sheets.Keys) {
             $grid = $book.Sheets[$sheetName]
+            # コード定義書: コード区分名ごとの表示名（選択の項目の値ごとのケースを確かめる）
+            foreach ($t in (Find-DesignTables $grid @('コード区分名', '表示名') 'コード区分名')) {
+                foreach ($dr in $t.Rows) {
+                    $k = ConvertTo-Label ([string]$dr.Cells[$t.ColumnOf['コード区分名']])
+                    $name = ([string]$dr.Cells[$t.ColumnOf['表示名']]).Trim()
+                    if (-not $k -or -not $name) { continue }
+                    if (-not $codeValues.ContainsKey($k)) { $codeValues[$k] = New-Object System.Collections.Generic.List[string] }
+                    if (-not $codeValues[$k].Contains($name)) { $codeValues[$k].Add($name) }
+                }
+            }
             $screen = Find-LabelValue $grid '画面ID'
             if (-not $screen) { continue }
             foreach ($t in (Find-DesignTables $grid @('項目名', '桁数') '項目名')) {
+                $cell = { param($dr, $name) if ($t.ColumnOf.ContainsKey($name)) { ([string]$dr.Cells[$t.ColumnOf[$name]]).Normalize($nfkc).Trim() } else { '' } }
                 foreach ($dr in $t.Rows) {
-                    $digits = ([string]$dr.Cells[$t.ColumnOf['桁数']]).Normalize($nfkc).Trim()
-                    if ($digits -notmatch '^\d+$') { continue }
-                    # 出力だけの項目（入出力が O）は入力の境界値が無い
-                    if ($t.ColumnOf.ContainsKey('入出力') -and ([string]$dr.Cells[$t.ColumnOf['入出力']]).Normalize($nfkc).Trim() -notmatch 'I') { continue }
-                    $boundaryItems.Add([pscustomobject]@{ Screen = $screen.Trim(); Item = ([string]$dr.Cells[$t.ColumnOf['項目名']]).Trim(); Digits = [int]$digits; File = $book.File; Sheet = $sheetName; Row = $dr.Row })
+                    # 出力だけの項目（入出力が O）は入力のテストが無い
+                    if ($t.ColumnOf.ContainsKey('入出力') -and (& $cell $dr '入出力') -notmatch 'I') { continue }
+                    $digits = & $cell $dr '桁数'
+                    $inputItems.Add([pscustomobject]@{
+                            Screen = $screen.Trim(); Item = ([string]$dr.Cells[$t.ColumnOf['項目名']]).Trim(); Digits = $(if ($digits -match '^\d+$') { [int]$digits } else { $null })
+                            Required = ((& $cell $dr '必須') -match '^(○|〇|◯|必須|要|Y|YES|1)$'); Type = (& $cell $dr '型'); Kind = (& $cell $dr '区分')
+                            File = $book.File; Sheet = $sheetName; Row = $dr.Row
+                        })
                 }
             }
         }
     }
-    foreach ($item in $boundaryItems) {
+    foreach ($item in $inputItems) {
         $screenRx = New-Object System.Text.RegularExpressions.Regex(('(?<![A-Za-z0-9]){0}(?![A-Za-z0-9])' -f [regex]::Escape($item.Screen)), 'IgnoreCase')
         $screenCases = @($cases | Where-Object { $screenRx.IsMatch(('{0} {1} {2}' -f $_.Function, $_.Place.File, $_.Place.Sheet).Normalize($nfkc)) })
         if ($screenCases.Count -eq 0) { continue }
         $itemLabel = ConvertTo-Label $item.Item
-        $covered = @($screenCases | Where-Object {
-                $text = (@($_.Values.Values) -join ' ').Normalize($nfkc)
-                (ConvertTo-Label $text).Contains($itemLabel) -and ($text -match $boundaryPattern -or $text -match ('(?<!\d){0}(?!\d)' -f $item.Digits) -or $text -match ('(?<!\d){0}(?!\d)' -f ($item.Digits + 1)))
-            })
+        # その項目の名前が出てくるケースの文字
+        $itemTexts = @($screenCases | ForEach-Object { (@($_.Values.Values) -join ' ').Normalize($nfkc) } | Where-Object { (ConvertTo-Label $_).Contains($itemLabel) })
+        $where = '{0} {1} {2} 行目' -f $item.File, $item.Sheet, $item.Row
+
+        # 必須の項目: 未入力のケース
+        if ($item.Required -and @($itemTexts | Where-Object { $_ -match $requiredPattern }).Count -eq 0) {
+            Add-Issue '警告' '必須のテストが無い' $screenCases[0] '' ("{0} の必須の入力項目「{1}」（{2}）を未入力にするケースが見つかりません" -f $item.Screen, $item.Item, $where)
+        }
+        # 型が日付・数値・半角の項目: 不正な値のケース
+        $typeKey = @($typePatterns.Keys | Where-Object { $item.Type -match $_ })[0]
+        if ($typeKey -and @($itemTexts | Where-Object { $_ -match $typePatterns[$typeKey] }).Count -eq 0) {
+            Add-Issue '警告' '型のテストが無い' $screenCases[0] '' ("{0} の入力項目「{1}」（型 {2}。{3}）に、{4}として正しくない値を入れるケースが見つかりません" -f $item.Screen, $item.Item, $item.Type, $where, $typeKey)
+        }
+        # 選択の項目で、コード定義書に同じ名前のコード区分がある: 値（表示名）ごとのケース
+        $codes = $codeValues[$itemLabel]
+        if ($codes) {
+            $missing = @($codes | Where-Object { $label = ConvertTo-Label $_; @($itemTexts | Where-Object { (ConvertTo-Label $_).Contains($label) }).Count -eq 0 })
+            if ($missing.Count -gt 0) {
+                Add-Issue '警告' 'コード値のテストが無い' $screenCases[0] '' ("{0} の入力項目「{1}」（{2}）の値のうち、{3} を選ぶケースが見つかりません（コード定義書の「{1}」の {4} 値）" -f $item.Screen, $item.Item, $where, (@($missing | ForEach-Object { '「' + $_ + '」' }) -join '・'), $codes.Count)
+            }
+        }
+        # 桁数の境界: 選ぶ項目（コード値・選択・チェック）と日付は、値の確かめ方が別なので見ない
+        if ($null -eq $item.Digits -or $codes -or $item.Kind -match '選択|ラジオ|チェック|プルダウン|リスト|コンボ' -or $item.Type -match '日付|時刻') { continue }
+        $covered = @($itemTexts | Where-Object { $_ -match $boundaryPattern -or $_ -match ('(?<!\d){0}(?!\d)' -f $item.Digits) -or $_ -match ('(?<!\d){0}(?!\d)' -f ($item.Digits + 1)) })
         if ($covered.Count -eq 0) {
             Add-Issue '警告' '境界値のテストが無い' $screenCases[0] '' ("{0} の入力項目「{1}」（{2} 桁。{3} {4} {5} 行目）の桁数の境界（{2} 桁・{6} 桁）を確かめるケースが見つかりません" -f $item.Screen, $item.Item, $item.Digits, $item.File, $item.Sheet, $item.Row, ($item.Digits + 1))
         }
@@ -211,12 +253,12 @@ Write-Host ''
 Write-Host ('テストケース {0} 件（機能 {1}）: エラー {2} 件 / 警告 {3} 件' -f $cases.Count, $functions.Count, @($issues | Where-Object Level -eq 'エラー').Count, @($issues | Where-Object Level -eq '警告').Count)
 $byItem = @($issues | Group-Object Item | Sort-Object @{ e = { $_.Count }; Descending = $true }, Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
 if ($byItem.Count -gt 0) { Write-Host ('内訳: {0}' -f ($byItem -join '・')) }
-if ($DesignPath) { Write-Host ('境界値: 桁数のある入力項目 {0} 件を確かめました' -f $boundaryItems.Count) }
+if ($DesignPath) { Write-Host ('入力項目 {0} 件（必須 {1}・桁数あり {2}）とコード区分 {3} 件を確かめました' -f $inputItems.Count, @($inputItems | Where-Object Required).Count, @($inputItems | Where-Object { $null -ne $_.Digits }).Count, $codeValues.Count) }
 Write-ReadLogSummary $readLog
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
 # .SYNOPSIS
-#     テスト仕様書（テストケースの一覧）の書き方の抜け・あいまいさ・重複と、異常系・境界値のケースの不足を見つけます（Excel 不要）。
+#     テスト仕様書（テストケースの一覧）の書き方の抜け・あいまいさ・重複と、異常系・必須・型・境界値・コード値のケースの不足を見つけます（Excel 不要）。
 #
 # .DESCRIPTION
 #     テスト仕様書（Excel・CSV）から、期待結果・手順・前提条件・入力値・区分・結果などの列を見出しの文字で探して読み、次を確かめます。
@@ -225,6 +267,9 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       テストIDの重複・同じ内容のケース（前提条件・手順・入力値・期待結果がすべて同じ）・結果の値が読めない
 #       異常系が少ない機能（区分の列、無ければ期待結果の言葉から推定。-MinErrorRatio 未満）
 #       境界値のテストが無い入力項目（-DesignPath の画面項目定義の桁数。項目名と、桁・文字・最大などの言葉か桁数の数字が出てくるケースを探す）
+#       必須のテストが無い入力項目（必須 ○ の項目。項目名と、未入力・空欄などの言葉が出てくるケースを探す）
+#       型のテストが無い入力項目（型が日付・数値・半角の項目。項目名と、その型として正しくない値の言葉が出てくるケースを探す）
+#       コード値のテストが無い入力項目（コード定義書に同じ名前のコード区分がある項目。表示名ごとに、項目名と表示名が出てくるケースを探す）
 #
 #     見出しの候補は tools\test-quality\見出し.csv（Measure-TestQuality.ps1 と同じ）で足せます。
 #
@@ -232,7 +277,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     テスト仕様書のファイルまたはフォルダ（Excel・CSV。複数可・ワイルドカード可）。既定はカレントフォルダ。
 #
 # .PARAMETER DesignPath
-#     設計書のフォルダ・ファイル。画面項目定義の入力項目の桁数から、境界値のケースがあるかを確かめます。
+#     設計書のフォルダ・ファイル。画面項目定義の入力項目の必須・型・桁数とコード定義書から、未入力・不正な値・境界値・選ぶ値ごとのケースがあるかを確かめます。
 #
 # .PARAMETER MinErrorRatio
 #     異常系のケースの割合の下限（既定 0.2）。ケースが 5 件以上の機能で、これより少なければ警告します。
