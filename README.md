@@ -2,6 +2,8 @@
 
 Excel の設計書・成果物を扱う作業を効率化するツール集です。どれも PowerShell のスクリプトで、多くは **Excel がなくても動きます**。
 
+**どの工程でどのツールを使うかは [工程別ガイド](docs/工程別ガイド.md) にまとめています。**
+
 ## ツール
 
 | ツール | できること | Excel |
@@ -55,6 +57,7 @@ PowerShell に慣れていない人には、`.\tools\Install-SendTo.ps1` を 1 �
 | --- | --- |
 | `tools/` | ツール本体と共通部品（`ExcelTools.psm1`）、設計レビューの観点表と Copilot プロンプト集（`review-checklists/`） |
 | `tests/` | ツールのテスト（[tests/README.md](tests/README.md)）。GitHub Actions で Windows PowerShell 5.1・PowerShell 7 の両方で実行 |
+| `docs/工程別ガイド.md` | 設計・レビュー・提出・見積もり・テスト・改修・品質会議の工程ごとに、使うツールと順番 |
 | `docs/design-sample/` | 設計ツールの検証用の詳細設計サンプル（架空の受注管理システム） |
 | `docs/schedule-recovery/` | スケジュール遅延リカバリ計画のテンプレートと記入例 |
 | `vba-files/`・`Book1.xlsm` | Excel マクロ（XVBA で管理）。「体裁整える」マクロは `Reset-ExcelView.ps1` で置き換え可能 |
