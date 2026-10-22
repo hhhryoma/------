@@ -35,7 +35,7 @@ function New-VersionBook {
 
 Test-Case 'Invoke-SendTo: -Action List で「送る」に登録する処理の一覧を返す' {
     $list = @(& $SendTo -Action List)
-    Assert-Equal @('Check', 'ResetView', 'Compare', 'Search', 'Terms', 'Consistency', 'Size', 'Estimate', 'Pdf') @($list | ForEach-Object { $_.Action })
+    Assert-Equal @('Check', 'ResetView', 'Compare', 'Search', 'Terms', 'Consistency', 'Size', 'Estimate', 'Quality', 'Pdf') @($list | ForEach-Object { $_.Action })
     Assert-True (@($list | Where-Object { -not $_.Label -or -not $_.Detail }).Count -eq 0) '名前・説明のない処理'
 }
 
@@ -98,6 +98,19 @@ Test-Case 'Invoke-SendTo: 検索は入力した文字そのものを探す。対
     Assert-Throws { Invoke-SendTo @{ Action = 'Check'; OutDir = $outDir } @((Join-Path $dir 'none.xlsx')) } '見つかりません'
 }
 
+Test-Case 'Invoke-SendTo: 品質評価は、案件のフォルダの品質評価の設定.csv を読み、設定の出力先に保存する' {
+    $dir = Join-Path (New-TestDir) '案件 A'
+    New-Item -ItemType Directory -Path (Join-Path $dir 'レビュー') | Out-Null
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    Export-Workbook -FilePath (Join-Path $dir 'レビュー/指摘管理表.xlsx') -Sheets @(@{ Name = '指摘'; Columns = @(@('設計書', '指摘内容', '状態') | ForEach-Object { @{ Header = $_; Width = 12 } }); Rows = @(@{ Values = @('DD02_画面設計書', '桁数が違う', '完了') }) })
+    @('項目,値', '指摘管理表,レビュー') | Set-Content -LiteralPath (Join-Path $dir '品質評価の設定.csv') -Encoding UTF8
+    Invoke-SendTo @{ Action = 'Quality' } @($dir)
+    $files = Get-ResultFiles (Join-Path $dir '品質報告')
+    Assert-Equal 1 $files.Count
+    Assert-Match (Split-Path $files[0] -Leaf) ('^品質評価_{0}\.xlsx$' -f (Get-Date).ToString('yyyyMMdd'))
+    Assert-Throws { & $SendTo -Action Quality -NoOpen -NoPause (Join-Path $dir 'レビュー') 6>$null } '設定ファイルが見つかりません'
+}
+
 Test-Case 'Invoke-SendTo: 表示を整えるは、選んだファイルを上書きする' {
     $path = Copy-Fixture 'deliverable/bad.xlsx'
     $before = (Get-FileHash -LiteralPath $path).Hash
@@ -116,7 +129,7 @@ Test-Case 'Install-SendTo: 「送る」にショートカットを作り、ほ�
     # -WhatIf では作らない（ショートカットを読み書きする型もここで読み込まれる）
     $results = @(& $InstallSendTo -SendToDir $linkDir -WhatIf 6>$null)
     Assert-Equal 0 @(Get-ChildItem -LiteralPath $linkDir -Filter '*.lnk').Count '-WhatIf で作った'
-    Assert-Equal 9 @($results | Where-Object Status -eq '作成予定').Count
+    Assert-Equal 10 @($results | Where-Object Status -eq '作成予定').Count
 
     # 同じ名前のほかのショートカット
     $notepad = Join-Path $env:SystemRoot 'notepad.exe'

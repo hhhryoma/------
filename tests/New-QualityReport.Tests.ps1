@@ -154,3 +154,25 @@ Test-Case 'New-QualityReport: -HistoryCsv に実績を足し、前回の値・�
     $l = @($limits | Where-Object { $_.Metric -eq '指摘密度' })[0]
     Assert-Equal 'ページ数|1|0.214' ('{0}|{1}|{2}' -f $l.Unit, $l.Count, $l.Mean)
 }
+
+Test-Case 'New-QualityReport: -Config の設定ファイル（相対パス・| 区切り）で資料を指定し、コマンドの指定を優先する' {
+    $dir = Join-Path (New-TestDir) '受注システム'
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    New-ReportData $dir
+    @('項目,値,説明', '指摘管理表,レビュー\指摘管理表.xlsx,', '障害管理表,障害管理表.xlsx|無い.csv,', '実績,品質報告\実績.csv,', 'タイトル,週次品質,') | Set-Content -LiteralPath (Join-Path $dir '品質評価の設定.csv') -Encoding UTF8
+    $r = @(& $ReportTool -Config $dir -AsOf '2026-10-20' 3>$null 6>$null)
+    Assert-True ($r.Count -gt 0) '指標'
+    $report = Join-Path $dir '品質報告/週次品質_20261020.xlsx'
+    Assert-True (Test-Path -LiteralPath $report) '設定の出力先とタイトル'
+    $history = @(Import-Csv -LiteralPath (Join-Path $dir '品質報告/実績.csv'))
+    Assert-Equal '受注システム' $history[0].'プロジェクト' 'プロジェクトの既定は設定ファイルのフォルダの名前'
+
+    # コマンドで指定した出力先を優先する
+    $other = Join-Path $dir '別の出力先'
+    & $ReportTool -Config (Join-Path $dir '品質評価の設定.csv') -OutDir $other -AsOf '2026-10-20' 3>$null 6>$null | Out-Null
+    Assert-True (Test-Path -LiteralPath (Join-Path $other '週次品質_20261020.xlsx')) '-OutDir を優先'
+
+    @('項目,値', '知らない項目,x') | Set-Content -LiteralPath (Join-Path $dir '品質評価の設定.csv') -Encoding UTF8
+    Assert-Throws { & $ReportTool -Config $dir 6>$null } '知らない項目'
+    Assert-Throws { & $ReportTool -Config (Join-Path $dir '無い') 6>$null } '設定ファイルが見つかりません'
+}
