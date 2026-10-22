@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
+    [string] $Config,
+
     [string] $OutDir,
 
     [string[]] $DesignPath,
@@ -43,6 +44,12 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
 $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
 
+# 設定ファイル（-Config）の値は、コマンドで指定しなかったパラメーターにだけ使う
+if ($Config) {
+    $settings = Read-QualityReportConfig $Config
+    foreach ($k in $settings.Keys) { if (-not $PSBoundParameters.ContainsKey($k)) { Set-Variable -Name $k -Value $settings[$k] } }
+}
+if (-not $OutDir) { throw '-OutDir（品質評価の保存先）か、-Config（品質評価の設定ファイル）を指定してください' }
 if (-not $Findings -and -not $TestPath -and -not $DesignPath) { throw '-Findings（レビューの指摘管理表）・-TestPath（テスト仕様書）・-DesignPath（設計書）のどれかを指定してください' }
 $OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
 $detailDir = Join-Path $OutDir '詳細'
@@ -515,6 +522,11 @@ Write-Host "各ツールの詳細: $detailDir"
 #       -DesignPath      Test-DesignConsistency.ps1（設計書どうしの参照の食い違い）
 #
 #     「要対応」のシートには、基準から外れた設計書・機能、要対応のゾーン、流出のあった工程、テストの抜けを書きます（担当・期限は空欄）。
+#
+# .PARAMETER Config
+#     品質評価の設定ファイル（CSV。項目・値）か、それを置いたフォルダ（「品質評価の設定.csv」を読む）。
+#     資料の場所などを毎回指定しなくて済むようにします。ひな形は tools\quality-report\品質評価の設定_ひな形.csv。
+#     コマンドで指定したパラメーターは、設定ファイルより優先します。
 #
 # .PARAMETER OutDir
 #     品質評価のブック（品質評価_日付.xlsx）と、各ツールの詳細（詳細フォルダ）を保存するフォルダ。

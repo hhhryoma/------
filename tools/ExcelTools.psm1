@@ -928,6 +928,46 @@ function Resolve-PhaseName {
     return $best
 }
 
+function Read-QualityReportConfig {
+    #     品質評価の設定の CSV（項目・値）を、New-QualityReport.ps1 のパラメーター → 値 にする。
+    #     Path がフォルダなら、その中の「品質評価の設定.csv」を読む。値の相対パスは設定ファイルのフォルダからのパスとし、
+    #     | で区切って複数書ける。出力先が無ければ設定ファイルのフォルダの「品質報告」、プロジェクトが無ければそのフォルダの名前
+    param([string] $Path)
+    $file = $Path
+    if (Test-Path -LiteralPath $Path -PathType Container) { $file = Join-Path $Path '品質評価の設定.csv' }
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "品質評価の設定ファイルが見つかりません: $file（tools\quality-report\品質評価の設定_ひな形.csv を写して書いてください）" }
+    $file = (Resolve-Path -LiteralPath $file).ProviderPath
+    $base = Split-Path -Path $file -Parent
+    # 項目 → パラメーター・複数か・パスか
+    $keys = [ordered]@{
+        '出力先' = @('OutDir', $false, $true); 'タイトル' = @('Title', $false, $false); 'プロジェクト' = @('Project', $false, $false)
+        '設計書' = @('DesignPath', $true, $true); '指摘管理表' = @('Findings', $true, $true); 'レビュー記録' = @('ReviewLog', $true, $true)
+        'ページ数' = @('PageCsv', $false, $true); 'テスト仕様書' = @('TestPath', $true, $true); '障害管理表' = @('BugList', $true, $true)
+        '要件一覧' = @('Requirement', $true, $true); '規模' = @('SizeCsv', $false, $true); '機能の対応表' = @('FunctionMap', $false, $true)
+        'レビューの基準値' = @('ReviewLimits', $false, $true); 'テストの基準値' = @('TestLimits', $false, $true); '判定基準' = @('Criteria', $false, $true)
+        '実績' = @('HistoryCsv', $false, $true)
+    }
+    $settings = [ordered]@{}
+    foreach ($r in (Read-CsvFile $file @('項目', '値') '品質評価の設定')) {
+        $key = ([string]$r.'項目').Trim()
+        $value = ([string]$r.'値').Trim()
+        if (-not $key -or -not $value) { continue }
+        if (-not $keys.Contains($key)) { throw ("品質評価の設定に知らない項目があります: {0}（使える項目: {1}）: {2}" -f $key, (@($keys.Keys) -join '・'), $file) }
+        $def = $keys[$key]
+        $values = @($value)
+        if ($def[1]) { $values = @($value -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+        if ($def[2]) {
+            # Windows の区切り（\）で書いた相対パスを、ほかの OS でも読めるようにする
+            if ([System.IO.Path]::DirectorySeparatorChar -eq '/') { $values = @($values | ForEach-Object { $_.Replace('\', '/') }) }
+            $values = @($values | ForEach-Object { if ([System.IO.Path]::IsPathRooted($_)) { $_ } else { [System.IO.Path]::GetFullPath((Join-Path $base $_)) } })
+        }
+        if ($def[1]) { $settings[$def[0]] = [string[]]$values } else { $settings[$def[0]] = [string]$values[0] }
+    }
+    if (-not $settings.Contains('OutDir')) { $settings['OutDir'] = Join-Path $base '品質報告' }
+    if (-not $settings.Contains('Project')) { $settings['Project'] = Split-Path -Path $base -Leaf }
+    return $settings
+}
+
 function Read-FunctionMap {
     #     機能の対応表の CSV（機能・別名・設計書。別名と設計書は | で区切って複数書ける）を、名前（ConvertTo-NameKey）→ 機能の名前 にする
     #     テスト仕様書・障害管理表・規模・設計書で機能の書き方が違うとき（SCR001 / 受注一覧 / DD02_画面設計書_SCR001_受注一覧 など）にそろえる

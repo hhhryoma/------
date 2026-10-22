@@ -1,7 +1,7 @@
 ﻿[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'Search', 'Terms', 'Consistency', 'Size', 'Estimate', 'Pdf')]
+    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'Search', 'Terms', 'Consistency', 'Size', 'Estimate', 'Quality', 'Pdf')]
     [string] $Action,
 
     # 「送る」は選んだファイルを引数の最後に並べるため、名前の無い引数はすべてここに入れる（PositionalBinding = $false）
@@ -30,6 +30,7 @@ $actions = [ordered]@{
     Consistency = @{ Label = '設計書の整合性チェック'; File = '整合性チェック'; Tool = 'Test-DesignConsistency.ps1'; Detail = '設計書どうしの参照の食い違いを見つけ、結果の Excel を開きます' }
     Size        = @{ Label = '規模の見積もり'; File = '規模'; Tool = 'Measure-DesignSize.ps1'; Detail = '設計書の規模を数えて工数の目安を出し、結果の Excel を開きます' }
     Estimate    = @{ Label = '見積書の検算'; File = '見積書の検算'; Tool = 'Test-ExcelEstimate.ps1'; Detail = '見積書の合計の範囲漏れ・手入力の合計などを見つけ、結果の Excel を開きます' }
+    Quality     = @{ Label = '品質評価'; Tool = 'New-QualityReport.ps1'; Literal = $true; Detail = '案件のフォルダ（品質評価の設定.csv を置いたもの）を選ぶと、品質の各ツールを実行して品質評価のブックを作り、開きます' }
     Pdf         = @{ Label = 'PDF にする'; Tool = 'Export-ExcelToPdf.ps1'; Literal = $true; Detail = 'Excel を PDF にして、元のファイルと同じフォルダに保存します（Excel が必要）' }
 }
 
@@ -140,6 +141,18 @@ try {
         'Pdf' {
             foreach ($t in $toolPaths) { & $tool -Path $t | Out-Host }
         }
+        'Quality' {
+            if ($targets.Count -ne 1) { throw "案件のフォルダ（品質評価の設定.csv を置いたフォルダ）か、設定ファイルを 1 つ選んでください（$($targets.Count) 件選ばれています）" }
+            Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
+            $settings = Read-QualityReportConfig $targets[0]
+            $reportArgs = @{ Config = $targets[0] }
+            $dir = $settings.OutDir
+            if ($OutDir) { $reportArgs['OutDir'] = $OutDir; $dir = $OutDir }
+            $title = '品質評価'
+            if ($settings.Contains('Title')) { $title = $settings.Title }
+            $null = & $tool @reportArgs
+            $out = Join-Path $dir ('{0}_{1}.xlsx' -f $title, (Get-Date).ToString('yyyyMMdd'))
+        }
         default {
             $null = & $tool -Path $toolPaths -OutXlsx $out
         }
@@ -183,13 +196,13 @@ if ($failure) { throw $failure }
 # .PARAMETER Action
 #     実行する処理。Check（提出前チェック）・ResetView（表示を整える）・Compare（差分）・Search（検索）・
 #     Terms（表記ゆれ）・Consistency（設計書の整合性チェック）・Size（規模の見積もり）・Estimate（見積書の検算）・
-#     Pdf（PDF にする）。List は処理の一覧を返します。
+#     Quality（品質評価。案件のフォルダの「品質評価の設定.csv」を読む）・Pdf（PDF にする）。List は処理の一覧を返します。
 #
 # .PARAMETER Path
 #     対象のファイル・フォルダ（「送る」から渡されます）。
 #
 # .PARAMETER OutDir
-#     結果のファイルを保存するフォルダ。既定は「ドキュメント\Excel ツールの結果」。
+#     結果のファイルを保存するフォルダ。既定は「ドキュメント\Excel ツールの結果」（品質評価は設定ファイルの出力先）。
 #
 # .PARAMETER Text
 #     検索（Search）で探す文字。指定しなければ入力を求めます。
