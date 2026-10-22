@@ -9,6 +9,8 @@ param(
 
     [switch] $Force,
 
+    [string] $Previous,
+
     [switch] $NoExcel
 )
 
@@ -41,23 +43,57 @@ $nfkc = [System.Text.NormalizationForm]::FormKC
 # ---------------------------------------------------------------- 品質評価のブックを読む
 
 
-$fields = @('区分', '指標', '実績', '増減', '判定', '判定の考え方', '定性分析（原因）', '対策')
-$candidates = @{}
-foreach ($f in $fields) { $candidates[$f] = @(ConvertTo-Label $f) }
+function Read-QualityMetrics {
+    #     品質評価のシートの指標の行（定性分析・対策の列の場所も）
+    param([string] $File)
+    $fields = @('区分', '指標', '実績', '増減', '判定', '判定の考え方', '定性分析（原因）', '対策')
+    $candidates = @{}
+    foreach ($f in $fields) { $candidates[$f] = @(ConvertTo-Label $f) }
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($rec in (Read-HeaderRecords -Inputs (Get-InputFiles @($File) '品質評価') -Candidates $candidates -Fields $fields -Need @('指標', '判定', '定性分析（原因）', '対策') -Key @('指標') -What '品質評価' -NoExcel:$NoExcel)) {
+        if ($rec.Sheet -ne '品質評価') { continue }
+        $v = $rec.Values
+        if (-not ([string]$v['指標']).Trim()) { continue }
+        $list.Add([pscustomobject]@{
+                Area = ([string]$v['区分']).Trim(); Name = ([string]$v['指標']).Trim(); Value = ([string]$v['実績']).Trim(); Change = ([string]$v['増減']).Trim()
+                Judgement = ([string]$v['判定']).Normalize($nfkc).Trim(); Basis = ([string]$v['判定の考え方']).Trim()
+                Cause = ([string]$v['定性分析（原因）']).Trim(); Measure = ([string]$v['対策']).Trim()
+                Row = $rec.Row; CauseColumn = $rec.Columns['定性分析（原因）']; MeasureColumn = $rec.Columns['対策']; No = 0
+            })
+    }
+    if ($list.Count -eq 0) { throw "「品質評価」のシートに、指標・判定・定性分析（原因）・対策の見出しの表がありません: $File" }
+    return , $list
+}
+
+function Find-PreviousBook {
+    #     同じフォルダの、名前が「<タイトル>_日付（8 桁）」で日付が前の品質評価のブックのうち、一番近いもの（無ければ $null）
+    param([string] $File)
+    $m = [regex]::Match([System.IO.Path]::GetFileNameWithoutExtension($File), '^(.*)_(\d{8})$')
+    if (-not $m.Success) { return $null }
+    $older = @(Get-ChildItem -LiteralPath (Split-Path -Path $File -Parent) -Filter '*.xlsx' -File | ForEach-Object {
+            $o = [regex]::Match($_.BaseName, '^(.*)_(\d{8})$')
+            if ($o.Success -and $o.Groups[1].Value -eq $m.Groups[1].Value -and $o.Groups[2].Value -lt $m.Groups[2].Value) { [pscustomobject]@{ Date = $o.Groups[2].Value; Path = $_.FullName } }
+        } | Sort-Object Date)
+    if ($older.Count -eq 0) { return $null }
+    return $older[-1].Path
+}
+
 $inputs = Get-InputFiles @($Path) '品質評価'
-$metrics = New-Object System.Collections.Generic.List[object]
-foreach ($rec in (Read-HeaderRecords -Inputs $inputs -Candidates $candidates -Fields $fields -Need @('指標', '判定', '定性分析（原因）', '対策') -Key @('指標') -What '品質評価' -NoExcel:$NoExcel)) {
-    if ($rec.Sheet -ne '品質評価') { continue }
-    $v = $rec.Values
-    if (-not ([string]$v['指標']).Trim()) { continue }
-    $metrics.Add([pscustomobject]@{
-            Area = ([string]$v['区分']).Trim(); Name = ([string]$v['指標']).Trim(); Value = ([string]$v['実績']).Trim(); Change = ([string]$v['増減']).Trim()
-            Judgement = ([string]$v['判定']).Normalize($nfkc).Trim(); Basis = ([string]$v['判定の考え方']).Trim()
-            Cause = ([string]$v['定性分析（原因）']).Trim(); Measure = ([string]$v['対策']).Trim()
-            Row = $rec.Row; CauseColumn = $rec.Columns['定性分析（原因）']; MeasureColumn = $rec.Columns['対策']; No = 0
+$metrics = Read-QualityMetrics $Path
+
+# 前回の品質評価の定性分析・対策（対策が効いたかを、今回の実績と並べて確かめてもらう）
+if ($Previous) { $Previous = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Previous) }
+else { $Previous = Find-PreviousBook $Path }
+$previousNotes = @()
+if ($Previous) {
+    if (-not (Test-Path -LiteralPath $Previous)) { throw "前回の品質評価のブックが見つかりません: $Previous" }
+    $current = @{}
+    foreach ($m in $metrics) { $current['{0}|{1}' -f $m.Area, $m.Name] = $m }
+    $before = Read-QualityMetrics $Previous
+    $previousNotes = @($before | Where-Object { $_.Cause -or $_.Measure } | ForEach-Object {
+            [pscustomobject]@{ Before = $_; Now = $current['{0}|{1}' -f $_.Area, $_.Name] }
         })
 }
-if ($metrics.Count -eq 0) { throw "「品質評価」のシートに、指標・判定・定性分析（原因）・対策の見出しの表がありません: $Path" }
 
 $actionFields = @('区分', '対象', '内容')
 $actionCandidates = @{}
@@ -100,6 +136,17 @@ function New-AnalysisPrompt {
         $lines.Add('| --- | --- | --- |')
         foreach ($a in $actions) { $lines.Add(('| {0} | {1} | {2} |' -f (ConvertTo-Cell $a.Values['区分']), (ConvertTo-Cell $a.Values['対象']), (ConvertTo-Cell $a.Values['内容']))) }
     }
+    if ($previousNotes.Count -gt 0) {
+        $lines.Add('')
+        $lines.Add(('# 前回の定性分析と対策（{0}）' -f [System.IO.Path]::GetFileName($Previous)))
+        $lines.Add('| 区分 | 指標 | 前回の実績 | 前回の判定 | 今回の実績 | 今回の判定 | 前回の定性分析（原因） | 前回の対策 |')
+        $lines.Add('| --- | --- | --- | --- | --- | --- | --- | --- |')
+        foreach ($n in $previousNotes) {
+            $nowValue = '（今回なし）'; $nowJudgement = ''
+            if ($n.Now) { $nowValue = $n.Now.Value; $nowJudgement = $n.Now.Judgement }
+            $lines.Add(('| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} |' -f (ConvertTo-Cell $n.Before.Area), (ConvertTo-Cell $n.Before.Name), (ConvertTo-Cell $n.Before.Value), $n.Before.Judgement, (ConvertTo-Cell $nowValue), $nowJudgement, (ConvertTo-Cell $n.Before.Cause), (ConvertTo-Cell $n.Before.Measure)))
+        }
+    }
     $others = @($metrics | Where-Object { @('×', '△') -notcontains $_.Judgement })
     if ($others.Count -gt 0) {
         $lines.Add('')
@@ -115,6 +162,7 @@ function New-AnalysisPrompt {
     $lines.Add('| --- | --- | --- |')
     $lines.Add('- 定性分析は、実績・増減・要対応・ほかの指標との関係から考えられる原因を書いてください。数字から断定できないことは「～の可能性がある（～で確かめる）」と書いてください。')
     $lines.Add('- 対策は、誰が・何を・いつまでにするかが分かる具体的な行動にしてください（例: 「設計リーダーが SCR002 の画面設計書を再レビューする（今週中）」）。')
+    if ($previousNotes.Count -gt 0) { $lines.Add('- 前回の対策がある指標は、前回から今回への実績の変化で、対策が効いたかを定性分析に書いてください。効いていなければ、対策を変えてください。') }
     $lines.Add('- 1 つのセルは 200 文字以内で、セルの中で改行しないでください。')
     return ($lines -join "`r`n")
 }
@@ -158,6 +206,7 @@ if (-not $ImportOnly) {
 if ($PromptOnly) {
     Write-Host ''
     Write-Host ('判定が × か △ の指標 {0} 件の定性分析・対策の依頼を作りました: {1}' -f $targets.Count, $promptPath)
+    if ($previousNotes.Count -gt 0) { Write-Host ('前回の品質評価の定性分析・対策 {0} 件も入れました: {1}' -f $previousNotes.Count, $Previous) }
     Write-Host '次の手順:'
     Write-Host '  1. 依頼の内容を Copilot に貼り付けて送信する'
     Write-Host ('  2. 回答をコピーし、{0} に UTF-8 のテキストとして保存する' -f $answerPath)
@@ -237,6 +286,7 @@ Write-Host 'AI の下書きです。会議の前に、事実と合っている�
 #
 #     依頼と回答は、ブックと同じフォルダに「<ブック名>_定性分析の依頼.txt」「<ブック名>_定性分析の回答.txt」として保存します。
 #     記入済みの行は書き換えません（-Force で書き直します）。
+#     前回の品質評価のブック（同じフォルダの、名前の日付が前のもの）に定性分析・対策があれば、今回の実績と並べて依頼に入れます。
 #
 # .PARAMETER Path
 #     品質評価のブック（品質評価_日付.xlsx）。フォルダを指定すると、その中で「品質評価」のシートがある一番新しい xlsx を使います。
@@ -249,6 +299,10 @@ Write-Host 'AI の下書きです。会議の前に、事実と合っている�
 #
 # .PARAMETER Force
 #     定性分析・対策が記入済みの指標も、依頼に含めて書き直します。
+#
+# .PARAMETER Previous
+#     前回の品質評価のブック。省略時は、同じフォルダで名前の日付（品質評価_20261008.xlsx など）が前のもののうち一番近いもの。
+#     前回の定性分析・対策と、前回と今回の実績・判定を依頼に入れ、対策が効いたかも書いてもらいます。
 #
 # .PARAMETER NoExcel
 #     Excel を起動しません（品質評価のブックは .xlsx なので、通常は不要です）。
