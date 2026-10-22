@@ -2074,7 +2074,7 @@ Metric   Unit     Process  Count  Mean  Low  High
 - 項目は 出力先・プロジェクト・設計書・指摘管理表・レビュー記録・ページ数・テスト仕様書・障害管理表・要件一覧・規模・機能の対応表・レビューの基準値・テストの基準値・判定基準・実績・タイトル です。空の行は使いません
 - 相対パスは設定ファイルのフォルダから。複数の資料は `|` で区切ります。出力先が無ければ設定ファイルのフォルダの「品質報告」、プロジェクトが無ければそのフォルダの名前です
 - コマンドで指定したパラメーターは、設定ファイルより優先します
-- Install-SendTo.ps1 で登録した「送る」→「Excel 品質評価」に案件のフォルダを送ると、PowerShell を使わずに品質評価を作れます
+- Install-SendTo.ps1 で登録した「送る」→「Excel 品質評価」に案件のフォルダを送ると、PowerShell を使わずに品質評価を作れます。続けて品質評価のブックを「Excel 品質評価の定性分析」に送ると、定性分析・対策の下書きを書き込めます
 
 ### 実績の蓄積と前回との比較（`-HistoryCsv`）
 
@@ -2526,6 +2526,7 @@ Excel 差分（2 つ選ぶ）     作成   2 つのブック（またはフォ�
 | Excel 規模の見積もり | Measure-DesignSize.ps1 | 結果の Excel を開く |
 | Excel 見積書の検算 | Test-ExcelEstimate.ps1 | 結果の Excel を開く |
 | Excel 品質評価 | New-QualityReport.ps1 | 案件のフォルダ（`品質評価の設定.csv` を置いたもの）を選ぶ。品質の各ツールを実行し、設定の出力先に品質評価のブックを保存して開く |
+| Excel 品質評価の定性分析 | Invoke-QualityAnalysis.ps1 | 品質評価のブック（またはそれを置いたフォルダ）を選ぶ。依頼をクリップボードにコピーするので、Copilot に貼り付け、回答をコピーして Enter を押すと、定性分析・対策の下書きを書き込んで開く |
 | Excel PDF にする | Export-ExcelToPdf.ps1 | 元のファイルと同じフォルダに PDF を保存する（Excel が必要） |
 
 - 結果の Excel は「ドキュメント\Excel ツールの結果」に `提出前チェック_20261021_101500.xlsx` のような名前で保存します（`-OutDir` で変えられます）
@@ -2548,7 +2549,7 @@ Excel 差分（2 つ選ぶ）     作成   2 つのブック（またはフォ�
 
 | パラメーター | 内容 |
 | --- | --- |
-| `-Action` | 登録する処理（`Check`・`ResetView`・`Compare`・`Search`・`Terms`・`Consistency`・`Size`・`Estimate`・`Pdf`）。既定はすべて |
+| `-Action` | 登録する処理（`Check`・`ResetView`・`Compare`・`Search`・`Terms`・`Consistency`・`Size`・`Estimate`・`Quality`・`Analysis`・`Pdf`）。既定はすべて |
 | `-SendToDir` | ショートカットを作るフォルダ。既定は、ログインしている人の「送る」のフォルダ（`shell:sendto`） |
 | `-Prefix` | ショートカットの名前の頭に付ける文字（既定は `Excel `） |
 | `-OutDir` | 結果のファイルを保存するフォルダ |
