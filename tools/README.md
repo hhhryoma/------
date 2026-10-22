@@ -25,13 +25,14 @@
 | [Measure-CodeSize.ps1](#measure-codesizeps1) | ソースコードのステップ数（コメント・空行を除いた行数）を機能（フォルダ）ごとに数え、前の版との新規・修正・削除も出す。バグ密度・テスト密度の分母（KLOC）に（Excel 不要） |
 | [New-QualityLimits.ps1](#new-qualitylimitsps1) | 過去のプロジェクトの品質の実績（指摘密度・バグ密度など）から、社内の基準値（下限・上限）の CSV を作る（Excel 不要） |
 | [New-QualityReport.ps1](#new-qualityreportps1) | レビュー・テスト・工程・網羅・設計書の整合性の各ツールをまとめて実行し、工程完了判定（品質会議）に使う品質評価のブック（指標・実績・判定 ○△×・要対応）を作る |
+| [Invoke-QualityAnalysis.ps1](#invoke-qualityanalysisps1) | 品質評価のブックの × と △ の指標について、定性分析（原因）と対策の下書きを AI（Microsoft 365 Copilot）に書かせ、ブックに書き込む（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
 | [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Invoke-SendTo.ps1` は各ツールを、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -2085,6 +2086,36 @@ Metric   Unit     Process  Count  Mean  Low  High
 - 品質評価のシートに**前回（前の時点）の値と増減**の列を、**推移**のシートに直近 12 回の値を加えます
 - 全体の指摘密度・レビュー工数密度・テスト密度・バグ密度も、「指摘密度」「テスト密度」などの名前と分母（ページ数・KLOC など）で残します。プロジェクトが終わったら、この CSV を **New-QualityLimits.ps1 にそのまま渡して**、次の案件の基準値を作れます（同じプロジェクトは最後の時点の値だけを使います）
 - `-Project` を省くと、`-OutDir` のフォルダの名前をプロジェクトの名前にします
+
+## Invoke-QualityAnalysis.ps1
+
+New-QualityReport.ps1 で作った品質評価のブックの、判定が **× と △ の指標**について、**定性分析（原因）と対策の下書き**を AI（Microsoft 365 Copilot など）に書かせ、品質評価のシートに書き込みます。Excel は不要です。
+
+```powershell
+.\Invoke-QualityAnalysis.ps1 D:\案件\受注システム\品質報告
+```
+
+```
+手順: Copilot に貼り付けて送信 → 回答をコピー（回答の下のコピー ボタン）→ ここで Enter（q = 中断）
+判定が × か △ の指標 3 件の依頼（1520 文字）→ クリップボードにコピーしました
+回答をコピーしたら Enter:
+
+定性分析・対策の下書きを 3 件書き込みました（判定が × か △ の指標 3 件）: D:\案件\受注システム\品質報告\品質評価_20261022.xlsx
+AI の下書きです。会議の前に、事実と合っているかを確かめて書き直してください。
+```
+
+- 依頼には、× と △ の指標（実績・増減・判定・判定の考え方）、「要対応」のシートの内容、ほかの指標（参考）を入れ、`No | 定性分析（原因） | 対策` の表で答えるよう頼みます
+- 回答は Markdown の表でも、Copilot の表をコピーしたタブ区切りでも読めます。書き込むのは定性分析（原因）・対策の列だけで、ほかのセル・シート（リンク・グラフ）はそのままです
+- フォルダを指定すると、その中で「品質評価」のシートがある一番新しい xlsx を使います
+- 記入済みの行は書き換えません（`-Force` で書き直す）。依頼と回答は、ブックと同じフォルダに `<ブック名>_定性分析の依頼.txt`・`<ブック名>_定性分析の回答.txt` として残します
+- **AI の下書きです。** 会議の前に、事実と合っているかを確かめて書き直してください
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 品質評価のブック、またはそれを置いたフォルダ |
+| `-PromptOnly` | 依頼のファイルを作るだけにする（クリップボードが使えないとき）。回答を `_定性分析の回答.txt` に保存して `-ImportOnly` |
+| `-ImportOnly` | 保存した回答のファイルを読んで、ブックに書き込む |
+| `-Force` | 記入済みの指標も依頼に含めて書き直す |
 
 ## Export-ExcelToPdf.ps1
 
