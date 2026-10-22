@@ -49,6 +49,32 @@ Test-Case 'Invoke-QualityAnalysis: × と △ の指標の依頼を作り、回�
     Assert-Match $text '判定が × か △ の指標 3 件の定性分析・対策の依頼を作りました'
 }
 
+Test-Case 'Invoke-QualityAnalysis: 同じフォルダの前回の品質評価の定性分析・対策を、今回の実績と並べて依頼に入れる' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $columns = @(@('区分', '指標', '実績', '判定', '判定の考え方', '定性分析（原因）', '対策') | ForEach-Object { @{ Header = $_; Width = 14 } })
+    foreach ($old in @(@('20260924', '古い原因', '古い対策'), @('20261008', 'レビュー時間が短い', '再レビューする'))) {
+        Export-Workbook -FilePath (Join-Path $dir ('品質評価_{0}.xlsx' -f $old[0])) -Sheets @(@{ Name = '品質評価'; Columns = $columns; Rows = @(
+                    @{ Values = @('レビュー', '指摘密度（件/ページ）', [double]0.3, '×', '', $old[1], $old[2]) },
+                    @{ Values = @('テスト', '消化率', [double]0.5, '×', '', 'テスト環境の遅れ', '環境を先に作る') },
+                    @{ Values = @('テスト', 'テスト密度（件/FP）', [double]3.5, '△', '', '', '') }) })
+    }
+    $book = Join-Path $dir '品質評価_20261022.xlsx'
+    New-QualityBook $book
+    $text = Get-HostText { & $QualityAnalysis $book -PromptOnly | Out-Null }
+    Assert-Match $text '前回の品質評価の定性分析・対策 2 件も入れました: .*品質評価_20261008\.xlsx'
+    $prompt = [System.IO.File]::ReadAllText((Join-Path $dir '品質評価_20261022_定性分析の依頼.txt'))
+    Assert-Match $prompt '# 前回の定性分析と対策（品質評価_20261008\.xlsx）'
+    Assert-Match $prompt '\| レビュー \| 指摘密度（件/ページ） \| 0\.3 \| × \| 0\.4 \| × \| レビュー時間が短い \| 再レビューする \|'
+    Assert-Match $prompt '\| テスト \| 消化率 \| 0\.5 \| × \| （今回なし） \|  \| テスト環境の遅れ \| 環境を先に作る \|'
+    Assert-True (-not $prompt.Contains('古い対策')) '一番近い前回だけを使う'
+    Assert-Match $prompt '対策が効いたかを定性分析に書いてください'
+
+    # -Previous で前回を指定できる
+    $null = & $QualityAnalysis $book -PromptOnly -Previous (Join-Path $dir '品質評価_20260924.xlsx') 6>$null
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $dir '品質評価_20261022_定性分析の依頼.txt'))) '古い対策'
+}
+
 Test-Case 'Invoke-QualityAnalysis: 回答が無い・読めないときと、品質評価のブックが無いときに知らせる' {
     $dir = New-TestDir
     Assert-Throws { & $QualityAnalysis $dir -PromptOnly 6>$null } '品質評価のブック'
@@ -62,5 +88,5 @@ Test-Case 'Invoke-QualityAnalysis: 回答が無い・読めないときと、品
 Test-Case 'Invoke-QualityAnalysis: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityAnalysis
     Assert-Match $h.Synopsis '定性分析（原因）と対策の下書き'
-    Assert-Equal 5 @($h.parameters.parameter).Count
+    Assert-Equal 6 @($h.parameters.parameter).Count
 }
