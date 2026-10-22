@@ -22,7 +22,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Export-ExcelToMarkdown.ps1](tools/README.md#export-exceltomarkdownps1) | Excel を Markdown にする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見られる | 不要 ※1 |
 | [Measure-ReviewQuality.ps1](tools/README.md#measure-reviewqualityps1) | 指摘管理表を集計し、設計書ごとの指摘件数・指摘密度・未完了・期限切れ、基準値から外れた設計書、起票・完了の推移を出す。レビュー記録の工数から、レビュー工数密度 × 指摘密度のゾーン分析もする | 不要 ※1 |
 | [Measure-TestQuality.ps1](tools/README.md#measure-testqualityps1) | テスト仕様書と障害管理表から、機能ごとのテスト密度・バグ密度とゾーン分析、テストの消化とバグの収束（信頼度成長曲線）、再テスト漏れなどの食い違いを出す | 不要 ※1 |
-| [Test-TestSpec.ps1](tools/README.md#test-testspecps1) | テスト仕様書の期待結果の空欄・あいまいさ、重複したケース、異常系・境界値のケースの不足を見つける | 不要 ※1 |
+| [Test-TestSpec.ps1](tools/README.md#test-testspecps1) | テスト仕様書の期待結果の空欄・あいまいさ、重複したケース、異常系・必須・型・境界値・コード値のケースの不足を見つける | 不要 ※1 |
 | [Measure-DefectRemoval.ps1](tools/README.md#measure-defectremovalps1) | バグとレビューの指摘の混入工程 × 摘出工程、工程ごとの摘出率・流出、原因の多い順を出す | 不要 ※1 |
 | [Measure-ReviewEffectiveness.ps1](tools/README.md#measure-revieweffectivenessps1) | 設計書ごとにレビューの指摘と設計で入ったバグを突き合わせ、レビューで見逃した設計書と設計工程の摘出率を出す | 不要 ※1 |
 | [Compare-ReviewFindings.ps1](tools/README.md#compare-reviewfindingsps1) | AI のレビューと人のレビューの指摘を突き合わせ、一致・AI だけ・人だけと、観点ごとの一致率を出す | 不要 ※1 |

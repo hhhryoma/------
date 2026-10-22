@@ -58,6 +58,33 @@ Test-Case 'Test-TestSpec: -DesignPath の画面項目定義の桁数から、境
     Assert-Equal 'SCR001|6|2|0.333|区分の列' ('{0}|{1}|{2}|{3}|{4}' -f $functions.Rows[2]['A'], $functions.Rows[2]['B'], $functions.Rows[2]['C'], $functions.Rows[2]['D'], $functions.Rows[2]['E'])
 }
 
+Test-Case 'Test-TestSpec: -DesignPath の必須・型・コード定義書から、未入力・不正な値・選ぶ値ごとのケースが無い入力項目を知らせる' {
+    $dir = New-TestDir
+    $rows = @(
+        @('1', 'SCR002', '異常', '', '受注日を未入力で登録する', '', 'E0001 が表示される', 'OK'),
+        @('2', '', '異常', '', '受注日に存在しない日付を入れて登録する', '2025/02/30', 'E0004 が表示される', 'OK'),
+        @('3', '', '正常', '', '支払方法に 銀行振込 を選んで登録する', '', '登録される', 'OK'))
+    $path = Join-Path $dir 'UT_受注登録.xlsx'
+    New-SpecBook $path @('No', '機能', '区分', '前提条件', '手順', '入力値', '期待結果', '結果') $rows
+    $issues = @(& $TestSpecTool -Path $path -DesignPath (Join-Path $script:RepoRoot 'docs/design-sample') 6>$null)
+    $of = { param($item) @($issues | Where-Object Item -eq $item | ForEach-Object { [regex]::Match($_.Detail, '「(.+?)」').Groups[1].Value }) }
+    $required = & $of '必須のテストが無い'
+    Assert-True ($required -notcontains '受注日') '未入力のケースがある受注日'
+    Assert-True ($required -contains '顧客コード') ($required -join ', ')
+    $type = & $of '型のテストが無い'
+    Assert-True ($type -notcontains '受注日') '存在しない日付のケースがある受注日'
+    Assert-True ($type -contains '希望納品日') ($type -join ', ')
+    Assert-Match @($issues | Where-Object { $_.Item -eq '型のテストが無い' -and $_.Detail -like '*「顧客コード」*' })[0].Detail '（型 半角英数。DD02_画面設計書_SCR002_受注登録\.xlsx 画面項目定義 \d+ 行目）に、半角として正しくない値'
+    $code = @($issues | Where-Object { $_.Item -eq 'コード値のテストが無い' -and $_.Detail -like '*「支払方法」*' })
+    Assert-Equal 1 $code.Count
+    Assert-Match $code[0].Detail '値のうち、「クレジットカード」・「代金引換」 を選ぶケースが見つかりません（コード定義書の「支払方法」の 3 値）'
+    $boundary = & $of '境界値のテストが無い'
+    Assert-True ($boundary -notcontains '支払方法' -and $boundary -notcontains '受注日') '選ぶ項目と日付は桁数の境界を見ない'
+    Assert-True ($boundary -contains '備考') ($boundary -join ', ')
+    $text = Get-HostText { & $TestSpecTool -Path $path -DesignPath (Join-Path $script:RepoRoot 'docs/design-sample') | Out-Null }
+    Assert-Match $text '入力項目 \d+ 件（必須 \d+・桁数あり \d+）とコード区分 \d+ 件を確かめました'
+}
+
 Test-Case 'Test-TestSpec: 区分の列が無ければ、期待結果の言葉から異常系を推定する' {
     $dir = New-TestDir
     $csv = Join-Path $dir 'cases.csv'
