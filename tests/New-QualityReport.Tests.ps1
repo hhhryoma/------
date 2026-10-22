@@ -150,6 +150,14 @@ Test-Case 'New-QualityReport: -AiReview で AI のレビュー結果と人の指
     Assert-Equal 1 $s02.Count 'AI だけの指摘が多い S02 を要対応に並べる'
     Assert-Match $s02[0]['C'] '^判定基準を見直す（2 件）: 数量のエラー時のメッセージが無い'
 
+    # 観点別の一致率: 実績の CSV に残し、前の時点と並べる
+    $history = Join-Path $dir '実績.csv'
+    foreach ($asOf in @('2026-10-06', '2026-10-20')) { $null = & $ReportTool -OutDir (Join-Path $dir '報告3') -Findings (Join-Path $dir 'レビュー') -AiReview (Join-Path $dir 'レビュー結果.xlsx') -HistoryCsv $history -Project 'A' -AsOf $asOf 3>$null 6>$null }
+    $book = Read-XlsxSheet -Path (Join-Path $dir '報告3/品質評価_20261020.xlsx') -Index 5
+    Assert-Equal @('品質評価', '要対応', '対象', '推移', '観点別の一致率') $book.Sheets
+    Assert-Equal @('観点ID|AI の指摘|人と一致|2026/10/06|2026/10/20', 'S01|1|1|1|1', 'S02|2|0|0|0') @(1..3 | ForEach-Object { $r = $book.Rows[$_]; (@('A', 'B', 'C', 'D', 'E') | ForEach-Object { $r[$_] }) -join '|' })
+    Assert-Equal 2 @(Import-Csv -LiteralPath $history | Where-Object { $_.'区分' -eq 'AI レビュー（観点別）' -and $_.'時点' -eq '2026/10/20' }).Count '観点ごとの一致率を実績の CSV に残す'
+
     # -Findings が無ければ突き合わせない
     $text = Get-HostText { & $ReportTool -OutDir (Join-Path $dir '報告2') -TestPath (Join-Path $dir 'テスト') -AiReview (Join-Path $dir 'レビュー結果.xlsx') -AsOf '2026-10-20' -WarningVariable script:aiWarnings -WarningAction SilentlyContinue | Out-Null }
     Assert-Match ($script:aiWarnings -join ' ') '-Findings（人の指摘管理表）と一緒に'
