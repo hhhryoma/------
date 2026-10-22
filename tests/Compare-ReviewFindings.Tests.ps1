@@ -49,7 +49,7 @@ Test-Case 'Compare-ReviewFindings: AI と人の指摘を、場所の近さと内
     Assert-Match $text '人の指摘 4 件: AI と一致 2（50\.0%）・人だけ 2'
 
     $points = Read-XlsxSheet -Path $out -Index 2
-    Assert-Equal @('突き合わせ', '観点別', '設計書別', '読み取り結果') $points.Sheets
+    Assert-Equal @('突き合わせ', '観点別', '設計書別', '観点表への反映案', '読み取り結果') $points.Sheets
     Assert-Equal 'C03|1|1|1' ('{0}|{1}|{2}|{3}' -f $points.Rows[2]['A'], $points.Rows[2]['B'], $points.Rows[2]['C'], $points.Rows[2]['D'])
     $pairsSheet = Read-XlsxSheet -Path $out -Index 1
     Assert-True (@($pairsSheet.Links | Where-Object { $_.Location -eq "'指摘'!E2" }).Count -eq 1) '人の指摘管理表の行へのリンク'
@@ -62,6 +62,38 @@ Test-Case 'Compare-ReviewFindings: 場所を「シート名 セル」の形で�
     @('設計書,指摘内容,場所', 'DD02_画面設計書_SCR001_受注一覧.xlsx,受注ステータスの桁数が無い,画面項目定義!AB11') | Set-Content -LiteralPath (Join-Path $dir 'ai.csv') -Encoding UTF8
     $r = @(& $CompareFindings (Join-Path $dir 'ai.csv') (Join-Path $dir 'human.csv') 6>$null)
     Assert-Equal '一致|場所' ('{0}|{1}' -f $r[0].Status, $r[0].Basis)
+}
+
+Test-Case 'Compare-ReviewFindings: 人だけの指摘と AI だけの指摘から、観点表に足す観点・具体的にする判定基準・見直す観点の案を出す' {
+    $dir = New-TestDir
+    $checklist = Join-Path $dir '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効',
+        'S02,画面項目,入力チェックのエラー時のメッセージが決まっている,入力チェックごとにエラー時のメッセージIDが書かれている,中,*画面設計書*,○',
+        'S03,画面項目,選択項目・日付項目の初期値が決まっている,選択項目と日付項目の初期値が書かれている,中,*画面設計書*,○',
+        'X01,記述,ログ出力の方針が書かれている,使わない観点,低,*,×') | Set-Content -LiteralPath $checklist -Encoding UTF8
+    $scr = 'DD02_画面設計書_SCR001_受注一覧'
+    @('設計書,指摘内容,場所,観点ID',
+        "$scr,受注ステータスの桁数が無い,画面項目定義!AB11,S01",
+        "$scr,数量のエラー時のメッセージが無い,画面項目定義!AK7,S02",
+        "$scr,単価のエラー時のメッセージが無い,画面項目定義!AK8,S02") | Set-Content -LiteralPath (Join-Path $dir 'ai.csv') -Encoding UTF8
+    @('設計書,指摘内容,場所,分類,重要度',
+        "$scr,受注ステータスの桁数が未記入,画面項目定義!AB12,,",
+        "$scr,受注日の初期値が書かれていない,画面項目定義!M20,画面項目,高",
+        "$scr,ログ出力の方針が書かれていない,画面概要!C5,非機能,中",
+        'DD05_メッセージ一覧,句読点の揺れ,メッセージ一覧!K6,表記,低') | Set-Content -LiteralPath (Join-Path $dir 'human.csv') -Encoding UTF8
+    $out = Join-Path $dir 'compare.xlsx'
+    $null = & $CompareFindings (Join-Path $dir 'ai.csv') (Join-Path $dir 'human.csv') -Checklist $checklist -OutXlsx $out 6>$null
+    $book = Read-XlsxSheet -Path $out -Index 4
+    Assert-Equal '提案|観点ID|分類|観点|判定基準|重要度|対象設計書|件数' (@('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H' | ForEach-Object { $book.Rows[1][$_] }) -join '|') 'B〜G 列は観点表と同じ並び'
+    Assert-Equal @(
+        '判定基準を具体的にする|S03|画面項目|選択項目・日付項目の初期値が決まっている|中|*画面設計書*|1',
+        '観点を足す||非機能||中|*画面設計書*|1',
+        '観点を足す||表記||低|*|1',
+        '判定基準を見直す|S02|画面項目|入力チェックのエラー時のメッセージが決まっている|中|*画面設計書*|2') @(2..5 | ForEach-Object { $r = $book.Rows[$_]; (@('A', 'B', 'C', 'D', 'F', 'G', 'H' | ForEach-Object { $r[$_] }) -join '|') })
+    Assert-Equal '受注日の初期値が書かれていない（DD02_画面設計書_SCR001_受注一覧）' $book.Rows[2]['I']
+    Assert-Match $book.Rows[5]['J'] 'AI の指摘 2 件のうち 2 件が AI だけ'
+    $text = Get-HostText { & $CompareFindings (Join-Path $dir 'ai.csv') (Join-Path $dir 'human.csv') -Checklist $checklist | Out-Null }
+    Assert-Match $text '観点表への反映案: .*観点を足す 2'
 }
 
 Test-Case 'Compare-ReviewFindings: Get-Help でヘルプが表示される' {

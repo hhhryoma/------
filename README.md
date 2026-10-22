@@ -25,7 +25,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Test-TestSpec.ps1](tools/README.md#test-testspecps1) | テスト仕様書の期待結果の空欄・あいまいさ、重複したケース、異常系・必須・型・境界値・コード値のケースの不足を見つける | 不要 ※1 |
 | [Measure-DefectRemoval.ps1](tools/README.md#measure-defectremovalps1) | バグとレビューの指摘の混入工程 × 摘出工程、工程ごとの摘出率・流出、原因の多い順を出す | 不要 ※1 |
 | [Measure-ReviewEffectiveness.ps1](tools/README.md#measure-revieweffectivenessps1) | 設計書ごとにレビューの指摘と設計で入ったバグを突き合わせ、レビューで見逃した設計書と設計工程の摘出率を出す | 不要 ※1 |
-| [Compare-ReviewFindings.ps1](tools/README.md#compare-reviewfindingsps1) | AI のレビューと人のレビューの指摘を突き合わせ、一致・AI だけ・人だけと、観点ごとの一致率を出す | 不要 ※1 |
+| [Compare-ReviewFindings.ps1](tools/README.md#compare-reviewfindingsps1) | AI のレビューと人のレビューの指摘を突き合わせ、一致・AI だけ・人だけと、観点ごとの一致率、観点表への反映案を出す | 不要 ※1 |
 | [Measure-CodeSize.ps1](tools/README.md#measure-codesizeps1) | ソースコードのステップ数（KLOC）を機能ごとに数え、前の版との新規・修正・削除も出す | 不要 |
 | [New-QualityLimits.ps1](tools/README.md#new-qualitylimitsps1) | 過去のプロジェクトの品質の実績から、社内の基準値（下限・上限）の CSV を作る | 不要 |
 | [New-QualityReport.ps1](tools/README.md#new-qualityreportps1) | レビュー・テスト・工程・網羅・整合性の各ツールをまとめて実行し、工程完了判定に使う品質評価のブック（指標・実績・判定 ○△×・要対応）を作る | 不要 ※1 |
