@@ -129,7 +129,7 @@ Test-Case 'Install-SendTo: 「送る」にショートカットを作り、ほ�
     # -WhatIf では作らない（ショートカットを読み書きする型もここで読み込まれる）
     $results = @(& $InstallSendTo -SendToDir $linkDir -WhatIf 6>$null)
     Assert-Equal 0 @(Get-ChildItem -LiteralPath $linkDir -Filter '*.lnk').Count '-WhatIf で作った'
-    Assert-Equal 9 @($results | Where-Object Status -eq '作成予定').Count
+    Assert-Equal 10 @($results | Where-Object Status -eq '作成予定').Count
 
     # 同じ名前のほかのショートカット
     $notepad = Join-Path $env:SystemRoot 'notepad.exe'
