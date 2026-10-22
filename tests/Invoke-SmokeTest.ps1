@@ -93,6 +93,12 @@ $copies = Join-Path $data '書き換え用'
 New-Item -ItemType Directory -Force -Path $copies | Out-Null
 Copy-Item -LiteralPath (Join-Path $fixtures 'deliverable/bad.xlsx') -Destination (Join-Path $copies '表示を整える.xlsx')
 Copy-Item -LiteralPath (Join-Path $fixtures 'replace/table.xlsx') -Destination (Join-Path $copies '置換.xlsx')
+# 設計書の新版（SCR002 の支払方法の初期値と E0004 の文言を変えたもの。再テストするケースを選ぶ）
+$designV2 = Join-Path $data '設計書_新版'
+New-Item -ItemType Directory -Force -Path $designV2 | Out-Null
+Get-ChildItem -LiteralPath $design -Filter '*.xlsx' | Copy-Item -Destination $designV2
+$null = & (Join-Path $tools 'Replace-Excel.ps1') -Pattern '銀行振込' -Replacement 'クレジットカード' -SimpleMatch -Path (Join-Path $designV2 "$scr2.xlsx") -SheetNamePattern '画面項目定義' -Force 6>$null
+$null = & (Join-Path $tools 'Replace-Excel.ps1') -Pattern '日付の形式が正しくありません' -Replacement '日付の形式が違います' -SimpleMatch -Path (Join-Path $designV2 'DD05_メッセージ一覧.xlsx') -Force 6>$null
 
 # ---------------------------------------------------------------- ツールを順に実行する
 
@@ -123,6 +129,7 @@ Invoke-Step 'Test-ExcelTerms（表記ゆれ）' '03_表記ゆれ.xlsx' '表記�
 Invoke-Step 'Compare-Excel（差分）' '04_差分.xlsx' '差分一覧のリンクが開く。04_差分_色付け フォルダの写しで、変更のあったセルに色が付いている' { param($o) & (& $t 'Compare-Excel.ps1') -Old (Join-Path $fixtures 'compare/v1') -New (Join-Path $fixtures 'compare/v2') -OutXlsx $o -OutMarkedDir (Join-Path $OutDir '04_差分_色付け') }
 Invoke-Step 'Test-DesignConsistency（設計書の整合性）' '05_整合性.xlsx' '指摘一覧のリンクで設計書の該当セルが開く。CRUD のシートが読める' { param($o) & (& $t 'Test-DesignConsistency.ps1') -Path (Join-Path $fixtures 'consistency') -OutXlsx $o }
 Invoke-Step 'Test-Traceability（網羅）' '06_網羅.xlsx' '抜け・網羅・要件のシートと、場所のリンク' { param($o) & (& $t 'Test-Traceability.ps1') -DesignPath $design -TestPath (Join-Path $data 'テスト') -Requirement (Join-Path $data '要件一覧.csv') -OutXlsx $o }
+Invoke-Step 'Select-RegressionTests（再テストするケース）' '06b_再テスト.xlsx' '選んだ理由の列と、テスト仕様書の場所のリンク（該当セルが開く）' { param($o) & (& $t 'Select-RegressionTests.ps1') -Old $design -New $designV2 -TestPath (Join-Path $data 'テスト') -OutXlsx $o }
 Invoke-Step 'Measure-DesignSize（規模）' '07_規模.xlsx' '集計・規模一覧・係数表のシート' { param($o) & (& $t 'Measure-DesignSize.ps1') -Path $design -OutXlsx $o }
 Invoke-Step 'Test-ExcelEstimate（見積書の検算）' '08_見積書の検算.xlsx' '検算結果のリンクで、見積書の該当セルが開く' { param($o) & (& $t 'Test-ExcelEstimate.ps1') -Path (Join-Path $fixtures 'estimate/見積書.xlsx') -OutXlsx $o }
 Invoke-Step 'Export-TableDdl（DDL）' '09_DDL.xlsx' 'DB との差異・定義書の指摘・テーブルのシート（09_DDL.sql も作る）' { param($o) & (& $t 'Export-TableDdl.ps1') -Path $design -OutFile (Join-Path $OutDir '09_DDL.sql') -CompareCatalog (Join-Path $fixtures 'ddl/postgresql_columns.csv') -OutXlsx $o }
