@@ -21,7 +21,8 @@ if (-not $OutDir) {
 $OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
 $data = Join-Path $OutDir '資料'
 New-Item -ItemType Directory -Force -Path $data | Out-Null
-$onWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+# Excel が要るツール（PDF にする）は、Excel の入った Windows だけで実行する
+$hasExcel = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT -and $null -ne [type]::GetTypeFromProgID('Excel.Application')
 
 # ---------------------------------------------------------------- 確かめるための資料（サンプルの設計書に合わせた指摘・テスト・障害・WBS）
 
@@ -102,7 +103,7 @@ function Invoke-Step {
     param([string] $Name, [string] $File, [string] $Check, [scriptblock] $Run, [switch] $NeedsExcel)
     $path = $(if ($File) { Join-Path $OutDir $File } else { '' })
     $status = '成功'; $message = ''
-    if ($NeedsExcel -and -not $onWindows) { $status = 'スキップ'; $message = 'Excel が必要です（Windows で実行してください）' }
+    if ($NeedsExcel -and -not $hasExcel) { $status = 'スキップ'; $message = 'Excel が必要です（Excel の入った Windows で実行してください）' }
     else {
         Write-Host ('  {0} …' -f $Name)
         try {
@@ -204,4 +205,4 @@ if ($failed.Count -gt 0) { throw ('失敗したツールがあります: {0}' -f
 #     .\tests\Invoke-SmokeTest.ps1
 #
 # .NOTES
-#     PDF にする（Export-ExcelToPdf.ps1）は Excel が必要なので、Windows 以外ではスキップします。
+#     PDF にする（Export-ExcelToPdf.ps1）は Excel が必要なので、Excel が無ければスキップします。
