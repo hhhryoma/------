@@ -12,6 +12,8 @@ param(
 
     [switch] $NoRecurse,
 
+    [switch] $IncludeWord,
+
     [switch] $NoExcel,
 
     [string] $OutCsv,
@@ -68,8 +70,14 @@ if ($Glossary) {
 $searchArgs = @{ Pattern = '\S'; Path = $Path; Target = $Target }
 if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
+if ($IncludeWord) { $searchArgs['IncludeWord'] = $true }
 $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
 $fileCount = @($hits | ForEach-Object { $_.Path } | Sort-Object -Unique).Count
+
+function Test-WordPath {
+    param([string] $FilePath)
+    return @('.docx', '.docm') -contains [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
+}
 
 # 表記 → 出現箇所の一覧（用語集と自動の検出で別々に数える）。表記は大文字・小文字を区別する
 function New-OrdinalTable { return , (New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)) }
@@ -178,7 +186,8 @@ if ($OutXlsx) {
         $summaryRows.Add(@{ Values = @($r.Preferred, $r.Variant, $r.Kind, $r.Count, $r.PreferredCount, $r.Files, $r.Examples) })
         foreach ($o in $r.Occurrences) {
             $loc = ''
-            if ($o.Sheet -and $o.Cell) { $loc = "'{0}'!{1}" -f $o.Sheet.Replace("'", "''"), $o.Cell }
+            # Word の文書は開くだけ（セルの場所が無い）
+            if ($o.Sheet -and $o.Cell -and -not (Test-WordPath $o.Path)) { $loc = "'{0}'!{1}" -f $o.Sheet.Replace("'", "''"), $o.Cell }
             $detailRows.Add(@{ Values = @($r.Variant, $r.Preferred, $o.File, $o.Location, $o.Kind, $o.Text); Link = @{ Column = 3; Path = $o.Path; Location = $loc } })
         }
     }
@@ -208,13 +217,15 @@ $total = 0
 foreach ($r in $sorted) { $total += $r.Count }
 Write-Host ("{0} ファイルを調べました: 表記ゆれ {1} 種類（{2} か所）" -f $fileCount, $sorted.Count, $total)
 if ($OutCsv) { Write-Host "置換リストを保存しました: $OutCsv （確認・修正してから Replace-Excel.ps1 -ListPath で使えます）" }
+$wordFiles = @($sorted | ForEach-Object { $_.Occurrences } | Where-Object { Test-WordPath $_.Path } | ForEach-Object { $_.File } | Sort-Object -Unique)
+if ($wordFiles.Count -gt 0) { Write-Host ("Word の文書の揺れ（{0}）は Replace-Excel.ps1 では直せません。Word の置換（Ctrl+H）で直してください" -f ($wordFiles -join '、')) }
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
 # .SYNOPSIS
 #     複数の Excel ファイルの表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を見つけます（Excel 不要）。
 #
 # .DESCRIPTION
-#     セルの値・コメント・図形の文字を読み、次の 2 つの方法で表記ゆれを見つけます。
+#     セルの値・コメント・図形の文字を読み、次の 2 つの方法で表記ゆれを見つけます。-IncludeWord で Word の文書も調べます。
 #
 #       用語集（-Glossary）  CSV の「正しい表記」と「揺れ」（/ や 、 で区切って複数可）に沿って、揺れの表記を数えます。
 #                            揺れの一致のうち、正しい表記の一部になっている箇所（「ユーザー」の中の「ユーザ」）は数えません。
@@ -238,6 +249,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER NoRecurse
 #     フォルダを指定したとき、サブフォルダを見ません。
+#
+# .PARAMETER IncludeWord
+#     Word の文書（.docx / .docm）の本文・表・脚注・コメント・テキストボックスも調べます（「送る」の表記ゆれはこれを付けて実行します）。
+#     Word の揺れは Replace-Excel.ps1 では直せないので、Word の置換（Ctrl+H）で直してください。
 #
 # .PARAMETER NoExcel
 #     Excel を起動しません（.xls / .xlsb は調べられなくなります）。
