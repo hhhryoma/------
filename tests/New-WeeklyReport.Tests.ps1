@@ -91,6 +91,15 @@ Test-Case 'New-WeeklyReport: WBS・指摘・障害から、今週の実績・遅
     Assert-True (@($list.Links | Where-Object { $_.Location -eq "'WBS'!B5" }).Count -eq 1) 'WBS の該当セルへのリンク'
     $issues = Read-XlsxSheet -Path $xlsx -Index 5
     Assert-Equal 8 $issues.Rows.Count '見出しと、未完了 5 件・今週の完了 2 件'
+    # 担当者ごとの文章（本人に送るリマインド）
+    $ownerDir = Join-Path $out '週次報告_20261023_担当者別'
+    $names = [string[]]@(Get-ChildItem -LiteralPath $ownerDir -File | ForEach-Object { $_.Name })
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    Assert-Equal @('佐藤.txt', '山田.txt', '担当なし.txt', '鈴木.txt') $names
+    $sato = [System.IO.File]::ReadAllText((Join-Path $ownerDir '佐藤.txt'))
+    Assert-Match $sato '^佐藤 さん\r\n\r\n週次報告（2026/10/17～2026/10/23）の、担当の分です。\r\n\r\n■ 遅延・期限切れ（3 件）\r\n  - \[期限切れ\] 指摘: DD03 テーブル定義書: 型が誤り（期限 10/21・高・未対応） … 指摘管理表\.xlsx C2\r\n'
+    Assert-Match $sato '■ 来週まで（1 件）\r\n  - \[期限間近\] 指摘: DD03 テーブル定義書: 桁数が違う'
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $ownerDir '担当なし.txt'))) '^週次報告（2026/10/17～2026/10/23）の、担当者が決まっていないものの分です。'
     Assert-Equal @('時点,区分,項目,値', '2026/10/23,進捗,タスク,6') @(Get-Content -LiteralPath $history -Encoding UTF8 | Select-Object -First 2 | ForEach-Object { $_ -replace '"', '' })
 }
 

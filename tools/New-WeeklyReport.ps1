@@ -64,10 +64,11 @@ $nextEnd = $AsOf.AddDays(7)
 $maxListed = 10
 
 $reportName = '{0}_{1}' -f $Title, $AsOf.ToString('yyyyMMdd')
-$outXlsx = $null; $outText = $null
+$outXlsx = $null; $outText = $null; $outOwnerDir = $null
 if ($OutDir) {
     $outXlsx = Join-Path $OutDir ($reportName + '.xlsx')
     $outText = Join-Path $OutDir ($reportName + '.txt')
+    $outOwnerDir = Join-Path $OutDir ($reportName + '_担当者別')
 }
 
 function Test-InRange {
@@ -676,6 +677,34 @@ if ($OutDir) {
         $outXlsx = $null
     }
     [System.IO.File]::WriteAllText($outText, $reportText, (New-Object System.Text.UTF8Encoding($true)))
+
+    # 担当者ごとの文章（本人に送るリマインド）。前に作ったものは消して作り直す
+    if (Test-Path -LiteralPath $outOwnerDir) { Get-ChildItem -LiteralPath $outOwnerDir -Filter '*.txt' -File | Remove-Item -Force }
+    if ($owners.Count -gt 0) { New-Item -ItemType Directory -Force -Path $outOwnerDir | Out-Null }
+    $invalid = [System.IO.Path]::GetInvalidFileNameChars()
+    foreach ($o in $owners) {
+        $ownerLines = New-Object System.Collections.Generic.List[string]
+        if ($o.Owner -ne $noOwner) { $ownerLines.Add(('{0} さん' -f $o.Owner)); $ownerLines.Add('') }
+        $ownerLines.Add(('{0}（{1}～{2}）の、{3}の分です。' -f $Title, $Since.ToString('yyyy/MM/dd'), $AsOf.ToString('yyyy/MM/dd'), $(if ($o.Owner -eq $noOwner) { '担当者が決まっていないもの' } else { '担当' })))
+        foreach ($section in @(@('遅延・期限切れ', 0, 0), @('来週まで', 1, 2), @('そのほかの未完了', 3, 3))) {
+            $list = @($o.Items | Where-Object { $_.Rank -ge $section[1] -and $_.Rank -le $section[2] })
+            if ($list.Count -eq 0) { continue }
+            $ownerLines.Add('')
+            $ownerLines.Add(('■ {0}（{1} 件）' -f $section[0], $list.Count))
+            foreach ($x in $list) {
+                $text = '  - [{0}] {1}: {2}' -f $x.State, $x.Kind, $x.Title
+                $detail = @()
+                if ($x.Date) { $detail += ('{0} {1}' -f $x.DateLabel, (Format-Day $x.Date)) }
+                if ($x.Note) { $detail += $x.Note }
+                if ($detail.Count -gt 0) { $text += '（' + ($detail -join '・') + '）' }
+                if ($x.Place) { $text += ' … ' + (Format-PlaceText $x.Place) }
+                $ownerLines.Add($text)
+            }
+        }
+        $name = ($o.Owner.ToCharArray() | ForEach-Object { if ($invalid -contains $_) { '_' } else { $_ } }) -join ''
+        $name = $name.Trim('（', '）')
+        [System.IO.File]::WriteAllText((Join-Path $outOwnerDir ($name + '.txt')), (($ownerLines -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
+    }
 }
 
 # 実績の CSV に今回の数字を足す（同じ時点の行は置き換える）
@@ -694,6 +723,7 @@ foreach ($l in $lines) { Write-Host $l }
 Write-Host ''
 if ($outXlsx) { Write-Host "報告の Excel を保存しました: $outXlsx" }
 if ($outText) { Write-Host "報告の文章を保存しました: $outText" }
+if ($outOwnerDir -and $owners.Count -gt 0) { Write-Host ('担当者ごとの文章（{0} 人）を保存しました: {1}' -f $owners.Count, $outOwnerDir) }
 if ($HistoryCsv) {
     $prevText = '前回の実績はありません'
     if ($previousDate) { $prevText = '前回 ' + $previousDate + ' と比べました' }
@@ -715,6 +745,7 @@ if ($HistoryCsv) {
 #
 #     「今週」は -Since から -AsOf まで（既定は -AsOf までの 7 日）、「来週」は -AsOf の翌日から 7 日です。
 #     -OutDir を指定すると、報告の Excel（概要・担当者・担当者別・タスク・指摘・障害・課題。元の表へのリンク付き）と、
+#     担当者ごとの文章（タイトル_yyyyMMdd_担当者別\担当者.txt。本人に送るリマインド。担当者のいないものは「担当なし.txt」）と、
 #     メールやチャットに貼る文章（.txt）を保存します。-HistoryCsv を指定すると毎週の数字を残し、前回と比べます。
 #
 # .PARAMETER Config
@@ -753,7 +784,7 @@ if ($HistoryCsv) {
 #     休日の CSV（1 列目が日付。内閣府の syukujitsu.csv をそのまま使えます）。遅れの営業日の計算に使います。
 #
 # .PARAMETER OutDir
-#     報告の Excel（タイトル_yyyyMMdd.xlsx）と文章（タイトル_yyyyMMdd.txt）を保存するフォルダ。このフォルダのファイルは表として読みません。
+#     報告の Excel（タイトル_yyyyMMdd.xlsx）と文章（タイトル_yyyyMMdd.txt）、担当者ごとの文章（タイトル_yyyyMMdd_担当者別）を保存するフォルダ。このフォルダのファイルは表として読みません。
 #
 # .PARAMETER Title
 #     報告のタイトルとファイル名。既定は「週次報告」。
