@@ -24,7 +24,7 @@ $ErrorActionPreference = 'Stop'
 $actions = [ordered]@{
     Check       = @{ Label = '提出前チェック'; File = '提出前チェック'; Tool = 'Test-ExcelDeliverable.ps1'; Detail = '体裁・消し忘れ・情報漏れ・印刷のはみ出しなどを確かめ、結果の Excel を開きます' }
     ResetView   = @{ Label = '表示を整える'; Tool = 'Reset-ExcelView.ps1'; Detail = '開いたときに先頭シートの A1 が倍率 100% で表示される状態に直します（上書きします）' }
-    Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック（またはフォルダ）を比べ、結果の Excel を開きます。版数（ファイル名）か更新日時の古い方を旧にします' }
+    Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック（またはフォルダ）を比べ、差分をシートの方眼のまま色付けした画面（ブラウザー）を開きます（一覧の Excel も保存）。版数（ファイル名）か更新日時の古い方を旧にします' }
     Search      = @{ Label = '検索'; File = '検索'; Tool = 'Search-Excel.ps1'; Detail = '入力した文字を、値・数式・コメント・図形などから探し、結果の Excel を開きます' }
     Terms       = @{ Label = '表記ゆれ'; File = '表記ゆれ'; Tool = 'Test-ExcelTerms.ps1'; Detail = '表記ゆれ（ユーザ／ユーザー など）を見つけ、結果の Excel を開きます' }
     Consistency = @{ Label = '設計書の整合性チェック'; File = '整合性チェック'; Tool = 'Test-DesignConsistency.ps1'; Detail = '設計書どうしの参照の食い違いを見つけ、結果の Excel を開きます' }
@@ -127,7 +127,11 @@ try {
             Write-Host "旧: $($pair[0])"
             Write-Host "新: $($pair[1])"
             Write-Host ''
-            $null = & $tool -Old $pair[0] -New $pair[1] -OutXlsx $out
+            # 差分はシートの方眼のまま色付けした HTML で開く（一覧の Excel も同じ名前で保存する）
+            $html = [System.IO.Path]::ChangeExtension($out, '.html')
+            $null = & $tool -Old $pair[0] -New $pair[1] -OutXlsx $out -OutHtml $html
+            Write-Host "差分の一覧（Excel）: $out"
+            $out = $html
         }
         'Search' {
             if (-not $Text) { $Text = Read-Host '探す文字を入力してください' }
