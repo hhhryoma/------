@@ -274,7 +274,8 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
 
         # 閉じるときに画面の大きさを覚える
         Save-GuiWindowBounds
-        Assert-Match $s.Settings.Window ',1120,800$'
+        # 画面より大きい大きさは Windows が縮めるので、いまの大きさと比べる
+        Assert-Equal ('{0},{1},{2},{3}' -f $form.Bounds.X, $form.Bounds.Y, $form.Bounds.Width, $form.Bounds.Height) $s.Settings.Window
 
         # やりたいことを言葉で探す
         Update-GuiTree '検索'
