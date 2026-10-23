@@ -171,9 +171,11 @@ Test-Case 'Start-ExcelTools: 入力を保存して次に読む（結果の保存
     $settings.Tools['Effort'] = $keep
     $settings.LastTool = 'Effort'
     $settings.ShowAdvanced = $true
+    $settings.Window = '-8,20,1200,900,max'
+    $settings.Splitter = 340
     Save-GuiSettings $settings $path
     $back = Read-GuiSettings $path
-    Assert-Equal 'Effort|True' ('{0}|{1}' -f $back.LastTool, $back.ShowAdvanced)
+    Assert-Equal 'Effort|True|-8,20,1200,900,max|340' ('{0}|{1}|{2}|{3}' -f $back.LastTool, $back.ShowAdvanced, $back.Window, $back.Splitter) '画面の位置・大きさ・左の一覧の幅も覚える'
     $v = $back.Tools['Effort']
     Assert-Equal @('D:\工数', 'D:\日報') $v['Path']
     Assert-Equal '時間|True' ('{0}|{1}' -f $v['Unit'], $v['NoRecurse'])
@@ -269,6 +271,10 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Set-GuiValue 'Path' $dir
         Invoke-GuiRun
         Assert-True (Test-Path -LiteralPath $s.LastConsoleScript) 'PowerShell の画面で実行するスクリプト'
+
+        # 閉じるときに画面の大きさを覚える
+        Save-GuiWindowBounds
+        Assert-Match $s.Settings.Window ',1120,800$'
 
         # やりたいことを言葉で探す
         Update-GuiTree '検索'

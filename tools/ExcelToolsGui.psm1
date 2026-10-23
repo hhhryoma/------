@@ -484,14 +484,17 @@ function Get-GuiSettingsPath {
 }
 
 function Read-GuiSettings {
-    #     保存した入力を読む。戻り値: Tools（処理の Id → 引数の名前 → 値）・LastTool・Recent（最近実行した処理の Id）・OpenResult・ShowAdvanced
+    #     保存した入力を読む。戻り値: Tools（処理の Id → 引数の名前 → 値）・LastTool・Recent（最近実行した処理の Id）・OpenResult・ShowAdvanced・
+    #     Window（画面の位置と大きさ「左,上,幅,高さ」。最大化なら末尾に「,max」）・Splitter（左の一覧の幅）
     param([string] $Path = (Get-GuiSettingsPath))
-    $settings = [pscustomobject]@{ Tools = @{}; LastTool = ''; Recent = @(); OpenResult = $true; ShowAdvanced = $false }
+    $settings = [pscustomobject]@{ Tools = @{}; LastTool = ''; Recent = @(); OpenResult = $true; ShowAdvanced = $false; Window = ''; Splitter = 0 }
     if (-not (Test-Path -LiteralPath $Path)) { return $settings }
     try { $json = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json }
     catch { return $settings }
     if ($json.LastTool) { $settings.LastTool = [string]$json.LastTool }
     if ($json.Recent) { $settings.Recent = @($json.Recent | ForEach-Object { [string]$_ } | Where-Object { $_ }) }
+    if ($json.Window -and [string]$json.Window -match '^-?\d+,-?\d+,\d+,\d+(,max)?$') { $settings.Window = [string]$json.Window }
+    if ($json.Splitter) { $settings.Splitter = [int]$json.Splitter }
     if ($null -ne $json.OpenResult) { $settings.OpenResult = [bool]$json.OpenResult }
     if ($null -ne $json.ShowAdvanced) { $settings.ShowAdvanced = [bool]$json.ShowAdvanced }
     if ($json.Tools) {
@@ -521,7 +524,7 @@ function Save-GuiSettings {
         }
         $tools[$id] = $values
     }
-    $json = [ordered]@{ LastTool = $Settings.LastTool; Recent = @($Settings.Recent); OpenResult = [bool]$Settings.OpenResult; ShowAdvanced = [bool]$Settings.ShowAdvanced; Tools = $tools } | ConvertTo-Json -Depth 6
+    $json = [ordered]@{ LastTool = $Settings.LastTool; Recent = @($Settings.Recent); Window = [string]$Settings.Window; Splitter = [int]$Settings.Splitter; OpenResult = [bool]$Settings.OpenResult; ShowAdvanced = [bool]$Settings.ShowAdvanced; Tools = $tools } | ConvertTo-Json -Depth 6
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
@@ -573,6 +576,7 @@ function New-GuiWindow {
     $form.MinimumSize = New-Object System.Drawing.Size(880, 620)
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
     $s.Form = $form
+    Restore-GuiWindowBounds
     $s.ToolTip = New-Object System.Windows.Forms.ToolTip
     $s.ToolTip.AutoPopDelay = 20000
 
@@ -724,7 +728,7 @@ function New-GuiWindow {
     $s.HelpButton.Add_Click({ Invoke-GuiSafe { Show-GuiToolHelp } })
     $s.CopyButton.Add_Click({ Invoke-GuiSafe { Copy-GuiCommand } })
     $host1.Add_Resize({ Update-GuiWrap })
-    $form.Add_Load({ try { $script:Gui.Split.SplitterDistance = 300 } catch { } })
+    $form.Add_Load({ $d = 300; if ($script:Gui.Settings.Splitter -ge 150) { $d = $script:Gui.Settings.Splitter }; try { $script:Gui.Split.SplitterDistance = $d } catch { } })
     $form.Add_FormClosing({ Close-GuiWindow $_ })
     if ($s.CanDrop) {
         # ファイル・フォルダを画面のどこに落としても、空いているパスの欄に入れる
@@ -1528,7 +1532,33 @@ function Close-GuiWindow {
         Stop-GuiToolRun $s.Run
     }
     $s.Timer.Stop()
+    Save-GuiWindowBounds
     Save-GuiCurrentValues
+}
+
+function Restore-GuiWindowBounds {
+    #     前に閉じたときの画面の位置と大きさにする（どの画面にも入らないなら、真ん中に出す）
+    $s = $script:Gui
+    $m = [regex]::Match([string]$s.Settings.Window, '^(-?\d+),(-?\d+),(\d+),(\d+)(,max)?$')
+    if (-not $m.Success) { return }
+    $rect = New-Object System.Drawing.Rectangle([int]$m.Groups[1].Value, [int]$m.Groups[2].Value, [int]$m.Groups[3].Value, [int]$m.Groups[4].Value)
+    if ($rect.Width -lt $s.Form.MinimumSize.Width -or $rect.Height -lt $s.Form.MinimumSize.Height) { return }
+    if (@([System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.WorkingArea.IntersectsWith($rect) }).Count -eq 0) { return }
+    $s.Form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $s.Form.Bounds = $rect
+    if ($m.Groups[5].Success) { $s.Form.WindowState = [System.Windows.Forms.FormWindowState]::Maximized }
+}
+
+function Save-GuiWindowBounds {
+    #     閉じるときの画面の位置と大きさ（最大化・最小化しているときは、元の大きさ）と、左の一覧の幅を覚える
+    $s = $script:Gui
+    $f = $s.Form
+    $b = $f.Bounds
+    if ($f.WindowState -ne [System.Windows.Forms.FormWindowState]::Normal) { $b = $f.RestoreBounds }
+    $text = '{0},{1},{2},{3}' -f $b.X, $b.Y, $b.Width, $b.Height
+    if ($f.WindowState -eq [System.Windows.Forms.FormWindowState]::Maximized) { $text += ',max' }
+    $s.Settings.Window = $text
+    $s.Settings.Splitter = $s.Split.SplitterDistance
 }
 
 Export-ModuleMember -Function *
