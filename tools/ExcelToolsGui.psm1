@@ -451,13 +451,14 @@ function Get-GuiSettingsPath {
 }
 
 function Read-GuiSettings {
-    #     保存した入力を読む。戻り値: Tools（処理の Id → 引数の名前 → 値）・LastTool・OpenResult・ShowAdvanced
+    #     保存した入力を読む。戻り値: Tools（処理の Id → 引数の名前 → 値）・LastTool・Recent（最近実行した処理の Id）・OpenResult・ShowAdvanced
     param([string] $Path = (Get-GuiSettingsPath))
-    $settings = [pscustomobject]@{ Tools = @{}; LastTool = ''; OpenResult = $true; ShowAdvanced = $false }
+    $settings = [pscustomobject]@{ Tools = @{}; LastTool = ''; Recent = @(); OpenResult = $true; ShowAdvanced = $false }
     if (-not (Test-Path -LiteralPath $Path)) { return $settings }
     try { $json = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json }
     catch { return $settings }
     if ($json.LastTool) { $settings.LastTool = [string]$json.LastTool }
+    if ($json.Recent) { $settings.Recent = @($json.Recent | ForEach-Object { [string]$_ } | Where-Object { $_ }) }
     if ($null -ne $json.OpenResult) { $settings.OpenResult = [bool]$json.OpenResult }
     if ($null -ne $json.ShowAdvanced) { $settings.ShowAdvanced = [bool]$json.ShowAdvanced }
     if ($json.Tools) {
@@ -487,9 +488,15 @@ function Save-GuiSettings {
         }
         $tools[$id] = $values
     }
-    $json = [ordered]@{ LastTool = $Settings.LastTool; OpenResult = [bool]$Settings.OpenResult; ShowAdvanced = [bool]$Settings.ShowAdvanced; Tools = $tools } | ConvertTo-Json -Depth 6
+    $json = [ordered]@{ LastTool = $Settings.LastTool; Recent = @($Settings.Recent); OpenResult = [bool]$Settings.OpenResult; ShowAdvanced = [bool]$Settings.ShowAdvanced; Tools = $tools } | ConvertTo-Json -Depth 6
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Add-GuiRecent {
+    #     最近実行した処理の一覧の先頭に足す（同じものは前から除き、5 つまで）
+    param($Settings, [string] $Id, [int] $Max = 5)
+    $Settings.Recent = @(@($Id) + @($Settings.Recent | Where-Object { $_ -and $_ -ne $Id }) | Select-Object -First $Max)
 }
 
 function Get-GuiValuesToSave {
@@ -746,6 +753,19 @@ function Update-GuiTree {
     $tree.BeginUpdate()
     try {
         $tree.Nodes.Clear()
+        # 最近実行したもの（絞り込んでいないとき）
+        $recent = @($s.Settings.Recent | ForEach-Object { $id = $_; @($s.Catalog.Tools | Where-Object Id -eq $id)[0] } | Where-Object { $_ })
+        if (-not ($Filter -and $Filter.Trim()) -and $recent.Count -gt 0) {
+            $root = New-Object System.Windows.Forms.TreeNode('最近使ったもの')
+            foreach ($t in $recent) {
+                $n = New-Object System.Windows.Forms.TreeNode($t.Label)
+                $n.Tag = $t
+                $n.ToolTipText = $t.Summary
+                [void]$root.Nodes.Add($n)
+            }
+            [void]$tree.Nodes.Add($root)
+            $root.Expand()
+        }
         foreach ($for in @('担当者', '管理者')) {
             $root = New-Object System.Windows.Forms.TreeNode(($for + '向け'))
             foreach ($g in @($s.Catalog.Groups | Where-Object For -eq $for)) {
@@ -773,6 +793,9 @@ function Select-GuiTreeNode {
     #     一覧の中で、選んでいる処理の行を選んだ状態にする（選び直しの処理は起こさない）
     $s = $script:Gui
     if (-not $s.Entry) { return }
+    # 「最近使ったもの」の行を選んだときは、その行のままにする
+    $current = $s.Tree.SelectedNode
+    if ($current -and $current.Tag -and $current.Tag.Id -eq $s.Entry.Id) { return }
     foreach ($root in $s.Tree.Nodes) {
         foreach ($g in $root.Nodes) {
             foreach ($n in $g.Nodes) {
@@ -1246,7 +1269,9 @@ function Invoke-GuiRun {
         if (-not (Show-GuiMessage $entry.Confirm -YesNo -Warning)) { Write-GuiLog '取りやめました。' 'Gray'; return }
         foreach ($k in $entry.ConfirmArguments.Keys) { $arguments[$k] = $entry.ConfirmArguments[$k] }
     }
+    Add-GuiRecent $s.Settings $entry.Id
     Save-GuiCurrentValues
+    $s.RecentChanged = $true
     foreach ($name in $entry.Output) {
         if ($arguments.Contains($name)) { $dir = Split-Path -Parent ([string]$arguments[$name]); if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null } }
     }
@@ -1271,6 +1296,8 @@ function Invoke-GuiRun {
             Start-Process -FilePath $exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $consoleScript))
         }
         Set-GuiResult $entry $arguments
+        $s.RecentChanged = $false
+        Update-GuiTree $s.Find.Text
         return
     }
     $s.Run = Start-GuiToolRun $entry.ToolPath $arguments
@@ -1281,6 +1308,7 @@ function Invoke-GuiRun {
 function Set-GuiRunning {
     param([bool] $Running)
     $s = $script:Gui
+    if (-not $Running -and $s.RecentChanged) { $s.RecentChanged = $false; Update-GuiTree $s.Find.Text }
     $s.RunButton.Enabled = -not $Running
     $s.StopButton.Enabled = $Running
     $s.Tree.Enabled = -not $Running
