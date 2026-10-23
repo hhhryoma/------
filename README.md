@@ -14,6 +14,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Test-ExcelDeliverable.ps1](tools/README.md#test-exceldeliverableps1) | 提出前チェック（体裁・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・表紙と改訂履歴の版数の食い違い）。プロパティの個人名・ヘッダーのファイルの場所・表示の状態は `-Fix` で直せる | 不要 |
 | [Reset-ExcelView.ps1](tools/README.md#reset-excelviewps1) | 開いたときに先頭シートの A1 が表示される状態に一括で直す | 不要 |
 | [Compare-Excel.ps1](tools/README.md#compare-excelps1) | 2 つのブック・フォルダのセル単位の差分（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写し、シートの方眼のまま色付けしてブラウザーで見る HTML、改訂履歴の記載漏れの確認・下書きもできる） | 不要 ※1 |
+| [Compare-SharePointVersion.ps1](tools/README.md#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの版（バージョン履歴の 3.0 など）を取り出し、現在の版や別の版と比べて差分の画面を開く | 必要 ※4 |
 | [Test-DesignConsistency.ps1](tools/README.md#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、画面遷移の食い違い、桁数・必須の違い）。CRUD 図と影響調査（使っている場所の一覧）も作る | 不要 ※1 |
 | [Test-Traceability.ps1](tools/README.md#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、画面・イベント・メッセージ・IF にテストがあるか（テストの抜け）を全件確かめる | 不要 ※1 |
 | [Select-RegressionTests.ps1](tools/README.md#select-regressiontestsps1) | 設計書の旧版と新版の差分から、再テストするテストケースを選ぶ（改修の回帰テストの範囲決め） | 不要 ※1 |
@@ -40,6 +41,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 ※1 .xls / .xlsb を扱う場合のみ Excel が必要です。
 ※2 PDF のページ数を数えるだけ（`-CountOnly`）なら不要です。
 ※3 「PDF にする」だけは Excel が必要です。
+※4 版を Excel で取り出します。Excel が無いか、Excel で開けないときは、ブラウザーでダウンロードします。
 
 使い方の詳細は [tools/README.md](tools/README.md) を見てください。`tools` フォルダは**まとめて**配置してください（共通部品の `ExcelTools.psm1` を各スクリプトが使います）。
 

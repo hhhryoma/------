@@ -10,6 +10,7 @@
 | [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違いをまとめて確認する（プロパティの個人名など、機械で直せるものは `-Fix` で直す） |
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる） |
+| [Compare-SharePointVersion.ps1](#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの 2 つの版（バージョン履歴）を取り出して比べ、差分の画面を開く（版は Excel で取り出す） |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、桁数・必須の違いなど）を全件見つける。CRUD 図と影響調査も（Excel 不要） |
 | [Test-Traceability.ps1](#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、設計の要素（画面・イベント・メッセージ・IF）にテストがあるかを確かめる。テストの抜けを全件、機械で見つける（Excel 不要） |
 | [Select-RegressionTests.ps1](#select-regressiontestsps1) | 設計書の旧版と新版の差分から、変更した項目・イベント・メッセージなどが出てくるテストケースを、再テストするケースとして選ぶ（改修の回帰テストの範囲決め。Excel 不要） |
@@ -35,7 +36,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1` は `Compare-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールを、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールを、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -697,6 +698,44 @@ Location        Kind Detail
 - 書式は `-CompareFormat` を付けたときだけ比べ、罫線・フォントの種類と大きさ・表示形式は比べません
 - 内容がまったく同じ行が何度も出てくる表で行を入れ替えた場合、対応付けが直感と違うことがあります
 - 値の少ない列（ほとんど空の列など）は、列の挿入・削除を見つけにくいことがあります
+
+## Compare-SharePointVersion.ps1
+
+SharePoint（Microsoft 365）に置いた設計書の**以前の版（バージョン履歴）と今の版**を比べます。版を手で保存しなくても、版の番号を指定するだけで、[Compare-Excel.ps1 の差分の画面](#差分をブラウザーで見るouthtml)を開きます。
+
+```powershell
+# OneDrive で同期しているフォルダのファイルを、版 3.0 と現在の版で比べる
+.\Compare-SharePointVersion.ps1 "C:\Users\yamada\会社名\受注システム - ドキュメント\設計\DD03_テーブル定義書.xlsx" 3.0
+
+# SharePoint の URL で指定し、版 2.0 と 5.0 を比べる
+.\Compare-SharePointVersion.ps1 "https://contoso.sharepoint.com/sites/juchu/Shared Documents/設計/DD03_テーブル定義書.xlsx" 2.0 -NewVersion 5.0
+```
+
+1. 版の番号は、SharePoint（ブラウザー）でファイルの「…」→「バージョン履歴」、または Excel の「ファイル」→「情報」→「バージョン履歴」で確かめます（3.0・3.1 など）
+2. ファイルは、OneDrive で同期しているフォルダのファイル（エクスプローラーのパス）か、SharePoint の URL で指定します。URL は、Excel でファイルを開いて「ファイル」→「情報」→「パスのコピー」でコピーしたもの（ブラウザーのアドレスでも可）を使います。共有リンク（`/:x:/s/…`）は使えません
+3. 版は、PC の Excel で開いて写しを保存します。**Office にサインインしているアカウントで SharePoint を読む**ので、アプリの登録・PowerShell のモジュール・管理者の申請は要りません。Excel で開けないときは、既定のブラウザーでダウンロードします（ダウンロードのフォルダにできたファイルを使います）
+4. 取り出した版と差分の HTML は「ドキュメント\Excel ツールの結果\SharePoint の版」に「名前_v3.0.xlsx」「名前_v3.0-現在.html」の形で残ります。同じ番号の版は、次から取り出し直しません
+
+「送る」→「Excel SharePoint の版と比べる」で、同期しているファイルを選んで版の番号を入力しても使えます。
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 比べるファイル（OneDrive で同期しているフォルダのファイル、または SharePoint の URL） |
+| `-Version` | 旧の版の番号（3.0・3・3.1 など）。指定しなければ入力を求める |
+| `-NewVersion` | 新の版の番号。指定しなければ現在の版。同期しているファイルなら、現在の版はそのファイルを使う |
+| `-SiteUrl` | ファイルのあるサイトの URL。既定は URL の `/sites/名前`・`/teams/名前`。サブサイトのときに指定する |
+| `-Method` | 版の取り出し方。`Auto`（既定。Excel で開けなければブラウザー）・`Excel`・`Browser` |
+| `-OutDir` / `-OutHtml` / `-OutXlsx` | 取り出した版と差分の保存先 |
+| `-CompareFormat` / `-CheckHistory` | Compare-Excel.ps1 と同じ（書式も比べる・改訂履歴の記載漏れを知らせる） |
+| `-NoOpen` | 差分の画面を開かない |
+
+### 既知の制約
+
+- SharePoint の版の一覧は取り出せません（Office のサインインでは版の一覧を読めないため）。番号はバージョン履歴を見て指定してください
+- 版は SharePoint の `サイト/_vti_history/番号/ライブラリ/ファイル`（番号は 大きい番号 × 512 + 小さい番号）から取り出します。版の履歴を残さない設定のライブラリでは使えません
+- サブサイトのファイルは `-SiteUrl` が要ります。OneDrive で「マイ ファイルにショートカットを追加」したフォルダは、同期しているファイルとして扱えないことがあります（そのときは URL で指定してください）
 
 ## Test-DesignConsistency.ps1
 
@@ -2590,6 +2629,7 @@ Excel 差分（2 つ選ぶ）     作成   2 つのブック（またはフォ�
 | Excel 提出前チェック | Test-ExcelDeliverable.ps1 | 結果の Excel を開く |
 | Excel 表示を整える | Reset-ExcelView.ps1 | 選んだファイルを上書きする |
 | Excel 差分（2 つ選ぶ） | Compare-Excel.ps1 | 2 つ選ぶ。ファイル名の版数（`_v1.1` など）、無ければ更新日時の古い方を旧にして、差分をシートの方眼のまま色付けした画面（ブラウザー）を開く。一覧の Excel も保存する |
+| Excel SharePoint の版と比べる | Compare-SharePointVersion.ps1 | OneDrive で同期している SharePoint のファイルを 1 つ選び、バージョン履歴の番号（3.0 など）を入力する。その版と現在の版の差分の画面を開く |
 | Excel 検索 | Search-Excel.ps1 | 探す文字を入力する（入力した文字そのものを探す）。結果の Excel を開く |
 | Excel 表記ゆれ | Test-ExcelTerms.ps1 | 結果の Excel を開く |
 | Excel 設計書の整合性チェック | Test-DesignConsistency.ps1 | 結果の Excel を開く |

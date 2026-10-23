@@ -1,7 +1,7 @@
 ﻿[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'Search', 'Terms', 'Consistency', 'Size', 'Estimate', 'Quality', 'Analysis', 'Pdf')]
+    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'Size', 'Estimate', 'Quality', 'Analysis', 'Pdf')]
     [string] $Action,
 
     # 「送る」は選んだファイルを引数の最後に並べるため、名前の無い引数はすべてここに入れる（PositionalBinding = $false）
@@ -25,6 +25,7 @@ $actions = [ordered]@{
     Check       = @{ Label = '提出前チェック'; File = '提出前チェック'; Tool = 'Test-ExcelDeliverable.ps1'; Detail = '体裁・消し忘れ・情報漏れ・印刷のはみ出しなどを確かめ、結果の Excel を開きます' }
     ResetView   = @{ Label = '表示を整える'; Tool = 'Reset-ExcelView.ps1'; Detail = '開いたときに先頭シートの A1 が倍率 100% で表示される状態に直します（上書きします）' }
     Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック（またはフォルダ）を比べ、差分をシートの方眼のまま色付けした画面（ブラウザー）を開きます（一覧の Excel も保存）。版数（ファイル名）か更新日時の古い方を旧にします' }
+    SpVersion   = @{ Label = 'SharePoint の版と比べる'; Tool = 'Compare-SharePointVersion.ps1'; Literal = $true; Detail = 'OneDrive で同期している SharePoint のファイルを 1 つ選び、バージョン履歴の番号（3.0 など）を入力すると、その版と現在の版の差分の画面（ブラウザー）を開きます（版は Excel で取り出します）' }
     Search      = @{ Label = '検索'; File = '検索'; Tool = 'Search-Excel.ps1'; Detail = '入力した文字を、値・数式・コメント・図形などから探し、結果の Excel を開きます' }
     Terms       = @{ Label = '表記ゆれ'; File = '表記ゆれ'; Tool = 'Test-ExcelTerms.ps1'; Detail = '表記ゆれ（ユーザ／ユーザー など）を見つけ、結果の Excel を開きます' }
     Consistency = @{ Label = '設計書の整合性チェック'; File = '整合性チェック'; Tool = 'Test-DesignConsistency.ps1'; Detail = '設計書どうしの参照の食い違いを見つけ、結果の Excel を開きます' }
@@ -133,6 +134,14 @@ try {
             Write-Host "差分の一覧（Excel）: $out"
             $out = $html
         }
+        'SpVersion' {
+            if ($targets.Count -ne 1 -or (Test-Path -LiteralPath $targets[0] -PathType Container)) { throw "OneDrive で同期している SharePoint のファイルを 1 つ選んでください（$($targets.Count) 件選ばれています）" }
+            # 版の番号は、-Text が無ければツールが入力を求める。差分の画面はツールが開く
+            $spArgs = @{ Path = $targets[0]; NoOpen = [bool]$NoOpen }
+            if ($Text) { $spArgs['Version'] = $Text }
+            if ($OutDir) { $spArgs['OutDir'] = $OutDir }
+            $null = & $tool @spArgs
+        }
         'Search' {
             if (-not $Text) { $Text = Read-Host '探す文字を入力してください' }
             if (-not $Text) { throw '探す文字が入力されていません' }
@@ -208,7 +217,7 @@ if ($failure) { throw $failure }
 #     使える処理は -Action List で確かめられます。
 #
 # .PARAMETER Action
-#     実行する処理。Check（提出前チェック）・ResetView（表示を整える）・Compare（差分）・Search（検索）・
+#     実行する処理。Check（提出前チェック）・ResetView（表示を整える）・Compare（差分）・SpVersion（SharePoint の版と比べる）・Search（検索）・
 #     Terms（表記ゆれ）・Consistency（設計書の整合性チェック）・Size（規模の見積もり）・Estimate（見積書の検算）・
 #     Quality（品質評価。案件のフォルダの「品質評価の設定.csv」を読む）・Analysis（品質評価の定性分析の下書き）・Pdf（PDF にする）。
 #     List は処理の一覧を返します。
@@ -220,7 +229,7 @@ if ($failure) { throw $failure }
 #     結果のファイルを保存するフォルダ。既定は「ドキュメント\Excel ツールの結果」（品質評価は設定ファイルの出力先）。
 #
 # .PARAMETER Text
-#     検索（Search）で探す文字。指定しなければ入力を求めます。
+#     検索（Search）で探す文字、SharePoint の版と比べる（SpVersion）ときの旧の版の番号。指定しなければ入力を求めます。
 #
 # .PARAMETER NoOpen
 #     結果のファイルを開きません。

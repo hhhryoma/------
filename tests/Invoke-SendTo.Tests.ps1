@@ -35,7 +35,7 @@ function New-VersionBook {
 
 Test-Case 'Invoke-SendTo: -Action List で「送る」に登録する処理の一覧を返す' {
     $list = @(& $SendTo -Action List)
-    Assert-Equal @('Check', 'ResetView', 'Compare', 'Search', 'Terms', 'Consistency', 'Size', 'Estimate', 'Quality', 'Analysis', 'Pdf') @($list | ForEach-Object { $_.Action })
+    Assert-Equal @('Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'Size', 'Estimate', 'Quality', 'Analysis', 'Pdf') @($list | ForEach-Object { $_.Action })
     Assert-True (@($list | Where-Object { -not $_.Label -or -not $_.Detail }).Count -eq 0) '名前・説明のない処理'
 }
 
@@ -83,6 +83,10 @@ Test-Case 'Invoke-SendTo: 差分は 2 つを選び、版数（無ければ更新
 
     Assert-Throws { Invoke-SendTo @{ Action = 'Compare'; OutDir = $outDir } @($v10) } '2 つ選んでください'
     Assert-Throws { Invoke-SendTo @{ Action = 'Compare'; OutDir = $outDir } @($v10, $dir) } 'ファイルどうし'
+
+    # SharePoint の版と比べるのは、同期しているファイル 1 つ
+    Assert-Throws { Invoke-SendTo @{ Action = 'SpVersion'; Text = '3.0' } @($dir) } 'ファイルを 1 つ選んでください'
+    Assert-Throws { Invoke-SendTo @{ Action = 'SpVersion'; Text = '3.0' } @($v10) } '同期している SharePoint のフォルダのファイルではありません'
 }
 
 Test-Case 'Invoke-SendTo: 検索は入力した文字そのものを探す。対象が無い・見つからないときはエラーを知らせる' {
@@ -140,7 +144,7 @@ Test-Case 'Install-SendTo: 「送る」にショートカットを作り、ほ�
     # -WhatIf では作らない（ショートカットを読み書きする型もここで読み込まれる）
     $results = @(& $InstallSendTo -SendToDir $linkDir -WhatIf 6>$null)
     Assert-Equal 0 @(Get-ChildItem -LiteralPath $linkDir -Filter '*.lnk').Count '-WhatIf で作った'
-    Assert-Equal 11 @($results | Where-Object Status -eq '作成予定').Count
+    Assert-Equal 12 @($results | Where-Object Status -eq '作成予定').Count
 
     # 同じ名前のほかのショートカット
     $notepad = Join-Path $env:SystemRoot 'notepad.exe'
