@@ -1,0 +1,1432 @@
+﻿#     Excel ツールの画面（Start-ExcelTools.ps1）の部品。
+#     ツールの一覧（gui\ツールの一覧.psd1）を読み、各ツールの引数とヘルプから入力欄を作り、入力から引数を組み立てて、
+#     別の実行空間（runspace）でツールを動かす。前半は画面（Windows Forms）を使わないので、どの OS でもテストできる
+
+$script:CommonParameters = @([System.Management.Automation.PSCmdlet]::CommonParameters) + @([System.Management.Automation.PSCmdlet]::OptionalCommonParameters)
+$script:IsWindowsOs = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
+$script:FieldCache = @{}
+
+# ---------------------------------------------------------------- ツールの一覧
+
+
+function Get-GuiCatalog {
+    #     ツールの一覧を読む。戻り値: Groups（Name・For）と Tools（各処理。省略した項目は空の値にそろえる）
+    param([string] $Path = (Join-Path (Join-Path $PSScriptRoot 'gui') 'ツールの一覧.psd1'))
+    $data = Import-PowerShellDataFile -LiteralPath $Path
+    $toolsDir = $PSScriptRoot
+    $groups = @($data.Groups | ForEach-Object { [pscustomobject]@{ Name = $_.Name; For = $_.For } })
+    $groupNames = @($groups | ForEach-Object { $_.Name })
+    $ids = @{}
+    $tools = foreach ($t in $data.Tools) {
+        if (-not $t.Id -or -not $t.Label -or -not $t.Tool) { throw "ツールの一覧に Id・Label・Tool の無い行があります: $($t | Out-String)" }
+        if ($ids.ContainsKey($t.Id)) { throw "ツールの一覧の Id が重なっています: $($t.Id)" }
+        $ids[$t.Id] = $true
+        if ($groupNames -notcontains $t.Group) { throw "ツールの一覧の Group が Groups にありません: $($t.Id)（$($t.Group)）" }
+        $get = { param($Name, $Empty) if ($t.ContainsKey($Name) -and $null -ne $t[$Name]) { $t[$Name] } else { $Empty } }
+        $output = @(& $get 'Output' @())
+        $open = @(& $get 'Open' @())
+        if ($open.Count -eq 0) { $open = $output }
+        [pscustomobject]@{
+            Id = $t.Id; Label = $t.Label; Group = $t.Group; For = (@($groups | Where-Object Name -eq $t.Group))[0].For
+            Tool = $t.Tool; ToolPath = (Join-Path $toolsDir $t.Tool); Set = [string](& $get 'Set' '')
+            Summary = [string](& $get 'Summary' ''); Keywords = [string](& $get 'Keywords' '')
+            Main = @(& $get 'Main' @()); Labels = (& $get 'Labels' @{}); Kinds = (& $get 'Kinds' @{}); Extensions = (& $get 'Extensions' @{})
+            Required = @(& $get 'Required' @()); Hide = @(& $get 'Hide' @()); Defaults = (& $get 'Defaults' @{}); Fixed = (& $get 'Fixed' @{})
+            Output = $output; OutputName = [string](& $get 'OutputName' $t.Label); Open = $open
+            WhatIf = [bool](& $get 'WhatIf' $false); Confirm = [string](& $get 'Confirm' ''); ConfirmWhen = [string](& $get 'ConfirmWhen' '')
+            ConfirmArguments = (& $get 'ConfirmArguments' @{}); Console = [bool](& $get 'Console' $false)
+        }
+    }
+    return [pscustomobject]@{ Groups = $groups; Tools = @($tools) }
+}
+
+function Find-GuiTool {
+    #     処理を言葉で探す（名前・説明・キーワード・ツールのファイル名。空白で区切った言葉のすべてを含むもの）
+    param($Catalog, [string] $Text)
+    $words = @($Text -split '\s+' | Where-Object { $_ })
+    foreach ($t in $Catalog.Tools) {
+        $hay = ('{0} {1} {2} {3} {4}' -f $t.Label, $t.Summary, $t.Keywords, $t.Tool, $t.Group).ToLowerInvariant()
+        if (@($words | Where-Object { $hay.IndexOf($_.ToLowerInvariant()) -lt 0 }).Count -eq 0) { $t }
+    }
+}
+
+# ---------------------------------------------------------------- 入力欄
+
+
+function Get-GuiFirstSentence {
+    #     ヘルプの最初の文（括弧の外の最初の「。」まで）
+    param([string] $Help)
+    $depth = 0
+    for ($i = 0; $i -lt $Help.Length; $i++) {
+        $c = $Help[$i]
+        if ($c -eq [char]'（' -or $c -eq [char]'(') { $depth++ }
+        elseif (($c -eq [char]'）' -or $c -eq [char]')') -and $depth -gt 0) { $depth-- }
+        elseif ($c -eq [char]'。' -and $depth -eq 0) { return $Help.Substring(0, $i).Trim() }
+    }
+    return $Help.Trim()
+}
+
+function Get-GuiLabel {
+    #     ヘルプの最初の文から、入力欄の名前を作る（括弧の中を除き、長ければ最後の「、」のあと）
+    param([string] $Help, [string] $Name)
+    $text = Get-GuiFirstSentence $Help
+    do { $before = $text; $text = [regex]::Replace($text, '（[^（）]*）|\([^()]*\)', '') } while ($text -ne $before)
+    $text = [regex]::Replace($text, '\s+', ' ').Trim()
+    if (-not $text) { return $Name }
+    if ($text.Length -gt 30 -and $text.LastIndexOf('、') -gt 0) {
+        $tail = $text.Substring($text.LastIndexOf('、') + 1).Trim()
+        if ($tail.Length -ge 8) { $text = $tail }
+    }
+    if ($text.Length -gt 34) { $text = $text.Substring(0, 33) + '…' }
+    return $text
+}
+
+function Get-GuiFieldKind {
+    #     入力欄の種類を、引数の名前・型・ヘルプの最初の文から決める
+    param([string] $Name, [type] $Type, [string] $Help, [bool] $HasChoices)
+    $element = $Type
+    if ($Type.IsArray) { $element = $Type.GetElementType() }
+    if ($Type -eq [System.Management.Automation.SwitchParameter]) { return 'Switch' }
+    if ($HasChoices) { return 'Choice' }
+    if ($element -eq [datetime]) { return 'Date' }
+    if (@([int], [long], [double], [decimal], [single]) -contains $element) { return 'Number' }
+    $first = Get-GuiFirstSentence $Help
+    $plain = $first
+    do { $before = $plain; $plain = [regex]::Replace($plain, '（[^（）]*）|\([^()]*\)', '') } while ($plain -ne $before)
+    $folder = $first -match 'フォルダ'
+    $file = $first -match 'ファイル|ブック|CSV|csv|xlsx|xlsm|テンプレート|雛形'
+    if ($Name -match '^Out' -or ($first -match '保存します' -and ($file -or $folder))) {
+        if ($Name -match '(Dir|Root)$' -or ($folder -and -not $file)) { return 'SaveFolder' }
+        return 'SaveFile'
+    }
+    if ($Name -match '(Dir|Root)$') { return 'SaveFolder' }
+    # 名前・番号・正規表現などは文字（「ファイル名」「シートの名前」もファイルを選ぶ欄にしない）
+    if ($plain -match '名前|ファイル名|番号|正規表現|URL|タイトル') { return 'Text' }
+    if ($file -and $folder) { return 'Path' }
+    if ($folder) { return 'Folder' }
+    if ($file) { return 'File' }
+    return 'Text'
+}
+
+function Get-GuiExtension {
+    #     保存するファイルの拡張子（引数の名前・ヘルプから。わからなければ空）
+    param([string] $Name, [string] $Help)
+    if ($Name -match 'Xlsx$') { return '.xlsx' }
+    if ($Name -match 'Html$') { return '.html' }
+    if ($Name -match 'Csv$') { return '.csv' }
+    $first = ($Help -split '。')[0]
+    if ($first -match 'CSV') { return '.csv' }
+    if ($first -match 'xlsx') { return '.xlsx' }
+    return ''
+}
+
+function Get-GuiFields {
+    #     処理の入力欄の一覧。ツールの引数（Get-Command）とヘルプ（Get-Help）から作り、ツールの一覧の指定で上書きする。
+    #     Main は最初から見せる欄（ツールの一覧の Main の順）、そのほかは「詳細な設定」の欄（ツールの引数の順）
+    param($Entry)
+    if ($script:FieldCache.ContainsKey($Entry.Id)) { return $script:FieldCache[$Entry.Id] }
+    $cmd = Get-Command -Name $Entry.ToolPath -ErrorAction Stop
+    $help = Get-Help -Name $Entry.ToolPath -ErrorAction SilentlyContinue
+    $helpText = @{}
+    foreach ($p in @($help.parameters.parameter)) {
+        if ($p -and $p.name) { $helpText[$p.name] = ((@($p.description | ForEach-Object { $_.Text })) -join "`n").Trim() }
+    }
+    $fields = New-Object System.Collections.Generic.List[object]
+    $order = 0
+    foreach ($p in $cmd.Parameters.Values) {
+        $order++
+        if ($script:CommonParameters -contains $p.Name) { continue }
+        if ($Entry.Hide -contains $p.Name -or $Entry.Fixed.ContainsKey($p.Name)) { continue }
+        # 引数のセットの違うもの・テスト用の引数（ヘルプの無いもの・スクリプトブロック）は出さない
+        $setName = $null
+        if ($Entry.Set) {
+            if ($p.ParameterSets.ContainsKey($Entry.Set)) { $setName = $Entry.Set }
+            elseif ($p.ParameterSets.ContainsKey('__AllParameterSets')) { $setName = '__AllParameterSets' }
+            else { continue }
+        }
+        else { $setName = @($p.ParameterSets.Keys)[0] }
+        $text = [string]$helpText[$p.Name]
+        if (-not $text) { continue }
+        if (@([scriptblock], [object], [object[]]) -contains $p.ParameterType) { continue }
+        $choices = @($p.Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] } | ForEach-Object { $_.ValidValues })
+        $kind = Get-GuiFieldKind -Name $p.Name -Type $p.ParameterType -Help $text -HasChoices ($choices.Count -gt 0)
+        if ($Entry.Kinds.ContainsKey($p.Name)) { $kind = $Entry.Kinds[$p.Name] }
+        $label = Get-GuiLabel -Help $text -Name $p.Name
+        if ($Entry.Labels.ContainsKey($p.Name)) { $label = $Entry.Labels[$p.Name] }
+        $ext = ''
+        if ($kind -eq 'SaveFile') { $ext = Get-GuiExtension -Name $p.Name -Help $text }
+        if ($Entry.Extensions.ContainsKey($p.Name)) { $ext = $Entry.Extensions[$p.Name] }
+        $mainIndex = [array]::IndexOf([object[]]$Entry.Main, $p.Name)
+        $default = $null
+        if ($Entry.Defaults.ContainsKey($p.Name)) { $default = $Entry.Defaults[$p.Name] }
+        $fields.Add([pscustomobject]@{
+                Name = $p.Name; Label = $label; Help = $text; Kind = $kind; Multiple = $p.ParameterType.IsArray
+                Choices = $choices; Required = ($p.ParameterSets[$setName].IsMandatory -or $Entry.Required -contains $p.Name)
+                Main = ($mainIndex -ge 0); Order = $(if ($mainIndex -ge 0) { $mainIndex } else { 1000 + $order })
+                Default = $default; Extension = $ext; Type = $p.ParameterType
+                # ワイルドカードを使える引数には、[ ] を含む名前がそのまま通るよう、パスを逃がして渡す
+                Wildcard = ($text -match 'ワイルドカード')
+            })
+    }
+    $missing = @($Entry.Main | Where-Object { $n = $_; @($fields | Where-Object Name -eq $n).Count -eq 0 })
+    if ($missing.Count -gt 0) { throw ('ツールの一覧の Main に、{0} の引数に無い名前があります: {1}' -f $Entry.Tool, ($missing -join ', ')) }
+    $sorted = @($fields | Sort-Object Order)
+    $script:FieldCache[$Entry.Id] = $sorted
+    return $sorted
+}
+
+# ---------------------------------------------------------------- 引数を組み立てる
+
+
+function Test-GuiEmpty {
+    param($Value)
+    if ($null -eq $Value) { return $true }
+    if ($Value -is [bool]) { return -not $Value }
+    if ($Value -is [string]) { return -not $Value.Trim() }
+    if ($Value -is [array]) { return @($Value | Where-Object { -not (Test-GuiEmpty $_) }).Count -eq 0 }
+    return $false
+}
+
+function ConvertTo-GuiNumber {
+    param([string] $Text, [type] $Type)
+    $styles = [System.Globalization.NumberStyles]::Float
+    $n = 0.0
+    $t = $Text.Trim().Normalize([System.Text.NormalizationForm]::FormKC)
+    if (-not [double]::TryParse($t, $styles, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { return $null }
+    if (@([int], [long]) -contains $Type) { if ($n -ne [math]::Truncate($n)) { return $null }; return [Convert]::ChangeType($n, $Type) }
+    return $n
+}
+
+function ConvertTo-GuiArguments {
+    #     入力（引数の名前 → 値）から、ツールに渡す引数（スプラッティング用のハッシュテーブル）を作る。
+    #     空の欄は渡さない。戻り値: Arguments と Errors（入力の誤りの文）
+    param($Entry, $Fields, [hashtable] $Values)
+    $arguments = [ordered]@{}
+    $errors = New-Object System.Collections.Generic.List[string]
+    foreach ($f in $Fields) {
+        $v = $Values[$f.Name]
+        if (Test-GuiEmpty $v) {
+            if ($f.Required) { $errors.Add(('「{0}」を入れてください' -f $f.Label)) }
+            continue
+        }
+        switch ($f.Kind) {
+            'Switch' { $arguments[$f.Name] = $true }
+            'Date' {
+                $d = $v
+                if ($d -isnot [datetime]) {
+                    $parsed = [datetime]::MinValue
+                    if (-not [datetime]::TryParse([string]$d, [ref]$parsed)) { $errors.Add(('「{0}」は日付で入れてください（例: 2026/10/23）' -f $f.Label)); continue }
+                    $d = $parsed
+                }
+                if ($f.Type -eq [datetime]) { $arguments[$f.Name] = $d.Date } else { $arguments[$f.Name] = $d.ToString('yyyy-MM-dd') }
+            }
+            'Number' {
+                $element = $f.Type
+                if ($f.Type.IsArray) { $element = $f.Type.GetElementType() }
+                $texts = @($v | ForEach-Object { [string]$_ -split '[,、\s]+' } | Where-Object { $_ })
+                $numbers = @($texts | ForEach-Object { ConvertTo-GuiNumber $_ $element })
+                if (@($numbers | Where-Object { $null -eq $_ }).Count -gt 0) { $errors.Add(('「{0}」は数で入れてください' -f $f.Label)); continue }
+                if ($f.Multiple) { $arguments[$f.Name] = $numbers } else { $arguments[$f.Name] = $numbers[0] }
+            }
+            default {
+                $items = @($v | ForEach-Object { [string]$_ } | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })
+                # 複数の文字は、カンマ・読点・改行で区切って入れられる（パスは 1 行に 1 つ）
+                if ($f.Multiple -and $f.Kind -eq 'Text') { $items = @($items | ForEach-Object { $_ -split '[,、\r\n]+' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+                if ($f.Wildcard -and @('File', 'Folder', 'Path') -contains $f.Kind) { $items = @($items | ForEach-Object { [System.Management.Automation.WildcardPattern]::Escape($_) }) }
+                if ($f.Multiple) { $arguments[$f.Name] = [string[]]$items } else { $arguments[$f.Name] = $items[0] }
+            }
+        }
+    }
+    foreach ($k in $Entry.Fixed.Keys) { $arguments[$k] = $Entry.Fixed[$k] }
+    return [pscustomobject]@{ Arguments = $arguments; Errors = $errors.ToArray() }
+}
+
+function Get-GuiResultDir {
+    #     結果の既定の保存先（「送る」と同じ「ドキュメント\Excel ツールの結果」）
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    if (-not $docs) { $docs = [System.IO.Path]::GetTempPath() }
+    return (Join-Path $docs 'Excel ツールの結果')
+}
+
+function Get-GuiDefaultOutputs {
+    #     結果の欄（ツールの一覧の Output）のうち空のものに入れるパス（名前_日時.拡張子。同じ名前があれば連番）。戻り値: 引数の名前 → パス
+    param($Entry, $Fields, [hashtable] $Values, [string] $Dir = (Get-GuiResultDir), [datetime] $Now = (Get-Date))
+    $result = @{}
+    $stamp = $Now.ToString('yyyyMMdd_HHmmss')
+    foreach ($name in $Entry.Output) {
+        if (-not (Test-GuiEmpty $Values[$name])) { continue }
+        $f = @($Fields | Where-Object Name -eq $name)[0]
+        if (-not $f) { continue }
+        $ext = $f.Extension
+        if (-not $ext) { $ext = '.xlsx' }
+        $candidate = Join-Path $Dir ('{0}_{1}{2}' -f $Entry.OutputName, $stamp, $ext)
+        for ($n = 2; Test-Path -LiteralPath $candidate; $n++) { $candidate = Join-Path $Dir ('{0}_{1}({2}){3}' -f $Entry.OutputName, $stamp, $n, $ext) }
+        $result[$name] = $candidate
+    }
+    return $result
+}
+
+function ConvertTo-GuiLiteral {
+    #     値を PowerShell の式の文字にする（コマンドの表示・PowerShell の画面での実行に使う）
+    param($Value)
+    if ($null -eq $Value) { return '$null' }
+    if ($Value -is [bool]) { if ($Value) { return '$true' } else { return '$false' } }
+    if ($Value -is [datetime]) { return "[datetime]'{0}'" -f $Value.ToString('yyyy-MM-dd') }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) { return ([string]::Format([System.Globalization.CultureInfo]::InvariantCulture, '{0}', $Value)) }
+    if ($Value -is [array]) { return '@(' + ((@($Value | ForEach-Object { ConvertTo-GuiLiteral $_ })) -join ', ') + ')' }
+    return "'" + ([string]$Value).Replace("'", "''") + "'"
+}
+
+function Format-GuiCommandLine {
+    #     同じことをする PowerShell のコマンド
+    param([string] $ToolPath, $Arguments)
+    $parts = New-Object System.Collections.Generic.List[string]
+    $parts.Add('& ' + (ConvertTo-GuiLiteral $ToolPath))
+    foreach ($k in $Arguments.Keys) {
+        $v = $Arguments[$k]
+        if ($v -is [bool] -and $v) { $parts.Add('-' + $k); continue }
+        if ($v -is [array]) { $parts.Add(('-{0} {1}' -f $k, ((@($v | ForEach-Object { ConvertTo-GuiLiteral $_ })) -join ', '))); continue }
+        $parts.Add(('-{0} {1}' -f $k, (ConvertTo-GuiLiteral $v)))
+    }
+    return ($parts -join ' ')
+}
+
+# ---------------------------------------------------------------- 実行
+
+
+function Start-GuiToolRun {
+    #     ツールを別の実行空間で動かし始める（画面が固まらないように）。Write-Host・警告・エラー・進み具合は Receive-GuiToolRun で受け取る
+    param([string] $ToolPath, $Arguments)
+    $runspace = [runspacefactory]::CreateRunspace()
+    # Excel を使うツールのため、Windows では STA にする
+    if ($script:IsWindowsOs) { $runspace.ApartmentState = [System.Threading.ApartmentState]::STA }
+    $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+    $runspace.Open()
+    $ps = [powershell]::Create()
+    $ps.Runspace = $runspace
+    $runner = {
+        param($ToolPath, $Arguments)
+        $ErrorActionPreference = 'Stop'
+        $result = @(& $ToolPath @Arguments)
+        $text = ''
+        if ($result.Count -gt 0) { $text = ($result | Select-Object -First 200 | Format-Table -AutoSize -Wrap | Out-String -Width 220).Trim() }
+        [pscustomobject]@{ Count = $result.Count; Text = $text }
+    }
+    $splat = @{}
+    foreach ($k in $Arguments.Keys) { $splat[$k] = $Arguments[$k] }
+    [void]$ps.AddScript($runner.ToString()).AddArgument($ToolPath).AddArgument($splat)
+    $handle = $ps.BeginInvoke()
+    return [pscustomobject]@{
+        PowerShell = $ps; Runspace = $runspace; Handle = $handle; Started = (Get-Date)
+        InfoIndex = 0; WarningIndex = 0; ErrorIndex = 0; Stopping = $false; Done = $false
+    }
+}
+
+function Receive-GuiToolRun {
+    #     実行中のツールの新しい出力を受け取る。戻り値: Messages（Text・Kind（情報・警告・エラー）・Color・NoNewLine）・Progress・Completed・
+    #     Succeeded・Summary（出力の件数と表）・Error
+    param($Run)
+    $messages = New-Object System.Collections.Generic.List[object]
+    $streams = $Run.PowerShell.Streams
+    $info = $streams.Information
+    while ($Run.InfoIndex -lt $info.Count) {
+        $data = $info[$Run.InfoIndex].MessageData
+        $Run.InfoIndex++
+        if ($data -is [System.Management.Automation.HostInformationMessage]) {
+            $color = ''
+            if ($null -ne $data.ForegroundColor) { $color = [string]$data.ForegroundColor }
+            $messages.Add([pscustomobject]@{ Kind = '情報'; Text = [string]$data.Message; Color = $color; NoNewLine = [bool]$data.NoNewLine })
+        }
+        else { $messages.Add([pscustomobject]@{ Kind = '情報'; Text = [string]$data; Color = ''; NoNewLine = $false }) }
+    }
+    while ($Run.WarningIndex -lt $streams.Warning.Count) {
+        $messages.Add([pscustomobject]@{ Kind = '警告'; Text = ('警告: ' + $streams.Warning[$Run.WarningIndex].Message); Color = 'DarkYellow'; NoNewLine = $false })
+        $Run.WarningIndex++
+    }
+    while ($Run.ErrorIndex -lt $streams.Error.Count) {
+        $messages.Add([pscustomobject]@{ Kind = 'エラー'; Text = ('エラー: ' + $streams.Error[$Run.ErrorIndex].Exception.Message); Color = 'Red'; NoNewLine = $false })
+        $Run.ErrorIndex++
+    }
+    $progress = $null
+    if ($streams.Progress.Count -gt 0) {
+        $last = $streams.Progress[$streams.Progress.Count - 1]
+        $streams.Progress.Clear()
+        $progress = [pscustomobject]@{ Activity = $last.Activity; Status = $last.StatusDescription; Percent = $last.PercentComplete; Completed = ($last.RecordType -eq 'Completed') }
+    }
+    $state = [pscustomobject]@{ Messages = $messages.ToArray(); Progress = $progress; Completed = $false; Succeeded = $false; Stopped = $false; Summary = $null; Error = $null; Seconds = ((Get-Date) - $Run.Started).TotalSeconds }
+    if ($Run.Done -or -not $Run.Handle.IsCompleted) { return $state }
+    $Run.Done = $true
+    $state.Completed = $true
+    try {
+        $out = @($Run.PowerShell.EndInvoke($Run.Handle))
+        $state.Summary = @($out | Where-Object { $_ -and $_.PSObject.Properties['Count'] -and $_.PSObject.Properties['Text'] })[0]
+        $state.Succeeded = $true
+    }
+    catch {
+        $ex = $_.Exception
+        while ($ex -is [System.Management.Automation.MethodInvocationException] -and $null -ne $ex.InnerException) { $ex = $ex.InnerException }
+        if ($ex -is [System.Management.Automation.PipelineStoppedException] -or $Run.Stopping) { $state.Stopped = $true; $state.Error = '中止しました' }
+        else {
+            $err = $ex.Message
+            if ($ex -is [System.Management.Automation.RuntimeException] -and $ex.ErrorRecord -and $ex.ErrorRecord.Exception) { $err = $ex.ErrorRecord.Exception.Message }
+            $state.Error = $err
+        }
+    }
+    finally {
+        # 終わってから届いた出力も受け取る
+        $rest = Receive-GuiToolRunTail $Run
+        foreach ($m in $rest) { $messages.Add($m) }
+        $state.Messages = $messages.ToArray()
+        $Run.PowerShell.Dispose()
+        $Run.Runspace.Dispose()
+    }
+    return $state
+}
+
+function Receive-GuiToolRunTail {
+    param($Run)
+    $streams = $Run.PowerShell.Streams
+    $list = New-Object System.Collections.Generic.List[object]
+    while ($Run.InfoIndex -lt $streams.Information.Count) {
+        $data = $streams.Information[$Run.InfoIndex].MessageData
+        $Run.InfoIndex++
+        $text = [string]$data
+        $color = ''
+        if ($data -is [System.Management.Automation.HostInformationMessage]) { $text = [string]$data.Message; if ($null -ne $data.ForegroundColor) { $color = [string]$data.ForegroundColor } }
+        $list.Add([pscustomobject]@{ Kind = '情報'; Text = $text; Color = $color; NoNewLine = $false })
+    }
+    while ($Run.WarningIndex -lt $streams.Warning.Count) { $list.Add([pscustomobject]@{ Kind = '警告'; Text = ('警告: ' + $streams.Warning[$Run.WarningIndex].Message); Color = 'DarkYellow'; NoNewLine = $false }); $Run.WarningIndex++ }
+    while ($Run.ErrorIndex -lt $streams.Error.Count) { $list.Add([pscustomobject]@{ Kind = 'エラー'; Text = ('エラー: ' + $streams.Error[$Run.ErrorIndex].Exception.Message); Color = 'Red'; NoNewLine = $false }); $Run.ErrorIndex++ }
+    return $list.ToArray()
+}
+
+function Stop-GuiToolRun {
+    #     実行中のツールを止める（止まるのを待たない。止まったら Receive-GuiToolRun の Stopped になる）
+    param($Run)
+    if ($Run.Done) { return }
+    $Run.Stopping = $true
+    [void]$Run.PowerShell.BeginStop($null, $null)
+}
+
+function Wait-GuiToolRun {
+    #     ツールが終わるまで待ち、受け取った出力をまとめて返す（テストと、画面を使わない実行のため）
+    param($Run, [int] $TimeoutSeconds = 600)
+    $all = New-Object System.Collections.Generic.List[object]
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $r = Receive-GuiToolRun $Run
+        foreach ($m in $r.Messages) { $all.Add($m) }
+        if ($r.Completed) { $r.Messages = $all.ToArray(); return $r }
+        if ((Get-Date) -gt $deadline) { Stop-GuiToolRun $Run; throw 'ツールが時間内に終わりませんでした' }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
+function New-GuiConsoleScript {
+    #     PowerShell の画面で実行するためのスクリプト（途中で入力が要るツール用）。引数を書き込んだ一時ファイルを作り、そのパスを返す
+    param([string] $ToolPath, $Arguments, [string] $Title, [string] $Dir = (Join-Path ([System.IO.Path]::GetTempPath()) 'ExcelTools'))
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add('$ErrorActionPreference = ''Stop''')
+    $lines.Add('try { $Host.UI.RawUI.WindowTitle = ' + (ConvertTo-GuiLiteral ('Excel ツール - ' + $Title)) + ' } catch { }')
+    $lines.Add('$arguments = @{}')
+    foreach ($k in $Arguments.Keys) { $lines.Add(('$arguments[{0}] = {1}' -f (ConvertTo-GuiLiteral $k), (ConvertTo-GuiLiteral $Arguments[$k]))) }
+    $lines.Add('try { & ' + (ConvertTo-GuiLiteral $ToolPath) + ' @arguments | Out-Host }')
+    $lines.Add('catch { Write-Host ''''; Write-Host (''エラー: '' + $_.Exception.Message) -ForegroundColor Red }')
+    $lines.Add('Write-Host ''''')
+    $lines.Add('$null = Read-Host ''Enter キーを押すと閉じます''')
+    $path = Join-Path $Dir ('実行_{0}.ps1' -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [System.IO.File]::WriteAllText($path, (($lines -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
+    return $path
+}
+
+# ---------------------------------------------------------------- 入力の保存（次に開いたとき、前の入力を出す）
+
+
+function Get-GuiSettingsPath {
+    $base = $env:APPDATA
+    if (-not $base) { $base = [Environment]::GetFolderPath('ApplicationData') }
+    if (-not $base) { $base = [System.IO.Path]::GetTempPath() }
+    return (Join-Path (Join-Path $base 'ExcelTools') '画面の設定.json')
+}
+
+function Read-GuiSettings {
+    #     保存した入力を読む。戻り値: Tools（処理の Id → 引数の名前 → 値）・LastTool・OpenResult・ShowAdvanced
+    param([string] $Path = (Get-GuiSettingsPath))
+    $settings = [pscustomobject]@{ Tools = @{}; LastTool = ''; OpenResult = $true; ShowAdvanced = $false }
+    if (-not (Test-Path -LiteralPath $Path)) { return $settings }
+    try { $json = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json }
+    catch { return $settings }
+    if ($json.LastTool) { $settings.LastTool = [string]$json.LastTool }
+    if ($null -ne $json.OpenResult) { $settings.OpenResult = [bool]$json.OpenResult }
+    if ($null -ne $json.ShowAdvanced) { $settings.ShowAdvanced = [bool]$json.ShowAdvanced }
+    if ($json.Tools) {
+        foreach ($tp in $json.Tools.PSObject.Properties) {
+            $values = @{}
+            foreach ($vp in $tp.Value.PSObject.Properties) {
+                $v = $vp.Value
+                if ($v -is [array]) { $v = [string[]]@($v | ForEach-Object { [string]$_ }) }
+                $values[$vp.Name] = $v
+            }
+            $settings.Tools[$tp.Name] = $values
+        }
+    }
+    return $settings
+}
+
+function Save-GuiSettings {
+    #     入力を保存する（結果の保存先と日付は保存しない。次は新しい名前・今日にする）
+    param($Settings, [string] $Path = (Get-GuiSettingsPath))
+    $tools = [ordered]@{}
+    foreach ($id in @($Settings.Tools.Keys | Sort-Object)) {
+        $values = [ordered]@{}
+        foreach ($k in @($Settings.Tools[$id].Keys | Sort-Object)) {
+            $v = $Settings.Tools[$id][$k]
+            if ($v -is [datetime] -or $null -eq $v) { continue }
+            $values[$k] = $v
+        }
+        $tools[$id] = $values
+    }
+    $json = [ordered]@{ LastTool = $Settings.LastTool; OpenResult = [bool]$Settings.OpenResult; ShowAdvanced = [bool]$Settings.ShowAdvanced; Tools = $tools } | ConvertTo-Json -Depth 6
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Get-GuiValuesToSave {
+    #     保存する入力（結果の保存先・日付・試しに実行などを除く）
+    param($Entry, $Fields, [hashtable] $Values)
+    $keep = @{}
+    foreach ($f in $Fields) {
+        if ($Entry.Output -contains $f.Name -or $f.Kind -eq 'Date') { continue }
+        $v = $Values[$f.Name]
+        if ($null -eq $v) { continue }
+        $keep[$f.Name] = $v
+    }
+    return $keep
+}
+
+# ---------------------------------------------------------------- 画面（Windows Forms。Windows でだけ使う）
+#     画面の状態は $script:Gui に置く（イベントの処理はこのモジュールの中で動くので、$script: で同じものを見る）
+
+
+function New-GuiWindow {
+    #     画面を作る（表示はしない。Start-ExcelTools.ps1 が表示する）。Path は最初のパスの欄に入れるファイル・フォルダ（「送る」から）、
+    #     Tool は最初に選ぶ処理の Id。Quiet はテスト用（メッセージの画面を出さず、確認には QuietAnswer で答え、結果を開かない）
+    param([string[]] $Path, [string] $Tool, [string] $SettingsPath = (Get-GuiSettingsPath), [string] $CatalogPath, [switch] $Quiet)
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $catalogArgs = @{}
+    if ($CatalogPath) { $catalogArgs['Path'] = $CatalogPath }
+    $s = @{
+        Catalog = (Get-GuiCatalog @catalogArgs); SettingsPath = $SettingsPath; Settings = (Read-GuiSettings $SettingsPath)
+        InitialPaths = @($Path | Where-Object { $_ }); Bindings = (New-Object System.Collections.Generic.List[object]); WrapLabels = (New-Object System.Collections.Generic.List[object])
+        Entry = $null; Run = $null; RunArguments = $null; ResultPath = $null; ResultDir = $null; LastState = $null; LastErrors = @(); LastConsoleScript = $null
+        Quiet = [bool]$Quiet; QuietAnswer = $true; CanDrop = ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq [System.Threading.ApartmentState]::STA)
+    }
+    $script:Gui = $s
+    $font = [System.Drawing.SystemFonts]::MessageBoxFont
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = 'Excel ツール'
+    $form.Font = $font
+    $form.Size = New-Object System.Drawing.Size(1120, 800)
+    $form.MinimumSize = New-Object System.Drawing.Size(880, 620)
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $s.Form = $form
+    $s.ToolTip = New-Object System.Windows.Forms.ToolTip
+    $s.ToolTip.AutoPopDelay = 20000
+
+    $split = New-Object System.Windows.Forms.SplitContainer
+    $split.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $split.FixedPanel = [System.Windows.Forms.FixedPanel]::Panel1
+    $form.Controls.Add($split)
+    $s.Split = $split
+    try { $split.SplitterDistance = 300 } catch { }
+
+    # ---- 左: やりたいことの一覧
+    $left = New-Object System.Windows.Forms.TableLayoutPanel
+    $left.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $left.ColumnCount = 1
+    $left.RowCount = 3
+    [void]$left.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+    [void]$left.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+    [void]$left.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    $split.Panel1.Controls.Add($left)
+    $findLabel = New-Object System.Windows.Forms.Label
+    $findLabel.Text = 'やりたいことを探す（例: 差分・提出）'
+    $findLabel.AutoSize = $true
+    $findLabel.Margin = New-Object System.Windows.Forms.Padding(6, 8, 6, 2)
+    $left.Controls.Add($findLabel, 0, 0)
+    $find = New-Object System.Windows.Forms.TextBox
+    $find.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $find.Margin = New-Object System.Windows.Forms.Padding(6, 2, 6, 6)
+    $left.Controls.Add($find, 0, 1)
+    $s.Find = $find
+    $tree = New-Object System.Windows.Forms.TreeView
+    $tree.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $tree.HideSelection = $false
+    $tree.ShowNodeToolTips = $true
+    $tree.ItemHeight = [int]($font.Height * 1.6)
+    $tree.Margin = New-Object System.Windows.Forms.Padding(6, 0, 6, 6)
+    $left.Controls.Add($tree, 0, 2)
+    $s.Tree = $tree
+
+    # ---- 右: 選んだ処理の説明・入力欄・実行・記録
+    $right = New-Object System.Windows.Forms.TableLayoutPanel
+    $right.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $right.ColumnCount = 1
+    $right.RowCount = 7
+    $right.Padding = New-Object System.Windows.Forms.Padding(8, 4, 8, 4)
+    foreach ($style in @('AutoSize', 'AutoSize', 'Percent', 'AutoSize', 'AutoSize', 'Absolute', 'AutoSize')) {
+        if ($style -eq 'Percent') { [void]$right.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) }
+        elseif ($style -eq 'Absolute') { [void]$right.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 190))) }
+        else { [void]$right.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) }
+    }
+    $split.Panel2.Controls.Add($right)
+
+    $title = New-Object System.Windows.Forms.Label
+    $title.AutoSize = $true
+    $title.Font = New-Object System.Drawing.Font($font.FontFamily, ($font.Size + 4), [System.Drawing.FontStyle]::Bold)
+    $title.Margin = New-Object System.Windows.Forms.Padding(0, 6, 0, 4)
+    $right.Controls.Add($title, 0, 0)
+    $s.Title = $title
+    $summary = New-Object System.Windows.Forms.Label
+    $summary.AutoSize = $true
+    $summary.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
+    $right.Controls.Add($summary, 0, 1)
+    $s.Summary = $summary
+    $s.WrapLabels.Add($summary)
+
+    $host1 = New-Object System.Windows.Forms.Panel
+    $host1.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $host1.AutoScroll = $true
+    $host1.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $right.Controls.Add($host1, 0, 2)
+    $s.FieldsHost = $host1
+    $table = New-Object System.Windows.Forms.TableLayoutPanel
+    $table.Dock = [System.Windows.Forms.DockStyle]::Top
+    $table.AutoSize = $true
+    $table.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $table.ColumnCount = 2
+    $table.Padding = New-Object System.Windows.Forms.Padding(4)
+    [void]$table.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 240)))
+    [void]$table.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    $host1.Controls.Add($table)
+    $s.Fields = $table
+
+    $options = New-Object System.Windows.Forms.FlowLayoutPanel
+    $options.AutoSize = $true
+    $options.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $options.Margin = New-Object System.Windows.Forms.Padding(0, 6, 0, 0)
+    $right.Controls.Add($options, 0, 3)
+    $s.ShowAdvanced = New-GuiCheckBox '詳細な設定も表示する' $s.Settings.ShowAdvanced
+    $s.WhatIf = New-GuiCheckBox '試しに実行（ファイルを書き換えない）' $true
+    $s.OpenResult = New-GuiCheckBox '終わったら結果を開く' $s.Settings.OpenResult
+    $s.HelpButton = New-GuiButton 'ツールの説明'
+    $s.CopyButton = New-GuiButton 'コマンドをコピー'
+    foreach ($c in @($s.ShowAdvanced, $s.WhatIf, $s.OpenResult, $s.HelpButton, $s.CopyButton)) { $options.Controls.Add($c) }
+    $s.ToolTip.SetToolTip($s.CopyButton, '同じことをする PowerShell のコマンドをクリップボードに写します（くり返し使うときや、ほかの人に伝えるときに）')
+
+    $runRow = New-Object System.Windows.Forms.FlowLayoutPanel
+    $runRow.AutoSize = $true
+    $runRow.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $right.Controls.Add($runRow, 0, 4)
+    $s.RunButton = New-GuiButton '実行'
+    $s.RunButton.Font = New-Object System.Drawing.Font($font.FontFamily, ($font.Size + 2), [System.Drawing.FontStyle]::Bold)
+    $s.RunButton.MinimumSize = New-Object System.Drawing.Size(140, 36)
+    $s.StopButton = New-GuiButton '中止'
+    $s.StopButton.Enabled = $false
+    $s.StopButton.MinimumSize = New-Object System.Drawing.Size(80, 36)
+    $s.Progress = New-Object System.Windows.Forms.ProgressBar
+    $s.Progress.Size = New-Object System.Drawing.Size(260, 22)
+    $s.Progress.Margin = New-Object System.Windows.Forms.Padding(12, 10, 6, 0)
+    $s.Status = New-Object System.Windows.Forms.Label
+    $s.Status.AutoSize = $true
+    $s.Status.Margin = New-Object System.Windows.Forms.Padding(6, 12, 0, 0)
+    foreach ($c in @($s.RunButton, $s.StopButton, $s.Progress, $s.Status)) { $runRow.Controls.Add($c) }
+    $form.AcceptButton = $s.RunButton
+
+    $log = New-Object System.Windows.Forms.RichTextBox
+    $log.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $log.ReadOnly = $true
+    $log.BackColor = [System.Drawing.SystemColors]::Window
+    $log.WordWrap = $false
+    $log.Font = New-Object System.Drawing.Font([System.Drawing.FontFamily]::GenericMonospace, $font.Size)
+    $log.DetectUrls = $false
+    $right.Controls.Add($log, 0, 5)
+    $s.Log = $log
+
+    $resultRow = New-Object System.Windows.Forms.FlowLayoutPanel
+    $resultRow.AutoSize = $true
+    $resultRow.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $right.Controls.Add($resultRow, 0, 6)
+    $s.OpenButton = New-GuiButton '結果を開く'
+    $s.FolderButton = New-GuiButton '保存先のフォルダを開く'
+    $s.OpenButton.Enabled = $false
+    $s.FolderButton.Enabled = $false
+    $s.ResultLabel = New-Object System.Windows.Forms.Label
+    $s.ResultLabel.AutoSize = $true
+    $s.ResultLabel.Margin = New-Object System.Windows.Forms.Padding(6, 8, 0, 0)
+    foreach ($c in @($s.OpenButton, $s.FolderButton, $s.ResultLabel)) { $resultRow.Controls.Add($c) }
+
+    $s.Timer = New-Object System.Windows.Forms.Timer
+    $s.Timer.Interval = 200
+
+    # ---- イベント（エラーは記録の欄とメッセージで知らせ、画面は続ける）
+    $tree.Add_AfterSelect({ if ($_.Node -and $_.Node.Tag) { $id = $_.Node.Tag.Id; Invoke-GuiSafe { Select-GuiTool $id } } })
+    $find.Add_TextChanged({ Invoke-GuiSafe { Update-GuiTree $script:Gui.Find.Text } })
+    $s.ShowAdvanced.Add_CheckedChanged({ Invoke-GuiSafe { Update-GuiAdvanced } })
+    $s.RunButton.Add_Click({ Invoke-GuiSafe { Invoke-GuiRun } })
+    $s.StopButton.Add_Click({ if ($script:Gui.Run) { Stop-GuiToolRun $script:Gui.Run; Write-GuiLog '中止しています…' 'DarkYellow' } })
+    $s.Timer.Add_Tick({ Update-GuiRun })
+    $s.OpenButton.Add_Click({ if ($script:Gui.ResultPath) { Open-GuiPath $script:Gui.ResultPath } })
+    $s.FolderButton.Add_Click({ if ($script:Gui.ResultDir) { Open-GuiPath $script:Gui.ResultDir } })
+    $s.HelpButton.Add_Click({ Invoke-GuiSafe { Show-GuiToolHelp } })
+    $s.CopyButton.Add_Click({ Invoke-GuiSafe { Copy-GuiCommand } })
+    $host1.Add_Resize({ Update-GuiWrap })
+    $form.Add_Load({ try { $script:Gui.Split.SplitterDistance = 300 } catch { } })
+    $form.Add_FormClosing({ Close-GuiWindow $_ })
+    if ($s.CanDrop) {
+        # ファイル・フォルダを画面のどこに落としても、空いているパスの欄に入れる
+        foreach ($c in @($form, $host1, $table, $log, $tree)) { Enable-GuiDrop $c $null }
+    }
+
+    Write-GuiLog '左で、やりたいことを選んでください。ファイルやフォルダは、エクスプローラーからこの画面にドラッグ＆ドロップでも入れられます。' 'Gray'
+    Update-GuiTree ''
+    $first = $Tool
+    if (-not $first) { $first = $s.Settings.LastTool }
+    if (-not $first -or @($s.Catalog.Tools | Where-Object Id -eq $first).Count -eq 0) { $first = $s.Catalog.Tools[0].Id }
+    Select-GuiTool $first
+    Update-GuiWrap
+    return $form
+}
+
+function Invoke-GuiSafe {
+    #     画面の操作を動かし、エラーは記録の欄とメッセージで知らせる（画面は閉じない）
+    param([scriptblock] $Action)
+    try { & $Action }
+    catch {
+        Write-GuiLog ('エラー: ' + $_.Exception.Message) 'Red'
+        [void](Show-GuiMessage ('エラー: ' + $_.Exception.Message) -Warning)
+    }
+}
+
+function Get-GuiState {
+    #     画面の状態（テスト用）
+    return $script:Gui
+}
+
+function New-GuiButton {
+    param([string] $Text)
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $Text
+    $b.AutoSize = $true
+    $b.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $b.Padding = New-Object System.Windows.Forms.Padding(6, 2, 6, 2)
+    return $b
+}
+
+function New-GuiCheckBox {
+    param([string] $Text, [bool] $Checked)
+    $c = New-Object System.Windows.Forms.CheckBox
+    $c.Text = $Text
+    $c.AutoSize = $true
+    $c.Checked = $Checked
+    $c.Margin = New-Object System.Windows.Forms.Padding(3, 6, 12, 3)
+    return $c
+}
+
+function Update-GuiTree {
+    #     やりたいことの一覧（担当者向け・管理者向け → 分類 → 処理）。Filter があれば、それを含む処理だけ
+    param([string] $Filter)
+    $s = $script:Gui
+    $tree = $s.Tree
+    $entries = @($s.Catalog.Tools)
+    if ($Filter -and $Filter.Trim()) { $entries = @(Find-GuiTool $s.Catalog $Filter) }
+    $tree.BeginUpdate()
+    try {
+        $tree.Nodes.Clear()
+        foreach ($for in @('担当者', '管理者')) {
+            $root = New-Object System.Windows.Forms.TreeNode(($for + '向け'))
+            foreach ($g in @($s.Catalog.Groups | Where-Object For -eq $for)) {
+                $items = @($entries | Where-Object Group -eq $g.Name)
+                if ($items.Count -eq 0) { continue }
+                $gn = New-Object System.Windows.Forms.TreeNode($g.Name)
+                foreach ($t in $items) {
+                    $n = New-Object System.Windows.Forms.TreeNode($t.Label)
+                    $n.Tag = $t
+                    $n.ToolTipText = $t.Summary
+                    [void]$gn.Nodes.Add($n)
+                }
+                [void]$root.Nodes.Add($gn)
+            }
+            if ($root.Nodes.Count -eq 0) { continue }
+            [void]$tree.Nodes.Add($root)
+            if ($Filter -or $for -eq '担当者') { $root.ExpandAll() }
+        }
+    }
+    finally { $tree.EndUpdate() }
+    Select-GuiTreeNode
+}
+
+function Select-GuiTreeNode {
+    #     一覧の中で、選んでいる処理の行を選んだ状態にする（選び直しの処理は起こさない）
+    $s = $script:Gui
+    if (-not $s.Entry) { return }
+    foreach ($root in $s.Tree.Nodes) {
+        foreach ($g in $root.Nodes) {
+            foreach ($n in $g.Nodes) {
+                if ($n.Tag -and $n.Tag.Id -eq $s.Entry.Id) {
+                    if ($s.Tree.SelectedNode -ne $n) { $s.Selecting = $true; try { $n.EnsureVisible(); $s.Tree.SelectedNode = $n } finally { $s.Selecting = $false } }
+                    return
+                }
+            }
+        }
+    }
+}
+
+function Select-GuiTool {
+    #     処理を選び、入力欄を作り直す（前の処理の入力は保存する）
+    param([string] $Id)
+    $s = $script:Gui
+    if ($s.Selecting) { return }
+    $entry = @($s.Catalog.Tools | Where-Object Id -eq $Id)[0]
+    if (-not $entry) { throw "処理が見つかりません: $Id" }
+    if ($s.Entry -and $s.Entry.Id -eq $entry.Id -and $s.Bindings.Count -gt 0) { return }
+    if ($s.Entry) { Save-GuiCurrentValues }
+    $s.Entry = $entry
+    $s.Title.Text = $entry.Label
+    $s.Summary.Text = $entry.Summary
+    $fields = Get-GuiFields $entry
+    $s.CurrentFields = $fields
+    $table = $s.Fields
+    $table.SuspendLayout()
+    try {
+        foreach ($c in @($table.Controls)) { $c.Dispose() }
+        $table.Controls.Clear()
+        $table.RowStyles.Clear()
+        $table.RowCount = 0
+        $s.Bindings.Clear()
+        for ($i = $s.WrapLabels.Count - 1; $i -ge 1; $i--) { $s.WrapLabels.RemoveAt($i) }
+        $advancedHeader = $null
+        foreach ($f in $fields) {
+            if (-not $f.Main -and -not $advancedHeader) {
+                $advancedHeader = New-Object System.Windows.Forms.Label
+                $advancedHeader.Text = '詳細な設定（空欄・選ばないままなら、ツールの既定のとおり）'
+                $advancedHeader.AutoSize = $true
+                $advancedHeader.Font = New-Object System.Drawing.Font($s.Form.Font, [System.Drawing.FontStyle]::Bold)
+                $advancedHeader.Margin = New-Object System.Windows.Forms.Padding(3, 14, 3, 4)
+                $row = Add-GuiTableRow
+                $table.Controls.Add($advancedHeader, 0, $row)
+                $table.SetColumnSpan($advancedHeader, 2)
+                $s.AdvancedHeader = $advancedHeader
+            }
+            $s.Bindings.Add(@(New-GuiFieldControl $f)[-1])
+        }
+        if (-not $advancedHeader) { $s.AdvancedHeader = $null }
+    }
+    finally { $table.ResumeLayout() }
+
+    # 入力: 保存した前の入力 → 既定 → 「送る」から渡されたパス（最初に実行するまで、どの処理を選んでも入れる）
+    $saved = $s.Settings.Tools[$entry.Id]
+    foreach ($b in $s.Bindings) {
+        $v = $null
+        if ($saved -and $saved.ContainsKey($b.Field.Name)) { $v = $saved[$b.Field.Name] }
+        elseif ($null -ne $b.Field.Default) { $v = $b.Field.Default }
+        if ($null -ne $v) { Set-GuiControlValue $b $v }
+    }
+    if ($s.InitialPaths.Count -gt 0) {
+        $target = @($s.Bindings | Where-Object { $_.Field.Main -and @('File', 'Folder', 'Path') -contains $_.Field.Kind })[0]
+        if ($target) { Set-GuiControlValue $target $s.InitialPaths }
+    }
+    $s.WhatIf.Visible = $entry.WhatIf
+    $s.WhatIf.Checked = $true
+    if ($entry.Console) { $s.RunButton.Text = 'PowerShell の画面で実行' } else { $s.RunButton.Text = '実行' }
+    $s.ResultPath = $null
+    $s.ResultDir = $null
+    $s.OpenButton.Enabled = $false
+    $s.FolderButton.Enabled = $false
+    $s.ResultLabel.Text = ''
+    Update-GuiAdvanced
+    Update-GuiWrap
+    Select-GuiTreeNode
+    $s.Settings.LastTool = $entry.Id
+}
+
+function Add-GuiTableRow {
+    $t = $script:Gui.Fields
+    $row = $t.RowCount
+    $t.RowCount = $row + 1
+    [void]$t.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+    return $row
+}
+
+function New-GuiFieldControl {
+    #     1 つの入力欄（名前・入力・説明）を作って表に足す。戻り値: Field・Input・Rows（表示を切り替えるもの）
+    param($Field)
+    $s = $script:Gui
+    $table = $s.Fields
+    $rows = New-Object System.Collections.Generic.List[object]
+    $binding = [pscustomobject]@{ Field = $Field; Input = $null; Rows = $rows }
+    $row = Add-GuiTableRow
+
+    $name = New-Object System.Windows.Forms.Label
+    $name.AutoSize = $true
+    $name.MaximumSize = New-Object System.Drawing.Size(232, 0)
+    $name.Margin = New-Object System.Windows.Forms.Padding(3, 8, 3, 0)
+    $text = $Field.Label
+    if ($Field.Required) { $text += ' *' }
+    if ($Field.Kind -ne 'Switch') { $name.Text = $text }
+    $table.Controls.Add($name, 0, $row)
+    $rows.Add($name)
+    $s.ToolTip.SetToolTip($name, ('{0}（-{1}）' -f $Field.Help, $Field.Name))
+
+    $ctl = $null
+    $panel = $null
+    switch ($Field.Kind) {
+        'Switch' {
+            $ctl = New-GuiCheckBox $text $false
+            $panel = $ctl
+        }
+        'Choice' {
+            if ($Field.Multiple) {
+                $ctl = New-Object System.Windows.Forms.CheckedListBox
+                $ctl.CheckOnClick = $true
+                foreach ($c in $Field.Choices) { [void]$ctl.Items.Add($c) }
+                $ctl.Height = [Math]::Min(140, ($Field.Choices.Count * ($s.Form.Font.Height + 3)) + 8)
+                $ctl.Width = 320
+                $ctl.IntegralHeight = $false
+            }
+            else {
+                $ctl = New-Object System.Windows.Forms.ComboBox
+                $ctl.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+                if (-not $Field.Required) { [void]$ctl.Items.Add('') }
+                foreach ($c in $Field.Choices) { [void]$ctl.Items.Add($c) }
+                $ctl.Width = 240
+                $ctl.SelectedIndex = 0
+            }
+            $panel = $ctl
+        }
+        'Date' {
+            $ctl = New-Object System.Windows.Forms.DateTimePicker
+            $ctl.Format = [System.Windows.Forms.DateTimePickerFormat]::Short
+            $ctl.ShowCheckBox = $true
+            $ctl.Checked = $false
+            $ctl.Width = 180
+            $panel = $ctl
+        }
+        'Number' {
+            $ctl = New-Object System.Windows.Forms.TextBox
+            $ctl.Width = 160
+            $panel = $ctl
+        }
+        default {
+            $pathKind = @('File', 'Folder', 'Path', 'SaveFile', 'SaveFolder') -contains $Field.Kind
+            $buttons = @()
+            if ($Field.Kind -eq 'File') { $buttons = @('ファイルを選ぶ…') }
+            elseif ($Field.Kind -eq 'Folder') { $buttons = @('フォルダを選ぶ…') }
+            elseif ($Field.Kind -eq 'Path') { $buttons = @('ファイル…', 'フォルダ…') }
+            elseif ($Field.Kind -eq 'SaveFile') { $buttons = @('保存先…') }
+            elseif ($Field.Kind -eq 'SaveFolder') { $buttons = @('フォルダを選ぶ…') }
+            $multiPath = $Field.Multiple -and @('File', 'Folder', 'Path') -contains $Field.Kind
+            if ($multiPath) {
+                $ctl = New-Object System.Windows.Forms.ListBox
+                $ctl.Height = 68
+                $ctl.IntegralHeight = $false
+                $ctl.HorizontalScrollbar = $true
+                $ctl.SelectionMode = [System.Windows.Forms.SelectionMode]::MultiExtended
+                $ctl.Dock = [System.Windows.Forms.DockStyle]::Fill
+                $buttons += '外す'
+                $ctl.Add_KeyDown({ Invoke-GuiListKey $this $_ })
+            }
+            else {
+                $ctl = New-Object System.Windows.Forms.TextBox
+                $ctl.Dock = [System.Windows.Forms.DockStyle]::Fill
+            }
+            $panel = New-Object System.Windows.Forms.TableLayoutPanel
+            $panel.Dock = [System.Windows.Forms.DockStyle]::Fill
+            $panel.AutoSize = $true
+            $panel.Margin = New-Object System.Windows.Forms.Padding(0)
+            $panel.ColumnCount = 2
+            $panel.RowCount = 1
+            [void]$panel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+            [void]$panel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+            $panel.Controls.Add($ctl, 0, 0)
+            if ($buttons.Count -gt 0) {
+                $flow = New-Object System.Windows.Forms.FlowLayoutPanel
+                $flow.AutoSize = $true
+                $flow.WrapContents = $false
+                $flow.Margin = New-Object System.Windows.Forms.Padding(0)
+                if ($multiPath) { $flow.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown }
+                foreach ($bt in $buttons) {
+                    $btn = New-GuiButton $bt
+                    $btn.Tag = $binding
+                    $btn.Margin = New-Object System.Windows.Forms.Padding(2, 1, 0, 1)
+                    $btn.Add_Click({ $b = $this.Tag; $t = $this.Text; Invoke-GuiSafe { Invoke-GuiBrowse $b $t } })
+                    $flow.Controls.Add($btn)
+                }
+                $panel.Controls.Add($flow, 1, 0)
+            }
+            if ($pathKind -and $s.CanDrop) { Enable-GuiDrop $ctl $binding }
+        }
+    }
+    $ctl.Tag = $binding
+    $binding.Input = $ctl
+    if ($panel -eq $ctl) { $ctl.Anchor = [System.Windows.Forms.AnchorStyles]::Left }
+    $ctl.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 0)
+    $table.Controls.Add($panel, 1, $row)
+    $rows.Add($panel)
+    $s.ToolTip.SetToolTip($ctl, $Field.Help)
+
+    # 説明（ヘルプ）。結果の欄は、空欄のときの保存先も書く
+    $helpText = $Field.Help -replace '\s*\r?\n\s*', ' '
+    if ($s.Entry.Output -contains $Field.Name) { $helpText = '空欄なら「ドキュメント\Excel ツールの結果」に保存します。' + $helpText }
+    if ($helpText.Length -gt 220) { $helpText = $helpText.Substring(0, 219) + '…' }
+    $hrow = Add-GuiTableRow
+    $help = New-Object System.Windows.Forms.Label
+    $help.Text = $helpText
+    $help.AutoSize = $true
+    $help.ForeColor = [System.Drawing.SystemColors]::GrayText
+    $help.Margin = New-Object System.Windows.Forms.Padding(3, 1, 3, 6)
+    $table.Controls.Add($help, 1, $hrow)
+    $rows.Add($help)
+    $s.WrapLabels.Add($help)
+    return $binding
+}
+
+function Get-GuiControlValue {
+    param($Binding)
+    $f = $Binding.Field
+    $c = $Binding.Input
+    switch ($f.Kind) {
+        'Switch' { return [bool]$c.Checked }
+        'Date' { if ($c.Checked) { return $c.Value.Date } else { return $null } }
+        'Choice' {
+            if ($f.Multiple) { return [string[]]@($c.CheckedItems | ForEach-Object { [string]$_ }) }
+            return [string]$c.SelectedItem
+        }
+        default {
+            if ($c -is [System.Windows.Forms.ListBox]) { return [string[]]@($c.Items | ForEach-Object { [string]$_ }) }
+            return $c.Text
+        }
+    }
+}
+
+function Set-GuiControlValue {
+    param($Binding, $Value)
+    $f = $Binding.Field
+    $c = $Binding.Input
+    switch ($f.Kind) {
+        'Switch' { $c.Checked = [bool]$Value }
+        'Date' {
+            $d = [datetime]::MinValue
+            if ($Value -is [datetime]) { $c.Value = $Value; $c.Checked = $true }
+            elseif ($Value -and [datetime]::TryParse([string]$Value, [ref]$d)) { $c.Value = $d; $c.Checked = $true }
+            else { $c.Checked = $false }
+        }
+        'Choice' {
+            if ($f.Multiple) {
+                $want = @($Value | ForEach-Object { [string]$_ })
+                for ($i = 0; $i -lt $c.Items.Count; $i++) { $c.SetItemChecked($i, ($want -contains [string]$c.Items[$i])) }
+            }
+            else {
+                $i = $c.Items.IndexOf([string]$Value)
+                if ($i -ge 0) { $c.SelectedIndex = $i }
+            }
+        }
+        default {
+            if ($c -is [System.Windows.Forms.ListBox]) {
+                $c.Items.Clear()
+                foreach ($v in @($Value)) { if ($v -and -not $c.Items.Contains([string]$v)) { [void]$c.Items.Add([string]$v) } }
+            }
+            elseif ($Value -is [array]) { $c.Text = (@($Value | ForEach-Object { [string]$_ })) -join ', ' }
+            else { $c.Text = [string]$Value }
+        }
+    }
+}
+
+function Set-GuiValue {
+    #     入力欄に値を入れる（テスト用。引数の名前で指定）
+    param([string] $Name, $Value)
+    $b = @($script:Gui.Bindings | Where-Object { $_.Field.Name -eq $Name })[0]
+    if (-not $b) { throw "入力欄がありません: $Name" }
+    Set-GuiControlValue $b $Value
+}
+
+function Get-GuiValues {
+    $values = @{}
+    foreach ($b in $script:Gui.Bindings) { $values[$b.Field.Name] = Get-GuiControlValue $b }
+    return $values
+}
+
+function Update-GuiAdvanced {
+    $s = $script:Gui
+    $show = $s.ShowAdvanced.Checked
+    $s.Fields.SuspendLayout()
+    try {
+        foreach ($b in $s.Bindings) { if (-not $b.Field.Main) { foreach ($c in $b.Rows) { $c.Visible = $show } } }
+        if ($s.AdvancedHeader) { $s.AdvancedHeader.Visible = $show }
+    }
+    finally { $s.Fields.ResumeLayout() }
+    $s.Settings.ShowAdvanced = $show
+}
+
+function Update-GuiWrap {
+    #     説明の文を、右側の幅で折り返す
+    $s = $script:Gui
+    $w = [Math]::Max(200, $s.FieldsHost.ClientSize.Width - 290)
+    foreach ($l in $s.WrapLabels) {
+        if ($l -eq $s.Summary) { $l.MaximumSize = New-Object System.Drawing.Size(([Math]::Max(300, $s.FieldsHost.ClientSize.Width - 10)), 0) }
+        else { $l.MaximumSize = New-Object System.Drawing.Size($w, 0) }
+    }
+}
+
+function Enable-GuiDrop {
+    #     ファイル・フォルダのドラッグ＆ドロップを受ける。Binding が無ければ、空いているパスの欄に入れる
+    param($Control, $Binding)
+    $Control.AllowDrop = $true
+    if ($Binding) { $Control.Tag = $Binding }
+    $Control.Add_DragEnter({ if ($_.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) { $_.Effect = [System.Windows.Forms.DragDropEffects]::Copy } })
+    $Control.Add_DragDrop({
+            $paths = @($_.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop))
+            $target = $null
+            if ($this.Tag -and $this.Tag.PSObject.Properties['Field']) { $target = $this.Tag }
+            Add-GuiPaths $paths $target
+        })
+}
+
+function Add-GuiPaths {
+    #     パスを入力欄に入れる（複数の欄は足す。欄を指定しなければ、最初の空いているパスの欄、無ければ最初のパスの欄）
+    param([string[]] $Paths, $Binding)
+    $s = $script:Gui
+    $Paths = @($Paths | Where-Object { $_ })
+    if ($Paths.Count -eq 0) { return }
+    if (-not $Binding) {
+        $candidates = @($s.Bindings | Where-Object { $_.Field.Main -and @('File', 'Folder', 'Path') -contains $_.Field.Kind })
+        $Binding = @($candidates | Where-Object { Test-GuiEmpty (Get-GuiControlValue $_) })[0]
+        if (-not $Binding) { $Binding = $candidates[0] }
+        if (-not $Binding) { return }
+    }
+    if ($Binding.Input -is [System.Windows.Forms.ListBox]) {
+        foreach ($p in $Paths) { if (-not $Binding.Input.Items.Contains($p)) { [void]$Binding.Input.Items.Add($p) } }
+    }
+    else { Set-GuiControlValue $Binding $Paths[0] }
+}
+
+function Invoke-GuiListKey {
+    #     パスの一覧で Delete キーは外す、Ctrl+V はエクスプローラーでコピーしたファイル（または 1 行 1 つのパスの文字）を入れる
+    param($List, $KeyArgs)
+    if ($KeyArgs.KeyCode -eq [System.Windows.Forms.Keys]::Delete) {
+        foreach ($item in @($List.SelectedItems)) { $List.Items.Remove($item) }
+    }
+    elseif ($KeyArgs.Control -and $KeyArgs.KeyCode -eq [System.Windows.Forms.Keys]::V) {
+        $paths = @()
+        if ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) { $paths = @([System.Windows.Forms.Clipboard]::GetFileDropList()) }
+        elseif ([System.Windows.Forms.Clipboard]::ContainsText()) { $paths = @([System.Windows.Forms.Clipboard]::GetText() -split '\r?\n' | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ }) }
+        Add-GuiPaths $paths $List.Tag
+    }
+}
+
+function Get-GuiFileFilter {
+    param($Field)
+    $help = $Field.Help
+    $all = 'すべてのファイル (*.*)|*.*'
+    if ($Field.Kind -eq 'SaveFile' -and $Field.Extension) { return ('{0} (*{1})|*{1}|{2}' -f $Field.Extension.TrimStart('.').ToUpperInvariant(), $Field.Extension, $all) }
+    $first = Get-GuiFirstSentence $help
+    if ($first -match 'CSV' -and $first -notmatch 'Excel|xlsx|ブック') { return ('CSV (*.csv)|*.csv|{0}' -f $all) }
+    if ($first -match 'Excel|xlsx|xlsm|ブック|テンプレート|雛形') { return ('Excel・CSV (*.xlsx;*.xlsm;*.xls;*.xlsb;*.csv)|*.xlsx;*.xlsm;*.xls;*.xlsb;*.csv|{0}' -f $all) }
+    return $all
+}
+
+function Invoke-GuiBrowse {
+    #     「ファイルを選ぶ」「フォルダを選ぶ」「保存先」「外す」のボタン
+    param($Binding, [string] $Action)
+    $s = $script:Gui
+    $f = $Binding.Field
+    $c = $Binding.Input
+    if ($Action -eq '外す') { foreach ($item in @($c.SelectedItems)) { $c.Items.Remove($item) }; return }
+    $current = @(Get-GuiControlValue $Binding | Where-Object { $_ })[0]
+    $startDir = $null
+    if ($current) {
+        if (Test-Path -LiteralPath $current -PathType Container) { $startDir = $current }
+        elseif (Test-Path -LiteralPath (Split-Path -Parent $current) -PathType Container) { $startDir = Split-Path -Parent $current }
+    }
+    $picked = @()
+    if ($Action -match 'フォルダ') {
+        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dlg.Description = $f.Label
+        $dlg.ShowNewFolderButton = $true
+        if ($startDir) { $dlg.SelectedPath = $startDir }
+        if ($dlg.ShowDialog($s.Form) -eq [System.Windows.Forms.DialogResult]::OK) { $picked = @($dlg.SelectedPath) }
+        $dlg.Dispose()
+    }
+    elseif ($Action -eq '保存先…') {
+        $dlg = New-Object System.Windows.Forms.SaveFileDialog
+        $dlg.Filter = Get-GuiFileFilter $f
+        $dlg.OverwritePrompt = $true
+        if ($startDir) { $dlg.InitialDirectory = $startDir } else { $dlg.InitialDirectory = Get-GuiResultDir }
+        if ($current) { $dlg.FileName = Split-Path -Leaf $current }
+        elseif ($s.Entry.OutputName) { $dlg.FileName = $s.Entry.OutputName + $f.Extension }
+        if ($dlg.ShowDialog($s.Form) -eq [System.Windows.Forms.DialogResult]::OK) { $picked = @($dlg.FileName) }
+        $dlg.Dispose()
+    }
+    else {
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg.Filter = Get-GuiFileFilter $f
+        $dlg.Multiselect = $f.Multiple
+        $dlg.CheckFileExists = $false
+        if ($startDir) { $dlg.InitialDirectory = $startDir }
+        if ($dlg.ShowDialog($s.Form) -eq [System.Windows.Forms.DialogResult]::OK) { $picked = @($dlg.FileNames) }
+        $dlg.Dispose()
+    }
+    if ($picked.Count -gt 0) { Add-GuiPaths $picked $Binding }
+}
+
+function Write-GuiLog {
+    #     記録の欄に 1 行足す（色は PowerShell の色の名前）
+    param([string] $Text, [string] $Color, [switch] $NoNewLine)
+    $box = $script:Gui.Log
+    $map = @{ Red = 'Firebrick'; DarkRed = 'DarkRed'; Yellow = 'DarkGoldenrod'; DarkYellow = 'DarkGoldenrod'; Green = 'ForestGreen'; DarkGreen = 'DarkGreen'; Cyan = 'Teal'; DarkCyan = 'Teal'; Gray = 'DimGray'; DarkGray = 'DimGray'; Blue = 'RoyalBlue'; Magenta = 'DarkMagenta' }
+    $box.SelectionStart = $box.TextLength
+    $box.SelectionLength = 0
+    if ($Color -and $map.ContainsKey($Color)) { $box.SelectionColor = [System.Drawing.Color]::FromName($map[$Color]) } else { $box.SelectionColor = $box.ForeColor }
+    if ($NoNewLine) { $box.AppendText($Text) } else { $box.AppendText($Text + "`n") }
+    $box.SelectionColor = $box.ForeColor
+    $box.ScrollToCaret()
+}
+
+function Show-GuiMessage {
+    #     メッセージの画面（Quiet のときは出さず、確認には QuietAnswer で答える）。戻り値: はい なら $true
+    param([string] $Text, [switch] $YesNo, [switch] $Warning)
+    $s = $script:Gui
+    if ($s.Quiet) { return $s.QuietAnswer }
+    $buttons = [System.Windows.Forms.MessageBoxButtons]::OK
+    if ($YesNo) { $buttons = [System.Windows.Forms.MessageBoxButtons]::YesNo }
+    $icon = [System.Windows.Forms.MessageBoxIcon]::Information
+    if ($Warning) { $icon = [System.Windows.Forms.MessageBoxIcon]::Warning }
+    $r = [System.Windows.Forms.MessageBox]::Show($s.Form, $Text, 'Excel ツール', $buttons, $icon)
+    return ($r -eq [System.Windows.Forms.DialogResult]::Yes -or $r -eq [System.Windows.Forms.DialogResult]::OK)
+}
+
+function Get-GuiRunArguments {
+    #     入力から引数を作る（空の結果の欄には既定の保存先を入れる）。誤りがあれば知らせて $null
+    param([switch] $NoDefaults)
+    $s = $script:Gui
+    $values = Get-GuiValues
+    if (-not $NoDefaults) {
+        $defaults = Get-GuiDefaultOutputs $s.Entry $s.CurrentFields $values
+        foreach ($k in $defaults.Keys) {
+            $values[$k] = $defaults[$k]
+            $b = @($s.Bindings | Where-Object { $_.Field.Name -eq $k })[0]
+            if ($b) { Set-GuiControlValue $b $defaults[$k] }
+        }
+    }
+    $built = ConvertTo-GuiArguments $s.Entry $s.CurrentFields $values
+    $s.LastErrors = $built.Errors
+    if ($built.Errors.Count -gt 0) {
+        [void](Show-GuiMessage (($built.Errors -join "`n")) -Warning)
+        return $null
+    }
+    return $built.Arguments
+}
+
+function Invoke-GuiRun {
+    #     「実行」: 入力を確かめ、確認してから、ツールを動かし始める
+    $s = $script:Gui
+    if ($s.Run -or -not $s.Entry) { return }
+    $entry = $s.Entry
+    $arguments = Get-GuiRunArguments
+    if ($null -eq $arguments) { return }
+    $whatIf = $entry.WhatIf -and $s.WhatIf.Checked
+    if ($whatIf) { $arguments['WhatIf'] = $true }
+    elseif ($entry.Confirm -and (-not $entry.ConfirmWhen -or $arguments.Contains($entry.ConfirmWhen))) {
+        if (-not (Show-GuiMessage $entry.Confirm -YesNo -Warning)) { Write-GuiLog '取りやめました。' 'Gray'; return }
+        foreach ($k in $entry.ConfirmArguments.Keys) { $arguments[$k] = $entry.ConfirmArguments[$k] }
+    }
+    Save-GuiCurrentValues
+    foreach ($name in $entry.Output) {
+        if ($arguments.Contains($name)) { $dir = Split-Path -Parent ([string]$arguments[$name]); if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null } }
+    }
+    $s.RunArguments = $arguments
+    $s.InitialPaths = @()
+    $s.ResultPath = $null
+    $s.ResultDir = $null
+    $s.OpenButton.Enabled = $false
+    $s.FolderButton.Enabled = $false
+    $s.ResultLabel.Text = ''
+    Write-GuiLog ''
+    $mode = ''
+    if ($whatIf) { $mode = '（試しに実行。ファイルは書き換えません）' }
+    Write-GuiLog ('■ {0}{1}　{2}' -f $entry.Label, $mode, (Get-Date).ToString('HH:mm:ss')) 'Blue'
+    Write-GuiLog (Format-GuiCommandLine $entry.ToolPath $arguments) 'Gray'
+    if ($entry.Console) {
+        $consoleScript = New-GuiConsoleScript $entry.ToolPath $arguments $entry.Label
+        $s.LastConsoleScript = $consoleScript
+        Write-GuiLog 'PowerShell の画面で実行しています。開いた画面の案内に沿って進めてください。' 'DarkYellow'
+        if (-not $s.Quiet) {
+            $exe = (Get-Process -Id $PID).Path
+            Start-Process -FilePath $exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $consoleScript))
+        }
+        Set-GuiResult $entry $arguments
+        return
+    }
+    $s.Run = Start-GuiToolRun $entry.ToolPath $arguments
+    Set-GuiRunning $true
+    $s.Timer.Start()
+}
+
+function Set-GuiRunning {
+    param([bool] $Running)
+    $s = $script:Gui
+    $s.RunButton.Enabled = -not $Running
+    $s.StopButton.Enabled = $Running
+    $s.Tree.Enabled = -not $Running
+    $s.Find.Enabled = -not $Running
+    $s.Fields.Enabled = -not $Running
+    if ($Running) {
+        $s.Progress.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+        $s.Progress.MarqueeAnimationSpeed = 30
+        $s.Status.Text = '実行しています…'
+        $s.Form.Cursor = [System.Windows.Forms.Cursors]::AppStarting
+    }
+    else {
+        $s.Progress.Style = [System.Windows.Forms.ProgressBarStyle]::Blocks
+        $s.Progress.Value = 0
+        $s.Form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+}
+
+function Update-GuiRun {
+    #     実行中のツールの出力を記録の欄に出す（タイマーから呼ぶ）
+    $s = $script:Gui
+    if (-not $s.Run) { $s.Timer.Stop(); return }
+    try { $r = Receive-GuiToolRun $s.Run }
+    catch {
+        $s.Timer.Stop()
+        $s.Run = $null
+        Set-GuiRunning $false
+        Write-GuiLog ('エラー: ' + $_.Exception.Message) 'Red'
+        return
+    }
+    foreach ($m in $r.Messages) { Write-GuiLog $m.Text $m.Color -NoNewLine:$m.NoNewLine }
+    if ($r.Progress -and -not $r.Completed) {
+        if ($r.Progress.Percent -ge 0 -and -not $r.Progress.Completed) {
+            $s.Progress.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
+            $s.Progress.Value = [Math]::Max(0, [Math]::Min(100, $r.Progress.Percent))
+        }
+        $s.Status.Text = ('{0} {1}' -f $r.Progress.Activity, $r.Progress.Status).Trim()
+    }
+    if (-not $r.Completed) { return }
+    $s.Timer.Stop()
+    $s.Run = $null
+    $s.LastState = $r
+    Set-GuiRunning $false
+    if ($r.Summary -and $r.Summary.Count -gt 0 -and $r.Summary.Text) {
+        $more = ''
+        if ($r.Summary.Count -gt 200) { $more = '（最初の 200 件）' }
+        Write-GuiLog ('出力 {0} 件{1}:' -f $r.Summary.Count, $more) 'Gray'
+        Write-GuiLog $r.Summary.Text
+    }
+    if ($r.Succeeded) {
+        Write-GuiLog ('終わりました（{0:N1} 秒）' -f $r.Seconds) 'Green'
+        $s.Status.Text = '終わりました'
+        Set-GuiResult $s.Entry $s.RunArguments
+        if ($s.ResultPath -and $s.OpenResult.Checked -and -not $s.Quiet) { Open-GuiPath $s.ResultPath }
+    }
+    else {
+        Write-GuiLog $r.Error 'Red'
+        $s.Status.Text = $r.Error
+        if (-not $r.Stopped) { [void](Show-GuiMessage ('エラーで止まりました: ' + $r.Error) -Warning) }
+    }
+}
+
+function Set-GuiResult {
+    #     結果のファイル・フォルダ（ツールの一覧の Open の順に、あるもの）を「結果を開く」「保存先のフォルダを開く」にする
+    param($Entry, $Arguments)
+    $s = $script:Gui
+    foreach ($name in $Entry.Open) {
+        if (-not $Arguments.Contains($name)) { continue }
+        $p = [System.Management.Automation.WildcardPattern]::Unescape([string](@($Arguments[$name])[0]))
+        if (Test-Path -LiteralPath $p -PathType Leaf) { $s.ResultPath = $p; $s.ResultDir = Split-Path -Parent $p; break }
+        if (Test-Path -LiteralPath $p -PathType Container) { $s.ResultDir = $p; break }
+    }
+    $s.OpenButton.Enabled = [bool]$s.ResultPath
+    $s.FolderButton.Enabled = [bool]$s.ResultDir
+    if ($s.ResultPath) { $s.ResultLabel.Text = $s.ResultPath } elseif ($s.ResultDir) { $s.ResultLabel.Text = $s.ResultDir }
+}
+
+function Wait-GuiRun {
+    #     実行が終わるまで待つ（テスト用。タイマーの代わりに出力を受け取る）
+    param([int] $TimeoutSeconds = 600)
+    $s = $script:Gui
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ($s.Run) {
+        Update-GuiRun
+        [System.Windows.Forms.Application]::DoEvents()
+        if ((Get-Date) -gt $deadline) { Stop-GuiToolRun $s.Run; throw 'ツールが時間内に終わりませんでした' }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
+function Open-GuiPath {
+    param([string] $Path)
+    try { Invoke-Item -LiteralPath $Path } catch { [void](Show-GuiMessage ('開けませんでした: {0}' -f $_.Exception.Message) -Warning) }
+}
+
+function Save-GuiCurrentValues {
+    #     いまの処理の入力を、次に開いたときのために保存する
+    $s = $script:Gui
+    if (-not $s.Entry) { return }
+    $s.Settings.Tools[$s.Entry.Id] = Get-GuiValuesToSave $s.Entry $s.CurrentFields (Get-GuiValues)
+    $s.Settings.LastTool = $s.Entry.Id
+    $s.Settings.OpenResult = $s.OpenResult.Checked
+    $s.Settings.ShowAdvanced = $s.ShowAdvanced.Checked
+    try { Save-GuiSettings $s.Settings $s.SettingsPath } catch { }
+}
+
+function Copy-GuiCommand {
+    #     同じことをする PowerShell のコマンドをクリップボードに写す（結果の欄が空なら既定の保存先を入れる）
+    $s = $script:Gui
+    $arguments = Get-GuiRunArguments
+    if ($null -eq $arguments) { return }
+    $text = Format-GuiCommandLine $s.Entry.ToolPath $arguments
+    try { [System.Windows.Forms.Clipboard]::SetText($text); Write-GuiLog 'コマンドをクリップボードに写しました:' 'Gray' }
+    catch { Write-GuiLog 'クリップボードに写せませんでした。次のコマンドを写してください:' 'DarkYellow' }
+    Write-GuiLog $text
+}
+
+function Show-GuiToolHelp {
+    #     ツールの説明（Get-Help）を別の画面で見せる
+    $s = $script:Gui
+    $text = (Get-Help -Name $s.Entry.ToolPath -Full | Out-String -Width 120).Trim()
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'ツールの説明 - ' + $s.Entry.Label + '（' + $s.Entry.Tool + '）'
+    $f.Size = New-Object System.Drawing.Size(900, 700)
+    $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Multiline = $true
+    $box.ReadOnly = $true
+    $box.ScrollBars = [System.Windows.Forms.ScrollBars]::Both
+    $box.WordWrap = $false
+    $box.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $box.Font = New-Object System.Drawing.Font([System.Drawing.FontFamily]::GenericMonospace, $s.Form.Font.Size)
+    $box.Text = $text -replace '\r?\n', "`r`n"
+    $f.Controls.Add($box)
+    if ($s.Quiet) { $f.Dispose(); return $text }
+    [void]$f.ShowDialog($s.Form)
+    $f.Dispose()
+}
+
+function Close-GuiWindow {
+    #     閉じるとき: 実行中なら確かめて止め、入力を保存する
+    param($ClosingArgs)
+    $s = $script:Gui
+    if ($s.Run) {
+        if (-not (Show-GuiMessage '実行中です。中止して閉じますか？' -YesNo -Warning)) { $ClosingArgs.Cancel = $true; return }
+        Stop-GuiToolRun $s.Run
+    }
+    $s.Timer.Stop()
+    Save-GuiCurrentValues
+}
+
+Export-ModuleMember -Function *
