@@ -91,6 +91,8 @@
   table.grid tr.skip td { background: #f6f7f9; color: var(--muted); padding: 2px 0; overflow: visible; }
   table.grid tr.skip td span { display: inline-block; position: sticky; left: 56px; padding: 0 8px; }
   table.grid td.focus { outline: 3px solid var(--focus); outline-offset: -2px; animation: blink 1.2s ease-out 2; }
+  table.grid td.found { outline: 2px solid #1a73e8; outline-offset: -2px; box-shadow: inset 0 0 0 100px rgba(26, 115, 232, .12); }
+  #find { font: inherit; width: 14em; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; }
   @keyframes blink { 50% { outline-color: transparent; } }
   .banner { padding: 6px 10px; background: #fff3cd; border-bottom: 1px solid var(--line); }
   .list { max-height: 34vh; overflow: auto; background: var(--panel); border-top: 2px solid var(--line); }
@@ -148,6 +150,7 @@
         <button id="nextOpen" title="まだ確認していない次の差分へ。シート・ファイルをまたいで探します（u）">▼ 未確認</button>
         <span id="pos" class="muted"></span>
       </div>
+      <div class="group"><input type="search" id="find" placeholder="文字を探す（/）" title="新のシート（と、削除・変更した旧の文字）から、すべてのファイル・シートをまたいで探します。Enter で次、Shift+Enter で前"><span id="findPos" class="muted"></span></div>
       <div class="group" id="review"><span id="progress" class="muted"></span><label title="確認（OK・指摘）を付けた差分を、下の一覧に出さない"><input type="checkbox" id="onlyOpen">未確認だけ</label><button id="saveCsv" title="「指摘」にした差分を、指摘管理表の形の CSV に保存します（Measure-ReviewQuality.ps1 でそのまま集計できます）">指摘を CSV に保存</button><button id="saveNotes" title="確認・指摘の記録をファイルに書き出します。ほかのレビュアーに渡したり、別の PC で続けたりできます">記録を書き出す</button><button id="loadNotes" title="書き出した記録を読み込み、この画面の記録とまとめます（指摘は OK より優先し、指摘の内容はつなげます）">記録を読み込む</button><input type="file" id="notesFile" accept=".json,application/json" hidden></div>
       <div class="group"><label title="差分のある行と、その前後 2 行だけを表示（大きなシートで便利）"><input type="checkbox" id="compact">変わった行だけ</label><label title="図形・画像・グラフをシートの上に重ねて表示"><input type="checkbox" id="showShapes" checked>図形を重ねる</label></div>
       <div class="group" id="kinds"></div>
@@ -345,6 +348,7 @@ var DATA = /*DIFF_DATA*/null;
     if (e.key === 'k' || e.key === 'p') go(-1);
     // o: 見ている差分を OK にして次へ
     if (e.key === 'u') goOpen();
+    if (e.key === '/') { e.preventDefault(); $('find').focus(); $('find').select(); }
     if (e.key === 'O' && state.items[state.index]) { applySame(state.items[state.index]); if (!state.items[state.index].same) setNote(state.items[state.index], { st: 'ok' }); goOpen(); }
     if (e.key === 'o' && state.items[state.index]) { setNote(state.items[state.index], { st: 'ok' }); var sel = document.querySelector('#list tr.item[data-i="' + state.index + '"] select'); if (sel) sel.value = 'ok'; go(1); }
   });
@@ -776,6 +780,56 @@ var DATA = /*DIFF_DATA*/null;
     state.index = state.index < 0 ? (step > 0 ? 0 : state.items.length - 1) : (state.index + step + state.items.length) % state.items.length;
     focusItem();
   }
+
+  // 文字を探す: 新のシートのセルと、削除・変更した旧の文字（旧にしか無いシートは旧のセル）。ファイル・シートの順、行・列の順
+  var find = { q: '', hits: [], at: -1 };
+  function findAll(q) {
+    var hits = [], ql = q.toLowerCase(), has = function (t) { return t != null && String(t).toLowerCase().indexOf(ql) >= 0; };
+    var byPos = function (side, list) {
+      return list.map(function (k) { var x = k.split(','); return { side: side, key: k, r: +x[0], c: +x[1] }; })
+        .sort(function (a, b) { return a.r - b.r || a.c - b.c; });
+    };
+    DATA.files.forEach(function (f, fi) {
+      f.sheets.forEach(function (s, si) {
+        var found = [];
+        if (s['new']) found = byPos('new', Object.keys(s['new'].c).filter(function (k) { return has(s['new'].c[k]); }));
+        else if (s.oldSheet) found = byPos('old', Object.keys(s.oldSheet.c).filter(function (k) { return has(s.oldSheet.c[k]); }));
+        if (s['new'] && s.oldSheet) {
+          var seen = {};
+          sheetDiffs(f, s).forEach(function (d) {
+            var p = parseCell(d.oc);
+            if (!p || !has(d.a) || has(d.b)) return;
+            var k = p.r + ',' + p.c;
+            if (s.oldSheet.c[k] != null && !seen[k]) { seen[k] = true; found.push({ side: 'old', key: k, r: p.r, c: p.c }); }
+          });
+        }
+        found.forEach(function (h) { h.fi = fi; h.si = si; hits.push(h); });
+      });
+    });
+    return hits;
+  }
+  function findStep(step) {
+    var q = $('find').value.trim();
+    if (!q) { find.q = ''; find.hits = []; $('findPos').textContent = ''; return; }
+    if (q !== find.q) { find.q = q; find.hits = findAll(q); find.at = step > 0 ? -1 : 0; }
+    if (!find.hits.length) { $('findPos').textContent = '見つかりません'; each(document.querySelectorAll('td.found'), function (x) { x.classList.remove('found'); }); return; }
+    find.at = (find.at + step + find.hits.length) % find.hits.length;
+    var h = find.hits[find.at];
+    if (state.file !== h.fi || state.sheet !== h.si) select(h.fi, h.si);
+    if (state.mode !== 'both' && state.mode !== h.side) { setMode('both'); show(); }
+    var el = document.getElementById(h.side + '-' + h.key);
+    // 「変わった行だけ」で隠れている行なら、すべての行を表示する
+    if (!el && state.compact) { state.compact = false; $('compact').checked = false; show(); el = document.getElementById(h.side + '-' + h.key); }
+    each(document.querySelectorAll('td.found'), function (x) { x.classList.remove('found'); });
+    var where = DATA.files[h.fi].name + ' ' + (h.side === 'old' ? '旧 ' : '') + colName(h.c) + h.r;
+    if (el) { el.classList.add('found'); el.scrollIntoView({ block: 'center', inline: 'center' }); }
+    $('findPos').textContent = (find.at + 1) + ' / ' + find.hits.length + ' 件' + (el ? '' : '（' + where + ' は表示していない範囲です）');
+  }
+  $('find').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); findStep(e.shiftKey ? -1 : 1); }
+    if (e.key === 'Escape') { $('find').blur(); }
+  });
+  $('find').addEventListener('input', function () { if (!$('find').value.trim()) { find.q = ''; find.hits = []; $('findPos').textContent = ''; each(document.querySelectorAll('td.found'), function (x) { x.classList.remove('found'); }); } });
 
   // まだ確認していない次の差分へ（今のシートの続き → 次のシート・ファイル → 先頭から今の差分の前まで）。絞り込みで隠した差分は飛ばす
   function goOpen() {

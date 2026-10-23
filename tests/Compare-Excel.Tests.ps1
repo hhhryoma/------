@@ -608,6 +608,7 @@ Test-Case 'Compare-Excel: 表記だけの変更と、版数・更新日・改訂
     $data = [regex]::Match($html, 'var DATA = (\{.*?\});\r?\n').Groups[1].Value | ConvertFrom-Json
     Assert-Equal @('版情報', '版情報', '', '', '', '表記', '版情報') @($data.files[0].diffs | ForEach-Object { [string]$_.t }) 'HTML の差分にも分類（t）'
     Assert-True ($html.Contains('id="nextOpen"') -and $html.Contains('id="onlyOpen"')) '未確認の差分へ移る・未確認だけを出す'
+    Assert-True ($html.Contains('id="find"')) 'ファイル・シートをまたいで文字を探す'
 
     # -Ignore で外す。改訂履歴の突き合わせには、外した改訂履歴の変更も使う
     $text = Get-HostText { $script:d = @(& $CompareExcel $b.Old $b.New -Ignore 表記, 版情報 -CheckHistory) }
