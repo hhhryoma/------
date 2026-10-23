@@ -1,7 +1,7 @@
 ﻿[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Weekly', 'Actions', 'Pdf')]
+    [ValidateSet('List', 'Gui', 'Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Weekly', 'Actions', 'Pdf')]
     [string] $Action,
 
     # 「送る」は選んだファイルを引数の最後に並べるため、名前の無い引数はすべてここに入れる（PositionalBinding = $false）
@@ -22,6 +22,7 @@ $ErrorActionPreference = 'Stop'
 #     「送る」メニューの項目。Label はショートカットの名前（Install-SendTo.ps1 が使う）、File は結果のファイル名。
 #     Literal はツールが -Path をワイルドカードとして扱わない（そのまま渡す）もの
 $actions = [ordered]@{
+    Gui         = @{ Label = 'ツールの画面で開く'; Tool = 'Start-ExcelTools.ps1'; Literal = $true; Detail = '選んだファイル・フォルダを入れた状態で、ツールの画面を開きます（やりたいことは画面で選びます）' }
     Check       = @{ Label = '提出前チェック'; File = '提出前チェック'; Tool = 'Test-ExcelDeliverable.ps1'; Detail = '体裁・消し忘れ・情報漏れ・印刷のはみ出し（Word は変更履歴・コメント・隠し文字の残り）などを確かめ、結果の Excel を開きます' }
     ResetView   = @{ Label = '表示を整える'; Tool = 'Reset-ExcelView.ps1'; Detail = '開いたときに先頭シートの A1 が倍率 100% で表示される状態に直します（上書きします）' }
     Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック・Word 文書（またはフォルダ）を比べ、差分をシートの方眼のまま色付けした画面（ブラウザー）を開きます（一覧の Excel も保存）。版数（ファイル名）か更新日時の古い方を旧にします。3 つ以上か、版数の付いたファイルを置いたフォルダを 1 つ選ぶと、版を続けて比べます' }
@@ -93,6 +94,17 @@ try {
     if ($targets.Count -eq 0) { throw 'ファイルまたはフォルダを選んで、右クリックの「送る」から実行してください' }
     foreach ($t in $targets) { if (-not (Test-Path -LiteralPath $t)) { throw "見つかりません: $t" } }
     $targets = @($targets | ForEach-Object { (Resolve-Path -LiteralPath $_).ProviderPath })
+
+    if ($Action -eq 'Gui') {
+        # 画面は別の PowerShell で開き、この画面はすぐに閉じる（ドラッグ＆ドロップのため STA で）
+        $NoPause = [switch]$true
+        $guiArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', ('"{0}"' -f (Join-Path $PSScriptRoot $def.Tool)))
+        # 引数の最後が \" だと引用符の終わりと解釈されないため、末尾の区切りは外す（ドライブの直下は画面の側で直す）
+        $guiArgs += @($targets | ForEach-Object { $t = $_.TrimEnd('\', '/'); if (-not $t) { $t = $_ }; '"{0}"' -f $t })
+        if ($NoOpen) { Write-Host ('画面を開くコマンド: ' + ($guiArgs -join ' ')) }
+        else { Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $guiArgs -WindowStyle Hidden }
+        return
+    }
 
     Write-Host ('{0}（{1} 件）' -f $def.Label, $targets.Count)
     foreach ($t in $targets) { Write-Host "  $t" }
@@ -257,7 +269,7 @@ if ($failure) { throw $failure }
 #     使える処理は -Action List で確かめられます。
 #
 # .PARAMETER Action
-#     実行する処理。Check（提出前チェック）・ResetView（表示を整える）・Compare（差分）・SpVersion（SharePoint の版と比べる）・Search（検索）・
+#     実行する処理。Gui（ツールの画面で開く）・Check（提出前チェック）・ResetView（表示を整える）・Compare（差分）・SpVersion（SharePoint の版と比べる）・Search（検索）・
 #     Terms（表記ゆれ）・Consistency（設計書の整合性チェック）・TestDraft（テスト仕様書の下書き）・Size（規模の見積もり）・Estimate（見積書の検算）・
 #     Quality（品質評価。案件のフォルダの「品質評価の設定.csv」を読む）・Analysis（品質評価の定性分析の下書き）・
 #     Weekly（週次報告。案件のフォルダの「週次報告の設定.csv」を読む）・Actions（議事録の宿題）・Pdf（PDF にする）。

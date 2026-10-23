@@ -35,8 +35,16 @@ function New-VersionBook {
 
 Test-Case 'Invoke-SendTo: -Action List で「送る」に登録する処理の一覧を返す' {
     $list = @(& $SendTo -Action List)
-    Assert-Equal @('Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Weekly', 'Actions', 'Pdf') @($list | ForEach-Object { $_.Action })
+    Assert-Equal @('Gui', 'Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Weekly', 'Actions', 'Pdf') @($list | ForEach-Object { $_.Action })
     Assert-True (@($list | Where-Object { -not $_.Label -or -not $_.Detail }).Count -eq 0) '名前・説明のない処理'
+}
+
+Test-Case 'Invoke-SendTo: 「ツールの画面で開く」は、選んだファイル・フォルダを入れた画面を別の PowerShell で開き、すぐに閉じる' {
+    $dir = Join-Path (New-TestDir) '提出 物'
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $text = Get-HostText { & $SendTo -Action Gui -NoOpen ('"{0}"' -f $dir) | Out-Null }
+    Assert-Match $text ('-STA .*-File "{0}" "{1}"' -f [regex]::Escape((Join-Path $script:ToolsDir 'Start-ExcelTools.ps1')), [regex]::Escape($dir))
+    Assert-NotMatch $text 'Enter キー' '待たずに閉じる'
 }
 
 Test-Case 'Invoke-SendTo: 提出前チェックの結果を保存する（「送る」から届く引用符の残ったパスも読む）' {
@@ -167,7 +175,7 @@ Test-Case 'Install-SendTo: 「送る」にショートカットを作り、ほ�
     # -WhatIf では作らない（ショートカットを読み書きする型もここで読み込まれる）
     $results = @(& $InstallSendTo -SendToDir $linkDir -WhatIf 6>$null)
     Assert-Equal 0 @(Get-ChildItem -LiteralPath $linkDir -Filter '*.lnk').Count '-WhatIf で作った'
-    Assert-Equal 15 @($results | Where-Object Status -eq '作成予定').Count
+    Assert-Equal 16 @($results | Where-Object Status -eq '作成予定').Count
 
     # 同じ名前のほかのショートカット
     $notepad = Join-Path $env:SystemRoot 'notepad.exe'

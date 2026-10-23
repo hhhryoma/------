@@ -155,6 +155,12 @@ Test-Case 'Start-ExcelTools: 入力を保存して次に読む（結果の保存
     Assert-Equal '時間|True' ('{0}|{1}' -f $v['Unit'], $v['NoRecurse'])
     Assert-True (-not $v.ContainsKey('OutXlsx') -and -not $v.ContainsKey('AsOf')) '結果の保存先と日付は保存しない'
 
+    # 最近実行した処理（新しい順・同じものは 1 つ・5 つまで）
+    foreach ($id in @('Search', 'Check', 'Compare', 'Search', 'Terms', 'Size', 'Progress')) { Add-GuiRecent $back $id }
+    Assert-Equal @('Progress', 'Size', 'Terms', 'Search', 'Compare') $back.Recent
+    Save-GuiSettings $back $path
+    Assert-Equal @('Progress', 'Size', 'Terms', 'Search', 'Compare') (Read-GuiSettings $path).Recent
+
     $catalog = Get-GuiCatalog
     Assert-Equal @('Compare', 'SpVersion') @(Find-GuiTool $catalog '差分 画面' | ForEach-Object { $_.Id }) '空白で区切った言葉のすべてを含むもの'
     Assert-Equal @('Check') @(Find-GuiTool $catalog '提出前' | ForEach-Object { $_.Id })
@@ -183,6 +189,7 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Assert-Match $s.Log.Text '終わりました'
         Assert-Equal $out $s.ResultPath
         Assert-True $s.OpenButton.Enabled '結果を開く'
+        Assert-Equal '最近使ったもの|文字を探す（検索）' ('{0}|{1}' -f $s.Tree.Nodes[0].Text, $s.Tree.Nodes[0].Nodes[0].Text) '実行した処理は一覧の先頭の「最近使ったもの」に出る'
 
         # 入力の誤りは実行しない
         Select-GuiTool 'Compare'

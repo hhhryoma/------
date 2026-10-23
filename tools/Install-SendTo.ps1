@@ -43,86 +43,9 @@ else {
     $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 }
 
-# ショートカット（.lnk）の読み書き。WScript.Shell はファイル名を ANSI のコードページで扱うため、
-# 日本語の名前は日本語版以外の Windows で保存できない。Unicode の IShellLinkW を直接使う
-if (-not ('ExcelTools.ShellLink' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
-using System.Text;
-
-namespace ExcelTools {
-    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface IShellLinkW {
-        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile, int cch, IntPtr pfd, uint fFlags);
-        void GetIDList(out IntPtr ppidl);
-        void SetIDList(IntPtr pidl);
-        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszName, int cch);
-        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
-        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszDir, int cch);
-        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
-        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszArgs, int cch);
-        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
-        void GetHotkey(out short pwHotkey);
-        void SetHotkey(short wHotkey);
-        void GetShowCmd(out int piShowCmd);
-        void SetShowCmd(int iShowCmd);
-        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszIconPath, int cch, out int piIcon);
-        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
-        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, uint dwReserved);
-        void Resolve(IntPtr hwnd, uint fFlags);
-        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
-    }
-
-    [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
-    class CShellLink { }
-
-    public class ShellLinkInfo {
-        public string TargetPath;
-        public string Arguments;
-        public string WorkingDirectory;
-        public string Description;
-    }
-
-    public static class ShellLink {
-        public static void Save(string path, string targetPath, string arguments, string workingDirectory, string description) {
-            IShellLinkW link = (IShellLinkW)new CShellLink();
-            try {
-                link.SetPath(targetPath);
-                link.SetArguments(arguments);
-                link.SetWorkingDirectory(workingDirectory);
-                link.SetDescription(description);
-                ((IPersistFile)link).Save(path, true);
-            }
-            finally { Marshal.FinalReleaseComObject(link); }
-        }
-
-        public static ShellLinkInfo Read(string path) {
-            IShellLinkW link = (IShellLinkW)new CShellLink();
-            try {
-                ((IPersistFile)link).Load(path, 0);
-                ShellLinkInfo info = new ShellLinkInfo();
-                StringBuilder sb = new StringBuilder(32768);
-                link.GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
-                info.TargetPath = sb.ToString();
-                sb.Length = 0;
-                link.GetArguments(sb, sb.Capacity);
-                info.Arguments = sb.ToString();
-                sb.Length = 0;
-                link.GetWorkingDirectory(sb, sb.Capacity);
-                info.WorkingDirectory = sb.ToString();
-                sb.Length = 0;
-                link.GetDescription(sb, sb.Capacity);
-                info.Description = sb.ToString();
-                return info;
-            }
-            finally { Marshal.FinalReleaseComObject(link); }
-        }
-    }
-}
-'@
-}
+# ショートカット（.lnk）の読み書き（ExcelTools.psm1 の Add-ShellLinkType）
+Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
+Add-ShellLinkType
 
 $results = New-Object System.Collections.Generic.List[object]
 
@@ -187,7 +110,7 @@ else { Write-Host ('{0}: {1}' -f $SendToDir, (($results | Group-Object Status | 
 #     同じ名前のほかのショートカットは置き換えません（-Force で置き換えます）。
 #
 # .PARAMETER Action
-#     登録する処理（既定はすべて）。Check・ResetView・Compare・SpVersion・Search・Terms・Consistency・TestDraft・Size・Estimate・Quality・Analysis・Weekly・Actions・Pdf。
+#     登録する処理（既定はすべて）。Gui・Check・ResetView・Compare・SpVersion・Search・Terms・Consistency・TestDraft・Size・Estimate・Quality・Analysis・Weekly・Actions・Pdf。
 #     一覧は .\Invoke-SendTo.ps1 -Action List で確かめられます。
 #
 # .PARAMETER SendToDir

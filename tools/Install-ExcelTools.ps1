@@ -12,6 +12,10 @@ param(
 
     [switch] $NoSendTo,
 
+    [string] $ShortcutDir,
+
+    [switch] $Desktop,
+
     [switch] $Update,
 
     [switch] $CheckOnly,
@@ -74,7 +78,7 @@ function Save-InstallInfo {
     param([string] $From, [string] $Fingerprint, [datetime] $Checked)
     $info = [ordered]@{
         Source = $From; Fingerprint = $Fingerprint; Installed = (Get-Date).ToString('yyyy/MM/dd HH:mm:ss'); LastCheck = $Checked.ToString('yyyy-MM-ddTHH:mm:ss')
-        Action = @($Action); OutDir = $OutDir; SendToDir = $SendToDir; NoSendTo = [bool]$NoSendTo
+        Action = @($Action); OutDir = $OutDir; SendToDir = $SendToDir; NoSendTo = [bool]$NoSendTo; ShortcutDir = $ShortcutDir; Desktop = [bool]$Desktop
     }
     [System.IO.File]::WriteAllText($infoPath, ($info | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
 }
@@ -120,6 +124,43 @@ function Register-SendTo {
     $null = & (Join-Path $toolsDir 'Install-SendTo.ps1') @sendArgs 6>$null
 }
 
+function Get-LauncherDirs {
+    #     画面（Start-ExcelTools.ps1）のショートカットを置くフォルダ（既定はスタートメニュー。-Desktop ならデスクトップにも）
+    $dirs = @()
+    if ($ShortcutDir) { $dirs += $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ShortcutDir) }
+    else { $dirs += [Environment]::GetFolderPath('Programs') }
+    if ($Desktop) { $dirs += [Environment]::GetFolderPath('Desktop') }
+    return @($dirs | Where-Object { $_ })
+}
+
+function Register-Launcher {
+    #     スタートメニュー（とデスクトップ）に、画面を開くショートカット「Excel ツール」を作る
+    if ($NoSendTo -or -not $isWin) { return }
+    $gui = Join-Path $toolsDir 'Start-ExcelTools.ps1'
+    if (-not (Test-Path -LiteralPath $gui)) { return }
+    Import-Module (Join-Path $toolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    Add-ShellLinkType
+    $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    foreach ($dir in Get-LauncherDirs) {
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        $linkArgs = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}"' -f $gui
+        [ExcelTools.ShellLink]::Save((Join-Path $dir 'Excel ツール.lnk'), $exe, $linkArgs, $toolsDir, 'Excel ツールの画面を開きます（やりたいことを選んで、ファイルを入れて実行）')
+    }
+}
+
+function Unregister-Launcher {
+    #     画面のショートカットを消す（このツールのものだけ）
+    if (-not $isWin) { return }
+    Import-Module (Join-Path $toolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    Add-ShellLinkType
+    foreach ($dir in Get-LauncherDirs) {
+        $link = Join-Path $dir 'Excel ツール.lnk'
+        if (-not (Test-Path -LiteralPath $link)) { continue }
+        try { $info = [ExcelTools.ShellLink]::Read($link) } catch { continue }
+        if ($info.Arguments -match 'Start-ExcelTools\.ps1') { Remove-Item -LiteralPath $link -Force }
+    }
+}
+
 # ---------------------------------------------------------------- 入れたときの指定
 
 
@@ -130,6 +171,8 @@ if ($info) {
     if (-not $PSBoundParameters.ContainsKey('OutDir') -and $info.OutDir) { $OutDir = $info.OutDir }
     if (-not $PSBoundParameters.ContainsKey('SendToDir') -and $info.SendToDir) { $SendToDir = $info.SendToDir }
     if (-not $PSBoundParameters.ContainsKey('NoSendTo') -and $info.NoSendTo) { $NoSendTo = [switch]$true }
+    if (-not $PSBoundParameters.ContainsKey('ShortcutDir') -and $info.ShortcutDir) { $ShortcutDir = $info.ShortcutDir }
+    if (-not $PSBoundParameters.ContainsKey('Desktop') -and $info.Desktop) { $Desktop = [switch]$true }
 }
 
 # ---------------------------------------------------------------- 削除
@@ -142,8 +185,9 @@ if ($Uninstall) {
         if ($SendToDir) { $sendArgs['SendToDir'] = $SendToDir }
         $null = & (Join-Path $toolsDir 'Install-SendTo.ps1') @sendArgs 6>$null
     }
+    if (-not $NoSendTo -and (Test-Path -LiteralPath (Join-Path $toolsDir 'ExcelTools.psm1'))) { Unregister-Launcher }
     Remove-Item -LiteralPath $InstallDir -Recurse -Force
-    Write-Host "Excel ツールを削除しました（「送る」の項目も消しました）: $InstallDir"
+    Write-Host "Excel ツールを削除しました（「送る」の項目とスタートメニューの「Excel ツール」も消しました）: $InstallDir"
     [pscustomobject]@{ Result = '削除'; InstallDir = $InstallDir; Source = $null; Copied = 0; Removed = 0 }
     return
 }
@@ -179,6 +223,7 @@ if ($Update -or $CheckOnly) {
     $r = Sync-ToolsFolder $Source $toolsDir
     Save-InstallInfo $Source $fp (Get-Date)
     Register-SendTo
+    Register-Launcher
     Write-Host ("Excel ツールを新しい版に更新しました（{0} ファイル。削除 {1}）: {2}" -f $r.Copied, $r.Removed, $Source)
     [pscustomobject]@{ Result = '更新'; InstallDir = $InstallDir; Source = $Source; Copied = $r.Copied; Removed = $r.Removed }
     return
@@ -200,10 +245,14 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $r = Sync-ToolsFolder $Source $toolsDir
 Save-InstallInfo $Source (Get-ToolsFingerprint $Source) (Get-Date)
 Register-SendTo
+Register-Launcher
 $result = '入れた'
 if ($info) { $result = '入れ直した' }
 Write-Host ("Excel ツールを{0}: {1}（{2} ファイル中 {3} ファイルを写しました）" -f @{ '入れた' = '入れました'; '入れ直した' = '入れ直しました' }[$result], $toolsDir, $r.Total, $r.Copied)
-if (-not $NoSendTo -and $isWin) { Write-Host 'エクスプローラーでファイルを右クリック →「送る」→「Excel …」から使えます。' }
+if (-not $NoSendTo -and $isWin) {
+    Write-Host 'スタートメニューの「Excel ツール」から、ツールの画面を開けます（やりたいことを選んで、ファイルを入れて実行）。'
+    Write-Host 'エクスプローラーでファイルを右クリック →「送る」→「Excel …」からも使えます。'
+}
 Write-Host ("配布元: {0}（ここが更新されると、「送る」で使ったあとに自動で新しい版にします）" -f $Source)
 [pscustomobject]@{ Result = $result; InstallDir = $InstallDir; Source = $Source; Copied = $r.Copied; Removed = $r.Removed }
 
@@ -215,8 +264,9 @@ Write-Host ("配布元: {0}（ここが更新されると、「送る」で使�
 #
 #       ・配布元の tools フォルダを、この PC の「%LOCALAPPDATA%\ExcelTools\tools」に写し、右クリックの「送る」に各ツールを登録します
 #         （共有フォルダから直接動かすより速く、ネットワークが切れても使えます）
+#       ・スタートメニューに、ツールの画面（Start-ExcelTools.ps1）を開く「Excel ツール」を作ります（-Desktop でデスクトップにも）
 #       ・配布元が更新されると、「送る」でツールを使ったあとに自動で新しい版を写します（確認は 12 時間に 1 回まで。次の実行から新しい版になります）
-#       ・もう一度実行すると、すぐに入れ直します。-Uninstall で「送る」の項目とこの PC の写しを消します
+#       ・もう一度実行すると、すぐに入れ直します。-Uninstall で「送る」の項目・スタートメニューの「Excel ツール」とこの PC の写しを消します
 #
 # .PARAMETER Source
 #     配布元の tools フォルダ。既定はこのスクリプトのあるフォルダ（この PC に入れた写しから実行したときは、覚えている配布元）。
@@ -234,7 +284,13 @@ Write-Host ("配布元: {0}（ここが更新されると、「送る」で使�
 #     ショートカットを作るフォルダ（Install-SendTo.ps1 の -SendToDir）。既定は、ログインしている人の「送る」のフォルダ。
 #
 # .PARAMETER NoSendTo
-#     「送る」に登録しません（ツールを写すだけ）。
+#     「送る」とスタートメニューに登録しません（ツールを写すだけ）。
+#
+# .PARAMETER ShortcutDir
+#     ツールの画面を開くショートカット「Excel ツール」を作るフォルダ。既定はスタートメニュー（プログラム）。
+#
+# .PARAMETER Desktop
+#     ツールの画面を開くショートカットを、デスクトップにも作ります。
 #
 # .PARAMETER Update
 #     配布元が変わっていれば、変わったファイルだけを写します（変わっていなければ何もしません）。

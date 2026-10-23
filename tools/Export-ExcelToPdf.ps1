@@ -401,7 +401,8 @@ function Write-RunSummary {
     else {
         Write-Host "==== 出力ファイル一覧 ===================================================="
     }
-    $results | Select-Object $view | Format-Table -AutoSize | Out-Host
+    # 画面（Start-ExcelTools）からの実行でも記録に出るよう、Out-Host ではなく Write-Host で書く
+    Write-Host (($results | Select-Object $view | Format-Table -AutoSize | Out-String -Width 220).TrimEnd())
 
     Write-Host ("成功 {0} / スキップ {1} / 失敗 {2}" -f $ok, $skipped, $failed)
     Write-Host ("合計ページ数 {0}" -f $pageSum)
