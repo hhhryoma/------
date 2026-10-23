@@ -35,7 +35,7 @@ function New-VersionBook {
 
 Test-Case 'Invoke-SendTo: -Action List で「送る」に登録する処理の一覧を返す' {
     $list = @(& $SendTo -Action List)
-    Assert-Equal @('Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Pdf') @($list | ForEach-Object { $_.Action })
+    Assert-Equal @('Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Weekly', 'Pdf') @($list | ForEach-Object { $_.Action })
     Assert-True (@($list | Where-Object { -not $_.Label -or -not $_.Detail }).Count -eq 0) '名前・説明のない処理'
 }
 
@@ -115,6 +115,14 @@ Test-Case 'Invoke-SendTo: 品質評価は、案件のフォルダの品質評価
     Assert-Match (Split-Path $files[0] -Leaf) ('^品質評価_{0}\.xlsx$' -f (Get-Date).ToString('yyyyMMdd'))
     Assert-Throws { & $SendTo -Action Quality -NoOpen -NoPause (Join-Path $dir 'レビュー') 6>$null } '設定ファイルが見つかりません'
 
+    # 週次報告: 案件のフォルダの週次報告の設定.csv を読み、設定の出力先に Excel と文章を保存する
+    @('項目,値', '指摘管理表,レビュー') | Set-Content -LiteralPath (Join-Path $dir '週次報告の設定.csv') -Encoding UTF8
+    Invoke-SendTo @{ Action = 'Weekly' } @($dir)
+    $files = @(Get-ChildItem -LiteralPath (Join-Path $dir '週次報告') -File | ForEach-Object { $_.Name } | Sort-Object)
+    $day = (Get-Date).ToString('yyyyMMdd')
+    Assert-Equal @("週次報告_$day.txt", "週次報告_$day.xlsx") $files
+    Assert-Throws { & $SendTo -Action Weekly -NoOpen -NoPause $dir (Join-Path $dir 'レビュー') 6>$null } '1 つ選んでください'
+
     # 品質評価の定性分析: × と △ の定性分析・対策が記入済みなら、依頼を作らずに知らせる（クリップボードを使わない）
     $analysisDir = Join-Path $dir '定性分析'
     New-Item -ItemType Directory -Path $analysisDir | Out-Null
@@ -144,7 +152,7 @@ Test-Case 'Install-SendTo: 「送る」にショートカットを作り、ほ�
     # -WhatIf では作らない（ショートカットを読み書きする型もここで読み込まれる）
     $results = @(& $InstallSendTo -SendToDir $linkDir -WhatIf 6>$null)
     Assert-Equal 0 @(Get-ChildItem -LiteralPath $linkDir -Filter '*.lnk').Count '-WhatIf で作った'
-    Assert-Equal 13 @($results | Where-Object Status -eq '作成予定').Count
+    Assert-Equal 14 @($results | Where-Object Status -eq '作成予定').Count
 
     # 同じ名前のほかのショートカット
     $notepad = Join-Path $env:SystemRoot 'notepad.exe'
