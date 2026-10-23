@@ -96,7 +96,29 @@ if ($Open -and -not (Get-Command Out-GridView -ErrorAction SilentlyContinue)) {
     throw 'この環境では Out-GridView が使えないため、-Open は利用できません（Windows で実行してください）。'
 }
 
-Update-TypeData -TypeName 'SearchExcel.Hit' -DefaultDisplayPropertySet File, Location, Kind, Text -Force -WhatIf:$false
+# 見つかった 1 件。セルの数だけ作るので、[pscustomobject] と型名の付け足し（遅い）ではなくクラスにする
+class SearchExcelHit : System.ICloneable {
+    [string] $File
+    [string] $Location
+    [string] $Sheet
+    [string] $Cell
+    [string] $Kind
+    [string] $Text
+    [string] $Name
+    [string] $Path
+
+    SearchExcelHit([string] $file, [string] $location, [string] $sheet, [string] $cell, [string] $kind, [string] $text, [string] $name, [string] $path) {
+        $this.File = $file; $this.Location = $location; $this.Sheet = $sheet; $this.Cell = $cell
+        $this.Kind = $kind; $this.Text = $text; $this.Name = $name; $this.Path = $path
+    }
+
+    # 読み取り結果の使い回し（PSObject.Copy）で、写しを作れるようにする
+    [object] Clone() {
+        return [SearchExcelHit]::new($this.File, $this.Location, $this.Sheet, $this.Cell, $this.Kind, $this.Text, $this.Name, $this.Path)
+    }
+}
+
+Update-TypeData -TypeName 'SearchExcelHit' -DefaultDisplayPropertySet File, Location, Kind, Text -Force -WhatIf:$false
 
 # ---------------------------------------------------------------- ヘルパー
 
@@ -233,6 +255,7 @@ function Read-SharedStrings {
 
     $strings = New-Object System.Collections.Generic.List[string]
     $hits    = New-Object System.Collections.Generic.List[bool]
+    $oneLine = New-Object System.Collections.Generic.List[string]   # 結果に出す形（改行を ↵ にしたもの）
 
     if ($PartName) {
         $reader = New-PartXmlReader -Package $Package -PartName $PartName
@@ -242,13 +265,15 @@ function Read-SharedStrings {
             $normalize  = [bool]$IgnoreWidth
             $inPhonetic = $false
             $advance    = $true
+            $elementType = [System.Xml.XmlNodeType]::Element
+            $endType     = [System.Xml.XmlNodeType]::EndElement
             try {
                 while ($true) {
                     if ($advance -and -not $reader.Read()) { break }
                     $advance = $true
 
                     $nodeType = $reader.NodeType
-                    if ($nodeType -eq [System.Xml.XmlNodeType]::Element) {
+                    if ($nodeType -eq $elementType) {
                         $name = $reader.LocalName
                         if ($name -eq 't') {
                             $t = $reader.ReadElementContentAsString()
@@ -257,11 +282,11 @@ function Read-SharedStrings {
                         }
                         elseif ($name -eq 'si') {
                             [void]$sb.Clear()
-                            if ($reader.IsEmptyElement) { $strings.Add(''); $hits.Add($false) }
+                            if ($reader.IsEmptyElement) { $strings.Add(''); $hits.Add($false); $oneLine.Add('') }
                         }
                         elseif ($name -eq 'rPh' -and -not $reader.IsEmptyElement) { $inPhonetic = $true }
                     }
-                    elseif ($nodeType -eq [System.Xml.XmlNodeType]::EndElement) {
+                    elseif ($nodeType -eq $endType) {
                         $name = $reader.LocalName
                         if ($name -eq 'si') {
                             $s = $sb.ToString()
@@ -270,6 +295,7 @@ function Read-SharedStrings {
                             $probe = $s
                             if ($normalize) { $probe = $probe.Normalize($nfkc) }
                             $hits.Add($rx.IsMatch($probe))
+                            if ($s.IndexOf([char]10) -ge 0 -or $s.IndexOf([char]13) -ge 0) { $oneLine.Add((ConvertTo-OneLine $s)) } else { $oneLine.Add($s) }
                         }
                         elseif ($name -eq 'rPh') { $inPhonetic = $false }
                     }
@@ -279,7 +305,7 @@ function Read-SharedStrings {
         }
     }
 
-    return [pscustomobject]@{ Strings = $strings; Hits = $hits }
+    return [pscustomobject]@{ Strings = $strings; Hits = $hits; OneLine = $oneLine }
 }
 
 function Read-DateStyles {
@@ -314,18 +340,7 @@ function New-Hit {
     if ($Cell) { $location = $Sheet + '!' + $Cell }
     if ($Text.IndexOf([char]10) -ge 0 -or $Text.IndexOf([char]13) -ge 0) { $Text = ConvertTo-OneLine $Text }
 
-    $hit = [pscustomobject]@{
-        File     = $script:CurrentFile
-        Location = $location
-        Sheet    = $Sheet
-        Cell     = $Cell
-        Kind     = $Kind
-        Text     = $Text
-        Name     = $Name
-        Path     = $script:CurrentPath
-    }
-    $hit.PSObject.TypeNames.Insert(0, 'SearchExcel.Hit')
-    return $hit
+    return [SearchExcelHit]::new($script:CurrentFile, $location, $Sheet, $Cell, $Kind, $Text, $Name, $script:CurrentPath)
 }
 
 function Search-WorksheetCells {
@@ -338,6 +353,11 @@ function Search-WorksheetCells {
 
     $sstStrings = $Shared.Strings
     $sstHits    = $Shared.Hits
+    $sstOneLine = $Shared.OneLine
+    $file       = $script:CurrentFile
+    $path       = $script:CurrentPath
+    $elementType = [System.Xml.XmlNodeType]::Element      # 節ごとに型を引かないよう、変数に入れておく
+    $endType     = [System.Xml.XmlNodeType]::EndElement
     $dateCount  = $DateStyles.Count
     $normalize  = [bool]$IgnoreWidth
     $numStyle   = [System.Globalization.NumberStyles]::Float
@@ -361,7 +381,7 @@ function Search-WorksheetCells {
             $advance = $true
 
             $nodeType = $reader.NodeType
-            if ($nodeType -eq [System.Xml.XmlNodeType]::Element) {
+            if ($nodeType -eq $elementType) {
                 $name = $reader.LocalName
 
                 if ($name -eq 'c') {
@@ -433,21 +453,25 @@ function Search-WorksheetCells {
                     }
                 }
             }
-            elseif ($nodeType -eq [System.Xml.XmlNodeType]::EndElement -and $inCell -and $reader.LocalName -eq 'c') {
+            elseif ($nodeType -eq $endType -and $inCell -and $reader.LocalName -eq 'c') {
                 $inCell = $false
 
                 if ($wantFormula -and $formula) {
                     $f = '=' + $formula
                     $probe = $f
                     if ($normalize) { $probe = $probe.Normalize($nfkc) }
-                    if ($rx.IsMatch($probe)) { New-Hit -Kind '数式' -Sheet $SheetName -Cell $ref -Text $f }
+                    if ($rx.IsMatch($probe)) {
+                        if ($f.IndexOf([char]10) -ge 0 -or $f.IndexOf([char]13) -ge 0) { $f = ConvertTo-OneLine $f }
+                        [SearchExcelHit]::new($file, $SheetName + '!' + $ref, $SheetName, $ref, '数式', $f, '', $path)
+                    }
                 }
 
                 if ($wantValue) {
                     $text = $null
                     if ($type -eq 's') {
                         if ([int]::TryParse($value, [ref]$idx) -and $idx -ge 0 -and $idx -lt $sstStrings.Count) {
-                            if ($sstHits[$idx]) { New-Hit -Kind '値' -Sheet $SheetName -Cell $ref -Text $sstStrings[$idx] }
+                            # 回数が多いので New-Hit を呼ばずに作る（共有文字列は読むときに 1 行にしてある）
+                            if ($sstHits[$idx]) { [SearchExcelHit]::new($file, $SheetName + '!' + $ref, $SheetName, $ref, '値', $sstOneLine[$idx], '', $path) }
                         }
                         continue
                     }
@@ -465,7 +489,10 @@ function Search-WorksheetCells {
                     if ($text) {
                         $probe = $text
                         if ($normalize) { $probe = $probe.Normalize($nfkc) }
-                        if ($rx.IsMatch($probe)) { New-Hit -Kind '値' -Sheet $SheetName -Cell $ref -Text $text }
+                        if ($rx.IsMatch($probe)) {
+                            if ($text.IndexOf([char]10) -ge 0 -or $text.IndexOf([char]13) -ge 0) { $text = ConvertTo-OneLine $text }
+                            [SearchExcelHit]::new($file, $SheetName + '!' + $ref, $SheetName, $ref, '値', $text, '', $path)
+                        }
                     }
                 }
             }
@@ -626,7 +653,7 @@ function Search-OpenXmlWorkbook {
             $dateStyles = Read-DateStyles -Package $pkg -PartName $stylesPart
         }
         else {
-            $shared = [pscustomobject]@{ Strings = @(); Hits = @() }
+            $shared = [pscustomobject]@{ Strings = @(); Hits = @(); OneLine = @() }
             $dateStyles = @()
         }
 
