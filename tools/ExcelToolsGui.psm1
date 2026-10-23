@@ -299,6 +299,23 @@ function Get-GuiOldNewOrder {
     return @($Paths)
 }
 
+function Get-GuiBrowseStart {
+    #     ファイル・フォルダを選ぶ画面を開く場所（欄に入っているパスから）。戻り値: Dir（あるフォルダ。無ければ $null）・Name（ファイルの名前）。
+    #     名前だけ・使えない文字を含むなど、フォルダのわからない入力でも止まらない
+    param([string] $Current)
+    $result = [pscustomobject]@{ Dir = $null; Name = '' }
+    if (-not $Current -or -not $Current.Trim()) { return $result }
+    $Current = $Current.Trim().Trim('"')
+    try {
+        if (Test-Path -LiteralPath $Current -PathType Container) { $result.Dir = $Current; return $result }
+        $result.Name = Split-Path -Leaf $Current
+        $parent = Split-Path -Parent $Current
+        if ($parent -and (Test-Path -LiteralPath $parent -PathType Container)) { $result.Dir = $parent }
+    }
+    catch { }
+    return $result
+}
+
 function ConvertTo-GuiLiteral {
     #     値を PowerShell の式の文字にする（コマンドの表示・PowerShell の画面での実行に使う）
     param($Value)
@@ -441,11 +458,16 @@ function Receive-GuiToolRunTail {
 }
 
 function Stop-GuiToolRun {
-    #     実行中のツールを止める（止まるのを待たない。止まったら Receive-GuiToolRun の Stopped になる）
-    param($Run)
-    if ($Run.Done) { return }
-    $Run.Stopping = $true
-    [void]$Run.PowerShell.BeginStop($null, $null)
+    #     実行中のツールを止める（止まったら Receive-GuiToolRun の Stopped になる）。WaitSeconds があれば、止まるまでその秒数まで待つ
+    #     （画面を閉じるとき。ツールの後片付け（開いた Excel を閉じるなど）を終えさせる）。戻り値: 止まったら $true
+    param($Run, [int] $WaitSeconds = 0)
+    if ($Run.Done) { return $true }
+    if (-not $Run.Stopping) {
+        $Run.Stopping = $true
+        [void]$Run.PowerShell.BeginStop($null, $null)
+    }
+    if ($WaitSeconds -le 0) { return $Run.Handle.IsCompleted }
+    return $Run.Handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($WaitSeconds))
 }
 
 function Wait-GuiToolRun {
@@ -457,7 +479,7 @@ function Wait-GuiToolRun {
         $r = Receive-GuiToolRun $Run
         foreach ($m in $r.Messages) { $all.Add($m) }
         if ($r.Completed) { $r.Messages = $all.ToArray(); return $r }
-        if ((Get-Date) -gt $deadline) { Stop-GuiToolRun $Run; throw 'ツールが時間内に終わりませんでした' }
+        if ((Get-Date) -gt $deadline) { $null = Stop-GuiToolRun $Run; throw 'ツールが時間内に終わりませんでした' }
         Start-Sleep -Milliseconds 100
     }
 }
@@ -728,9 +750,16 @@ function New-GuiWindow {
     # ---- イベント（エラーは記録の欄とメッセージで知らせ、画面は続ける）
     $tree.Add_AfterSelect({ if ($_.Node -and $_.Node.Tag) { $id = $_.Node.Tag.Id; Invoke-GuiSafe { Select-GuiTool $id } } })
     $find.Add_TextChanged({ Invoke-GuiSafe { Update-GuiTree $script:Gui.Find.Text } })
+    # 左（探す欄・一覧）では Enter で実行しない。探す欄の Enter は見つかった処理を選び、一覧の Enter は入力欄に移る
+    foreach ($c in @($find, $tree)) {
+        $c.Add_Enter({ $script:Gui.Form.AcceptButton = $null })
+        $c.Add_Leave({ $script:Gui.Form.AcceptButton = $script:Gui.RunButton })
+    }
+    $find.Add_KeyDown({ $e = $_; Invoke-GuiSafe { Invoke-GuiFindKey $e } })
+    $tree.Add_KeyDown({ if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $_.SuppressKeyPress = $true; Invoke-GuiSafe { Enter-GuiFirstField } } })
     $s.ShowAdvanced.Add_CheckedChanged({ Invoke-GuiSafe { Update-GuiAdvanced } })
     $s.RunButton.Add_Click({ Invoke-GuiSafe { Invoke-GuiRun } })
-    $s.StopButton.Add_Click({ if ($script:Gui.Run) { Stop-GuiToolRun $script:Gui.Run; Write-GuiLog '中止しています…' 'DarkYellow' } })
+    $s.StopButton.Add_Click({ if ($script:Gui.Run) { $null = Stop-GuiToolRun $script:Gui.Run; Write-GuiLog '中止しています…' 'DarkYellow' } })
     $s.Timer.Add_Tick({ Update-GuiRun })
     $s.OpenButton.Add_Click({ if ($script:Gui.ResultPath) { Open-GuiPath $script:Gui.ResultPath } })
     $s.FolderButton.Add_Click({ if ($script:Gui.ResultDir) { Open-GuiPath $script:Gui.ResultDir } })
@@ -833,6 +862,47 @@ function Update-GuiTree {
     }
     finally { $tree.EndUpdate() }
     Select-GuiTreeNode
+}
+
+function Invoke-GuiFindKey {
+    #     探す欄のキー: Enter は見つかった処理を選んで最初の入力欄に移り、↓ は一覧に移る
+    param($KeyArgs)
+    $s = $script:Gui
+    if ($KeyArgs.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+        $KeyArgs.SuppressKeyPress = $true
+        if (Select-GuiFound) { Enter-GuiFirstField }
+    }
+    elseif ($KeyArgs.KeyCode -eq [System.Windows.Forms.Keys]::Down) {
+        $KeyArgs.Handled = $true
+        [void]$s.Tree.Focus()
+    }
+}
+
+function Select-GuiFound {
+    #     探す欄の言葉で見つかった処理を選ぶ（選んでいる処理が見つかったものにあればそのまま、無ければ一覧の最初のもの）。戻り値: 選んだら $true
+    $s = $script:Gui
+    $text = $s.Find.Text
+    if (-not ($text -and $text.Trim())) { return [bool]$s.Entry }
+    $found = @(Find-GuiTool $s.Catalog $text | ForEach-Object { $_.Id })
+    if ($found.Count -eq 0) { return $false }
+    if ($s.Entry -and $found -contains $s.Entry.Id) { return $true }
+    foreach ($root in $s.Tree.Nodes) {
+        foreach ($g in $root.Nodes) {
+            foreach ($n in $g.Nodes) {
+                if ($n.Tag -and $found -contains $n.Tag.Id) { Select-GuiTool $n.Tag.Id; return $true }
+            }
+        }
+    }
+    Select-GuiTool $found[0]
+    return $true
+}
+
+function Enter-GuiFirstField {
+    #     最初の入力欄に移る
+    $s = $script:Gui
+    $first = @($s.Bindings | Where-Object { $_.Field.Main })[0]
+    if (-not $first) { $first = @($s.Bindings)[0] }
+    if ($first) { [void]$first.Input.Focus() } else { [void]$s.RunButton.Focus() }
 }
 
 function Select-GuiTreeNode {
@@ -1138,6 +1208,11 @@ function Update-GuiAdvanced {
     finally { $s.Fields.ResumeLayout() }
     $s.Settings.ShowAdvanced = $show
     $s.AdvancedShown = $show
+    # 隠した詳細な設定に入れてある欄の数を出す（見えない入力で結果が変わることに気づけるように。結果の保存先は数えない）
+    $count = 0
+    if (-not $show) { $count = @($s.Bindings | Where-Object { -not $_.Field.Main -and $s.Entry.Output -notcontains $_.Field.Name -and -not (Test-GuiEmpty (Get-GuiControlValue $_)) }).Count }
+    $s.AdvancedCount = $count
+    if ($count -gt 0) { $s.ShowAdvanced.Text = '詳細な設定も表示する（{0} 件入れています）' -f $count } else { $s.ShowAdvanced.Text = '詳細な設定も表示する' }
 }
 
 function Update-GuiWrap {
@@ -1228,12 +1303,8 @@ function Invoke-GuiBrowse {
     $f = $Binding.Field
     $c = $Binding.Input
     if ($Action -eq '外す') { foreach ($item in @($c.SelectedItems)) { $c.Items.Remove($item) }; return }
-    $current = @(Get-GuiControlValue $Binding | Where-Object { $_ })[0]
-    $startDir = $null
-    if ($current) {
-        if (Test-Path -LiteralPath $current -PathType Container) { $startDir = $current }
-        elseif (Test-Path -LiteralPath (Split-Path -Parent $current) -PathType Container) { $startDir = Split-Path -Parent $current }
-    }
+    $start = Get-GuiBrowseStart @(Get-GuiControlValue $Binding | Where-Object { $_ })[0]
+    $startDir = $start.Dir
     $picked = @()
     if ($Action -match 'フォルダ') {
         $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -1248,7 +1319,7 @@ function Invoke-GuiBrowse {
         $dlg.Filter = Get-GuiFileFilter $f
         $dlg.OverwritePrompt = $true
         if ($startDir) { $dlg.InitialDirectory = $startDir } else { $dlg.InitialDirectory = Get-GuiResultDir }
-        if ($current) { $dlg.FileName = Split-Path -Leaf $current }
+        if ($start.Name) { $dlg.FileName = $start.Name }
         elseif ($s.Entry.OutputName) { $dlg.FileName = $s.Entry.OutputName + $f.Extension }
         if ($dlg.ShowDialog($s.Form) -eq [System.Windows.Forms.DialogResult]::OK) { $picked = @($dlg.FileName) }
         $dlg.Dispose()
@@ -1483,7 +1554,7 @@ function Wait-GuiRun {
     while ($s.Run) {
         Update-GuiRun
         [System.Windows.Forms.Application]::DoEvents()
-        if ((Get-Date) -gt $deadline) { Stop-GuiToolRun $s.Run; throw 'ツールが時間内に終わりませんでした' }
+        if ((Get-Date) -gt $deadline) { $null = Stop-GuiToolRun $s.Run; throw 'ツールが時間内に終わりませんでした' }
         Start-Sleep -Milliseconds 50
     }
 }
@@ -1543,7 +1614,12 @@ function Close-GuiWindow {
     $s = $script:Gui
     if ($s.Run) {
         if (-not (Show-GuiMessage '実行中です。中止して閉じますか？' -YesNo -Warning)) { $ClosingArgs.Cancel = $true; return }
-        Stop-GuiToolRun $s.Run
+        # ツールの後片付け（開いた Excel を閉じるなど）が終わるまで待つ（待たずに閉じると、Excel が残ることがある）
+        $s.Status.Text = '中止しています…'
+        $s.Form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $s.Form.Update()
+        $null = Stop-GuiToolRun $s.Run -WaitSeconds 20
+        $s.Run = $null
     }
     $s.Timer.Stop()
     Save-GuiWindowBounds

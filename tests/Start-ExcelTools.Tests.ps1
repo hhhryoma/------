@@ -167,9 +167,38 @@ Test-Case 'Start-ExcelTools: ツールを別の実行空間で動かし、Write-
     [System.IO.File]::WriteAllText($slow, "Start-Sleep -Seconds 60`r`n")
     $run = Start-GuiToolRun $slow @{}
     Start-Sleep -Milliseconds 500
-    Stop-GuiToolRun $run
+    $null = Stop-GuiToolRun $run
     $r = Wait-GuiToolRun $run -TimeoutSeconds 30
     Assert-Equal 'True|中止しました' ('{0}|{1}' -f $r.Stopped, $r.Error)
+
+    # 画面を閉じるときは、ツールの後片付け（finally で Excel を閉じるなど）が終わるまで待つ
+    $marker = Join-Path $dir '片付けた.txt'
+    $cleanup = Join-Path $dir 'cleanup.ps1'
+    [System.IO.File]::WriteAllText($cleanup, ("try {{ Start-Sleep -Seconds 60 }}`r`nfinally {{ [System.Threading.Thread]::Sleep(800); [System.IO.File]::WriteAllText('{0}', 'x') }}`r`n" -f $marker.Replace("'", "''")), (New-Object System.Text.UTF8Encoding($true)))
+    $run = Start-GuiToolRun $cleanup @{}
+    Start-Sleep -Milliseconds 500
+    Assert-True (Stop-GuiToolRun $run -WaitSeconds 30) '止まるまで待つ'
+    Assert-True (Test-Path -LiteralPath $marker) '後片付けが終わっている'
+    Assert-True (Wait-GuiToolRun $run -TimeoutSeconds 10).Stopped '中止'
+}
+
+Test-Case 'Start-ExcelTools: ファイル・フォルダを選ぶ画面を開く場所（名前だけ・使えない文字でも止まらない）' {
+    $dir = New-TestDir
+    $file = Join-Path $dir '設計書.xlsx'
+    [System.IO.File]::WriteAllText($file, 'x')
+    $r = Get-GuiBrowseStart $dir
+    Assert-Equal "$dir|" ('{0}|{1}' -f $r.Dir, $r.Name) 'フォルダはそのフォルダから'
+    $r = Get-GuiBrowseStart $file
+    Assert-Equal "$dir|設計書.xlsx" ('{0}|{1}' -f $r.Dir, $r.Name) 'ファイルはそのフォルダから、名前を入れて'
+    $r = Get-GuiBrowseStart (Join-Path $dir '新しい結果.xlsx')
+    Assert-Equal "$dir|新しい結果.xlsx" ('{0}|{1}' -f $r.Dir, $r.Name) 'まだ無いファイルも、あるフォルダから'
+    $r = Get-GuiBrowseStart '結果.xlsx'
+    Assert-Equal '|結果.xlsx' ('{0}|{1}' -f $r.Dir, $r.Name) '名前だけ（フォルダがわからない）'
+    $r = Get-GuiBrowseStart (Join-Path (Join-Path $dir '無いフォルダ') 'a.xlsx')
+    Assert-Equal '|a.xlsx' ('{0}|{1}' -f $r.Dir, $r.Name) '無いフォルダ'
+    $r = Get-GuiBrowseStart 'a<b>|c'
+    Assert-True ($null -eq $r.Dir) '使えない文字'
+    Assert-Equal '|' ('{0}|{1}' -f (Get-GuiBrowseStart '').Dir, (Get-GuiBrowseStart ' ').Name) '空'
 }
 
 Test-Case 'Start-ExcelTools: 入力を保存して次に読む（結果の保存先と日付は保存しない）。やりたいことを言葉で探す' {
@@ -257,6 +286,14 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Assert-True (-not $s.AdvancedShown) '詳細な設定は隠す'
         $s.ShowAdvanced.Checked = $true
         Assert-True $s.AdvancedShown '詳細な設定を出す'
+        # 隠した詳細な設定に入れてある欄の数を出す
+        Select-GuiTool 'Search'
+        Set-GuiValue 'Target' @('Value')
+        $s.ShowAdvanced.Checked = $false
+        Assert-Equal '1|詳細な設定も表示する（1 件入れています）' ('{0}|{1}' -f $s.AdvancedCount, $s.ShowAdvanced.Text)
+        Set-GuiValue 'Target' @()
+        $s.ShowAdvanced.Checked = $true
+        Assert-Equal '0|詳細な設定も表示する' ('{0}|{1}' -f $s.AdvancedCount, $s.ShowAdvanced.Text)
 
         # 2 つ落とすと旧・新に分けて入れる（版数の古い方が旧）
         Select-GuiTool 'Compare'
@@ -292,6 +329,16 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Update-GuiTree '検索'
         $labels = @($s.Tree.Nodes | ForEach-Object { $_.Nodes } | ForEach-Object { $_.Nodes } | ForEach-Object { $_.Text })
         Assert-True ($labels -contains '文字を探す（検索）') ($labels -join ', ')
+
+        # 探す欄の Enter は実行せず、見つかった処理を選ぶ
+        $s.Find.Text = '提出前'
+        $key = New-Object System.Windows.Forms.KeyEventArgs([System.Windows.Forms.Keys]::Enter)
+        Invoke-GuiFindKey $key
+        Assert-Equal 'Check|True' ('{0}|{1}' -f $s.Entry.Id, $key.SuppressKeyPress)
+        Assert-True ($null -eq $s.Run) '実行しない'
+        $s.Find.Text = '見つからない言葉'
+        Assert-True (-not (Select-GuiFound)) '見つからなければ選び直さない'
+        Assert-Equal 'Check' $s.Entry.Id
     }
     finally { $form.Dispose() }
 }
