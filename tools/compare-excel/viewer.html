@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Excel の差分</title>
+<!--
+  Compare-Excel.ps1 -OutHtml のひな形。/*DIFF_DATA*/null の所に差分のデータ（JSON）を入れて保存する。
+  外部のファイル・通信を使わないので、社内の PC のブラウザーでそのまま開ける。
+-->
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --line: #d9dde3; --text: #1f2328; --muted: #656d76; --accent: #217346;
+    --chg: #ffeb9c; --add: #c6efce; --del: #ffc7ce; --mov: #ddebf7; --fmt: #e4dfec; --hist: #fce4d6;
+    --grid: #e3e6ea; --head: #f0f2f4; --focus: #e8590c;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.45 "Yu Gothic UI", "Meiryo UI", "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  header { background: var(--accent); color: #fff; padding: 8px 14px; display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .paths { font-size: 12px; opacity: .9; display: flex; flex-direction: column; min-width: 0; }
+  header .paths span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60vw; }
+  header .summary { margin-left: auto; font-size: 12px; }
+  .layout { flex: 1; display: grid; grid-template-columns: 260px 1fr; min-height: 0; }
+  nav { background: var(--panel); border-right: 1px solid var(--line); overflow: auto; padding: 8px 0; }
+  nav .file { padding: 6px 12px 2px; font-weight: 600; word-break: break-all; }
+  nav .file small { font-weight: normal; color: var(--muted); margin-left: 4px; }
+  nav .sheet { display: flex; align-items: center; gap: 6px; padding: 4px 12px 4px 22px; cursor: pointer; border-left: 3px solid transparent; }
+  nav .sheet:hover { background: #eef3ef; }
+  nav .sheet.active { background: #e2efe6; border-left-color: var(--accent); }
+  nav .sheet .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  nav .badge { font-size: 11px; border-radius: 9px; padding: 0 7px; background: var(--chg); color: #5c4a00; }
+  nav .badge.zero { background: #eceff1; color: var(--muted); }
+  nav .badge.add { background: var(--add); color: #155724; }
+  nav .badge.del { background: var(--del); color: #8a1c24; }
+  nav .note { padding: 2px 12px 6px 22px; color: var(--muted); font-size: 12px; }
+  main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; min-width: 0; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .toolbar .group { display: flex; align-items: center; gap: 4px; }
+  .toolbar button { font: inherit; border: 1px solid var(--line); background: #fff; padding: 3px 10px; border-radius: 4px; cursor: pointer; }
+  .toolbar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .toolbar label { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+  .legend span { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 3px; margin-right: 3px; font-size: 12px; }
+  .panes { display: grid; grid-template-columns: 1fr; min-height: 0; min-width: 0; }
+  .panes.both { grid-template-columns: 1fr 1fr; }
+  .pane { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0; border-right: 1px solid var(--line); }
+  .pane .title { padding: 4px 10px; background: var(--head); border-bottom: 1px solid var(--line); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pane .title .side { display: inline-block; min-width: 2.5em; color: var(--muted); font-weight: normal; }
+  .pane .scroll { overflow: auto; background: #fff; position: relative; }
+  .pane .empty { padding: 24px; color: var(--muted); }
+  table.grid { border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+  table.grid th { background: var(--head); color: var(--muted); font-weight: normal; border: 1px solid var(--grid); position: sticky; z-index: 2; }
+  table.grid thead th { top: 0; height: 20px; }
+  table.grid tbody th { left: 0; text-align: right; padding: 0 4px; z-index: 3; }
+  table.grid thead th.corner { left: 0; z-index: 4; }
+  table.grid td { border: 1px solid var(--grid); height: 20px; padding: 0 2px; white-space: pre; overflow: hidden; text-overflow: ellipsis; vertical-align: top; }
+  table.grid td.ov { overflow: visible; text-overflow: clip; }
+  table.grid td.chg { background: var(--chg); }
+  table.grid td.add, table.grid tr.add td { background: var(--add); }
+  table.grid td.del, table.grid tr.del td { background: var(--del); }
+  table.grid td.mov, table.grid tr.mov td { background: var(--mov); }
+  table.grid td.fmt { background: var(--fmt); }
+  table.grid td.hist { background: var(--hist); }
+  table.grid td.colmark { box-shadow: inset 0 0 0 9999px rgba(198, 239, 206, .45); }
+  table.grid td.colmark.del { box-shadow: inset 0 0 0 9999px rgba(255, 199, 206, .55); }
+  table.grid td.mark { cursor: help; }
+  table.grid td.focus { outline: 3px solid var(--focus); outline-offset: -2px; animation: blink 1.2s ease-out 2; }
+  @keyframes blink { 50% { outline-color: transparent; } }
+  .banner { padding: 6px 10px; background: #fff3cd; border-bottom: 1px solid var(--line); }
+  .list { max-height: 34vh; overflow: auto; background: var(--panel); border-top: 2px solid var(--line); }
+  .list table { width: 100%; border-collapse: collapse; }
+  .list th, .list td { text-align: left; padding: 3px 8px; border-bottom: 1px solid #eef0f2; vertical-align: top; }
+  .list th { position: sticky; top: 0; background: var(--head); font-weight: 600; z-index: 1; }
+  .list tr.item { cursor: pointer; }
+  .list tr.item:hover { background: #f3f8f4; }
+  .list tr.item.current { background: #fff1e6; }
+  .list td.val { max-width: 34vw; white-space: pre-wrap; word-break: break-all; }
+  .chip { display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 11px; }
+  .chip.chg { background: var(--chg); } .chip.add { background: var(--add); } .chip.del { background: var(--del); }
+  .chip.mov { background: var(--mov); } .chip.fmt { background: var(--fmt); } .chip.hist { background: var(--hist); }
+  del { background: #ffc7ce; color: #8a1c24; text-decoration: line-through; }
+  ins { background: #c6efce; color: #155724; text-decoration: none; font-weight: 600; }
+  #tip { position: fixed; z-index: 20; max-width: 520px; background: #fff; border: 1px solid var(--line); box-shadow: 0 4px 16px rgba(0,0,0,.15); border-radius: 6px; padding: 8px 10px; display: none; pointer-events: none; font-size: 12px; }
+  #tip .row { display: grid; grid-template-columns: 3em 1fr; gap: 4px; margin: 2px 0; }
+  #tip .row b { color: var(--muted); font-weight: normal; }
+  #tip .v { white-space: pre-wrap; word-break: break-all; }
+  #tip hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Excel の差分</h1>
+  <div class="paths"><span id="oldPath"></span><span id="newPath"></span></div>
+  <div class="summary" id="summary"></div>
+</header>
+<div class="layout">
+  <nav id="nav"></nav>
+  <main>
+    <div class="toolbar">
+      <div class="group" id="modes">
+        <button data-mode="new" class="on" title="新のシートを表示（変更・追加したセルに色）">新</button>
+        <button data-mode="old" title="旧のシートを表示（変更・削除したセルに色）">旧</button>
+        <button data-mode="both" title="旧と新を左右に並べる（スクロールは連動）">左右に並べる</button>
+      </div>
+      <div class="group">
+        <button id="prev" title="前の差分（k）">▲ 前</button>
+        <button id="next" title="次の差分（j）">▼ 次</button>
+        <span id="pos" class="muted"></span>
+      </div>
+      <div class="group" id="kinds"></div>
+      <div class="group legend"><span style="background:var(--chg)">変更</span><span style="background:var(--add)">追加</span><span style="background:var(--del)">削除</span><span style="background:var(--mov)">移動</span><span style="background:var(--fmt)">書式</span></div>
+    </div>
+    <div class="panes" id="panes"></div>
+    <div class="list" id="list"></div>
+  </main>
+</div>
+<div id="tip"></div>
+<script>
+var DATA = /*DIFF_DATA*/null;
+(function () {
+  'use strict';
+  var MAX_ROWS = 3000, MAX_COLS = 300;   // 大きなシートは先頭だけ表示する
+  var state = { file: -1, sheet: -1, mode: 'new', hidden: {}, items: [], index: -1 };
+  var $ = function (id) { return document.getElementById(id); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+  var colName = function (n) { var s = ''; while (n > 0) { var m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+  var colIndex = function (s) { var n = 0; for (var i = 0; i < s.length; i++) n = n * 26 + s.charCodeAt(i) - 64; return n; };
+  var parseCell = function (a) { var m = /^([A-Z]+)(\d+)$/.exec(a || ''); return m ? { r: +m[2], c: colIndex(m[1]) } : null; };
+  var cls = function (d, side) {
+    if (d.k === '書式') return 'fmt';
+    if (d.k === '改訂履歴') return 'hist';
+    if (d.ch === '追加') return side === 'old' ? 'chg' : 'add';
+    if (d.ch === '削除') return side === 'new' ? 'chg' : 'del';
+    if (d.ch === '移動') return 'mov';
+    return 'chg';
+  };
+
+  if (!DATA) { document.body.innerHTML = '<p style="padding:24px">差分のデータがありません。Compare-Excel.ps1 -OutHtml で作ってください。</p>'; return; }
+  $('oldPath').textContent = '旧: ' + DATA.old;
+  $('newPath').textContent = '新: ' + DATA.new;
+  var total = 0, changed = 0;
+  DATA.files.forEach(function (f) { total += f.count; if (f.count > 0) changed++; });
+  $('summary').textContent = DATA.files.length + ' ファイル（差分のあるファイル ' + changed + '）・差分 ' + total + ' 件・' + DATA.created;
+
+  // 種類の絞り込み
+  var kinds = {};
+  DATA.files.forEach(function (f) { f.diffs.forEach(function (d) { kinds[d.k] = (kinds[d.k] || 0) + 1; }); });
+  $('kinds').innerHTML = Object.keys(kinds).map(function (k) { return '<label><input type="checkbox" checked data-kind="' + esc(k) + '">' + esc(k) + '</label>'; }).join('');
+  $('kinds').addEventListener('change', function (e) { state.hidden[e.target.getAttribute('data-kind')] = !e.target.checked; show(); });
+
+  // 左: ファイルとシート
+  var nav = $('nav'), html = '';
+  DATA.files.forEach(function (f, fi) {
+    html += '<div class="file">' + esc(f.name) + '<small>' + esc(f.state) + '</small></div>';
+    if (f.sheets.length === 0) {
+      var notes = f.diffs.map(function (d) { return esc(d.d); });
+      html += '<div class="note">' + (notes.length ? notes.join('<br>') : '差分なし') + '</div>';
+      return;
+    }
+    f.sheets.forEach(function (s, si) {
+      var n = sheetDiffs(f, s).length;
+      var badge = !s.oldName ? 'add' : !s.name ? 'del' : n ? '' : 'zero';
+      var label = s.name || s.oldName;
+      if (s.name && s.oldName && s.name !== s.oldName) label = s.oldName + ' → ' + s.name;
+      html += '<div class="sheet" data-f="' + fi + '" data-s="' + si + '" title="' + esc(label) + '"><span class="name">' + esc(label) + '</span><span class="badge ' + badge + '">' + (!s.oldName ? '追加' : !s.name ? '削除' : n) + '</span></div>';
+    });
+  });
+  nav.innerHTML = html;
+  nav.addEventListener('click', function (e) {
+    var el = e.target.closest('.sheet');
+    if (el) select(+el.getAttribute('data-f'), +el.getAttribute('data-s'));
+  });
+
+  function sheetDiffs(f, s) {
+    return f.diffs.filter(function (d) {
+      if (d.k === 'ファイル') return false;
+      return (s.name && d.s === s.name) || (!s.name && s.oldName && (d.os === s.oldName || d.s === s.oldName));
+    });
+  }
+
+  // 表示の切り替え
+  $('modes').addEventListener('click', function (e) {
+    var m = e.target.getAttribute('data-mode');
+    if (!m) return;
+    state.mode = m;
+    Array.prototype.forEach.call($('modes').children, function (b) { b.classList.toggle('on', b.getAttribute('data-mode') === m); });
+    show();
+  });
+  $('prev').addEventListener('click', function () { go(-1); });
+  $('next').addEventListener('click', function () { go(1); });
+  document.addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'j' || e.key === 'n') go(1);
+    if (e.key === 'k' || e.key === 'p') go(-1);
+  });
+
+  function select(fi, si) {
+    state.file = fi; state.sheet = si; state.index = -1;
+    Array.prototype.forEach.call(nav.querySelectorAll('.sheet'), function (el) {
+      el.classList.toggle('active', +el.getAttribute('data-f') === fi && +el.getAttribute('data-s') === si);
+    });
+    show();
+    // 最初の差分のセルを見せる
+    if (state.items.some(function (d) { return d.nc || d.oc; })) go(1);
+  }
+
+  function show() {
+    var f = DATA.files[state.file], s = f && f.sheets[state.sheet];
+    var panes = $('panes');
+    if (!s) { panes.innerHTML = '<div class="pane"><div class="empty">左の一覧からシートを選んでください。</div></div>'; $('list').innerHTML = ''; return; }
+    state.items = sheetDiffs(f, s).filter(function (d) { return !state.hidden[d.k]; });
+    var sheetDiff = state.items.filter(function (d) { return d.k === 'シート'; });
+    var sides = state.mode === 'both' ? ['old', 'new'] : [state.mode];
+    panes.className = 'panes' + (sides.length > 1 ? ' both' : '');
+    panes.innerHTML = sides.map(function (side) {
+      var name = side === 'new' ? s.name : s.oldName;
+      return '<div class="pane"><div class="title"><span class="side">' + (side === 'new' ? '新' : '旧') + '</span>' + esc(name || '（このシートはありません）') + '</div><div class="scroll" id="scroll-' + side + '"></div></div>';
+    }).join('');
+    sides.forEach(function (side) {
+      var box = $('scroll-' + side);
+      var banner = sheetDiff.map(function (d) { return '<div class="banner">' + esc(d.d) + '</div>'; }).join('');
+      box.innerHTML = banner + renderGrid(side === 'new' ? s['new'] : s.oldSheet, side);
+    });
+    if (sides.length > 1) syncScroll($('scroll-old'), $('scroll-new'));
+    renderList();
+    $('pos').textContent = state.items.length ? (state.index >= 0 ? (state.index + 1) + ' / ' : '') + state.items.length + ' 件' : '差分なし';
+  }
+
+  // シートの方眼（列幅・結合セルを反映し、差分のセル・行・列に色を付ける）
+  function renderGrid(sheet, side) {
+    if (!sheet) return '<div class="empty">' + (side === 'new' ? '新' : '旧') + 'にはこのシートがありません。</div>';
+    var marks = {}, rowMarks = {}, colMarks = {}, tips = {};
+    state.items.forEach(function (d, i) {
+      var p = parseCell(side === 'new' ? d.nc : d.oc);
+      if (!p) return;
+      if (d.k === '行') { rowMarks[p.r] = cls(d, side); }
+      else if (d.k === '列') { colMarks[p.c] = d.ch === '削除' ? 'del' : 'add'; }
+      else { var key = p.r + ',' + p.c; marks[key] = cls(d, side); (tips[key] = tips[key] || []).push(i); }
+    });
+    var rows = sheet.rows, cols = sheet.cols;
+    Object.keys(marks).forEach(function (k) { var x = k.split(','); rows = Math.max(rows, +x[0]); cols = Math.max(cols, +x[1]); });
+    Object.keys(rowMarks).forEach(function (r) { rows = Math.max(rows, +r); });
+    var covered = {}, spans = {};
+    sheet.m.forEach(function (ref) {
+      var x = ref.split(':'), a = parseCell(x[0]), b = parseCell(x[1] || x[0]);
+      if (!a || !b) return;
+      spans[a.r + ',' + a.c] = { rs: b.r - a.r + 1, cs: b.c - a.c + 1 };
+      for (var r = a.r; r <= b.r; r++) for (var c = a.c; c <= b.c; c++) if (r !== a.r || c !== a.c) covered[r + ',' + c] = true;
+      rows = Math.max(rows, b.r); cols = Math.max(cols, b.c);
+    });
+    rows = Math.max(rows, 1); cols = Math.max(cols, 1);
+    var cut = rows > MAX_ROWS || cols > MAX_COLS;
+    rows = Math.min(rows, MAX_ROWS); cols = Math.min(cols, MAX_COLS);
+    var width = function (c) { var w = sheet.w[c]; return w == null ? sheet.def : w; };
+    // 列幅どおりに並べるため、表の幅を列幅の合計にする（table-layout: fixed は幅の指定が要る）
+    var total = 44;
+    for (var c = 1; c <= cols; c++) total += width(c);
+    var out = ['<table class="grid" data-side="' + side + '" style="width:' + total + 'px"><colgroup><col style="width:44px">'];
+    for (c = 1; c <= cols; c++) out.push('<col style="width:' + width(c) + 'px">');
+    out.push('</colgroup><thead><tr><th class="corner"></th>');
+    for (c = 1; c <= cols; c++) out.push('<th>' + (width(c) ? colName(c) : '') + '</th>');
+    out.push('</tr></thead><tbody>');
+    for (var r = 1; r <= rows; r++) {
+      out.push('<tr' + (rowMarks[r] ? ' class="' + rowMarks[r] + '"' : '') + '><th>' + r + '</th>');
+      for (c = 1; c <= cols; c++) {
+        var key = r + ',' + c;
+        if (covered[key]) continue;
+        var text = sheet.c[key], sp = spans[key], klass = [];
+        if (marks[key]) klass.push(marks[key], 'mark');
+        if (colMarks[c]) klass.push('colmark', colMarks[c] === 'del' ? 'del' : '');
+        // Excel と同じく、右が空なら文字をはみ出して見せる
+        if (text && !sp && sheet.c[r + ',' + (c + 1)] == null && !covered[r + ',' + (c + 1)]) klass.push('ov');
+        out.push('<td id="' + side + '-' + key + '"' + (klass.length ? ' class="' + klass.join(' ') + '"' : '') +
+          (sp ? ' rowspan="' + sp.rs + '" colspan="' + sp.cs + '"' : '') + (tips[key] ? ' data-tip="' + tips[key].join(' ') + '"' : '') + '>' + (text == null ? '' : esc(text)) + '</td>');
+      }
+      out.push('</tr>');
+    }
+    out.push('</tbody></table>');
+    if (cut) out.push('<div class="empty">大きなシートのため、' + MAX_ROWS + ' 行・' + MAX_COLS + ' 列までを表示しています。</div>');
+    return out.join('');
+  }
+
+  // 下: 差分の一覧（クリックで該当のセルへ）
+  function renderList() {
+    var rows = state.items.map(function (d, i) {
+      var where = d.nc ? (d.s + '!' + d.nc) : d.oc ? ((d.os || d.s) + '!' + d.oc + '（旧）') : d.s;
+      return '<tr class="item' + (i === state.index ? ' current' : '') + '" data-i="' + i + '"><td>' + esc(where) + '</td><td>' + esc(d.k) +
+        '</td><td><span class="chip ' + cls(d, 'new') + '">' + esc(d.ch) + '</span></td><td class="val">' + diffHtml(d.a, d.b, 'old') + '</td><td class="val">' + diffHtml(d.a, d.b, 'new') + '</td></tr>';
+    });
+    $('list').innerHTML = rows.length ? '<table><thead><tr><th>場所</th><th>種類</th><th>変更</th><th>変更前</th><th>変更後</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>'
+      : '<div class="empty" style="padding:10px 12px">このシートに差分はありません（絞り込みで隠れている差分も含めて）。</div>';
+  }
+  $('list').addEventListener('click', function (e) {
+    var tr = e.target.closest('tr.item');
+    if (tr) { state.index = +tr.getAttribute('data-i'); focusItem(); }
+  });
+
+  function go(step) {
+    if (!state.items.length) return;
+    state.index = state.index < 0 ? (step > 0 ? 0 : state.items.length - 1) : (state.index + step + state.items.length) % state.items.length;
+    focusItem();
+  }
+
+  function focusItem() {
+    var d = state.items[state.index];
+    if (!d) return;
+    // 旧にしか無い差分（削除）は、新だけの表示なら左右に並べる
+    if (state.mode === 'new' && !d.nc && d.oc) { state.mode = 'both'; Array.prototype.forEach.call($('modes').children, function (b) { b.classList.toggle('on', b.getAttribute('data-mode') === 'both'); }); }
+    show();
+    ['new', 'old'].forEach(function (side) {
+      var p = parseCell(side === 'new' ? d.nc : d.oc);
+      if (!p) return;
+      var el = $(side + '-' + p.r + ',' + p.c) || (function () { var tr = document.querySelector('table[data-side="' + side + '"] tbody tr:nth-child(' + p.r + ')'); return tr && tr.children[1]; })();
+      if (!el) return;
+      el.classList.add('focus');
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+    });
+    var cur = document.querySelector('#list tr.current');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+
+  function syncScroll(a, b) {
+    var busy = false;
+    var link = function (from, to) { from.addEventListener('scroll', function () { if (busy) return; busy = true; to.scrollTop = from.scrollTop; to.scrollLeft = from.scrollLeft; requestAnimationFrame(function () { busy = false; }); }); };
+    link(a, b); link(b, a);
+  }
+
+  // マウスを重ねたセルの変更前・変更後（変わった文字に色）
+  var tip = $('tip');
+  document.addEventListener('mouseover', function (e) {
+    var td = e.target.closest && e.target.closest('td[data-tip]');
+    if (!td) { tip.style.display = 'none'; return; }
+    tip.innerHTML = td.getAttribute('data-tip').split(' ').map(function (i) {
+      var d = state.items[+i];
+      return '<div><span class="chip ' + cls(d, 'new') + '">' + esc(d.k + ' ' + d.ch) + '</span></div>' +
+        '<div class="row"><b>旧</b><span class="v">' + diffHtml(d.a, d.b, 'old') + '</span></div><div class="row"><b>新</b><span class="v">' + diffHtml(d.a, d.b, 'new') + '</span></div>';
+    }).join('<hr>');
+    tip.style.display = 'block';
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (tip.style.display !== 'block') return;
+    var x = e.clientX + 14, y = e.clientY + 14, w = tip.offsetWidth, h = tip.offsetHeight;
+    if (x + w > innerWidth - 8) x = e.clientX - w - 14;
+    if (y + h > innerHeight - 8) y = e.clientY - h - 14;
+    tip.style.left = Math.max(4, x) + 'px'; tip.style.top = Math.max(4, y) + 'px';
+  });
+
+  // 文字単位の差分（短い文字は LCS。長すぎる文字はそのまま）
+  function diffHtml(a, b, side) {
+    a = a == null ? '' : String(a); b = b == null ? '' : String(b);
+    if (!a || !b || a.length * b.length > 250000) return esc(side === 'old' ? a : b) || '<span class="muted">（なし）</span>';
+    var n = a.length, m = b.length, dp = [];
+    for (var i = 0; i <= n; i++) { dp.push(new Uint16Array(m + 1)); }
+    for (i = n - 1; i >= 0; i--) for (var j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    var out = '', run = '', tag = '';
+    var flush = function () { if (run) out += tag ? '<' + tag + '>' + esc(run) + '</' + tag + '>' : esc(run); run = ''; };
+    var put = function (t, ch) { if (t !== tag) { flush(); tag = t; } run += ch; };
+    i = 0; j = 0;
+    while (i < n || j < m) {
+      if (i < n && j < m && a[i] === b[j]) { put('', a[i]); i++; j++; }
+      else if (j < m && (i === n || dp[i][j + 1] >= dp[i + 1][j])) { if (side === 'new') put('ins', b[j]); j++; }
+      else { if (side === 'old') put('del', a[i]); i++; }
+    }
+    flush();
+    return out;
+  }
+
+  // 最初の差分のあるシートを開く
+  for (var fi = 0; fi < DATA.files.length; fi++) {
+    var f = DATA.files[fi];
+    for (var si = 0; si < f.sheets.length; si++) { if (sheetDiffs(f, f.sheets[si]).length) { select(fi, si); return; } }
+  }
+  if (DATA.files.length && DATA.files[0].sheets.length) select(0, 0); else show();
+})();
+</script>
+</body>
+</html>

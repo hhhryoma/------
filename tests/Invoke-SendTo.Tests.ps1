@@ -68,6 +68,7 @@ Test-Case 'Invoke-SendTo: 差分は 2 つを選び、版数（無ければ更新
     $outDir = Join-Path $dir '結果'
     Invoke-SendTo @{ Action = 'Compare'; OutDir = $outDir } @($v11, $v10)
     $rows = Get-SheetValues (Get-ResultFiles $outDir)[0]
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath $outDir -Filter '差分_*.html').Count '差分を見る HTML も作る'
     Assert-True (@($rows | Where-Object { $_ -match '\|受注\|受注明細$' }).Count -eq 1) ($rows -join ' / ')
 
     # 版数が無ければ更新日時の古い方を旧にする

@@ -26,7 +26,9 @@ param(
 
     [string] $OutXlsx,
 
-    [string] $OutMarkedDir
+    [string] $OutMarkedDir,
+
+    [string] $OutHtml
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +45,10 @@ if ($OutXlsx) {
     if ([System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw "-OutXlsx の拡張子は .xlsx にしてください: $OutXlsx" }
 }
 if ($OutMarkedDir) { $OutMarkedDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutMarkedDir) }
+if ($OutHtml) {
+    $OutHtml = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutHtml)
+    if (@('.html', '.htm') -notcontains [System.IO.Path]::GetExtension($OutHtml).ToLowerInvariant()) { throw "-OutHtml の拡張子は .html にしてください: $OutHtml" }
+}
 if ($OutHistory) { $OutHistory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutHistory) }
 
 Update-TypeData -TypeName 'CompareExcel.Diff' -DefaultDisplayPropertySet File, Location, Change, Detail -Force -WhatIf:$false
@@ -642,6 +648,8 @@ function Add-Diff {
         Path        = $script:CurrentNewPath
         OldPath     = $script:CurrentOldPath
         Segments    = $segments
+        NewCell     = $NewCell
+        OldCell     = $OldCell
     }
     $d.PSObject.TypeNames.Insert(0, 'CompareExcel.Diff')
     $script:Diffs.Add($d)
@@ -1305,6 +1313,8 @@ function Compare-Book {
     $oldBook = Read-Book $OldPath
     $newBook = Read-Book $NewPath
     $firstDiff = $script:Diffs.Count
+    # グラフィカルな差分（-OutHtml）は、シートの中身も使う
+    if ($OutHtml) { $script:HtmlBooks[$script:CurrentFile] = [pscustomobject]@{ Old = $oldBook; New = $newBook } }
 
     # 片方にしか無いシートどうしで中身がよく似ていれば、シート名の変更とみなす
     $renamed = @{}   # 新のシート名 → 旧のシート名
@@ -1529,6 +1539,165 @@ function Test-HistoryCoverage {
 
 # ---------------------------------------------------------------- 比べるファイルの組み合わせ
 
+
+# ---------------------------------------------------------------- グラフィカルな差分（-OutHtml）
+
+
+$script:HtmlBooks = @{}
+
+function Read-SheetLayout {
+    #     xlsx のシートごとの列幅（ピクセル。非表示は 0）と結合セル。読めないブック（.xls など）は空
+    param([string] $FilePath)
+    $layout = @{}
+    if (-not $FilePath -or @('.xlsx', '.xlsm') -notcontains [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()) { return $layout }
+    try {
+        $pkg = Open-ZipPackage $FilePath
+        try {
+            $parts = Get-WorkbookSheetParts $pkg
+            foreach ($name in $parts.Sheets.Keys) {
+                $doc = Read-PartXml -Package $pkg -PartName $parts.Sheets[$name]
+                if (-not $doc) { continue }
+                $default = 8.43
+                $fmt = $doc.SelectSingleNode("//*[local-name()='sheetFormatPr']")
+                if ($fmt -and $fmt.GetAttribute('defaultColWidth')) { $v = 0.0; if ([double]::TryParse($fmt.GetAttribute('defaultColWidth'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { $default = $v } }
+                $widths = @{}
+                foreach ($c in $doc.SelectNodes("//*[local-name()='cols']/*[local-name()='col']")) {
+                    $w = $default
+                    $v = 0.0
+                    if ([double]::TryParse($c.GetAttribute('width'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { $w = $v }
+                    $px = [int][math]::Round($w * 7 + 5)
+                    if ($c.GetAttribute('hidden') -eq '1' -or $c.GetAttribute('hidden') -eq 'true') { $px = 0 }
+                    # 最後の列までまとめて指定した <col max="16384"> などは、使う範囲だけにする
+                    $max = [math]::Min([int]$c.GetAttribute('max'), 1024)
+                    for ($i = [int]$c.GetAttribute('min'); $i -le $max; $i++) { $widths[$i] = $px }
+                }
+                $merges = @($doc.SelectNodes("//*[local-name()='mergeCells']/*[local-name()='mergeCell']") | ForEach-Object { $_.GetAttribute('ref') })
+                $layout[$name] = [pscustomobject]@{ Default = [int][math]::Round($default * 7 + 5); Widths = $widths; Merges = $merges }
+            }
+        }
+        finally { $pkg.Zip.Dispose() }
+    }
+    catch { Write-Verbose ("{0}: 列幅・結合セルを読めませんでした: {1}" -f [System.IO.Path]::GetFileName($FilePath), $_.Exception.Message) }
+    return $layout
+}
+
+function Add-JsonText {
+    #     文字を JSON の文字列として足す（HTML の中に置くので < > & も逃がす）
+    param([System.Text.StringBuilder] $Builder, $Text)
+    if ($null -eq $Text) { [void]$Builder.Append('null'); return }
+    $escaped = $script:JsonEscape.Replace([string]$Text, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) '\u{0:x4}' -f [int][char]$m.Value })
+    [void]$Builder.Append('"').Append($escaped).Append('"')
+}
+# JSON の文字列で逃がす文字（" と \ も \u の形にする）
+$script:JsonEscape = New-Object System.Text.RegularExpressions.Regex('[\x00-\x1f"\\<>&\u2028\u2029]')
+
+function Add-SheetJson {
+    #     シートの値（行・列 → 文字）と列幅・結合セル
+    param([System.Text.StringBuilder] $Builder, $Sheet, $Layout)
+    if ($null -eq $Sheet) { [void]$Builder.Append('null'); return }
+    $maxRow = 0; $maxCol = 0
+    [void]$Builder.Append('{"c":{')
+    $first = $true
+    foreach ($rowKey in $Sheet.Rows.Keys) {
+        $r = [int]$rowKey
+        $row = $Sheet.Rows[$rowKey]
+        $cols = @($row.V.Keys) + @($row.F.Keys | Where-Object { -not $row.V.ContainsKey($_) })
+        foreach ($colKey in $cols) {
+            $c = Get-ColumnIndex $colKey
+            $text = $row.V[$colKey]
+            if ($null -eq $text) { $text = $row.F[$colKey]; if (-not $text.StartsWith('=')) { $text = '=' + $text } }
+            if (-not $first) { [void]$Builder.Append(',') }
+            $first = $false
+            [void]$Builder.Append(('"{0},{1}":' -f $r, $c))
+            Add-JsonText $Builder $text
+            if ($r -gt $maxRow) { $maxRow = $r }
+            if ($c -gt $maxCol) { $maxCol = $c }
+        }
+    }
+    [void]$Builder.Append('},"w":{')
+    if ($Layout) {
+        [void]$Builder.Append((@($Layout.Widths.Keys | Sort-Object | ForEach-Object { '"{0}":{1}' -f $_, $Layout.Widths[$_] }) -join ','))
+    }
+    [void]$Builder.Append('},"m":[')
+    if ($Layout) { [void]$Builder.Append((@($Layout.Merges | ForEach-Object { '"{0}"' -f $_ }) -join ',')) }
+    $default = 64
+    if ($Layout) { $default = $Layout.Default }
+    [void]$Builder.Append(('],"rows":{0},"cols":{1},"def":{2}}}' -f $maxRow, $maxCol, $default))
+}
+
+function Export-DiffHtml {
+    #     差分をシートの方眼のまま色付けして見る HTML（1 ファイル。外部のファイル・通信を使わない）
+    param([string] $OutPath, $Summary)
+    $template = Join-Path $PSScriptRoot 'compare-excel/viewer.html'
+    if (-not (Test-Path -LiteralPath $template)) { throw "差分を見る HTML のひな形がありません（tools フォルダはまとめて配置してください）: $template" }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('{"old":'); Add-JsonText $sb $oldItem.FullName
+    [void]$sb.Append(',"new":'); Add-JsonText $sb $newItem.FullName
+    [void]$sb.Append(',"created":'); Add-JsonText $sb (Get-Date -Format 'yyyy/MM/dd HH:mm')
+    [void]$sb.Append(',"files":[')
+    $firstFile = $true
+    foreach ($s in $Summary) {
+        if (-not $firstFile) { [void]$sb.Append(',') }
+        $firstFile = $false
+        [void]$sb.Append('{"name":'); Add-JsonText $sb $s.File
+        [void]$sb.Append(',"state":'); Add-JsonText $sb $s.State
+        [void]$sb.Append(',"count":' + $s.Count)
+        $fileDiffs = @($script:Diffs | Where-Object { $_.File -eq $s.File })
+        [void]$sb.Append(',"diffs":[')
+        $firstDiff = $true
+        foreach ($d in $fileDiffs) {
+            if (-not $firstDiff) { [void]$sb.Append(',') }
+            $firstDiff = $false
+            [void]$sb.Append('{"s":'); Add-JsonText $sb $d.Sheet
+            [void]$sb.Append(',"os":'); Add-JsonText $sb $d.OldSheet
+            [void]$sb.Append(',"k":'); Add-JsonText $sb $d.Kind
+            [void]$sb.Append(',"ch":'); Add-JsonText $sb $d.Change
+            [void]$sb.Append(',"nc":'); Add-JsonText $sb $(if ($d.NewCell) { $d.NewCell } else { $null })
+            [void]$sb.Append(',"oc":'); Add-JsonText $sb $(if ($d.OldCell) { $d.OldCell } else { $null })
+            [void]$sb.Append(',"a":'); Add-JsonText $sb $d.Old
+            [void]$sb.Append(',"b":'); Add-JsonText $sb $d.New
+            [void]$sb.Append(',"d":'); Add-JsonText $sb $d.Detail
+            [void]$sb.Append('}')
+        }
+        [void]$sb.Append('],"sheets":[')
+        $books = $script:HtmlBooks[$s.File]
+        if ($books -and $s.State -eq '差分あり') {
+            $oldLayout = Read-SheetLayout $s.Old
+            $newLayout = Read-SheetLayout $s.New
+            # 名前を変えたシート（新の名前 → 旧の名前）
+            $renamed = @{}
+            foreach ($d in @($fileDiffs | Where-Object { $_.Kind -eq 'シート' -and $_.Change -eq '名前変更' })) { $renamed[$d.New] = $d.Old }
+            $sheets = New-Object System.Collections.Generic.List[object]
+            foreach ($name in $books.New.Keys) {
+                $oldName = $null
+                if ($books.Old.Contains($name)) { $oldName = $name } elseif ($renamed.ContainsKey($name)) { $oldName = $renamed[$name] }
+                $sheets.Add([pscustomobject]@{ New = $name; Old = $oldName })
+            }
+            $usedOld = @{}
+            foreach ($x in $sheets) { if ($x.Old) { $usedOld[$x.Old] = $true } }
+            foreach ($name in $books.Old.Keys) { if (-not $usedOld.ContainsKey($name)) { $sheets.Add([pscustomobject]@{ New = $null; Old = $name }) } }
+            $firstSheet = $true
+            foreach ($x in $sheets) {
+                if (-not $firstSheet) { [void]$sb.Append(',') }
+                $firstSheet = $false
+                [void]$sb.Append('{"name":'); Add-JsonText $sb $x.New
+                [void]$sb.Append(',"oldName":'); Add-JsonText $sb $x.Old
+                [void]$sb.Append(',"new":'); Add-SheetJson $sb $(if ($x.New) { $books.New[$x.New] } else { $null }) $(if ($x.New) { $newLayout[$x.New] } else { $null })
+                [void]$sb.Append(',"oldSheet":'); Add-SheetJson $sb $(if ($x.Old) { $books.Old[$x.Old] } else { $null }) $(if ($x.Old) { $oldLayout[$x.Old] } else { $null })
+                [void]$sb.Append('}')
+            }
+        }
+        [void]$sb.Append(']}')
+    }
+    [void]$sb.Append(']}')
+    $html = [System.IO.File]::ReadAllText($template, (New-Object System.Text.UTF8Encoding($false)))
+    $marker = '/*DIFF_DATA*/null'
+    if (-not $html.Contains($marker)) { throw "差分を見る HTML のひな形に、データを入れる場所（$marker）がありません: $template" }
+    $html = $html.Replace($marker, $sb.ToString())
+    $dir = Split-Path -Path $OutPath -Parent
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    [System.IO.File]::WriteAllText($OutPath, $html, (New-Object System.Text.UTF8Encoding($false)))
+}
 
 # ---------------------------------------------------------------- 差分の印を付けた写し（-OutMarkedDir）
 
@@ -2164,6 +2333,14 @@ if ($OutXlsx) {
     }
 }
 
+if ($OutHtml) {
+    try { Export-DiffHtml -OutPath $OutHtml -Summary $summary }
+    catch {
+        Write-Warning ("差分を見る HTML を保存できませんでした: {0} : {1}" -f $OutHtml, $_.Exception.Message)
+        $OutHtml = $null
+    }
+}
+
 if ($OutHistory) {
     # 改訂履歴の下書き（New-DesignDocument.ps1 -Bump -CompareWith もこれを使う）
     $encoding = 'UTF8'
@@ -2182,6 +2359,7 @@ Write-Host ''
 $states = $summary | Group-Object State | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
 Write-Host ("{0} ファイル: {1} / 差分 {2} 件" -f $summary.Count, ($states -join ' / '), $script:Diffs.Count)
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
+if ($OutHtml) { Write-Host "差分を見る HTML を保存しました（ブラウザーで開きます）: $OutHtml" }
 if ($markedCount -gt 0) { Write-Host ("差分の印を付けた写しを保存しました: {0}（{1} ファイル）" -f $OutMarkedDir, $markedCount) }
 if ($OutHistory) {
     Write-Host ("改訂履歴の下書きを保存しました: {0}（{1} 件）" -f $OutHistory, $script:HistoryDrafts.Count)
@@ -2204,6 +2382,7 @@ if ($OutHistory) {
 #     版数だけが違う名前のファイル（_v1.0 と _v1.1、第1.0版 と 第1.1版 など）は、1 対 1 なら同じファイルとして比べます。
 #     結果は 1 差分 1 行のオブジェクトで出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
 #     -OutMarkedDir を付けると、新のブックの写しに差分の印（セルの色と、選んだときに出る変更前の値）を付けて保存します。
+#     -OutHtml を付けると、差分をシートの方眼のまま色付けして見る HTML（ブラウザーで開く）を保存します。
 #     -CheckHistory を付けると、改訂履歴に書かれていない変更を、改訂履歴に書く文の下書きとともに知らせます。
 #     -OutHistory を付けると、すべての変更の改訂履歴の下書きを CSV に保存します。
 #
@@ -2256,6 +2435,11 @@ if ($OutHistory) {
 #     結果を xlsx に保存します（差分一覧・ファイル別。場所をクリックすると該当セルが開きます）。
 #     長い文字列の変更は、変更前の削除した部分を赤の取り消し線、変更後の追加した部分を赤の太字で示します。
 #
+# .PARAMETER OutHtml
+#     差分をシートの方眼のまま色付けして見る HTML を保存します（1 ファイル。ブラウザーで開きます。外部のファイル・通信は使いません）。
+#     列幅・結合セルを Excel に近い形で表示し、変更・追加・削除・移動したセルや行に色を付けます。
+#     マウスを重ねたセルの変更前・変更後（変わった文字に色）、新・旧・左右に並べる表示の切り替え、差分の一覧からのジャンプ、前後の差分への移動ができます。
+#
 # .PARAMETER OutMarkedDir
 #     差分のあった新のブック（.xlsx / .xlsm）の写しを、このフォルダーに同じ名前（フォルダーどうしなら同じ相対パス）で保存し、
 #     差分の印を付けます。変更したセルは黄、追加したセル・行・列は緑、値を消したセルは赤、移動した行は青で塗り、
@@ -2284,6 +2468,10 @@ if ($OutHistory) {
 # .EXAMPLE
 #     # 改訂履歴の下書きを作る
 #     .\Compare-Excel.ps1 D:\納品\v1.0 D:\納品\v1.1 -OutHistory D:\改訂履歴_下書き.csv
+#
+# .EXAMPLE
+#     # 差分をシートの方眼のまま色付けして、ブラウザーで見る
+#     .\Compare-Excel.ps1 D:\納品\v1.0 D:\納品\v1.1 -OutHtml D:\差分_v1.0-v1.1.html
 #
 # .EXAMPLE
 #     # 新の版の写しに差分の印を付けて、レビュー用に保存する

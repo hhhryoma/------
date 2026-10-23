@@ -469,6 +469,44 @@ Test-Case 'Compare-Excel: フォルダどうしでは、版数だけが違う名
     Assert-Equal @('DD03_テーブル定義書_v1.1.xlsx|Data|受注番号（ORDER_NO）: 桁数を 10 → 12 に変更', 'DD04_コード定義書_v1.0.xlsx|全体|新規作成') @(Import-Csv -LiteralPath $csv -Encoding UTF8 | ForEach-Object { '{0}|{1}|{2}' -f $_.'ファイル', $_.'改訂箇所', $_.'改訂内容' })
 }
 
+Test-Case 'Compare-Excel: -OutHtml で、シートの値・列幅・結合セルと差分を入れた、差分を見る HTML を保存する' {
+    $dir = New-TestDir
+    $out = Join-Path $dir '差分.html'
+    $null = Invoke-Compare @{ Old = (Join-Path $cmpDir 'v1'); New = (Join-Path $cmpDir 'v2'); OutHtml = $out }
+    $html = [System.IO.File]::ReadAllText($out)
+    Assert-True ($html.Contains('<title>Excel の差分</title>')) 'ひな形の HTML'
+    $m = [regex]::Match($html, 'var DATA = (\{.*?\});\r?\n')
+    Assert-True $m.Success 'データ（JSON）が入っている'
+    Assert-True (-not $m.Groups[1].Value.Contains('<')) 'データの中の < は逃がす（</script> で HTML が壊れないように）'
+    $data = $m.Groups[1].Value | ConvertFrom-Json
+    Assert-Equal @('同じ.xlsx|同じ|0', '追加された.xlsx|追加|1', '項目定義.xlsx|差分あり|7', '削除された.xlsx|削除|1') @($data.files | ForEach-Object { '{0}|{1}|{2}' -f $_.name, $_.state, $_.count })
+    $file = @($data.files | Where-Object name -eq '項目定義.xlsx')[0]
+    Assert-Equal @('項目定義|項目定義', '変更履歴|', '|旧メモ') @($file.sheets | ForEach-Object { '{0}|{1}' -f $_.name, $_.oldName }) '追加・削除したシートも並べる'
+    $sheet = $file.sheets[0]
+    Assert-Equal '10|8' ('{0}|{1}' -f $sheet.new.c.'3,3', $sheet.oldSheet.c.'3,3') '新と旧の値（行,列 → 文字）'
+    Assert-Equal '=SUM(C2:C5)' $sheet.new.c.'6,3' '値の無い数式のセルは数式を表示する'
+    Assert-True ($sheet.new.rows -ge 6 -and $sheet.new.cols -ge 3) ('{0} 行 {1} 列' -f $sheet.new.rows, $sheet.new.cols)
+    $row = @($file.diffs | Where-Object { $_.k -eq '行' -and $_.ch -eq '削除' })[0]
+    Assert-Equal '|A5' ('{0}|{1}' -f $row.nc, $row.oc) '削除した行は旧の行だけを持つ'
+    Assert-True ($null -eq $data.files[0].sheets -or @($data.files[0].sheets).Count -eq 0) '同じファイルのシートは入れない'
+}
+
+Test-Case 'Compare-Excel: -OutHtml は、設計書の列幅と結合セルを入れる' {
+    $dir = New-TestDir
+    $design = Join-Path $script:RepoRoot 'docs/design-sample/DD05_メッセージ一覧.xlsx'
+    $new = Join-Path $dir 'DD05_メッセージ一覧.xlsx'
+    Copy-Item -LiteralPath $design -Destination $new
+    $null = & (Join-Path $script:ToolsDir 'Replace-Excel.ps1') -Pattern '日付の形式が正しくありません' -Replacement '日付の形式が違います' -SimpleMatch -Path $new -Force 6>$null
+    $out = Join-Path $dir 'diff.html'
+    $null = Invoke-Compare @{ Old = $design; New = $new; OutHtml = $out }
+    $data = [regex]::Match([System.IO.File]::ReadAllText($out), 'var DATA = (\{.*?\});\r?\n').Groups[1].Value | ConvertFrom-Json
+    $sheet = @($data.files[0].sheets | Where-Object name -eq 'メッセージ一覧')[0]
+    Assert-True (@($sheet.new.m).Count -gt 0) '結合セル'
+    Assert-True (@($sheet.new.w.PSObject.Properties).Count -gt 0) '列幅'
+    Assert-Equal 'K9' @($data.files[0].diffs)[0].nc
+    Assert-Throws { & $CompareExcel $design $new -OutHtml (Join-Path $dir 'diff.txt') 6>$null } '拡張子は .html'
+}
+
 Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定するとエラー' {
     Assert-Throws { & $CompareExcel -Old (Join-Path $cmpDir 'v1') -New (Join-Path $cmpDir 'v2/同じ.xlsx') 6>$null } '両方とも'
 }
