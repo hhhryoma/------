@@ -1,0 +1,105 @@
+﻿#     Export-ActionItems.ps1 のテスト。議事録（テキスト・Word・Excel）はテストの中で作る
+
+$ActionItems = Join-Path $script:ToolsDir 'Export-ActionItems.ps1'
+
+function New-MinutesDocx {
+    #     段落と表だけの最小の Word 文書（word/document.xml）を作る
+    param([string] $Path, [string[]] $Before, [string[][]] $Table, [string[]] $After)
+    $esc = { param($t) [System.Security.SecurityElement]::Escape($t) }
+    $p = { param($t) '<w:p><w:r><w:t xml:space="preserve">' + (& $esc $t) + '</w:t></w:r></w:p>' }
+    $body = New-Object System.Text.StringBuilder
+    foreach ($t in $Before) { [void]$body.Append((& $p $t)) }
+    [void]$body.Append('<w:tbl>')
+    foreach ($row in $Table) {
+        [void]$body.Append('<w:tr>')
+        foreach ($c in $row) { [void]$body.Append('<w:tc>' + (& $p $c) + '</w:tc>') }
+        [void]$body.Append('</w:tr>')
+    }
+    [void]$body.Append('</w:tbl>')
+    foreach ($t in $After) { [void]$body.Append((& $p $t)) }
+    $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + $body.ToString() + '</w:body></w:document>'
+    $fs = [System.IO.File]::Create($Path)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        foreach ($entry in @(@('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'), @('word/document.xml', $xml))) {
+            $sw = New-Object System.IO.StreamWriter($zip.CreateEntry($entry[0]).Open(), (New-Object System.Text.UTF8Encoding($false)))
+            $sw.Write($entry[1]); $sw.Dispose()
+        }
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
+Test-Case 'Export-ActionItems: テキストの議事録の宿題・決定事項の節と【TODO】から、担当・期限を取り出して一覧にする' {
+    $dir = New-TestDir
+    @('定例会議 議事録', '日時：2026年10月20日（火）10:00～11:00', '会議名：受注システム 定例', '',
+        '■ 議題', '1. 進捗の確認', '・画面設計は予定どおり。山田さんが説明した。', '',
+        '■ 決定事項', '・受注日の初期値は当日とする。', '',
+        '■ 宿題',
+        '・画面設計書の受注日の桁数を直す（山田、10/23まで）',
+        '・テーブル定義書のレビュー日程を決める　担当：佐藤　期限：10/27',
+        '　※ 鈴木さんの予定も確認',
+        '・お客様に締め日の扱いを確認する（来週中）',
+        '・性能の目標値を確認する',
+        '・なし', '',
+        '■ その他', '・次回は10/27。【TODO】議事録を共有する @鈴木 今週中') | Set-Content -LiteralPath (Join-Path $dir '議事録.txt') -Encoding UTF8
+    $text = Get-HostText { $script:r = @(& $ActionItems (Join-Path $dir '議事録.txt') -OutCsv (Join-Path $dir '宿題.csv')) }
+    Assert-Equal @(
+        '決定事項|受注日の初期値は当日とする||||受注システム 定例|2026/10/20',
+        '宿題|画面設計書の受注日の桁数を直す|山田|2026/10/23||受注システム 定例|2026/10/20',
+        '宿題|テーブル定義書のレビュー日程を決める|佐藤|2026/10/27|鈴木さんの予定も確認|受注システム 定例|2026/10/20',
+        '宿題|お客様に締め日の扱いを確認する||2026/10/30|担当なし|受注システム 定例|2026/10/20',
+        '宿題|性能の目標値を確認する|||担当なし・期限なし|受注システム 定例|2026/10/20',
+        '宿題|議事録を共有する|鈴木|2026/10/23||受注システム 定例|2026/10/20') @($script:r | ForEach-Object { '{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f $_.Kind, $_.Title, $_.Owner, $(if ($_.Due) { $_.Due.ToString('yyyy/MM/dd') } else { '' }), $_.Note, $_.Meeting, $_.MeetingDate.ToString('yyyy/MM/dd') })
+    Assert-Match $text '議事録 1 件: 宿題 5 件（担当なし 2・期限なし 1）・決定事項 1 件'
+
+    # CSV は課題管理表の形で、週次報告の -IssueList にそのまま渡せる
+    $csv = @(Import-Csv -LiteralPath (Join-Path $dir '宿題.csv') -Encoding UTF8)
+    Assert-Equal 'No|区分|件名|担当|期限|状態|起票日|会議|メモ|出典' ((@($csv[0].PSObject.Properties | ForEach-Object { $_.Name })) -join '|')
+    Assert-Equal '1|宿題|画面設計書の受注日の桁数を直す|山田|2026/10/23|未対応|2026/10/20' ((@('No', '区分', '件名', '担当', '期限', '状態', '起票日') | ForEach-Object { $csv[0].$_ }) -join '|')
+    Assert-Equal '議事録.txt 13 行目' $csv[0].'出典'
+    $weekly = Get-HostText { $null = & (Join-Path $script:ToolsDir 'New-WeeklyReport.ps1') -IssueList (Join-Path $dir '宿題.csv') -AsOf '2026-10-28' }
+    Assert-Match $weekly '・未完了: 5 件・うち期限切れ 3 件'
+}
+
+Test-Case 'Export-ActionItems: Word の議事録の表（アクション・担当・期限）と【決定】、Excel の議事録の表を読む' {
+    $dir = New-TestDir
+    $docx = Join-Path $dir '20261021_定例.docx'
+    New-MinutesDocx $docx @('定例会議 議事録') @(@('No', 'アクション', '担当', '期限'), @('1', 'IF 定義書を更新する', '佐藤さん', '2026/10/28'), @('2', '受入テストの範囲を決める', '鈴木', '次回')) @('【決定】結合テストは11/9から始める')
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $xlsx = Join-Path $dir '定例_2026-10-22.xlsx'
+    $rows = @(@('画面設計書を直す', '山田', '10/30'), @('帳票の様式を確認する', '', '11/2'), @('', '', ''), @('■ 決定事項', '', ''), @('・帳票は PDF で出す', '', ''))
+    Export-Workbook -FilePath $xlsx -Sheets @(@{ Name = '議事録'; Columns = @(@('項目', '担当', '期限') | ForEach-Object { @{ Header = $_; Width = 20 } }); Rows = @($rows | ForEach-Object { @{ Values = $_ } }) })
+    $out = Join-Path $dir '宿題.xlsx'
+    $r = @(& $ActionItems $dir -OutXlsx $out 6>$null)
+    Assert-Equal @(
+        '宿題|画面設計書を直す|山田|2026/10/30|定例_2026-10-22',
+        '宿題|帳票の様式を確認する||2026/11/02|定例_2026-10-22',
+        '決定事項|帳票は PDF で出す|||定例_2026-10-22',
+        '宿題|IF 定義書を更新する|佐藤|2026/10/28|20261021_定例',
+        '宿題|受入テストの範囲を決める|鈴木||20261021_定例',
+        '決定事項|結合テストは11/9から始める|||20261021_定例') @($r | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Kind, $_.Title, $_.Owner, $(if ($_.Due) { $_.Due.ToString('yyyy/MM/dd') } else { '' }), $_.Meeting }) 'Excel は行が飛んだところで表が終わる'
+    Assert-Equal '次回まで' $r[4].Note
+    Assert-Equal '2026/10/21' $r[3].MeetingDate.ToString('yyyy/MM/dd') 'ファイル名の日付'
+    $sheet = Read-XlsxSheet -Path $out -Index 1
+    Assert-Equal @('宿題', '決定事項') $sheet.Sheets
+    Assert-Equal 5 $sheet.Rows.Count '見出しと 4 件'
+    Assert-True (@($sheet.Links | Where-Object { $_.Location -eq "'議事録'!A2" }).Count -eq 1) 'Excel の議事録の該当セルへのリンク'
+}
+
+Test-Case 'Export-ActionItems: Markdown の表と、宿題の無い議事録' {
+    $dir = New-TestDir
+    @('# 定例 2026/10/23', '', '## 宿題', '', '| 内容 | 担当 | 期限 |', '|---|---|---|', '| 手順書を書く | 田中 | 10/30 |', '', '## メモ', '- 特になし') | Set-Content -LiteralPath (Join-Path $dir 'minutes.md') -Encoding UTF8
+    $r = @(& $ActionItems (Join-Path $dir 'minutes.md') 6>$null)
+    Assert-Equal @('宿題|手順書を書く|田中|2026/10/30') @($r | ForEach-Object { '{0}|{1}|{2}|{3:yyyy/MM/dd}' -f $_.Kind, $_.Title, $_.Owner, $_.Due })
+    @('打ち合わせメモ', '・特に問題なし') | Set-Content -LiteralPath (Join-Path $dir 'memo.txt') -Encoding UTF8
+    $text = Get-HostText { $null = & $ActionItems (Join-Path $dir 'memo.txt') -OutCsv (Join-Path $dir 'empty.csv') }
+    Assert-Match $text '宿題 0 件'
+    Assert-Equal 1 @(Get-Content -LiteralPath (Join-Path $dir 'empty.csv')).Count '見出しだけ'
+}
+
+Test-Case 'Export-ActionItems: Get-Help でヘルプが表示される' {
+    $h = Get-Help $ActionItems
+    Assert-Match $h.Synopsis '議事録'
+    Assert-Equal 5 @($h.parameters.parameter | Where-Object { $_.description }).Count
+}
