@@ -26,7 +26,7 @@ $actions = [ordered]@{
     ResetView   = @{ Label = '表示を整える'; Tool = 'Reset-ExcelView.ps1'; Detail = '開いたときに先頭シートの A1 が倍率 100% で表示される状態に直します（上書きします）' }
     Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック・Word 文書（またはフォルダ）を比べ、差分をシートの方眼のまま色付けした画面（ブラウザー）を開きます（一覧の Excel も保存）。版数（ファイル名）か更新日時の古い方を旧にします。3 つ以上か、版数の付いたファイルを置いたフォルダを 1 つ選ぶと、版を続けて比べます' }
     SpVersion   = @{ Label = 'SharePoint の版と比べる'; Tool = 'Compare-SharePointVersion.ps1'; Literal = $true; Detail = 'OneDrive で同期している SharePoint のファイルを 1 つ選び、バージョン履歴の番号（3.0 など）を入力すると、その版と現在の版の差分の画面（ブラウザー）を開きます（版は Excel で取り出します）' }
-    Search      = @{ Label = '検索'; File = '検索'; Tool = 'Search-Excel.ps1'; Detail = '入力した文字を、値・数式・コメント・図形などから探し、結果の Excel を開きます' }
+    Search      = @{ Label = '検索'; File = '検索'; Tool = 'Search-Excel.ps1'; Detail = '入力した文字を、値・数式・コメント・図形など（Word の文書も）から探し、結果の Excel を開きます' }
     Terms       = @{ Label = '表記ゆれ'; File = '表記ゆれ'; Tool = 'Test-ExcelTerms.ps1'; Detail = '表記ゆれ（ユーザ／ユーザー など）を見つけ、結果の Excel を開きます' }
     Consistency = @{ Label = '設計書の整合性チェック'; File = '整合性チェック'; Tool = 'Test-DesignConsistency.ps1'; Detail = '設計書どうしの参照の食い違いを見つけ、結果の Excel を開きます' }
     TestDraft   = @{ Label = 'テスト仕様書の下書き'; File = 'テスト仕様書の下書き'; Tool = 'New-TestSpecDraft.ps1'; Literal = $true; Detail = '画面設計書（とコード定義書・メッセージ一覧）のフォルダかファイルを選ぶと、必須・桁数・型・コード値・イベントのテストケースの下書きを作り、Excel を開きます' }
@@ -150,7 +150,7 @@ try {
         'Search' {
             if (-not $Text) { $Text = Read-Host '探す文字を入力してください' }
             if (-not $Text) { throw '探す文字が入力されていません' }
-            $null = & $tool -Pattern $Text -SimpleMatch -Path $toolPaths -OutXlsx $out
+            $null = & $tool -Pattern $Text -SimpleMatch -Path $toolPaths -IncludeWord -OutXlsx $out
         }
         'ResetView' {
             $results = @(& $tool -Path $toolPaths)

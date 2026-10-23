@@ -63,6 +63,7 @@
 
 検索対象は **セルの値 / 数式 / コメント（メモ） / 図形・テキストボックスの文字 / シート名 / ヘッダー・フッター / 名前の定義 / 入力規則** です。
 数式をコピーしたセル（共有数式）も、それぞれのセルの数式で検索します。
+`-IncludeWord` を付けると **Word の文書（.docx / .docm）** も一緒に検索します（「送る」の検索は Word も探します）。
 
 ### 要件
 
@@ -100,6 +101,9 @@
 
 # 結果一覧から選んだセルを Excel で開く
 .\Search-Excel.ps1 'TODO' D:\Docs -Open
+
+# Word の設計書も一緒に探す
+.\Search-Excel.ps1 '受注番号' D:\Docs -IncludeWord -OutXlsx D:\result.xlsx
 ```
 
 実行ポリシーで止まる場合:
@@ -192,6 +196,7 @@ $hits | Group-Object File | Sort-Object Count -Descending   # ファイルごと
 | `-Target` | 検索対象を限定。`Value` `Formula` `Comment` `Shape` `SheetName` `HeaderFooter` `DefinedName` `Validation` から複数指定（既定はすべて） |
 | `-NoRecurse` | サブフォルダを検索しない |
 | `-SkipHiddenSheets` | 非表示シートを検索しない（既定では非表示シートも検索します） |
+| `-IncludeWord` | Word の文書（.docx / .docm）も検索する（下の「Word の文書を探す」） |
 | `-SheetNamePattern` | 検索するシート名の正規表現 |
 | `-SheetNameExclude` | 除外するシート名の正規表現（`-SheetNamePattern` より優先） |
 | `-NoExcel` | Excel を起動しない（.xls / .xlsb は対象外になる） |
@@ -199,6 +204,25 @@ $hits | Group-Object File | Sort-Object Count -Descending   # ファイルごと
 | `-OutXlsx` | 結果を xlsx に保存（該当セルへのリンク付き） |
 | `-OutCsv` | 結果を CSV に保存 |
 | `-Extensions` | 対象拡張子（既定 `.xlsx .xlsm .xltx .xltm .xls .xlsb`） |
+
+### Word の文書を探す（`-IncludeWord`）
+
+Word は不要です。文書の中の XML を直接読みます。
+
+| 探すところ | シート | セル | 種類 | `-Target` |
+| --- | --- | --- | --- | --- |
+| 本文の段落（内容コントロールの中も） | 本文 | 段落 3 | 段落 | Value |
+| 表の行（セルを「 \| 」でつないだ内容で出す。セルをまたいでは一致しない） | 本文 | 表 1 の 2 行目 | 表 | Value |
+| テキストボックス | 本文 | （空） | 図形 | Shape |
+| 脚注・文末脚注 | 脚注・文末脚注 | 段落 1 | 段落 | Value |
+| ヘッダー・フッター | ヘッダー・フッター | 段落 1 | ヘッダー・フッター | HeaderFooter |
+| コメント（名前の列に作成者） | 本文 | コメントの付いた段落・表の行 | コメント | Comment |
+
+- 段落の番号は、本文の表の外の段落を上から数えたものです（空の段落も数えます）。Word の画面には出ないので、内容の文字を Ctrl+F で探してください
+- 変更履歴で削除した文字は探しません（挿入した文字は探します）
+- 結果の Excel の「ファイル」のリンクは文書を開くだけです。`-Open` で選んだ Word の行も、文書を開くだけです
+- パスワード付きの文書と、古い形式（.doc）は検索できません
+- 他のツール（整合性チェックなど）から呼ぶときは Word を探しません（`-IncludeWord` を付けたときだけ）
 
 ### 値の検索について
 

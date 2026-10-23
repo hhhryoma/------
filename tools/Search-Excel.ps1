@@ -16,6 +16,8 @@ param(
     [switch] $NoRecurse,
     [switch] $SkipHiddenSheets,
 
+    [switch] $IncludeWord,
+
     [string] $SheetNamePattern,
     [string] $SheetNameExclude,
 
@@ -692,6 +694,133 @@ function Search-OpenXmlWorkbook {
     }
 }
 
+# ---------------------------------------------------------------- Word（.docx / .docm）の読み取り
+
+$wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+
+function Get-WordParagraphText {
+    #     段落（w:p）の文字。テキストボックス（w:txbxContent）の中と、互換用の写し（mc:Fallback）・段落の書式（タブ位置）は含めない。
+    #     削除した変更履歴の文字（w:delText）は含めない
+    param($Paragraph, $Nsm)
+    $depth = $Paragraph.SelectNodes('ancestor::w:txbxContent', $Nsm).Count
+    $fallback = $Paragraph.SelectNodes('ancestor::mc:Fallback', $Nsm).Count
+    $xpath = './/*[(self::w:t or self::w:tab or self::w:br or self::w:cr) and not(ancestor::w:pPr) and count(ancestor::w:txbxContent) = {0} and count(ancestor::mc:Fallback) = {1}]' -f $depth, $fallback
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($n in $Paragraph.SelectNodes($xpath, $Nsm)) {
+        if ($n.LocalName -eq 't') { [void]$sb.Append($n.InnerText) }
+        elseif ($n.LocalName -eq 'tab') { [void]$sb.Append("`t") }
+        else { [void]$sb.Append("`n") }
+    }
+    return $sb.ToString().Trim()
+}
+
+function Search-WordDocument {
+    #     Word の本文の段落と表の行・テキストボックス・ヘッダー・フッター・脚注・コメントを検索する。
+    #     シートの列は部分（本文・ヘッダー・フッター・脚注・文末脚注）、セルの列は「段落 n」「表 n の m 行目」。
+    #     表は行ごとに 1 件にし、内容はセルを「 | 」でつなぐ（セルをまたいで一致させない）
+    param([string] $FilePath)
+
+    $pkg = Open-ZipPackage -FilePath $FilePath
+    try {
+        $doc = Read-PartXml -Package $pkg -PartName 'word/document.xml'
+        if ($null -eq $doc) { throw 'Word の文書ではありません（word/document.xml が見つかりません）' }
+        $nsm = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+        $nsm.AddNamespace('w', $wordNs)
+        $nsm.AddNamespace('mc', 'http://schemas.openxmlformats.org/markup-compatibility/2006')
+
+        $parts = New-Object System.Collections.Generic.List[object]
+        $parts.Add([pscustomobject]@{ Name = '本文'; Doc = $doc; Kind = '段落'; Want = $wantValue })
+        foreach ($e in @($pkg.Entries.Keys | Sort-Object)) {
+            $name = $null; $kind = '段落'; $want = $wantValue
+            if ($e -match '^word/header\d*\.xml$') { $name = 'ヘッダー'; $kind = 'ヘッダー・フッター'; $want = $wantHeaderFooter }
+            elseif ($e -match '^word/footer\d*\.xml$') { $name = 'フッター'; $kind = 'ヘッダー・フッター'; $want = $wantHeaderFooter }
+            elseif ($e -eq 'word/footnotes.xml') { $name = '脚注' }
+            elseif ($e -eq 'word/endnotes.xml') { $name = '文末脚注' }
+            if (-not $name -or -not $want) { continue }
+            $d = Read-PartXml -Package $pkg -PartName $e
+            if ($d) { $parts.Add([pscustomobject]@{ Name = $name; Doc = $d; Kind = $kind; Want = $true }) }
+        }
+
+        $commentAt = @{}   # コメントの番号 → 本文の場所
+        foreach ($part in $parts) {
+            if (-not (Test-SheetNameMatch $part.Name)) { continue }
+            $paragraphNo = 0; $tableNo = 0
+            # 段落・表（内容コントロール w:sdt の中も）を文書の順にたどる。脚注は区切り線などを除いた w:footnote の中
+            $root = $part.Doc.DocumentElement
+            if ($root.LocalName -eq 'document') { $containers = @($root.SelectNodes('w:body', $nsm)) }
+            elseif ($root.LocalName -eq 'footnotes' -or $root.LocalName -eq 'endnotes') { $containers = @($root.SelectNodes("*[not(@w:type) or @w:type='normal']", $nsm)) }
+            else { $containers = @($root) }
+            $stack = New-Object System.Collections.Generic.Stack[object]
+            for ($q = $containers.Count - 1; $q -ge 0; $q--) {
+                $children = @($containers[$q].ChildNodes)
+                for ($i = $children.Count - 1; $i -ge 0; $i--) { $stack.Push($children[$i]) }
+            }
+            while ($stack.Count -gt 0) {
+                $node = $stack.Pop()
+                if ($node.NamespaceURI -ne $wordNs) { continue }
+                if ($node.LocalName -eq 'sdt') {
+                    $content = $node.SelectSingleNode('w:sdtContent', $nsm)
+                    if ($content) { $children = @($content.ChildNodes); for ($i = $children.Count - 1; $i -ge 0; $i--) { $stack.Push($children[$i]) } }
+                    continue
+                }
+                if ($node.LocalName -eq 'p') {
+                    $paragraphNo++
+                    $cell = '段落 {0}' -f $paragraphNo
+                    foreach ($c in $node.SelectNodes('.//w:commentRangeStart | .//w:commentReference', $nsm)) { $id = $c.GetAttribute('id', $wordNs); if (-not $commentAt.ContainsKey($id)) { $commentAt[$id] = $cell } }
+                    if ($part.Want) {
+                        $text = Get-WordParagraphText $node $nsm
+                        if (Test-TextMatch $text) { New-Hit -Kind $part.Kind -Sheet $part.Name -Cell $cell -Text $text }
+                    }
+                    continue
+                }
+                if ($node.LocalName -eq 'tbl') {
+                    $tableNo++; $rowNo = 0
+                    foreach ($tr in $node.SelectNodes('w:tr', $nsm)) {
+                        $rowNo++
+                        $cell = '表 {0} の {1} 行目' -f $tableNo, $rowNo
+                        foreach ($c in $tr.SelectNodes('.//w:commentRangeStart | .//w:commentReference', $nsm)) { $id = $c.GetAttribute('id', $wordNs); if (-not $commentAt.ContainsKey($id)) { $commentAt[$id] = $cell } }
+                        if (-not $part.Want) { continue }
+                        $cells = @(foreach ($tc in $tr.SelectNodes('w:tc | w:sdt/w:sdtContent/w:tc', $nsm)) {
+                                (@(foreach ($p in $tc.SelectNodes('.//w:p', $nsm)) { Get-WordParagraphText $p $nsm }) | Where-Object { $_ }) -join ' '
+                            })
+                        if (@($cells | Where-Object { Test-TextMatch $_ }).Count -gt 0) { New-Hit -Kind '表' -Sheet $part.Name -Cell $cell -Text ($cells -join ' | ') }
+                    }
+                }
+            }
+
+            # テキストボックス（互換用の写しは除く）
+            if ($wantShape) {
+                $boxNo = 0
+                foreach ($box in $part.Doc.SelectNodes('//w:txbxContent[not(ancestor::mc:Fallback)]', $nsm)) {
+                    $boxNo++
+                    $text = (@(foreach ($p in $box.SelectNodes('w:p | w:tbl//w:p', $nsm)) { Get-WordParagraphText $p $nsm }) | Where-Object { $_ }) -join "`n"
+                    if (Test-TextMatch $text) { New-Hit -Kind '図形' -Sheet $part.Name -Cell $null -Text $text -Name ('テキストボックス {0}' -f $boxNo) }
+                }
+            }
+        }
+
+        if ($wantComment -and (Test-SheetNameMatch '本文')) {
+            $comments = Read-PartXml -Package $pkg -PartName 'word/comments.xml'
+            if ($comments) {
+                foreach ($cm in $comments.SelectNodes('//w:comment', $nsm)) {
+                    $text = (@(foreach ($p in $cm.SelectNodes('.//w:p', $nsm)) { Get-WordParagraphText $p $nsm }) | Where-Object { $_ }) -join "`n"
+                    if (-not (Test-TextMatch $text)) { continue }
+                    $id = $cm.GetAttribute('id', $wordNs)
+                    New-Hit -Kind 'コメント' -Sheet '本文' -Cell ([string]$commentAt[$id]) -Text $text -Name $cm.GetAttribute('author', $wordNs)
+                }
+            }
+        }
+    }
+    finally {
+        $pkg.Zip.Dispose()
+    }
+}
+
+function Test-WordFile {
+    param([string] $FilePath)
+    return @('.docx', '.docm') -contains [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
+}
+
 # ---------------------------------------------------------------- xls / xlsb（Excel COM）の読み取り
 
 $script:Excel      = $null
@@ -900,9 +1029,9 @@ function Export-HitsToXlsx {
         # シート名のヒットや位置不明の図形は A1 にリンクする
         $cell = $h.Cell
         if (-not $cell) { $cell = 'A1' }
-        # シートの無いもの（ブック全体の名前の定義）はファイルを開くだけにする
+        # シートの無いもの（ブック全体の名前の定義）と Word の文書はファイルを開くだけにする
         $location = $null
-        if ($h.Sheet) { $location = "'{0}'!{1}" -f $h.Sheet.Replace("'", "''"), $cell }
+        if ($h.Sheet -and -not (Test-WordFile $h.Path)) { $location = "'{0}'!{1}" -f $h.Sheet.Replace("'", "''"), $cell }
         $rows.Add(@{
             Values = @($h.File, $h.Location, $h.Sheet, $h.Cell, $h.Kind, $h.Text, $h.Name, $h.Path)
             Link   = @{ Column = 1; Path = $h.Path; Location = $location; Tooltip = ('{0} を開く' -f $h.File) }
@@ -1003,6 +1132,12 @@ function Show-HitPicker {
         Out-GridView -Title 'Excel で開く行を選んで OK を押してください（Ctrl / Shift で複数選択）' -PassThru)
 
     foreach ($h in $selected) {
+        if (Test-WordFile $h.Path) {
+            # Word の文書は開くだけ（場所は Ctrl+F で探す）
+            try { Invoke-Item -LiteralPath $h.Path; Write-Host ("Word で開きました: {0}（{1} {2}）。Ctrl+F で探してください" -f $h.File, $h.Sheet, $h.Cell) }
+            catch { Write-Warning ("開けませんでした: {0} : {1}" -f $h.File, $_.Exception.Message) }
+            continue
+        }
         try { Open-HitInExcel -Hit $h }
         catch { Write-Warning ("開けませんでした: {0} {1}!{2} : {3}" -f $h.File, $h.Sheet, $h.Cell, $_.Exception.Message) }
     }
@@ -1028,6 +1163,7 @@ function Get-FileSignature {
 }
 
 $extSet = @{}
+if ($IncludeWord) { $Extensions = @($Extensions) + @('.docx', '.docm') }
 foreach ($e in $Extensions) {
     $k = $e.ToLowerInvariant()
     if (-not $k.StartsWith('.')) { $k = '.' + $k }
@@ -1056,7 +1192,7 @@ foreach ($p in $Path) {
 
         foreach ($f in $found) {
             if (-not $extSet.ContainsKey($f.Extension.ToLowerInvariant())) { continue }
-            if ($f.Name.StartsWith('~$')) { continue }   # Excel の一時ファイル
+            if ($f.Name.StartsWith('~$')) { continue }   # Excel・Word の一時ファイル
             if ($seen.ContainsKey($f.FullName)) { continue }
             # 前回の -OutXlsx の出力が検索フォルダ内にあっても、それ自体は検索しない
             if ($OutXlsx -and [string]::Equals($f.FullName, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
@@ -1114,7 +1250,11 @@ try {
                 $ext = $file.Extension.ToLowerInvariant()
                 $sig = Get-FileSignature -FilePath $file.FullName
 
-                if ($ext -eq '.xlsb' -or ($sig -eq 'Ole' -and $ext -eq '.xls') -or $sig -eq 'Unknown') {
+                if (Test-WordFile $file.FullName) {
+                    if ($sig -eq 'Ole') { throw 'パスワードで保護されているため読めません' }
+                    $hits = @(Search-WordDocument -FilePath $file.FullName)
+                }
+                elseif ($ext -eq '.xlsb' -or ($sig -eq 'Ole' -and $ext -eq '.xls') -or $sig -eq 'Unknown') {
                     if ($NoExcel) {
                         Write-Verbose "スキップ（-NoExcel 指定のため .xls / .xlsb は対象外）: $($entry.Relative)"
                         continue
@@ -1206,6 +1346,10 @@ if ($Open -and $allHits.Count -gt 0) { Show-HitPicker -Hits $allHits }
 #     Excel がインストールされていない端末でも動作します。
 #     xls / xlsb 形式はファイル形式上 XML で読めないため、見つかった場合のみ Excel を起動して読みます。
 #
+#     -IncludeWord を付けると、Word の文書（.docx / .docm）の本文の段落・表・テキストボックス・ヘッダー・フッター・
+#     脚注・コメントも検索します（Word は不要）。シートの列は「本文」「ヘッダー」などの部分、セルの列は「段落 3」
+#     「表 1 の 2 行目」です。表は行ごとに 1 件にし、内容はセルを「 | 」でつないで出します。
+#
 #     結果はオブジェクトとして出力されるので、Where-Object や Export-Csv にそのまま渡せます。
 #     プロパティ: File（相対パス） / Location（シート!セル） / Sheet / Cell / Kind / Text / Name / Path
 #
@@ -1238,6 +1382,11 @@ if ($Open -and $allHits.Count -gt 0) { Show-HitPicker -Hits $allHits }
 #
 # .PARAMETER SkipHiddenSheets
 #     非表示シートを検索しません（既定では非表示シートも検索します）。
+#
+# .PARAMETER IncludeWord
+#     Word の文書（.docx / .docm）も検索します。Target の Value は本文・表・脚注、HeaderFooter はヘッダー・フッター、
+#     Comment はコメント、Shape はテキストボックスです。「送る」の検索はこれを付けて実行します。
+#     -Open で選んだ Word の行は、文書を Word で開くだけです（場所は Ctrl+F で探してください）。
 #
 # .PARAMETER SheetNamePattern
 #     検索対象とするシート名の正規表現（大文字小文字は区別しません）。
@@ -1278,6 +1427,10 @@ if ($Open -and $allHits.Count -gt 0) { Show-HitPicker -Hits $allHits }
 # .EXAMPLE
 #     # 結果を一覧ウィンドウで絞り込みながら見る
 #     .\Search-Excel.ps1 'TODO|要確認' D:\Docs | Out-GridView
+#
+# .EXAMPLE
+#     # Word の設計書も一緒に探す
+#     .\Search-Excel.ps1 '受注番号' D:\Docs -IncludeWord -OutXlsx D:\検索結果.xlsx
 #
 # .EXAMPLE
 #     # 結果一覧から選んだセルを Excel で開く
