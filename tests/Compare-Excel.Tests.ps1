@@ -579,6 +579,43 @@ Test-Case 'Compare-Excel: -OutHtml は、行の高さ・非表示の行と、図
     Assert-True ([System.IO.File]::ReadAllText($out).Contains('id="showShapes"')) '図形を重ねる表示'
 }
 
+function New-TaggedBooks {
+    #     表紙の版数・更新日、改訂履歴の追記、表記だけの変更（全角・空白）、同じ置き換え（受注 → 注文）のある旧・新のブック
+    param([string] $Dir)
+    $old = Join-Path $Dir 'old.xlsx'; $new = Join-Path $Dir 'new.xlsx'
+    New-SheetsBook $old ([ordered]@{
+            '表紙' = @(@('版数', '1.0'), @('更新日', '2026/10/01'))
+            '画面' = @(@('No', '名称', 'ID', '区分'), @('1', '受注一覧', 'LIST', '画面'), @('2', '受注日', 'DATE', '項目'), @('3', '受注番号を入力', 'NO', '項目'), @('4', '顧客', 'ＡＢＣ　コード', '項目'))
+            '改訂履歴' = @(@('版数', '内容'), @('1.0', '新規作成')) })
+    New-SheetsBook $new ([ordered]@{
+            '表紙' = @(@('版数', '1.1'), @('更新日', '2026/10/20'))
+            '画面' = @(@('No', '名称', 'ID', '区分'), @('1', '注文一覧', 'LIST', '画面'), @('2', '注文日', 'DATE', '項目'), @('3', '注文番号を入力', 'NO', '項目'), @('4', '顧客', 'ABC コード', '項目'))
+            '改訂履歴' = @(@('版数', '内容'), @('1.0', '新規作成'), @('1.1', '受注を注文に変更')) })
+    return [pscustomobject]@{ Old = $old; New = $new }
+}
+
+Test-Case 'Compare-Excel: 表記だけの変更と、版数・更新日・改訂履歴の変更に分類を付け、-Ignore で外す' {
+    $dir = New-TestDir
+    $b = New-TaggedBooks $dir
+    $out = Join-Path $dir 'diff.xlsx'
+    $text = Get-HostText { $script:d = @(& $CompareExcel $b.Old $b.New -OutXlsx $out -OutHtml (Join-Path $dir 'diff.html')) }
+    Assert-Equal @('表紙!B1|値|版情報', '表紙!B2|値|版情報', '画面!B2|値|', '画面!B3|値|', '画面!B4|値|', '画面!C5|値|表記', '改訂履歴!A3|行|版情報') @($script:d | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Kind, $_.Tag })
+    Assert-Match ($script:d[5].Detail) '（表記のみ）$'
+    Assert-Match $text '差分 7 件（うち 表記のみ 1 件・版情報 3 件）'
+    $sheet = Read-XlsxSheet -Path $out -Index 1
+    Assert-Equal '分類' $sheet.Rows[1]['I']
+    $html = [System.IO.File]::ReadAllText((Join-Path $dir 'diff.html'))
+    $data = [regex]::Match($html, 'var DATA = (\{.*?\});\r?\n').Groups[1].Value | ConvertFrom-Json
+    Assert-Equal @('版情報', '版情報', '', '', '', '表記', '版情報') @($data.files[0].diffs | ForEach-Object { [string]$_.t }) 'HTML の差分にも分類（t）'
+    Assert-True ($html.Contains('id="nextOpen"') -and $html.Contains('id="onlyOpen"')) '未確認の差分へ移る・未確認だけを出す'
+
+    # -Ignore で外す。改訂履歴の突き合わせには、外した改訂履歴の変更も使う
+    $text = Get-HostText { $script:d = @(& $CompareExcel $b.Old $b.New -Ignore 表記, 版情報 -CheckHistory) }
+    Assert-Equal @('画面!B2|値', '画面!B3|値', '画面!B4|値') @($script:d | Where-Object Kind -ne '改訂履歴' | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Kind })
+    Assert-Equal 0 @($script:d | Where-Object { $_.Kind -eq '改訂履歴' -and $_.Detail -match '追記' }).Count '改訂履歴に追記したことはわかる'
+    Assert-Match $text '除いた差分: 表記のみ 1 件・版情報 3 件'
+}
+
 Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定するとエラー' {
     Assert-Throws { & $CompareExcel -Old (Join-Path $cmpDir 'v1') -New (Join-Path $cmpDir 'v2/同じ.xlsx') 6>$null } '両方とも'
 }

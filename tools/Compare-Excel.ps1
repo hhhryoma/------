@@ -18,6 +18,9 @@ param(
 
     [string] $HistorySheet = '改訂履歴|変更履歴|改版履歴|更新履歴|改訂記録',
 
+    [ValidateSet('表記', '版情報')]
+    [string[]] $Ignore,
+
     [string] $OutHistory,
 
     [switch] $NoRecurse,
@@ -605,6 +608,7 @@ function Get-RowMapping {
 
 
 $script:Diffs = New-Object System.Collections.Generic.List[object]
+$script:IgnoredCounts = @{ '表記' = 0; '版情報' = 0 }
 
 function Add-Diff {
     #     DetailText を指定すると、Detail をその文字にする（書式の差分など）
@@ -656,6 +660,7 @@ function Add-Diff {
         Segments    = $segments
         NewCell     = $NewCell
         OldCell     = $OldCell
+        Tag         = ''
     }
     $d.PSObject.TypeNames.Insert(0, 'CompareExcel.Diff')
     $script:Diffs.Add($d)
@@ -1365,7 +1370,9 @@ function Compare-Book {
     foreach ($sheet in $oldBook.Keys) {
         if (-not $newBook.Contains($sheet) -and -not $renamedOld.ContainsKey($sheet)) { Add-Diff $sheet $null $null 'シート' '削除' ("{0} 行" -f $oldBook[$sheet].Rows.Count) $null }
     }
-    $diffs = $script:Diffs.GetRange($firstDiff, $script:Diffs.Count - $firstDiff).ToArray()
+    Set-DiffTags -OldBook $oldBook -NewBook $newBook -First $firstDiff
+    # 改訂履歴との突き合わせには、改訂履歴のシートの変更（版情報）も要る。外す表記だけの変更は、記載漏れとして扱わない
+    $diffs = @($script:Diffs.GetRange($firstDiff, $script:Diffs.Count - $firstDiff).ToArray() | Where-Object { -not ($_.Tag -eq '表記' -and $Ignore -contains '表記') })
     $groups = $null
     if ($OutHistory -or $CheckHistory) { $groups = Get-ChangeGroups -OldBook $oldBook -NewBook $newBook -Diffs $diffs }
     if ($OutHistory) {
@@ -1380,8 +1387,48 @@ function Compare-Book {
         }
     }
     if ($CheckHistory) { Test-HistoryCoverage -NewBook $newBook -Diffs $diffs -Groups $groups }
+    Remove-IgnoredDiffs -First $firstDiff
     # 差分の無いファイルのシートは HTML に入れないので、メモリーから外す
-    if ($OutHtml -and $diffs.Count -eq 0) { $script:HtmlBooks.Remove($script:CurrentFile) }
+    if ($OutHtml -and $script:Diffs.Count -eq $firstDiff) { $script:HtmlBooks.Remove($script:CurrentFile) }
+}
+
+# ---------------------------------------------------------------- 差分の分類（表記だけの変更・版情報）
+
+
+function ConvertTo-NotationKey {
+    #     表記の違い（全角・半角、空白・改行、英字の大文字・小文字）をそろえた文字
+    param([string] $Text)
+    return (([string]$Text).Normalize([System.Text.NormalizationForm]::FormKC) -replace '\s', '').ToUpperInvariant()
+}
+
+function Set-DiffTags {
+    #     First 番目からの差分に分類（Tag）を付ける
+    #       表記    値・数式・コメント・図形の変更のうち、全角・半角、空白・改行、英字の大文字・小文字だけが違うもの
+    #       版情報  改訂履歴のシートの変更と、版数・更新日・更新者などの欄（左隣の見出しで判断）の値の変更
+    param($OldBook, $NewBook, [int] $First)
+    for ($i = $First; $i -lt $script:Diffs.Count; $i++) {
+        $d = $script:Diffs[$i]
+        $tag = ''
+        if ($d.Kind -ne 'シート' -and $d.Sheet -match $HistorySheet) { $tag = '版情報' }
+        elseif (@('値', '数式') -contains $d.Kind -and (($d.NewCell -and $NewBook.Contains($d.Sheet) -and (Test-BookkeepingCell $NewBook[$d.Sheet] $d.NewCell)) -or
+                ($d.OldCell -and $OldBook.Contains($d.OldSheet) -and (Test-BookkeepingCell $OldBook[$d.OldSheet] $d.OldCell)))) { $tag = '版情報' }
+        elseif ($d.Change -eq '変更' -and @('値', '数式', 'コメント', '図形') -contains $d.Kind -and $d.Old -ne $d.New -and (ConvertTo-NotationKey $d.Old) -eq (ConvertTo-NotationKey $d.New)) { $tag = '表記' }
+        if (-not $tag) { continue }
+        $d.Tag = $tag
+        if ($tag -eq '表記') { $d.Detail += '（表記のみ）' } else { $d.Detail += '（版情報）' }
+    }
+}
+
+function Remove-IgnoredDiffs {
+    #     First 番目からの差分のうち、-Ignore の分類のものを外す
+    param([int] $First)
+    if (-not $Ignore) { return }
+    for ($i = $script:Diffs.Count - 1; $i -ge $First; $i--) {
+        if ($Ignore -contains $script:Diffs[$i].Tag) {
+            $script:IgnoredCounts[$script:Diffs[$i].Tag]++
+            $script:Diffs.RemoveAt($i)
+        }
+    }
 }
 
 # ---------------------------------------------------------------- 改訂履歴の記載漏れ（-CheckHistory）
@@ -1760,6 +1807,7 @@ function Export-DiffHtml {
             [void]$sb.Append(',"a":'); Add-JsonText $sb $d.Old
             [void]$sb.Append(',"b":'); Add-JsonText $sb $d.New
             [void]$sb.Append(',"d":'); Add-JsonText $sb $d.Detail
+            if ($d.Tag) { [void]$sb.Append(',"t":'); Add-JsonText $sb $d.Tag }
             [void]$sb.Append('}')
         }
         [void]$sb.Append('],"sheets":[')
@@ -2401,7 +2449,7 @@ if ($OutXlsx) {
             $oldValue = @{ Runs = @($d.Segments | Where-Object { $_.Op -ne '+' } | ForEach-Object { @{ Text = $_.Text; Style = $(if ($_.Op -eq '-') { 'Deleted' } else { '' }) } }) }
             $newValue = @{ Runs = @($d.Segments | Where-Object { $_.Op -ne '-' } | ForEach-Object { @{ Text = $_.Text; Style = $(if ($_.Op -eq '+') { 'Inserted' } else { '' }) } }) }
         }
-        $row = @{ Values = @($d.File, $d.Sheet, $d.Location, $d.OldLocation, $d.Kind, $d.Change, $oldValue, $newValue) }
+        $row = @{ Values = @($d.File, $d.Sheet, $d.Location, $d.OldLocation, $d.Kind, $d.Change, $oldValue, $newValue, $d.Tag) }
         # 削除は旧のファイル、それ以外は新のファイルの該当セルを開く
         $target = $d.Path; $cell = $d.Cell
         if ($d.Change -eq '削除') {
@@ -2429,7 +2477,7 @@ if ($OutXlsx) {
             @{
                 Name = '差分一覧'
                 Columns = @(@{ Header = 'ファイル'; Width = 36 }, @{ Header = 'シート'; Width = 16 }, @{ Header = '場所'; Width = 20 }, @{ Header = '旧の場所'; Width = 16 },
-                    @{ Header = '種類'; Width = 9 }, @{ Header = '変更'; Width = 7 }, @{ Header = '変更前'; Width = 45 }, @{ Header = '変更後'; Width = 45 })
+                    @{ Header = '種類'; Width = 9 }, @{ Header = '変更'; Width = 7 }, @{ Header = '変更前'; Width = 45 }, @{ Header = '変更後'; Width = 45 }, @{ Header = '分類'; Width = 8 })
                 Rows = $rows
             },
             @{
@@ -2468,7 +2516,12 @@ if ($OutHistory) {
 
 Write-Host ''
 $states = $summary | Group-Object State | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
-Write-Host ("{0} ファイル: {1} / 差分 {2} 件" -f $summary.Count, ($states -join ' / '), $script:Diffs.Count)
+$line = "{0} ファイル: {1} / 差分 {2} 件" -f $summary.Count, ($states -join ' / '), $script:Diffs.Count
+$tagged = @(@('表記', '表記のみ'), @('版情報', '版情報') | ForEach-Object { $n = @($script:Diffs | Where-Object Tag -eq $_[0]).Count; if ($n -gt 0) { '{0} {1} 件' -f $_[1], $n } })
+if ($tagged.Count -gt 0) { $line += '（うち ' + ($tagged -join '・') + '）' }
+$dropped = @(@('表記', '表記のみ'), @('版情報', '版情報') | ForEach-Object { if ($script:IgnoredCounts[$_[0]] -gt 0) { '{0} {1} 件' -f $_[1], $script:IgnoredCounts[$_[0]] } })
+if ($dropped.Count -gt 0) { $line += ' / 除いた差分: ' + ($dropped -join '・') }
+Write-Host $line
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 if ($OutHtml) { Write-Host "差分を見る HTML を保存しました（ブラウザーで開きます）: $OutHtml" }
 if ($markedCount -gt 0) { Write-Host ("差分の印を付けた写しを保存しました: {0}（{1} ファイル）" -f $OutMarkedDir, $markedCount) }
@@ -2488,6 +2541,7 @@ if ($OutHistory) {
 #     行の挿入・削除で No などの連番が振り直された場合は、番号のセルの変更を「連番の振り直し」1 件にまとめます。
 #     長い文字列の変更は、変わった部分だけを「…受注を[-登録-]{+更新+}する…」の形で示します。
 #     -CompareFormat を付けると、文字の書式（太字・斜体・下線・取り消し線・文字色）と塗りつぶし、文字列の一部だけの書式も比べます。
+#     全角・半角などの表記だけの変更と、版数・更新日・改訂履歴の変更には分類（表記・版情報）を付け、-Ignore で外せます。
 #
 #     フォルダどうしを指定すると、同じ相対パスのファイルを比べ、片方にしかないファイルは追加・削除として出力します。
 #     版数だけが違う名前のファイル（_v1.0 と _v1.1、第1.0版 と 第1.1版 など）は、1 対 1 なら同じファイルとして比べます。
@@ -2528,6 +2582,13 @@ if ($OutHistory) {
 #
 # .PARAMETER HistorySheet
 #     -CheckHistory・-OutHistory で使う、改訂履歴のシート名の正規表現。既定は「改訂履歴|変更履歴|改版履歴|更新履歴|改訂記録」。
+#     差分の分類「版情報」（改訂履歴のシートの変更）にも使います。
+#
+# .PARAMETER Ignore
+#     結果から外す差分の分類（複数可）。
+#       表記    全角・半角、空白・改行、英字の大文字・小文字だけが違う変更（表記ゆれを直したときなど）
+#       版情報  改訂履歴のシートの変更と、版数・更新日・更新者などの欄の変更（版を上げるたびに変わるもの）
+#     指定しなくても、これらの差分は分類（Tag。一覧の「分類」の列）を付けて出力し、HTML では絞り込みで隠せます。
 #
 # .PARAMETER OutHistory
 #     改訂履歴に書く文の下書きを CSV（ファイル・改訂箇所・改訂内容・場所。UTF-8 BOM 付き）に保存します。
