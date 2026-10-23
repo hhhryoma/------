@@ -244,6 +244,7 @@ $manual = @(
     @('Copilot（品質評価の定性分析）', ('PowerShell で .\tools\Invoke-QualityAnalysis.ps1 "{0}" -Force を実行 → 依頼が Copilot に貼り付けられる → 回答をコピーして Enter → ブックの定性分析・対策の列に入る' -f (Join-Path $reportDir '品質評価_20261020.xlsx'))),
     @('Copilot（AI レビュー）', ('PowerShell で .\tools\Invoke-DesignReview.ps1 "{0}" -OutDir "{1}" を実行 → 依頼を Copilot に貼り付け、回答をコピーして Enter → レビュー結果.xlsx ができる' -f (Join-Path $design "$scr2.xlsx"), (Join-Path $OutDir '18_AIレビュー'))),
     @('「送る」', '.\tools\Install-SendTo.ps1 を実行し、エクスプローラーで 17_品質評価 のフォルダを右クリック →「送る」→「Excel 品質評価の定性分析」'),
+    @('画面（Start-ExcelTools）', ('tools\Start-ExcelTools.cmd をダブルクリック → 左の「提出前チェック」を選ぶ → 「{0}」のフォルダを画面にドラッグ＆ドロップ → 「実行」→ 記録の欄に進み具合が出て、結果の Excel が開く。「表示を整える」は「試しに実行」で書き換える箇所が出る。閉じて開き直すと、前の入力が出る' -f $versions)),
     @('配布（Install-ExcelTools）', 'tools フォルダを共有フォルダ（または別のフォルダ）に写し、その中の Install-ExcelTools.cmd をダブルクリック →「送る」に項目ができる → 共有フォルダの README.md を書き換え、PowerShell で & "$env:LOCALAPPDATA\ExcelTools\tools\Install-ExcelTools.ps1" -Update →「更新」と出る → -Uninstall で「送る」の項目が消える'),
     @('SharePoint の版と比べる', 'OneDrive で同期している SharePoint のフォルダで、版が 2 つ以上ある Excel を右クリック →「送る」→「Excel SharePoint の版と比べる」→ バージョン履歴の番号（1.0 など）を入力 → その版と現在の版の差分の画面が開く（Excel で取り出せたか、ブラウザーでダウンロードしたかも書き留める）'))
 foreach ($m in $manual) { $rows.Add(@{ Values = @('', $m[0], '手で確かめる', '', $m[1], '', '') }) }

@@ -1,0 +1,234 @@
+﻿#     Start-ExcelTools.ps1（画面）と ExcelToolsGui.psm1 のテスト。
+#     入力欄・引数・実行は画面を使わずにどの OS でも、画面（Windows Forms）は Windows で、表示せずに操作して確かめる
+
+$GuiModule = Join-Path $script:ToolsDir 'ExcelToolsGui.psm1'
+$StartTool = Join-Path $script:ToolsDir 'Start-ExcelTools.ps1'
+Import-Module $GuiModule -Force -DisableNameChecking
+
+function Get-TestEntry {
+    param([string] $Id)
+    return @((Get-GuiCatalog).Tools | Where-Object Id -eq $Id)[0]
+}
+
+function Get-FieldKeys {
+    #     入力欄を「名前:種類（[] は複数・* は必須）」の並びにする
+    param($Fields)
+    return @($Fields | ForEach-Object { '{0}:{1}{2}{3}' -f $_.Name, $_.Kind, $(if ($_.Multiple) { '[]' } else { '' }), $(if ($_.Required) { '*' } else { '' }) })
+}
+
+Test-Case 'Start-ExcelTools: ツールの一覧のすべての処理で入力欄を作れ、導入と「送る」のほかのツールはすべて一覧にある' {
+    $catalog = Get-GuiCatalog
+    $listed = @($catalog.Tools | ForEach-Object { $_.Tool } | Sort-Object -Unique)
+    $tools = @(Get-ChildItem -LiteralPath $script:ToolsDir -Filter '*.ps1' | Where-Object { $_.Name -notmatch '^(Install-|Invoke-SendTo|Start-ExcelTools)' } | ForEach-Object { $_.Name })
+    Assert-Equal @() @($tools | Where-Object { $listed -notcontains $_ }) '一覧に無いツール（gui\ツールの一覧.psd1 に足してください）'
+    $kinds = @('Text', 'File', 'Folder', 'Path', 'SaveFile', 'SaveFolder', 'Number', 'Date', 'Switch', 'Choice')
+    foreach ($t in $catalog.Tools) {
+        $fields = Get-GuiFields $t
+        Assert-Equal @($t.Main) @($fields | Where-Object Main | ForEach-Object { $_.Name }) "$($t.Id) の最初の入力欄"
+        Assert-Equal @() @($fields | Where-Object { $kinds -notcontains $_.Kind -or -not $_.Label } | ForEach-Object { $_.Name }) "$($t.Id) の入力欄の種類と名前"
+        foreach ($o in $t.Output) { Assert-Equal 'SaveFile' (@($fields | Where-Object Name -eq $o)[0].Kind) "$($t.Id) の結果の欄 $o" }
+        foreach ($o in $t.Open) { Assert-True (@($fields | Where-Object Name -eq $o).Count -eq 1) "$($t.Id) の開く欄 $o" }
+        Assert-True ($catalog.Groups.Name -contains $t.Group) "$($t.Id) の分類"
+    }
+}
+
+Test-Case 'Start-ExcelTools: 入力欄の種類・名前・必須は、ツールの引数とヘルプとツールの一覧から決まる' {
+    $search = Get-GuiFields (Get-TestEntry 'Search')
+    Assert-Equal @('Pattern:Text*', 'Path:Path[]*', 'SimpleMatch:Switch', 'IncludeWord:Switch', 'OutXlsx:SaveFile') (Get-FieldKeys @($search | Where-Object Main))
+    Assert-Equal '探す文字' $search[0].Label 'ツールの一覧の名前'
+    $target = @($search | Where-Object Name -eq 'Target')[0]
+    Assert-Equal 'Choice|True|Value' ('{0}|{1}|{2}' -f $target.Kind, $target.Multiple, $target.Choices[0]) '選択肢（ValidateSet）は選ぶ欄'
+    Assert-Equal '.xlsx' @($search | Where-Object Name -eq 'OutXlsx')[0].Extension
+    Assert-True (@($search | Where-Object Name -eq 'Open').Count -eq 0) '画面で使えない引数（-Open）は出さない'
+    Assert-Equal $true (@($search | Where-Object Name -eq 'SimpleMatch')[0].Default) '最初の値'
+
+    # 引数のセットごとの処理（差分は旧・新、版を続けて比べるは版の一覧）
+    Assert-Equal @('Old:Path*', 'New:Path*', 'OutHtml:SaveFile', 'OutXlsx:SaveFile') (Get-FieldKeys @(Get-GuiFields (Get-TestEntry 'Compare') | Where-Object Main))
+    Assert-Equal @('Versions:Path[]*', 'OutHtml:SaveFile', 'OutXlsx:SaveFile') (Get-FieldKeys @(Get-GuiFields (Get-TestEntry 'CompareVersions') | Where-Object Main))
+    $bump = Get-GuiFields (Get-TestEntry 'Bump')
+    Assert-True (@($bump | Where-Object { @('Bump', 'Template', 'Book') -contains $_.Name }).Count -eq 0) '版を上げるは -Bump を付けて渡し、ほかのセットの引数は出さない'
+
+    # ヘルプから: 日付・数・名前（ファイルを選ぶ欄にしない）・保存先のフォルダ・ファイルとフォルダ
+    $progress = Get-GuiFields (Get-TestEntry 'Progress')
+    Assert-Equal 'Date' @($progress | Where-Object Name -eq 'AsOf')[0].Kind
+    Assert-Equal 'File' @($progress | Where-Object Name -eq 'FillTemplate')[0].Kind 'テンプレートのファイル'
+    $newDoc = Get-GuiFields (Get-TestEntry 'NewDoc')
+    Assert-Equal 'Text|Text' ('{0}|{1}' -f @($newDoc | Where-Object Name -eq 'FileName')[0].Kind, @($newDoc | Where-Object Name -eq 'ListSheet')[0].Kind) 'ファイル名・シートの名前は文字'
+    Assert-Equal 'SaveFolder' @($newDoc | Where-Object Name -eq 'OutDir')[0].Kind
+    Assert-Equal 'Number' @(Get-GuiFields (Get-TestEntry 'Effort') | Where-Object Name -eq 'HoursPerDay')[0].Kind
+    Assert-Equal 'Path' @(Get-GuiFields (Get-TestEntry 'Quality') | Where-Object Name -eq 'Config')[0].Kind '括弧の中の「。」で文を切らない（設定ファイルか、それを置いたフォルダ）'
+    Assert-Equal 'SaveFile' @(Get-GuiFields (Get-TestEntry 'Pdf') | Where-Object Name -eq 'LogPath')[0].Kind '「保存します」の CSV は保存先'
+    Assert-Equal '改訂履歴のシート名の正規表現' @(Get-GuiFields (Get-TestEntry 'Compare') | Where-Object Name -eq 'HistorySheet')[0].Label 'ヘルプからの名前（長いときは最後の「、」のあと）'
+}
+
+Test-Case 'Start-ExcelTools: 入力から引数を作る（空は渡さず、必須の欠け・数と日付の誤りを知らせ、ワイルドカードのパスは逃がす）' {
+    $search = Get-TestEntry 'Search'
+    $fields = Get-GuiFields $search
+    $r = ConvertTo-GuiArguments $search $fields @{ Pattern = '受注'; Path = @('D:\設計書[旧]', ' "D:\b" ', ''); SimpleMatch = $true; IncludeWord = $false; Target = [string[]]@('Value', 'Comment'); OutXlsx = '' }
+    Assert-Equal 0 $r.Errors.Count ($r.Errors -join ' / ')
+    Assert-Equal @('Pattern', 'Path', 'SimpleMatch', 'Target') @($r.Arguments.Keys) '空・選ばないスイッチは渡さない'
+    Assert-Equal @('D:\設計書`[旧`]', 'D:\b') $r.Arguments['Path'] 'ワイルドカードを使える引数のパスは逃がし、前後の空白と引用符は除く'
+    Assert-Equal @('Value', 'Comment') $r.Arguments['Target']
+
+    $r = ConvertTo-GuiArguments $search $fields @{ Pattern = ' '; Path = @() }
+    Assert-Equal @('「探す文字」を入れてください', '「探すファイル・フォルダ」を入れてください') $r.Errors
+
+    $effort = Get-TestEntry 'Effort'
+    $r = ConvertTo-GuiArguments $effort (Get-GuiFields $effort) @{ Path = @('a.xlsx'); HoursPerDay = '７.５'; Tolerance = 'たくさん'; AsOf = '2026/10/20' }
+    Assert-Equal @('「超過の見込みとみなす、予定工数を超える割合」は数で入れてください') $r.Errors
+    Assert-Equal '7.5' ([string]$r.Arguments['HoursPerDay']) '全角の数字も読む'
+    Assert-True ($r.Arguments['AsOf'] -is [datetime] -and $r.Arguments['AsOf'].Day -eq 20) '日付の引数には日付を渡す'
+
+    $consistency = Get-TestEntry 'Consistency'
+    $r = ConvertTo-GuiArguments $consistency (Get-GuiFields $consistency) @{ Path = @('x'); Where = 'T_ORDER, E0001、C005' }
+    Assert-Equal @('T_ORDER', 'E0001', 'C005') $r.Arguments['Where'] '複数の文字はカンマ・読点で区切る'
+
+    $bump = Get-TestEntry 'Bump'
+    $r = ConvertTo-GuiArguments $bump (Get-GuiFields $bump) @{ Path = @('a_v1.0.xlsx'); Description = '誤記の修正' }
+    Assert-Equal $true $r.Arguments['Bump'] 'いつも付ける引数（Fixed）'
+}
+
+Test-Case 'Start-ExcelTools: 結果の既定の保存先（名前_日時。同じ名前があれば連番）と、同じことをするコマンド・PowerShell の画面で実行するスクリプト' {
+    $dir = New-TestDir
+    $compare = Get-TestEntry 'Compare'
+    $fields = Get-GuiFields $compare
+    $now = Get-Date '2026-10-23 10:15:00'
+    [System.IO.File]::WriteAllText((Join-Path $dir '差分_20261023_101500.html'), '')
+    $outs = Get-GuiDefaultOutputs $compare $fields @{ OutXlsx = 'D:\自分で決めた.xlsx' } -Dir $dir -Now $now
+    Assert-Equal @('OutHtml') @($outs.Keys) '入れてある欄はそのまま'
+    Assert-Equal '差分_20261023_101500(2).html' (Split-Path -Leaf $outs['OutHtml'])
+
+    $arguments = [ordered]@{ Old = "D:\旧'版"; New = 'D:\新'; KeyColumn = [string[]]@('物理名', '項目ID'); NoRecurse = $true; AsOf = (Get-Date '2026-10-20'); MinBugs = 5 }
+    Assert-Equal "& 'C:\tools\Compare-Excel.ps1' -Old 'D:\旧''版' -New 'D:\新' -KeyColumn '物理名', '項目ID' -NoRecurse -AsOf [datetime]'2026-10-20' -MinBugs 5" (Format-GuiCommandLine 'C:\tools\Compare-Excel.ps1' $arguments)
+
+    $script = New-GuiConsoleScript 'C:\tools\Invoke-QualityAnalysis.ps1' $arguments '定性分析' -Dir $dir
+    $text = [System.IO.File]::ReadAllText($script)
+    Assert-Match $text ([regex]::Escape("`$arguments['KeyColumn'] = @('物理名', '項目ID')"))
+    Assert-Match $text 'Enter キーを押すと閉じます'
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$errors)
+    Assert-Equal 0 @($errors).Count 'PowerShell のスクリプトとして読める'
+}
+
+Test-Case 'Start-ExcelTools: ツールを別の実行空間で動かし、Write-Host・警告・出力の件数と表を受け取り、中止・エラーも知らせる' {
+    $dir = New-TestDir
+    $search = Get-TestEntry 'Search'
+    $out = Join-Path $dir '検索.xlsx'
+    $built = ConvertTo-GuiArguments $search (Get-GuiFields $search) @{ Pattern = 'TODO'; Path = @((Join-Path $script:Fixtures 'grep/sample.xlsx')); SimpleMatch = $true; OutXlsx = $out }
+    $r = Wait-GuiToolRun (Start-GuiToolRun $search.ToolPath $built.Arguments) -TimeoutSeconds 120
+    Assert-True $r.Succeeded $r.Error
+    Assert-True (@($r.Messages | Where-Object { $_.Text -match '1 ファイル中 1 ファイルで \d+ 件ヒット' }).Count -eq 1) (($r.Messages | ForEach-Object { $_.Text }) -join ' / ')
+    Assert-True ($r.Summary.Count -gt 0) '出力の件数'
+    Assert-Match $r.Summary.Text 'Location'
+    Assert-True (Test-Path -LiteralPath $out) '結果のファイル'
+
+    $script = Join-Path $dir 'tool.ps1'
+    [System.IO.File]::WriteAllText($script, "param([string] `$Name)`r`nWrite-Host ""始めます: `$Name"" -ForegroundColor Cyan`r`nWrite-Warning '注意'`r`nthrow '読めません'`r`n", (New-Object System.Text.UTF8Encoding($true)))
+    $r = Wait-GuiToolRun (Start-GuiToolRun $script @{ Name = '設計書' }) -TimeoutSeconds 60
+    Assert-Equal 'False|読めません' ('{0}|{1}' -f $r.Succeeded, $r.Error)
+    Assert-Equal @('始めます: 設計書|Cyan', '警告: 注意|DarkYellow') @($r.Messages | ForEach-Object { '{0}|{1}' -f $_.Text, $_.Color })
+
+    $slow = Join-Path $dir 'slow.ps1'
+    [System.IO.File]::WriteAllText($slow, "Start-Sleep -Seconds 60`r`n")
+    $run = Start-GuiToolRun $slow @{}
+    Start-Sleep -Milliseconds 500
+    Stop-GuiToolRun $run
+    $r = Wait-GuiToolRun $run -TimeoutSeconds 30
+    Assert-Equal 'True|中止しました' ('{0}|{1}' -f $r.Stopped, $r.Error)
+}
+
+Test-Case 'Start-ExcelTools: 入力を保存して次に読む（結果の保存先と日付は保存しない）。やりたいことを言葉で探す' {
+    $dir = New-TestDir
+    $path = Join-Path $dir '画面の設定.json'
+    $effort = Get-TestEntry 'Effort'
+    $keep = Get-GuiValuesToSave $effort (Get-GuiFields $effort) @{ Path = [string[]]@('D:\工数', 'D:\日報'); Wbs = [string[]]@(); AsOf = (Get-Date); NoRecurse = $true; Unit = '時間'; OutXlsx = 'D:\r.xlsx' }
+    $settings = Read-GuiSettings $path
+    Assert-Equal 'True|False' ('{0}|{1}' -f $settings.OpenResult, $settings.ShowAdvanced) '保存が無いときの既定'
+    $settings.Tools['Effort'] = $keep
+    $settings.LastTool = 'Effort'
+    $settings.ShowAdvanced = $true
+    Save-GuiSettings $settings $path
+    $back = Read-GuiSettings $path
+    Assert-Equal 'Effort|True' ('{0}|{1}' -f $back.LastTool, $back.ShowAdvanced)
+    $v = $back.Tools['Effort']
+    Assert-Equal @('D:\工数', 'D:\日報') $v['Path']
+    Assert-Equal '時間|True' ('{0}|{1}' -f $v['Unit'], $v['NoRecurse'])
+    Assert-True (-not $v.ContainsKey('OutXlsx') -and -not $v.ContainsKey('AsOf')) '結果の保存先と日付は保存しない'
+
+    $catalog = Get-GuiCatalog
+    Assert-Equal @('Compare', 'SpVersion') @(Find-GuiTool $catalog '差分 画面' | ForEach-Object { $_.Id }) '空白で区切った言葉のすべてを含むもの'
+    Assert-Equal @('Check') @(Find-GuiTool $catalog '提出前' | ForEach-Object { $_.Id })
+}
+
+Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行すると、記録と結果が出る。入力の誤り・試しに実行・ドロップ・PowerShell の画面での実行' -WindowsOnly {
+    $dir = New-TestDir
+    $form = New-GuiWindow -SettingsPath (Join-Path $dir '画面の設定.json') -Tool 'Search' -Quiet
+    try {
+        $s = Get-GuiState
+        Assert-Equal '文字を探す（検索）' $s.Title.Text
+        Assert-Equal @('Pattern', 'Path', 'SimpleMatch', 'IncludeWord', 'OutXlsx') @($s.Bindings | Where-Object { $_.Field.Main } | ForEach-Object { $_.Field.Name })
+        Assert-Equal $true $s.Bindings[2].Input.Checked '最初の値（入力した文字そのものを探す）'
+        # 表示していない画面では Visible が false になるので、画面が覚えている状態で確かめる
+        Assert-True (-not $s.WhatIfShown) '書き換えない処理には「試しに実行」を出さない'
+        Assert-True (@($s.Tree.Nodes | ForEach-Object { $_.Text }) -contains '担当者向け') '一覧'
+
+        # 実行: 結果の欄が空なら既定の保存先を入れ、記録に出力が出て、結果を開けるようになる
+        Set-GuiValue 'Pattern' 'TODO'
+        Set-GuiValue 'Path' @((Join-Path $script:Fixtures 'grep/sample.xlsx'))
+        $out = Join-Path $dir '検索.xlsx'
+        Set-GuiValue 'OutXlsx' $out
+        Invoke-GuiRun
+        Wait-GuiRun -TimeoutSeconds 120
+        Assert-Match $s.Log.Text '件ヒット'
+        Assert-Match $s.Log.Text '終わりました'
+        Assert-Equal $out $s.ResultPath
+        Assert-True $s.OpenButton.Enabled '結果を開く'
+
+        # 入力の誤りは実行しない
+        Select-GuiTool 'Compare'
+        Invoke-GuiRun
+        Assert-Equal @('「旧（変更前）のファイル・フォルダ」を入れてください', '「新（変更後）のファイル・フォルダ」を入れてください') $s.LastErrors
+        Assert-True ($null -eq $s.Run) '実行していない'
+
+        # 前の入力を戻す
+        Select-GuiTool 'Search'
+        Assert-Equal 'TODO' $s.Bindings[0].Input.Text
+
+        # 書き換える処理は、最初は「試しに実行」（ファイルは変わらない）
+        Select-GuiTool 'ResetView'
+        Assert-True ($s.WhatIfShown -and $s.WhatIf.Checked) '試しに実行'
+        $book = Copy-Fixture 'deliverable/bad.xlsx'
+        $before = (Get-FileHash -LiteralPath $book).Hash
+        Add-GuiPaths @($book)
+        Assert-Equal @($book) @($s.Bindings[0].Input.Items) 'ドロップしたファイルは空いているパスの欄に入る'
+        Invoke-GuiRun
+        Wait-GuiRun -TimeoutSeconds 120
+        Assert-Match $s.Log.Text '試しに実行'
+        Assert-Equal $before (Get-FileHash -LiteralPath $book).Hash 'ファイルは書き換えない'
+
+        # 詳細な設定
+        $s.ShowAdvanced.Checked = $false
+        Assert-True (-not $s.AdvancedShown) '詳細な設定は隠す'
+        $s.ShowAdvanced.Checked = $true
+        Assert-True $s.AdvancedShown '詳細な設定を出す'
+
+        # 途中で入力が要るツールは PowerShell の画面で実行する（テストでは起動しない）
+        Select-GuiTool 'Analysis'
+        Assert-Equal 'PowerShell の画面で実行' $s.RunButton.Text
+        Set-GuiValue 'Path' $dir
+        Invoke-GuiRun
+        Assert-True (Test-Path -LiteralPath $s.LastConsoleScript) 'PowerShell の画面で実行するスクリプト'
+
+        # やりたいことを言葉で探す
+        Update-GuiTree '検索'
+        $labels = @($s.Tree.Nodes | ForEach-Object { $_.Nodes } | ForEach-Object { $_.Nodes } | ForEach-Object { $_.Text })
+        Assert-True ($labels -contains '文字を探す（検索）') ($labels -join ', ')
+    }
+    finally { $form.Dispose() }
+}
+
+Test-Case 'Start-ExcelTools: Get-Help でヘルプが表示される' {
+    $h = Get-Help $StartTool
+    Assert-Match $h.Synopsis '画面'
+    Assert-Equal 3 @($h.parameters.parameter | Where-Object { $_.description }).Count
+}

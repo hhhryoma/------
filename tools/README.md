@@ -52,10 +52,36 @@
 | --- | --- |
 | [Install-ExcelTools.ps1](#install-exceltoolsps1) | 共有フォルダ（配布元）に置いた tools を、担当者の PC に 1 回のダブルクリック（`Install-ExcelTools.cmd`）で入れて「送る」に登録する。配布元が更新されると、「送る」で使ったあとに自動で新しい版を写す |
 | [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
+| [Start-ExcelTools.ps1](#start-exceltoolsps1画面) | ツールの画面（ウィンドウ）。やりたいことを選び、ファイルやフォルダを入れて「実行」を押すだけで各ツールを使える（`Start-ExcelTools.cmd` をダブルクリックで開く） |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
-`New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
+`New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
 `Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+
+## Start-ExcelTools.ps1（画面）
+
+PowerShell を使わずに、画面（ウィンドウ）から各ツールを使います。`Start-ExcelTools.cmd` をダブルクリックすると開きます。
+
+```powershell
+.\Start-ExcelTools.ps1                       # 前に使った処理を選んだ状態で開く
+.\Start-ExcelTools.ps1 -Tool Check D:\提出物  # 提出前チェックを選び、フォルダを入れて開く
+```
+
+| 画面の部分 | できること |
+| --- | --- |
+| 左の一覧 | やりたいこと（担当者向け・管理者向け → 分類 → 処理）。上の欄に言葉を入れると絞り込める（例: 差分・提出・WBS） |
+| 入力欄 | 最初は主な欄だけを出す。「詳細な設定も表示する」で、ツールのすべての引数を出す。各欄の下とマウスを重ねたときに説明が出る。`*` は必ず入れる欄 |
+| パスの欄 | 「ファイル…」「フォルダ…」で選ぶ。エクスプローラーからドラッグ＆ドロップ、コピーしたファイルの Ctrl+V でも入る（複数の欄は Delete で外す） |
+| 結果の保存先 | 空欄なら「ドキュメント\Excel ツールの結果」に「名前_日時.xlsx」で保存し、終わったら開く（「終わったら結果を開く」） |
+| 試しに実行 | ファイルを書き換える処理（置換・表示を整える・版を上げる・雛形から作る）で、最初は選んだ状態。書き換える箇所を記録の欄で確かめてから外して実行する。実際に書き換える前には確認が出る |
+| 実行・中止 | ツールを画面の裏で動かし、出力・警告・エラー・進み具合を記録の欄に出す。「中止」で止める |
+| コマンドをコピー | 同じことをする PowerShell のコマンドをクリップボードに写す（くり返し使うとき・ほかの人に伝えるとき） |
+| ツールの説明 | ツールのヘルプ（Get-Help）を見る |
+
+- 入力は「%APPDATA%\ExcelTools\画面の設定.json」に保存し、次に開いたときに出します（結果の保存先と日付は保存しません）
+- Copilot とやり取りするツール（AI レビュー・品質評価の定性分析）は、PowerShell の画面を開いて実行します
+- 並べる処理・分類・説明と、最初から見せる入力欄は `gui\ツールの一覧.psd1` に書きます。入力欄の種類（ファイル・フォルダ・日付・数・選択肢など）は、各ツールの引数とヘルプから決めます。新しいツールを足したら、この一覧にも足してください（テストで確かめています）
+- Windows でのみ使えます（Windows PowerShell 5.1・PowerShell 7）
 
 ## Search-Excel.ps1
 
