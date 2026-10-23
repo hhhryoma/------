@@ -101,10 +101,17 @@ Test-Case 'Invoke-SendTo: 検索は入力した文字そのものを探す。対
     $dir = New-TestDir
     New-VersionBook (Join-Path $dir '受注 (1).xlsx') '受注.明細'
     New-VersionBook (Join-Path $dir '顧客.xlsx') '受注X明細'
+    # Word の文書も探す
+    $fs = [System.IO.File]::Create((Join-Path $dir '基本設計書.docx'))
+    $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+    $sw = New-Object System.IO.StreamWriter($zip.CreateEntry('word/document.xml').Open(), (New-Object System.Text.UTF8Encoding($false)))
+    $sw.Write('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>受注.明細の画面</w:t></w:r></w:p></w:body></w:document>')
+    $sw.Dispose(); $zip.Dispose(); $fs.Dispose()
     $outDir = Join-Path $dir '結果'
     Invoke-SendTo @{ Action = 'Search'; OutDir = $outDir; Text = '受注.明細' } @($dir)
     $rows = Get-SheetValues (Get-ResultFiles $outDir)[0]
     Assert-True (@($rows | Where-Object { $_ -match '受注 \(1\)\.xlsx' }).Count -eq 1) ($rows -join ' / ')
+    Assert-True (@($rows | Where-Object { $_ -match '基本設計書\.docx.*本文!段落 1' }).Count -eq 1) ($rows -join ' / ')
     Assert-True (@($rows | Where-Object { $_ -match '顧客\.xlsx' }).Count -eq 0) '正規表現として探した'
 
     Assert-Throws { Invoke-SendTo @{ Action = 'Check'; OutDir = $outDir } @() } '選んで'

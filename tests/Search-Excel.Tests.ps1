@@ -243,6 +243,61 @@ Test-Case 'Search-Excel: 不正な正規表現は分かりやすいエラー' {
     Assert-Throws { & $SearchExcel -Pattern '(abc' -Path $grep 6>$null } 'SimpleMatch'
 }
 
+function New-SearchDocx {
+    #     段落・タブ・削除した変更履歴・表・テキストボックス（互換用の写し付き）・内容コントロール・コメント・ヘッダー・脚注のある Word 文書
+    param([string] $Path)
+    $ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:v="urn:schemas-microsoft-com:vml"'
+    $p = { param($t) '<w:p><w:r><w:t>' + $t + '</w:t></w:r></w:p>' }
+    $box = '<w:txbxContent><w:p><w:r><w:t>受注番号は自動採番</w:t></w:r></w:p></w:txbxContent>'
+    $row = { param($cells) '<w:tr>' + ((@($cells | ForEach-Object { '<w:tc>' + (& $p $_) + '</w:tc>' })) -join '') + '</w:tr>' }
+    $body = '<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>受注番号の採番ルール</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>' +
+        '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="840"/></w:tabs></w:pPr><w:r><w:t>受注日</w:t></w:r><w:r><w:tab/><w:t>必須</w:t></w:r></w:p>' +
+        '<w:p><w:r><w:t>残す文</w:t></w:r><w:del w:id="5" w:author="山田"><w:r><w:delText>受注番号（旧）</w:delText></w:r></w:del></w:p>' +
+        '<w:tbl>' + (& $row @('項目', '桁数')) + (& $row @('受注番号', '10')) + (& $row @('受注日', '8')) + '</w:tbl>' +
+        '<w:p><w:r><w:t>図の説明</w:t></w:r><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wps:wsp><wps:txbx>' + $box + '</wps:txbx></wps:wsp></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape><v:textbox>' + $box + '</v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>' +
+        '<w:sdt><w:sdtContent>' + (& $p '受注番号の桁数は10桁') + '</w:sdtContent></w:sdt>' + (& $p '以上')
+    $parts = [ordered]@{
+        'word/document.xml' = '<?xml version="1.0" encoding="UTF-8"?><w:document ' + $ns + '><w:body>' + $body + '</w:body></w:document>'
+        'word/header1.xml' = '<?xml version="1.0" encoding="UTF-8"?><w:hdr ' + $ns + '>' + (& $p '受注システム 基本設計書') + '</w:hdr>'
+        'word/footnotes.xml' = '<?xml version="1.0" encoding="UTF-8"?><w:footnotes ' + $ns + '><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="1">' + (& $p '受注番号は年度で切り替える') + '</w:footnote></w:footnotes>'
+        'word/comments.xml' = '<?xml version="1.0" encoding="UTF-8"?><w:comments ' + $ns + '><w:comment w:id="0" w:author="佐藤">' + (& $p '受注番号の桁数を確認') + '</w:comment></w:comments>'
+    }
+    $fs = [System.IO.File]::Create($Path)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        foreach ($k in $parts.Keys) {
+            $sw = New-Object System.IO.StreamWriter($zip.CreateEntry($k).Open(), (New-Object System.Text.UTF8Encoding($false)))
+            $sw.Write($parts[$k]); $sw.Dispose()
+        }
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
+Test-Case 'Search-Excel: -IncludeWord で Word の段落・表の行・テキストボックス・内容コントロール・脚注・コメントを探す（削除した変更履歴は探さない）' {
+    $dir = New-TestDir
+    New-SearchDocx (Join-Path $dir '基本設計書.docx')
+    $hits = Invoke-Search -Pattern '受注番号' -Path $dir -IncludeWord
+    Assert-Equal @(
+        '本文!段落 1|段落|受注番号の採番ルール|',
+        '本文!表 1 の 2 行目|表|受注番号 | 10|',
+        '本文!段落 5|段落|受注番号の桁数は10桁|',
+        '本文|図形|受注番号は自動採番|テキストボックス 1',
+        '脚注!段落 1|段落|受注番号は年度で切り替える|',
+        '本文!段落 1|コメント|受注番号の桁数を確認|佐藤') @($hits | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Location, $_.Kind, $_.Text, $_.Name }) 'テキストボックスは互換用の写しを数えない。コメントは付いている段落'
+    Assert-Equal "受注日`t必須" (Invoke-Search -Pattern '受注日' -Path $dir -IncludeWord -Target Value)[0].Text 'タブ位置の設定はタブにしない'
+    Assert-Equal 0 (Invoke-Search -Pattern '旧' -Path $dir -IncludeWord).Count '削除した文字'
+    Assert-Equal @('ヘッダー!段落 1|ヘッダー・フッター') @(Invoke-Search -Pattern 'システム' -Path $dir -IncludeWord -Target HeaderFooter | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Kind })
+    Assert-Equal 0 (Invoke-Search -Pattern '受注番号' -Path $dir).Count '-IncludeWord が無ければ Word は探さない（他のツールから呼ぶとき）'
+
+    # 結果の Excel のリンクは文書を開くだけ（Excel のセルの場所を付けない）
+    $out = Join-Path $dir '結果.xlsx'
+    $null = Invoke-Search -Pattern '受注番号' -Path (Join-Path $dir '基本設計書.docx') -IncludeWord -OutXlsx $out
+    $links = @((Read-XlsxSheet -Path $out).Links)
+    Assert-Equal 6 $links.Count
+    Assert-True (@($links | Where-Object { $_.Location -or $_.Target -notlike '*基本設計書.docx' }).Count -eq 0) ($links | Out-String)
+}
+
 Test-Case 'Search-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $SearchExcel
     Assert-Match $h.Synopsis 'grep'
