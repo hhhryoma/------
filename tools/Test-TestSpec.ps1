@@ -172,46 +172,11 @@ if ($DesignPath) {
     if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
     if ($NoExcel) { $searchArgs['NoExcel'] = $true }
     $designBooks = ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null)
-    foreach ($book in $designBooks.Values) {
-        foreach ($sheetName in $book.Sheets.Keys) {
-            $grid = $book.Sheets[$sheetName]
-            # コード定義書: コード区分名ごとの表示名（選択の項目の値ごとのケースを確かめる）
-            foreach ($t in (Find-DesignTables $grid @('コード区分名', '表示名') 'コード区分名')) {
-                foreach ($dr in $t.Rows) {
-                    $k = ConvertTo-Label ([string]$dr.Cells[$t.ColumnOf['コード区分名']])
-                    $name = ([string]$dr.Cells[$t.ColumnOf['表示名']]).Trim()
-                    if (-not $k -or -not $name) { continue }
-                    if (-not $codeValues.ContainsKey($k)) { $codeValues[$k] = New-Object System.Collections.Generic.List[string] }
-                    if (-not $codeValues[$k].Contains($name)) { $codeValues[$k].Add($name) }
-                }
-            }
-            # メッセージ一覧: メッセージID → 文言（テストに書いたメッセージ ID と文言を確かめる）
-            foreach ($t in (Find-DesignTables $grid @('メッセージID', 'メッセージ') 'メッセージID')) {
-                foreach ($dr in $t.Rows) {
-                    $id = ([string]$dr.Cells[$t.ColumnOf['メッセージID']]).Normalize($nfkc).Trim().ToUpperInvariant()
-                    $text = ([string]$dr.Cells[$t.ColumnOf['メッセージ']]).Normalize($nfkc).Trim()
-                    # 画面設計書のメッセージ欄（ID だけを書いた列）は文言ではない
-                    if ($id -notmatch '^[A-Z]+\d+$' -or -not $text -or $text -match '^[A-Za-z]+\d+$' -or $messages.ContainsKey($id)) { continue }
-                    $messages[$id] = [pscustomobject]@{ Text = $text; File = $book.File; Sheet = $sheetName; Row = $dr.Row }
-                }
-            }
-            $screen = Find-LabelValue $grid '画面ID'
-            if (-not $screen) { continue }
-            foreach ($t in (Find-DesignTables $grid @('項目名', '桁数') '項目名')) {
-                $cell = { param($dr, $name) if ($t.ColumnOf.ContainsKey($name)) { ([string]$dr.Cells[$t.ColumnOf[$name]]).Normalize($nfkc).Trim() } else { '' } }
-                foreach ($dr in $t.Rows) {
-                    # 出力だけの項目（入出力が O）は入力のテストが無い
-                    if ($t.ColumnOf.ContainsKey('入出力') -and (& $cell $dr '入出力') -notmatch 'I') { continue }
-                    $digits = & $cell $dr '桁数'
-                    $inputItems.Add([pscustomobject]@{
-                            Screen = $screen.Trim(); Item = ([string]$dr.Cells[$t.ColumnOf['項目名']]).Trim(); Digits = $(if ($digits -match '^\d+$') { [int]$digits } else { $null })
-                            Required = ((& $cell $dr '必須') -match '^(○|〇|◯|必須|要|Y|YES|1)$'); Type = (& $cell $dr '型'); Kind = (& $cell $dr '区分')
-                            File = $book.File; Sheet = $sheetName; Row = $dr.Row
-                        })
-                }
-            }
-        }
-    }
+    $design = Read-ScreenDesign $designBooks
+    $codeValues = $design.Codes
+    $messages = $design.Messages
+    # 出力だけの項目（入出力が O）は入力のテストが無い
+    foreach ($item in $design.Items) { if ($item.Input) { $inputItems.Add($item) } }
     # 画面ごとの項目名（揺れとみなさないため）
     $screenItems = @{}
     foreach ($item in $inputItems) {

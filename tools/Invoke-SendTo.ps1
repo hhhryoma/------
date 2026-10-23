@@ -1,7 +1,7 @@
 ﻿[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'Size', 'Estimate', 'Quality', 'Analysis', 'Pdf')]
+    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Pdf')]
     [string] $Action,
 
     # 「送る」は選んだファイルを引数の最後に並べるため、名前の無い引数はすべてここに入れる（PositionalBinding = $false）
@@ -29,6 +29,7 @@ $actions = [ordered]@{
     Search      = @{ Label = '検索'; File = '検索'; Tool = 'Search-Excel.ps1'; Detail = '入力した文字を、値・数式・コメント・図形などから探し、結果の Excel を開きます' }
     Terms       = @{ Label = '表記ゆれ'; File = '表記ゆれ'; Tool = 'Test-ExcelTerms.ps1'; Detail = '表記ゆれ（ユーザ／ユーザー など）を見つけ、結果の Excel を開きます' }
     Consistency = @{ Label = '設計書の整合性チェック'; File = '整合性チェック'; Tool = 'Test-DesignConsistency.ps1'; Detail = '設計書どうしの参照の食い違いを見つけ、結果の Excel を開きます' }
+    TestDraft   = @{ Label = 'テスト仕様書の下書き'; File = 'テスト仕様書の下書き'; Tool = 'New-TestSpecDraft.ps1'; Literal = $true; Detail = '画面設計書（とコード定義書・メッセージ一覧）のフォルダかファイルを選ぶと、必須・桁数・型・コード値・イベントのテストケースの下書きを作り、Excel を開きます' }
     Size        = @{ Label = '規模の見積もり'; File = '規模'; Tool = 'Measure-DesignSize.ps1'; Detail = '設計書の規模を数えて工数の目安を出し、結果の Excel を開きます' }
     Estimate    = @{ Label = '見積書の検算'; File = '見積書の検算'; Tool = 'Test-ExcelEstimate.ps1'; Detail = '見積書の合計の範囲漏れ・手入力の合計などを見つけ、結果の Excel を開きます' }
     Quality     = @{ Label = '品質評価'; Tool = 'New-QualityReport.ps1'; Literal = $true; Detail = '案件のフォルダ（品質評価の設定.csv を置いたもの）を選ぶと、品質の各ツールを実行して品質評価のブックを作り、開きます' }
@@ -142,6 +143,9 @@ try {
             if ($OutDir) { $spArgs['OutDir'] = $OutDir }
             $null = & $tool @spArgs
         }
+        'TestDraft' {
+            $null = & $tool -DesignPath $targets -OutXlsx $out
+        }
         'Search' {
             if (-not $Text) { $Text = Read-Host '探す文字を入力してください' }
             if (-not $Text) { throw '探す文字が入力されていません' }
@@ -218,7 +222,7 @@ if ($failure) { throw $failure }
 #
 # .PARAMETER Action
 #     実行する処理。Check（提出前チェック）・ResetView（表示を整える）・Compare（差分）・SpVersion（SharePoint の版と比べる）・Search（検索）・
-#     Terms（表記ゆれ）・Consistency（設計書の整合性チェック）・Size（規模の見積もり）・Estimate（見積書の検算）・
+#     Terms（表記ゆれ）・Consistency（設計書の整合性チェック）・TestDraft（テスト仕様書の下書き）・Size（規模の見積もり）・Estimate（見積書の検算）・
 #     Quality（品質評価。案件のフォルダの「品質評価の設定.csv」を読む）・Analysis（品質評価の定性分析の下書き）・Pdf（PDF にする）。
 #     List は処理の一覧を返します。
 #
