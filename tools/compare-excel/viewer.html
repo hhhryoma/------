@@ -107,6 +107,10 @@
   .list tr.ok td { color: var(--muted); }
   .list tr.ok td.val ins, .list tr.ok td.val del { opacity: .6; }
   .list tr.issue td.rv select, .list tr.issue td.note input { border-color: #c0392b; background: #fdecea; }
+  .list.only-open tr.item.ok, .list.only-open tr.item.issue { display: none; }
+  .list .tag { display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px; font-size: 11px; background: #eef0f2; color: var(--muted); }
+  .list button.same { font: inherit; font-size: 11px; margin-left: 4px; padding: 0 5px; border: 1px solid var(--line); border-radius: 3px; background: #fff; cursor: pointer; }
+  .list button.same:hover { border-color: var(--accent); }
   nav .badge.done { background: var(--add); color: #155724; }
   #review { font-size: 12px; }
   .chip { display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 11px; }
@@ -140,9 +144,10 @@
       <div class="group">
         <button id="prev" title="前の差分（k）">▲ 前</button>
         <button id="next" title="次の差分（j）">▼ 次</button>
+        <button id="nextOpen" title="まだ確認していない次の差分へ。シート・ファイルをまたいで探します（u）">▼ 未確認</button>
         <span id="pos" class="muted"></span>
       </div>
-      <div class="group" id="review"><span id="progress" class="muted"></span><button id="saveCsv" title="「指摘」にした差分を、指摘管理表の形の CSV に保存します（Measure-ReviewQuality.ps1 でそのまま集計できます）">指摘を CSV に保存</button><button id="saveNotes" title="確認・指摘の記録をファイルに書き出します。ほかのレビュアーに渡したり、別の PC で続けたりできます">記録を書き出す</button><button id="loadNotes" title="書き出した記録を読み込み、この画面の記録とまとめます（指摘は OK より優先し、指摘の内容はつなげます）">記録を読み込む</button><input type="file" id="notesFile" accept=".json,application/json" hidden></div>
+      <div class="group" id="review"><span id="progress" class="muted"></span><label title="確認（OK・指摘）を付けた差分を、下の一覧に出さない"><input type="checkbox" id="onlyOpen">未確認だけ</label><button id="saveCsv" title="「指摘」にした差分を、指摘管理表の形の CSV に保存します（Measure-ReviewQuality.ps1 でそのまま集計できます）">指摘を CSV に保存</button><button id="saveNotes" title="確認・指摘の記録をファイルに書き出します。ほかのレビュアーに渡したり、別の PC で続けたりできます">記録を書き出す</button><button id="loadNotes" title="書き出した記録を読み込み、この画面の記録とまとめます（指摘は OK より優先し、指摘の内容はつなげます）">記録を読み込む</button><input type="file" id="notesFile" accept=".json,application/json" hidden></div>
       <div class="group"><label title="差分のある行と、その前後 2 行だけを表示（大きなシートで便利）"><input type="checkbox" id="compact">変わった行だけ</label><label title="図形・画像・グラフをシートの上に重ねて表示"><input type="checkbox" id="showShapes" checked>図形を重ねる</label></div>
       <div class="group" id="kinds"></div>
       <div class="group legend"><span style="background:var(--chg)">変更</span><span style="background:var(--add)">追加</span><span style="background:var(--del)">削除</span><span style="background:var(--mov)">移動</span><span style="background:var(--fmt)">書式</span><span class="gapchip" id="gapLegend" title="片方にしか無い行・列の、もう片方の側">対応なし</span></div>
@@ -158,7 +163,7 @@ var DATA = /*DIFF_DATA*/null;
   'use strict';
   // 描く列の上限・1 画面に描くセルの上限・開いたときに「変わった行だけ」にするセルの数・「変わった行だけ」で前後に見せる行数
   var MAX_COLS = 300, MAX_CELLS = 150000, BIG_SHEET = 40000, CONTEXT = 2;
-  var state = { file: -1, sheet: -1, mode: 'new', compact: false, hidden: {}, items: [], index: -1 };
+  var state = { file: -1, sheet: -1, mode: 'new', compact: false, hidden: {}, hiddenTag: {}, items: [], index: -1 };
   var $ = function (id) { return document.getElementById(id); };
   var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
   var colName = function (n) { var s = ''; while (n > 0) { var m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
@@ -180,6 +185,7 @@ var DATA = /*DIFF_DATA*/null;
   };
 
   var chip = function (d) { return cls(d, d.ch === '削除' ? 'old' : 'new'); };
+  var short = function (t) { t = String(t); return t.length > 20 ? t.substring(0, 20) + '…' : (t || '（空）'); };
 
   // レビューの記録（差分ごとの 確認: ok / issue と、指摘のメモ）。このブラウザーに残し、開き直しても消えない
   // 記録のキーは差分の中身（ファイル・シート・種類・場所）で決めるので、比べ直した HTML でも同じ差分には同じ記録が付く
@@ -205,12 +211,40 @@ var DATA = /*DIFF_DATA*/null;
     });
   });
 
+  // 同じ変更: 前後の同じ文字を除いた「変わった部分」が同じ変更（「受注」→「注文」の置き換えなど）を、ファイルをまたいでまとめる
+  var sameSig = function (d) {
+    if (d.ch !== '変更' || !/^(値|数式|コメント|図形)$/.test(d.k) || d.a == null || d.b == null) return null;
+    var a = String(d.a), b = String(d.b), p = 0, q = 0;
+    while (p < a.length && p < b.length && a.charAt(p) === b.charAt(p)) p++;
+    while (q < a.length - p && q < b.length - p && a.charAt(a.length - 1 - q) === b.charAt(b.length - 1 - q)) q++;
+    var x = a.substring(p, a.length - q), y = b.substring(p, b.length - q);
+    if (x.length > 40 || y.length > 40) return null;
+    return [x, y];
+  };
+  var sameGroups = {};
+  DATA.files.forEach(function (f) {
+    f.diffs.forEach(function (d) {
+      var g = sameSig(d);
+      if (!g) return;
+      var k = g[0] + '\u0001' + g[1];
+      if (!sameGroups[k]) sameGroups[k] = { from: g[0], to: g[1], list: [] };
+      sameGroups[k].list.push(d);
+    });
+  });
+  Object.keys(sameGroups).forEach(function (k) { var g = sameGroups[k]; if (g.list.length > 1) g.list.forEach(function (d) { d.same = g; }); });
+
   // 種類の絞り込み
   var kinds = {};
   DATA.files.forEach(function (f) { f.diffs.forEach(function (d) { if (d.k !== 'ファイル') kinds[d.k] = (kinds[d.k] || 0) + 1; }); });
-  $('kinds').innerHTML = Object.keys(kinds).map(function (k) { return '<label><input type="checkbox" checked data-kind="' + esc(k) + '">' + esc(k) + '</label>'; }).join('');
+  // 分類（表記だけの変更・版数や更新日などの版情報）も、見るかどうかを選べる
+  var tags = {}, tagLabel = { '表記': '表記のみ', '版情報': '版情報' }, tagTitle = { '表記': '全角・半角、空白・改行、英字の大文字・小文字だけが違う変更', '版情報': '改訂履歴のシートと、版数・更新日・更新者などの欄の変更' };
+  DATA.files.forEach(function (f) { f.diffs.forEach(function (d) { if (d.t) tags[d.t] = (tags[d.t] || 0) + 1; }); });
+  $('kinds').innerHTML = Object.keys(kinds).map(function (k) { return '<label><input type="checkbox" checked data-kind="' + esc(k) + '">' + esc(k) + '</label>'; }).join('') +
+    Object.keys(tags).map(function (t) { return '<label title="' + esc(tagTitle[t] || '') + '"><input type="checkbox" checked data-tag="' + esc(t) + '">' + esc(tagLabel[t] || t) + '（' + tags[t] + '）</label>'; }).join('');
   $('kinds').addEventListener('change', function (e) {
-    state.hidden[e.target.getAttribute('data-kind')] = !e.target.checked;
+    var tag = e.target.getAttribute('data-tag');
+    if (tag) state.hiddenTag[tag] = !e.target.checked;
+    else state.hidden[e.target.getAttribute('data-kind')] = !e.target.checked;
     // 見ていた差分が残っていれば、その差分を見たままにする
     var cur = state.items[state.index];
     show();
@@ -278,6 +312,9 @@ var DATA = /*DIFF_DATA*/null;
     updateTwisties();
   }
 
+  // 種類・分類の絞り込みで隠していない差分か
+  function visible(d) { return !state.hidden[d.k] && !(d.t && state.hiddenTag[d.t]); }
+
   function sheetDiffs(f, s) {
     return f.diffs.filter(function (d) {
       if (d.k === 'ファイル') return false;
@@ -299,12 +336,15 @@ var DATA = /*DIFF_DATA*/null;
   });
   $('prev').addEventListener('click', function () { go(-1); });
   $('next').addEventListener('click', function () { go(1); });
+  $('nextOpen').addEventListener('click', function () { goOpen(); });
   document.addEventListener('keydown', function (e) {
     // Ctrl+P（印刷）などはブラウザーに任せる
     if (e.ctrlKey || e.metaKey || e.altKey || /^(SELECT|TEXTAREA)$/.test(e.target.tagName) || (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox')) return;
     if (e.key === 'j' || e.key === 'n') go(1);
     if (e.key === 'k' || e.key === 'p') go(-1);
     // o: 見ている差分を OK にして次へ
+    if (e.key === 'u') goOpen();
+    if (e.key === 'O' && state.items[state.index]) { applySame(state.items[state.index]); if (!state.items[state.index].same) setNote(state.items[state.index], { st: 'ok' }); goOpen(); }
     if (e.key === 'o' && state.items[state.index]) { setNote(state.items[state.index], { st: 'ok' }); var sel = document.querySelector('#list tr.item[data-i="' + state.index + '"] select'); if (sel) sel.value = 'ok'; go(1); }
   });
 
@@ -330,7 +370,7 @@ var DATA = /*DIFF_DATA*/null;
     var f = DATA.files[state.file], s = f && f.sheets[state.sheet];
     var panes = $('panes');
     if (!s) { panes.innerHTML = '<div class="pane"><div class="empty">左の一覧からシートを選んでください。</div></div>'; $('list').innerHTML = ''; return; }
-    state.items = sheetDiffs(f, s).filter(function (d) { return !state.hidden[d.k]; });
+    state.items = sheetDiffs(f, s).filter(visible);
     if (state.index >= state.items.length) state.index = -1;
     var sheetDiff = state.items.filter(function (d) { return d.k === 'シート'; });
     var sides = state.mode === 'both' ? ['old', 'new'] : [state.mode];
@@ -587,8 +627,11 @@ var DATA = /*DIFF_DATA*/null;
       var where = d.nc ? (d.s + '!' + d.nc) : d.oc ? ((d.os || d.s) + '!' + d.oc + '（旧）') : d.s;
       if (d.ho == null) { d.ho = diffHtml(d.a, d.b, 'old'); d.hn = diffHtml(d.a, d.b, 'new'); }
       var n = noteOf(d);
-      return '<tr class="item' + (i === state.index ? ' current' : '') + (n.st ? ' ' + n.st : '') + '" data-i="' + i + '"><td>' + esc(where) + '</td><td>' + esc(d.k) +
-        '</td><td><span class="chip ' + chip(d) + '">' + esc(d.ch) + '</span></td><td class="val">' + d.ho + '</td><td class="val">' + d.hn + '</td>' +
+      var tag = d.t ? '<span class="tag">' + esc(tagLabel[d.t] || d.t) + '</span>' : '';
+      var same = d.same ? '<button class="same" data-i="' + i + '" title="「' + esc(short(d.same.from)) + '」→「' + esc(short(d.same.to)) + '」と同じ変更が、ほかのシート・ファイルも含めて ' + d.same.list.length +
+        ' 件あります。押すと、この差分の確認（OK・指摘と内容。未確認なら OK）を同じ変更すべてに付けます（Shift+O）">同じ変更 ' + d.same.list.length + ' 件</button>' : '';
+      return '<tr class="item' + (i === state.index ? ' current' : '') + (n.st ? ' ' + n.st : '') + '" data-i="' + i + '"><td>' + esc(where) + '</td><td>' + esc(d.k) + tag +
+        '</td><td><span class="chip ' + chip(d) + '">' + esc(d.ch) + '</span>' + same + '</td><td class="val">' + d.ho + '</td><td class="val">' + d.hn + '</td>' +
         '<td class="rv"><select data-i="' + i + '" title="確認した差分は OK、直してほしい差分は 指摘（キーの o で OK にして次へ）"><option value="">－</option><option value="ok"' + (n.st === 'ok' ? ' selected' : '') + '>OK</option><option value="issue"' + (n.st === 'issue' ? ' selected' : '') + '>指摘</option></select></td>' +
         '<td class="note"><input type="text" data-i="' + i + '" placeholder="指摘の内容" value="' + esc(n.text || '') + '"></td></tr>';
     });
@@ -596,9 +639,24 @@ var DATA = /*DIFF_DATA*/null;
       : '<div class="empty" style="padding:10px 12px">このシートに差分はありません（絞り込みで隠れている差分も含めて）。</div>';
   }
   $('list').addEventListener('click', function (e) {
+    if (e.target.classList.contains('same')) { applySame(state.items[+e.target.getAttribute('data-i')]); return; }
     var tr = e.target.closest('tr.item');
-    if (tr && !/^(SELECT|INPUT|OPTION)$/.test(e.target.tagName)) { state.index = +tr.getAttribute('data-i'); focusItem(); }
+    if (tr && !/^(SELECT|INPUT|OPTION|BUTTON)$/.test(e.target.tagName)) { state.index = +tr.getAttribute('data-i'); focusItem(); }
   });
+  // 同じ変更すべてに、この差分の確認を付ける。OK を付けるときは、ほかで「指摘」にしたものは変えない
+  function applySame(d) {
+    if (!d || !d.same) return;
+    var n = noteOf(d), st = n.st || 'ok', text = n.text || '';
+    d.same.list.forEach(function (x) {
+      var cur = noteOf(x);
+      if (st === 'ok' && cur.st === 'issue') return;
+      notes[x.key] = { st: st, text: st === 'issue' ? text : (cur.text || '') };
+    });
+    saveNotes();
+    renderList();
+    updateProgress();
+  }
+  $('onlyOpen').addEventListener('change', function (e) { $('list').classList.toggle('only-open', e.target.checked); });
   // 確認・指摘の内容を書いたら、すぐに残す（指摘の内容を書けば「指摘」にする）
   $('list').addEventListener('change', function (e) {
     var d = state.items[+e.target.getAttribute('data-i')];
@@ -716,6 +774,29 @@ var DATA = /*DIFF_DATA*/null;
     if (!state.items.length) return;
     state.index = state.index < 0 ? (step > 0 ? 0 : state.items.length - 1) : (state.index + step + state.items.length) % state.items.length;
     focusItem();
+  }
+
+  // まだ確認していない次の差分へ（今のシートの続き → 次のシート・ファイル → 先頭から今の差分の前まで）。絞り込みで隠した差分は飛ばす
+  function goOpen() {
+    var order = [];
+    DATA.files.forEach(function (f, fi) { f.sheets.forEach(function (s, si) { order.push([fi, si]); }); });
+    if (!order.length) return;
+    var start = 0;
+    order.forEach(function (o, k) { if (o[0] === state.file && o[1] === state.sheet) start = k; });
+    for (var step = 0; step <= order.length; step++) {
+      var at = order[(start + step) % order.length], f = DATA.files[at[0]];
+      var list = sheetDiffs(f, f.sheets[at[1]]).filter(visible);
+      var here = at[0] === state.file && at[1] === state.sheet;
+      var from = here && step === 0 ? state.index + 1 : 0, to = here && step === order.length ? state.index : list.length;
+      for (var i = from; i < to; i++) {
+        if (noteOf(list[i]).st) continue;
+        if (!here) select(at[0], at[1]);
+        state.index = i;
+        focusItem();
+        return;
+      }
+    }
+    $('pos').textContent = 'すべての差分を確認しました';
   }
 
   // 図形・画像・グラフを、左上・右下のセル（またはピクセルの大きさ）の位置に重ねる。図形の差分は図形に色を付ける
