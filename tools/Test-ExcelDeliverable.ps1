@@ -719,23 +719,9 @@ function Test-WordDocument {
     $ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     $pkg = Open-ZipPackage $FilePath
     try {
-        $doc = Read-PartXml -Package $pkg -PartName 'word/document.xml'
-        if ($null -eq $doc) { throw 'Word の本文（word/document.xml）がありません' }
-        $nsm = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
-        $nsm.AddNamespace('w', $ns)
         # 本文・ヘッダー・フッター・脚注・文末脚注
-        $parts = New-Object System.Collections.Generic.List[object]
-        $parts.Add([pscustomobject]@{ Name = '本文'; Part = 'word/document.xml'; Doc = $doc })
-        foreach ($e in @($pkg.Entries.Keys | Sort-Object)) {
-            $name = $null
-            if ($e -match '^word/header\d*\.xml$') { $name = 'ヘッダー' }
-            elseif ($e -match '^word/footer\d*\.xml$') { $name = 'フッター' }
-            elseif ($e -eq 'word/footnotes.xml') { $name = '脚注' }
-            elseif ($e -eq 'word/endnotes.xml') { $name = '文末脚注' }
-            if (-not $name) { continue }
-            $d = Read-PartXml -Package $pkg -PartName $e
-            if ($d) { $parts.Add([pscustomobject]@{ Name = $name; Part = $e; Doc = $d }) }
-        }
+        $parts = Get-WordParts $pkg
+        $nsm = New-WordNamespaceManager $parts[0].Doc
         $count = { param([string] $XPath) $n = 0; foreach ($p in $parts) { $n += $p.Doc.SelectNodes($XPath, $nsm).Count }; $n }
 
         if ($checkSet['Revision']) {
@@ -783,19 +769,20 @@ function Test-WordDocument {
 
         if ($checkSet['Word'] -and $Words) {
             foreach ($p in $parts) {
-                $index = 0; $n = 0
-                foreach ($para in $p.Doc.SelectNodes('//w:p', $nsm)) {
-                    $index++
-                    $text = Get-WordText $para $nsm
+                $n = 0
+                # 場所は検索（Search-Excel -IncludeWord）と同じ「段落 n」「表 n の m 行目」「テキストボックス n」
+                $blocks = @(Get-WordBlocks $p.Doc $nsm) + @(Get-WordTextBoxes $p.Doc $nsm | ForEach-Object { [pscustomobject]@{ Cell = $_.Name; Text = $_.Text } })
+                foreach ($b in $blocks) {
+                    $text = $b.Text
                     if (-not $text) { continue }
                     $m = [regex]::Match($text, $Words, 'IgnoreCase')
                     if (-not $m.Success) { continue }
                     $n++
                     if ($n -gt $maxPerSheet) { continue }
                     if ($text.Length -gt 40) { $text = $text.Substring(0, 40) + '…' }
-                    Add-Issue '警告' '消し忘れ' '残っている文言' ("「{0}」が残っています: {1}" -f $m.Value, $text) -Sheet $p.Name -Cell ('段落 {0}' -f $index)
+                    Add-Issue '警告' '消し忘れ' '残っている文言' ("「{0}」が残っています: {1}" -f $m.Value, $text) -Sheet $p.Name -Cell $b.Cell
                 }
-                if ($n -gt $maxPerSheet) { Add-Issue '警告' '消し忘れ' '残っている文言' ("ほかにも消し忘れの文言のある段落が {0} 個あります" -f ($n - $maxPerSheet)) -Sheet $p.Name }
+                if ($n -gt $maxPerSheet) { Add-Issue '警告' '消し忘れ' '残っている文言' ("ほかにも消し忘れの文言のある段落・表の行が {0} 個あります" -f ($n - $maxPerSheet)) -Sheet $p.Name }
             }
         }
 
@@ -1147,7 +1134,7 @@ if ($Fix) {
 #                  用紙のサイズ・向きがシートによって違う（情報）
 #       マクロ     VBA を含むブック（情報）
 #
-#     Word（.docx / .docm）は、Word を使わずに次の項目をチェックします（場所は「本文!段落 12」のように示します）。
+#     Word（.docx / .docm）は、Word を使わずに次の項目をチェックします（場所は「本文!段落 12」「本文!表 1 の 2 行目」のように示します）。
 #
 #       消し忘れ   変更履歴（挿入・削除・移動・書式の変更）と、変更履歴の記録がオンのまま（情報）、コメント、隠し文字、
 #                  TODO などの文言（本文・ヘッダー・フッター・脚注）、蛍光ペン（情報）

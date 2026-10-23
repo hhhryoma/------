@@ -1741,4 +1741,105 @@ function Read-ZoneTable {
     return $table
 }
 
+# ---------------------------------------------------------------- Word（.docx / .docm）の本文（Search-Excel・Test-ExcelDeliverable）
+
+
+function New-WordNamespaceManager {
+    #     Word の XML を XPath で読むための名前空間（w・mc）
+    param($Doc)
+    $nsm = New-Object System.Xml.XmlNamespaceManager($Doc.NameTable)
+    $nsm.AddNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+    $nsm.AddNamespace('mc', 'http://schemas.openxmlformats.org/markup-compatibility/2006')
+    return , $nsm   # 列挙できる型なので、そのまま返すと名前空間の一覧に展開されてしまう
+}
+
+function Get-WordParts {
+    #     本文・ヘッダー・フッター・脚注・文末脚注の XML（Name・Part・Doc）。本文が無ければ例外
+    param($Package)
+    $doc = Read-PartXml -Package $Package -PartName 'word/document.xml'
+    if ($null -eq $doc) { throw 'Word の文書ではありません（word/document.xml が見つかりません）' }
+    $parts = New-Object System.Collections.Generic.List[object]
+    $parts.Add([pscustomobject]@{ Name = '本文'; Part = 'word/document.xml'; Doc = $doc })
+    foreach ($e in @($Package.Entries.Keys | Sort-Object)) {
+        $name = $null
+        if ($e -match '^word/header\d*\.xml$') { $name = 'ヘッダー' }
+        elseif ($e -match '^word/footer\d*\.xml$') { $name = 'フッター' }
+        elseif ($e -eq 'word/footnotes.xml') { $name = '脚注' }
+        elseif ($e -eq 'word/endnotes.xml') { $name = '文末脚注' }
+        if (-not $name) { continue }
+        $d = Read-PartXml -Package $Package -PartName $e
+        if ($d) { $parts.Add([pscustomobject]@{ Name = $name; Part = $e; Doc = $d }) }
+    }
+    return , $parts
+}
+
+function Get-WordParagraphText {
+    #     段落（w:p）の文字。テキストボックス（w:txbxContent）の中と、互換用の写し（mc:Fallback）・段落の書式（タブ位置）は含めない。
+    #     削除した変更履歴の文字（w:delText）は含めない
+    param($Paragraph, $Nsm)
+    $depth = $Paragraph.SelectNodes('ancestor::w:txbxContent', $Nsm).Count
+    $fallback = $Paragraph.SelectNodes('ancestor::mc:Fallback', $Nsm).Count
+    $xpath = './/*[(self::w:t or self::w:tab or self::w:br or self::w:cr) and not(ancestor::w:pPr) and count(ancestor::w:txbxContent) = {0} and count(ancestor::mc:Fallback) = {1}]' -f $depth, $fallback
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($n in $Paragraph.SelectNodes($xpath, $Nsm)) {
+        if ($n.LocalName -eq 't') { [void]$sb.Append($n.InnerText) }
+        elseif ($n.LocalName -eq 'tab') { [void]$sb.Append("`t") }
+        else { [void]$sb.Append("`n") }
+    }
+    return $sb.ToString().Trim()
+}
+
+function Get-WordBlocks {
+    #     本文・ヘッダーなどの段落と表の行を、文書の順に場所付きで返す（内容コントロール w:sdt の中も。脚注は区切り線などを除く）。
+    #     Cell は「段落 n」（表の外の段落を上から数えた番号。空の段落も数える）と「表 n の m 行目」。どのツールでも同じ場所を指す。
+    #     Text は段落の文字、表の行はセルの文字を「 | 」でつないだもの。Cells はセルごとの文字、Node は w:p・w:tr
+    param($Doc, $Nsm)
+    $wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    $root = $Doc.DocumentElement
+    if ($root.LocalName -eq 'document') { $containers = @($root.SelectNodes('w:body', $Nsm)) }
+    elseif ($root.LocalName -eq 'footnotes' -or $root.LocalName -eq 'endnotes') { $containers = @($root.SelectNodes("*[not(@w:type) or @w:type='normal']", $Nsm)) }
+    else { $containers = @($root) }
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    for ($q = $containers.Count - 1; $q -ge 0; $q--) {
+        $children = @($containers[$q].ChildNodes)
+        for ($i = $children.Count - 1; $i -ge 0; $i--) { $stack.Push($children[$i]) }
+    }
+    $paragraphNo = 0; $tableNo = 0
+    while ($stack.Count -gt 0) {
+        $node = $stack.Pop()
+        if ($node.NamespaceURI -ne $wordNs) { continue }
+        if ($node.LocalName -eq 'sdt') {
+            $content = $node.SelectSingleNode('w:sdtContent', $Nsm)
+            if ($content) { $children = @($content.ChildNodes); for ($i = $children.Count - 1; $i -ge 0; $i--) { $stack.Push($children[$i]) } }
+        }
+        elseif ($node.LocalName -eq 'p') {
+            $paragraphNo++
+            $text = Get-WordParagraphText $node $Nsm
+            [pscustomobject]@{ Kind = '段落'; Cell = ('段落 {0}' -f $paragraphNo); Text = $text; Cells = @($text); Node = $node }
+        }
+        elseif ($node.LocalName -eq 'tbl') {
+            $tableNo++; $rowNo = 0
+            foreach ($tr in $node.SelectNodes('w:tr', $Nsm)) {
+                $rowNo++
+                $cells = @(foreach ($tc in $tr.SelectNodes('w:tc | w:sdt/w:sdtContent/w:tc', $Nsm)) {
+                        # セルの中のテキストボックスは Get-WordTextBoxes で別に読む
+                        (@(foreach ($p in $tc.SelectNodes('.//w:p[not(ancestor::w:txbxContent) and not(ancestor::mc:Fallback)]', $Nsm)) { Get-WordParagraphText $p $Nsm }) | Where-Object { $_ }) -join ' '
+                    })
+                [pscustomobject]@{ Kind = '表'; Cell = ('表 {0} の {1} 行目' -f $tableNo, $rowNo); Text = ($cells -join ' | '); Cells = $cells; Node = $tr }
+            }
+        }
+    }
+}
+
+function Get-WordTextBoxes {
+    #     テキストボックスの文字（互換用の写し mc:Fallback は除く）。Name は「テキストボックス n」
+    param($Doc, $Nsm)
+    $n = 0
+    foreach ($box in $Doc.SelectNodes('//w:txbxContent[not(ancestor::mc:Fallback)]', $Nsm)) {
+        $n++
+        $text = (@(foreach ($p in $box.SelectNodes('w:p | w:tbl//w:p', $Nsm)) { Get-WordParagraphText $p $Nsm }) | Where-Object { $_ }) -join "`n"
+        [pscustomobject]@{ Name = ('テキストボックス {0}' -f $n); Text = $text }
+    }
+}
+
 Export-ModuleMember -Function *
