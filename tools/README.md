@@ -34,6 +34,7 @@
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
 | [Measure-Progress.ps1](#measure-progressps1) | WBS から子のタスクごとの遅れ（営業日）・状態と PV／EV／SPI を出し、遅延タスクと週ごとの完了数をスケジュール遅延リカバリ計画のテンプレートに書き込む（Excel 不要） |
 | [Measure-Effort.ps1](#measure-effortps1) | 日報・工数実績表（日付・担当・WBS 番号かタスク・工数）を、タスク・担当者×週ごとに集計し、WBS の予定工数と比べて予定超過・超過の見込みのタスクと CPI を出す。WBS に無い作業（会議など）の工数も出す（Excel 不要） |
+| [Export-ActionItems.ps1](#export-actionitemsps1) | 議事録（Word・Excel・テキスト・Markdown）から、宿題・ToDo の節や【宿題】の印、担当・期限の表を読み、宿題（担当・期限付き）と決定事項を一覧にする。CSV は課題管理表の形で、週次報告の `-IssueList` に渡せる（Excel・Word 不要） |
 | [New-WeeklyReport.ps1](#new-weeklyreportps1) | WBS・指摘管理表・障害管理表・課題（QA）管理表・工数実績から週次報告（今週の完了・遅延・来週の予定、指摘・障害・課題の起票・完了・期限切れ、今週の工数と予定超過のタスク、担当者ごとのやること）を作り、メールに貼れる文章と Excel（元の表へのリンク付き）に保存する。毎週の数字を残して前回と比べる（Excel 不要） |
 | [Measure-ReviewQuality.ps1](#measure-reviewqualityps1) | レビューの指摘管理表を集計し、設計書ごとの指摘件数・指摘密度（ページ数・規模あたり）・未完了・期限切れを出し、基準値から外れた設計書を知らせる。レビュー記録の工数も使うと、レビュー工数密度 × 指摘密度のゾーン分析もする（Excel 不要） |
 | [Measure-TestQuality.ps1](#measure-testqualityps1) | テスト仕様書と障害管理表を集計し、機能ごとのテスト密度・バグ密度とゾーン分析、テストの消化とバグの収束の推移、信頼度成長曲線（潜在バグ数の推定・収束の判定）、NG なのにバグ番号が無いなどの食い違いを出す（Excel 不要） |
@@ -54,7 +55,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -1368,6 +1369,48 @@ WBS のタスクに対応した工数: 87.5 時間（98%） / WBS に無い作�
 | `-HoursPerDay` | 1 人日の時間（既定は 8） |
 | `-Tolerance` | 超過の見込み・完了・超過とみなす、予定を超える割合（既定は 0.1） |
 | `-OutXlsx` | タスク（WBS へのリンク付き）・担当者×週・WBS に無い作業・読み取り結果を保存する |
+
+## Export-ActionItems.ps1
+
+議事録から**宿題（アクションアイテム）と決定事項**を抜き出し、担当・期限付きの一覧にします。会議のあとに議事録を読み返して課題管理表へ書き写す作業を機械でします。Excel・Word は不要です。
+
+```powershell
+.\Export-ActionItems.ps1 D:\PJ\議事録\20261020_定例.docx -OutXlsx D:\PJ\議事録\宿題.xlsx
+# 議事録のフォルダから宿題を集め、週次報告で期限切れを追う
+.\Export-ActionItems.ps1 D:\PJ\議事録 -OutCsv D:\PJ\宿題.csv
+.\New-WeeklyReport.ps1 -Wbs D:\PJ\WBS.xlsx -IssueList D:\PJ\宿題.csv -OutDir D:\PJ\週次報告
+```
+
+```
+■ 宿題
+・画面設計書の受注日の桁数を直す（山田、10/23まで）           → 件名・担当 山田・期限 2026/10/23
+・テーブル定義書のレビュー日程を決める　担当：佐藤　期限：10/27 → 担当 佐藤・期限 2026/10/27
+　※ 鈴木さんの予定も確認                                       → 前の宿題のメモ
+・お客様に締め日の扱いを確認する（来週中）                     → 期限 会議の翌週の金曜日・メモ「担当なし」
+・次回は10/27。【TODO】議事録を共有する @鈴木 今週中           → 担当 鈴木・期限 会議の週の金曜日
+```
+
+### 読む書き方
+
+| 書き方 | 例 |
+| --- | --- |
+| 節 | 「■宿題」「【ToDo】」「## アクションアイテム」「決定事項」などの見出しの下の行（次の ■・【】・# の見出しまで） |
+| 印 | 行の中の【宿題】【TODO】【AI】【決定】、行頭の「TODO:」「宿題:」 |
+| 表 | 内容（件名・項目・アクション）と、担当か期限の見出しがある表（Word の表・Excel・Markdown の表） |
+| 担当 | （山田、10/30まで）・担当: 山田・@山田・[山田]・山田さんが・（山田さん） |
+| 期限 | 期限: 10/30・10/30まで・（10/30）・今週中（会議の週の金曜日）・来週中（翌週の金曜日）・明日・本日中。「次回まで」はメモに書く |
+| 会議の日 | 「日時・開催日」の行、ファイル名の日付（20261020 など）、最初のほうの年のある日付、ファイルの更新日の順（年の無い期限の年に使う） |
+
+- 字下げした「※」「→」の行は、前の宿題のメモにします
+- 「なし」「特になし」は読みません。「お客様」「皆様」は担当にしません
+- 書き方の揺れが大きい議事録では、取り出せない・件名に担当が残るなどがあります。結果を確かめてから課題管理表に移してください
+
+### 保存するもの
+
+| パラメーター | 内容 |
+| --- | --- |
+| `-OutXlsx` | 宿題（No・区分・件名・担当・期限・状態・起票日・会議・メモ・出典・原文。Excel の議事録は該当セルへのリンク付き）と決定事項のシート |
+| `-OutCsv` | 宿題の CSV（No・区分・件名・担当・期限・状態・起票日・会議・メモ・出典）。課題管理表に貼り付けるか、[New-WeeklyReport.ps1](#new-weeklyreportps1) の `-IssueList` に渡す |
 
 ## New-WeeklyReport.ps1
 

@@ -1,7 +1,7 @@
 ﻿[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Weekly', 'Pdf')]
+    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Weekly', 'Actions', 'Pdf')]
     [string] $Action,
 
     # 「送る」は選んだファイルを引数の最後に並べるため、名前の無い引数はすべてここに入れる（PositionalBinding = $false）
@@ -35,6 +35,7 @@ $actions = [ordered]@{
     Quality     = @{ Label = '品質評価'; Tool = 'New-QualityReport.ps1'; Literal = $true; Detail = '案件のフォルダ（品質評価の設定.csv を置いたもの）を選ぶと、品質の各ツールを実行して品質評価のブックを作り、開きます' }
     Analysis    = @{ Label = '品質評価の定性分析'; Tool = 'Invoke-QualityAnalysis.ps1'; Literal = $true; Detail = '品質評価のブック（またはそのフォルダ）を選ぶと、× と △ の指標の定性分析・対策の下書きを Copilot とクリップボードでやり取りして書き込み、開きます' }
     Weekly      = @{ Label = '週次報告'; Tool = 'New-WeeklyReport.ps1'; Literal = $true; Detail = '案件のフォルダ（週次報告の設定.csv を置いたもの）を選ぶと、WBS・指摘管理表・障害管理表から週次報告（進捗・指摘・障害と担当者ごとのやること）を作って開き、報告の文章をクリップボードに写します' }
+    Actions     = @{ Label = '議事録の宿題'; File = '議事録の宿題'; Tool = 'Export-ActionItems.ps1'; Detail = '議事録（Word・Excel・テキスト）かそのフォルダを選ぶと、宿題（担当・期限付き）と決定事項を抜き出し、課題管理表の形の Excel を開きます' }
     Pdf         = @{ Label = 'PDF にする'; Tool = 'Export-ExcelToPdf.ps1'; Literal = $true; Detail = 'Excel を PDF にして、元のファイルと同じフォルダに保存します（Excel が必要）' }
 }
 
@@ -257,7 +258,7 @@ if ($failure) { throw $failure }
 #     実行する処理。Check（提出前チェック）・ResetView（表示を整える）・Compare（差分）・SpVersion（SharePoint の版と比べる）・Search（検索）・
 #     Terms（表記ゆれ）・Consistency（設計書の整合性チェック）・TestDraft（テスト仕様書の下書き）・Size（規模の見積もり）・Estimate（見積書の検算）・
 #     Quality（品質評価。案件のフォルダの「品質評価の設定.csv」を読む）・Analysis（品質評価の定性分析の下書き）・
-#     Weekly（週次報告。案件のフォルダの「週次報告の設定.csv」を読む）・Pdf（PDF にする）。
+#     Weekly（週次報告。案件のフォルダの「週次報告の設定.csv」を読む）・Actions（議事録の宿題）・Pdf（PDF にする）。
 #     List は処理の一覧を返します。
 #
 # .PARAMETER Path

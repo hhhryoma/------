@@ -187,7 +187,7 @@ else { Write-Host ('{0}: {1}' -f $SendToDir, (($results | Group-Object Status | 
 #     同じ名前のほかのショートカットは置き換えません（-Force で置き換えます）。
 #
 # .PARAMETER Action
-#     登録する処理（既定はすべて）。Check・ResetView・Compare・SpVersion・Search・Terms・Consistency・TestDraft・Size・Estimate・Quality・Analysis・Weekly・Pdf。
+#     登録する処理（既定はすべて）。Check・ResetView・Compare・SpVersion・Search・Terms・Consistency・TestDraft・Size・Estimate・Quality・Analysis・Weekly・Actions・Pdf。
 #     一覧は .\Invoke-SendTo.ps1 -Action List で確かめられます。
 #
 # .PARAMETER SendToDir
