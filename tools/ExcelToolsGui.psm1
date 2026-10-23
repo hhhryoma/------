@@ -199,11 +199,17 @@ function ConvertTo-GuiNumber {
 
 function ConvertTo-GuiArguments {
     #     入力（引数の名前 → 値）から、ツールに渡す引数（スプラッティング用のハッシュテーブル）を作る。
-    #     空の欄は渡さない。戻り値: Arguments と Errors（入力の誤りの文）
+    #     空の欄は渡さない。戻り値: Arguments と Errors（入力の誤りの文）・ErrorFields（誤りのある欄の引数の名前）
     param($Entry, $Fields, [hashtable] $Values)
     $arguments = [ordered]@{}
     $errors = New-Object System.Collections.Generic.List[string]
+    $errorFields = New-Object System.Collections.Generic.List[string]
+    $previous = $null
+    $counted = 0
     foreach ($f in $Fields) {
+        # 前の欄で誤りが増えていれば、その欄を覚える（欄の途中で continue するため、次の欄の頭で数える）
+        if ($errors.Count -gt $counted) { $errorFields.Add($previous); $counted = $errors.Count }
+        $previous = $f.Name
         $v = $Values[$f.Name]
         if (Test-GuiEmpty $v) {
             if ($f.Required) { $errors.Add(('「{0}」を入れてください' -f $f.Label)) }
@@ -237,8 +243,9 @@ function ConvertTo-GuiArguments {
             }
         }
     }
+    if ($errors.Count -gt $counted) { $errorFields.Add($previous) }
     foreach ($k in $Entry.Fixed.Keys) { $arguments[$k] = $Entry.Fixed[$k] }
-    return [pscustomobject]@{ Arguments = $arguments; Errors = $errors.ToArray() }
+    return [pscustomobject]@{ Arguments = $arguments; Errors = $errors.ToArray(); ErrorFields = $errorFields.ToArray() }
 }
 
 function Get-GuiResultDir {
@@ -1276,19 +1283,31 @@ function Get-GuiRunArguments {
     param([switch] $NoDefaults)
     $s = $script:Gui
     $values = Get-GuiValues
+    $defaults = @{}
     if (-not $NoDefaults) {
         $defaults = Get-GuiDefaultOutputs $s.Entry $s.CurrentFields $values
-        foreach ($k in $defaults.Keys) {
-            $values[$k] = $defaults[$k]
-            $b = @($s.Bindings | Where-Object { $_.Field.Name -eq $k })[0]
-            if ($b) { Set-GuiControlValue $b $defaults[$k] }
-        }
+        foreach ($k in $defaults.Keys) { $values[$k] = $defaults[$k] }
     }
     $built = ConvertTo-GuiArguments $s.Entry $s.CurrentFields $values
     $s.LastErrors = $built.Errors
+    # 誤りのある欄の色を変え、最初の欄に移る（直した欄は元の色に戻す）
+    $first = $null
+    foreach ($b in $s.Bindings) {
+        $bad = $built.ErrorFields -contains $b.Field.Name
+        if ($b.Input -isnot [System.Windows.Forms.CheckBox]) {
+            if ($bad) { $b.Input.BackColor = [System.Drawing.Color]::MistyRose } else { $b.Input.BackColor = [System.Drawing.SystemColors]::Window }
+        }
+        if ($bad -and -not $first) { $first = $b }
+    }
     if ($built.Errors.Count -gt 0) {
+        if ($first) { [void]$first.Input.Focus() }
         [void](Show-GuiMessage (($built.Errors -join "`n")) -Warning)
         return $null
+    }
+    # 空だった結果の欄に、既定の保存先を入れて見せる
+    foreach ($k in $defaults.Keys) {
+        $b = @($s.Bindings | Where-Object { $_.Field.Name -eq $k })[0]
+        if ($b) { Set-GuiControlValue $b $defaults[$k] }
     }
     return $built.Arguments
 }

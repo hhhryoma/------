@@ -72,10 +72,12 @@ Test-Case 'Start-ExcelTools: 入力から引数を作る（空は渡さず、必
 
     $r = ConvertTo-GuiArguments $search $fields @{ Pattern = ' '; Path = @() }
     Assert-Equal @('「探す文字」を入れてください', '「探すファイル・フォルダ」を入れてください') $r.Errors
+    Assert-Equal @('Pattern', 'Path') $r.ErrorFields '誤りのある欄'
 
     $effort = Get-TestEntry 'Effort'
     $r = ConvertTo-GuiArguments $effort (Get-GuiFields $effort) @{ Path = @('a.xlsx'); HoursPerDay = '７.５'; Tolerance = 'たくさん'; AsOf = '2026/10/20' }
     Assert-Equal @('「超過の見込みとみなす、予定工数を超える割合」は数で入れてください') $r.Errors
+    Assert-Equal @('Tolerance') $r.ErrorFields
     Assert-Equal '7.5' ([string]$r.Arguments['HoursPerDay']) '全角の数字も読む'
     Assert-True ($r.Arguments['AsOf'] -is [datetime] -and $r.Arguments['AsOf'].Day -eq 20) '日付の引数には日付を渡す'
 
@@ -218,6 +220,8 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Invoke-GuiRun
         Assert-Equal @('「旧（変更前）のファイル・フォルダ」を入れてください', '「新（変更後）のファイル・フォルダ」を入れてください') $s.LastErrors
         Assert-True ($null -eq $s.Run) '実行していない'
+        Assert-Equal 'MistyRose|Window' ('{0}|{1}' -f $s.Bindings[0].Input.BackColor.Name, $s.Bindings[2].Input.BackColor.Name) '誤りのある欄の色を変える'
+        Assert-Equal '' $s.Bindings[2].Input.Text '誤りがあるときは、結果の欄に既定の保存先を入れない'
 
         # 前の入力を戻す
         Select-GuiTool 'Search'
