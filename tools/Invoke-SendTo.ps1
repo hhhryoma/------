@@ -24,7 +24,7 @@ $ErrorActionPreference = 'Stop'
 $actions = [ordered]@{
     Check       = @{ Label = '提出前チェック'; File = '提出前チェック'; Tool = 'Test-ExcelDeliverable.ps1'; Detail = '体裁・消し忘れ・情報漏れ・印刷のはみ出しなどを確かめ、結果の Excel を開きます' }
     ResetView   = @{ Label = '表示を整える'; Tool = 'Reset-ExcelView.ps1'; Detail = '開いたときに先頭シートの A1 が倍率 100% で表示される状態に直します（上書きします）' }
-    Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック（またはフォルダ）を比べ、差分をシートの方眼のまま色付けした画面（ブラウザー）を開きます（一覧の Excel も保存）。版数（ファイル名）か更新日時の古い方を旧にします' }
+    Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック・Word 文書（またはフォルダ）を比べ、差分をシートの方眼のまま色付けした画面（ブラウザー）を開きます（一覧の Excel も保存）。版数（ファイル名）か更新日時の古い方を旧にします。3 つ以上か、版数の付いたファイルを置いたフォルダを 1 つ選ぶと、版を続けて比べます' }
     SpVersion   = @{ Label = 'SharePoint の版と比べる'; Tool = 'Compare-SharePointVersion.ps1'; Literal = $true; Detail = 'OneDrive で同期している SharePoint のファイルを 1 つ選び、バージョン履歴の番号（3.0 など）を入力すると、その版と現在の版の差分の画面（ブラウザー）を開きます（版は Excel で取り出します）' }
     Search      = @{ Label = '検索'; File = '検索'; Tool = 'Search-Excel.ps1'; Detail = '入力した文字を、値・数式・コメント・図形などから探し、結果の Excel を開きます' }
     Terms       = @{ Label = '表記ゆれ'; File = '表記ゆれ'; Tool = 'Test-ExcelTerms.ps1'; Detail = '表記ゆれ（ユーザ／ユーザー など）を見つけ、結果の Excel を開きます' }
@@ -57,19 +57,10 @@ function ConvertFrom-SendToArgument {
     return $v
 }
 
-function Get-NameVersion {
-    #     ファイル名の版数（_v1.2・Ver1.2・第1.2版）を比べられる形にする。版数が無ければ $null
-    param([string] $Name)
-    $m = [regex]::Match($Name.Normalize([System.Text.NormalizationForm]::FormKC).ToLowerInvariant(), '(?:(?<![a-z])v(?:er)?\.?\s*|第\s*)(\d+(?:\.\d+){0,3})')
-    if (-not $m.Success) { return $null }
-    $parts = @($m.Groups[1].Value.Split('.') | ForEach-Object { [int]$_ })
-    while ($parts.Count -lt 4) { $parts += 0 }
-    return New-Object System.Version($parts[0], $parts[1], $parts[2], $parts[3])
-}
-
 function Get-OldNew {
-    #     2 つのパスを旧・新の順に並べる。両方に版数があり違えば版数で、そうでなければ更新日時で決める
+    #     2 つのパスを旧・新の順に並べる。両方に版数があり違えば版数で（ExcelTools.psm1 の Get-NameVersion）、そうでなければ更新日時で決める
     param([string[]] $Pair)
+    Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
     $a = Get-Item -LiteralPath $Pair[0]
     $b = Get-Item -LiteralPath $Pair[1]
     if ($a.PSIsContainer -ne $b.PSIsContainer) { throw 'ファイルどうし、またはフォルダどうしを選んでください' }
@@ -126,14 +117,22 @@ try {
 
     switch ($Action) {
         'Compare' {
-            if ($targets.Count -ne 2) { throw "比べるファイル（またはフォルダ）を 2 つ選んでください（$($targets.Count) 件選ばれています）" }
-            $pair = Get-OldNew $targets
-            Write-Host "旧: $($pair[0])"
-            Write-Host "新: $($pair[1])"
-            Write-Host ''
             # 差分はシートの方眼のまま色付けした HTML で開く（一覧の Excel も同じ名前で保存する）
             $html = [System.IO.Path]::ChangeExtension($out, '.html')
-            $null = & $tool -Old $pair[0] -New $pair[1] -OutXlsx $out -OutHtml $html
+            if ($targets.Count -ge 3 -or ($targets.Count -eq 1 -and (Test-Path -LiteralPath $targets[0] -PathType Container))) {
+                # 3 つ以上か、版数の付いたファイルを置いたフォルダ 1 つなら、版を続けて比べる（v1.0 → v1.1 → v1.2）
+                Write-Host '版を続けて比べます（版数の順。版数が無ければ選んだ順）'
+                Write-Host ''
+                $null = & $tool -Versions $targets -OutXlsx $out -OutHtml $html
+            }
+            else {
+                if ($targets.Count -ne 2) { throw "比べるファイル（またはフォルダ）を 2 つ選んでください（$($targets.Count) 件選ばれています。版を続けて比べるときは 3 つ以上か、版数の付いたファイルを置いたフォルダを 1 つ）" }
+                $pair = Get-OldNew $targets
+                Write-Host "旧: $($pair[0])"
+                Write-Host "新: $($pair[1])"
+                Write-Host ''
+                $null = & $tool -Old $pair[0] -New $pair[1] -OutXlsx $out -OutHtml $html
+            }
             Write-Host "差分の一覧（Excel）: $out"
             $out = $html
         }

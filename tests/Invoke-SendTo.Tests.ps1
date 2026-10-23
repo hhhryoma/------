@@ -82,6 +82,14 @@ Test-Case 'Invoke-SendTo: 差分は 2 つを選び、版数（無ければ更新
     Assert-True (@($rows | Where-Object { $_ -match '\|受注\|受注明細$' }).Count -eq 1) ($rows -join ' / ')
 
     Assert-Throws { Invoke-SendTo @{ Action = 'Compare'; OutDir = $outDir } @($v10) } '2 つ選んでください'
+    # 3 つ選ぶと、版を続けて比べる
+    $v12 = Join-Path $dir '受注_v1.2.xlsx'
+    Copy-Item -LiteralPath $v11 -Destination $v12
+    $outDir3 = Join-Path $dir '結果3'
+    Invoke-SendTo @{ Action = 'Compare'; OutDir = $outDir3 } @($v12, $v10, $v11)
+    $html = @(Get-ChildItem -LiteralPath $outDir3 -Filter '*.html')
+    Assert-Equal 1 $html.Count '版を続けて比べた差分の画面'
+    Assert-Match ([System.IO.File]::ReadAllText($html[0].FullName)) 'v1\.0 → v1\.1'
     Assert-Throws { Invoke-SendTo @{ Action = 'Compare'; OutDir = $outDir } @($v10, $dir) } 'ファイルどうし'
 
     # SharePoint の版と比べるのは、同期しているファイル 1 つ

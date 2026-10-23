@@ -657,6 +657,32 @@ Test-Case 'Compare-Excel: Word（.docx）の段落と表の行を、行の挿入
     Assert-Equal '本文|1|480' ('{0}|{1}|{2}' -f $sheet.name, $sheet.new.wrap, $sheet.new.w.'1') '段落の列は読める幅で、折り返して表示する'
 }
 
+Test-Case 'Compare-Excel: -Versions で、版数だけが違うファイル・版のフォルダを版数の順に続けて比べる' {
+    $dir = New-TestDir
+    $hist = Join-Path $dir '履歴'
+    New-Item -ItemType Directory -Path $hist | Out-Null
+    New-TableBook (Join-Path $hist '画面設計書_v1.1.xlsx') @('項目', '桁数') @(@('受注番号', '12'), @('受注日', '8'))
+    New-TableBook (Join-Path $hist '画面設計書_v1.0.xlsx') @('項目', '桁数') @(@('受注番号', '10'), @('受注日', '8'))
+    New-TableBook (Join-Path $hist '画面設計書_v1.2.xlsx') @('項目', '桁数') @(@('受注番号', '12'), @('受注日', '8'), @('顧客', '40'))
+    New-TableBook (Join-Path $hist 'メモ.xlsx') @('メモ') @(, @('版数の無いファイルは比べない'))
+    $out = Join-Path $dir 'history.html'
+    $d = Invoke-Compare @{ Versions = @($hist); OutHtml = $out }
+    Assert-Equal @('画面設計書_v1.1.xlsx（v1.0 → v1.1）|Data!B2|値|変更', '画面設計書_v1.2.xlsx（v1.1 → v1.2）|Data!A4|行|追加') @($d | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.File, $_.Location, $_.Kind, $_.Change })
+    $data = [regex]::Match([System.IO.File]::ReadAllText($out), 'var DATA = (\{.*?\});\r?\n').Groups[1].Value | ConvertFrom-Json
+    Assert-Equal @('画面設計書_v1.1.xlsx（v1.0 → v1.1）', '画面設計書_v1.2.xlsx（v1.1 → v1.2）') @($data.files | ForEach-Object { $_.name }) '版ごとに 1 つずつ並べる'
+
+    # 版のフォルダを並べる（順が逆でも版数の順にする）
+    foreach ($v in @('v1.0', 'v1.1', 'v1.2')) {
+        New-Item -ItemType Directory -Path (Join-Path $dir $v) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $hist ('画面設計書_{0}.xlsx' -f $v)) -Destination (Join-Path $dir ('{0}/画面設計書.xlsx' -f $v))
+    }
+    $d = Invoke-Compare @{ Versions = @((Join-Path $dir 'v1.2'), (Join-Path $dir 'v1.0'), (Join-Path $dir 'v1.1')) }
+    Assert-Equal @('画面設計書.xlsx（v1.0 → v1.1）|Data!B2', '画面設計書.xlsx（v1.1 → v1.2）|Data!A4') @($d | ForEach-Object { '{0}|{1}' -f $_.File, $_.Location })
+
+    Assert-Throws { & $CompareExcel -Versions (Join-Path $hist '画面設計書_v1.0.xlsx') 6>$null } '2 つ以上'
+    Assert-Throws { & $CompareExcel -Versions (Join-Path $dir 'v1.0') 6>$null } '版数'
+}
+
 Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定するとエラー' {
     Assert-Throws { & $CompareExcel -Old (Join-Path $cmpDir 'v1') -New (Join-Path $cmpDir 'v2/同じ.xlsx') 6>$null } '両方とも'
 }
