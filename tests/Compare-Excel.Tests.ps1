@@ -540,6 +540,45 @@ Test-Case 'Compare-Excel: -OutHtml は、左右に並べてそろえるための
     Assert-Equal 10 @($sheet.rp).Count
 }
 
+function Edit-ZipText {
+    #     xlsx の中の 1 つのパーツの文字を書き換える（テスト用）
+    param([string] $Path, [string] $Name, [scriptblock] $Change)
+    $fs = [System.IO.File]::Open($Path, 'Open', 'ReadWrite')
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Update)
+        $entry = $zip.GetEntry($Name)
+        $sr = New-Object System.IO.StreamReader($entry.Open())
+        $text = $sr.ReadToEnd(); $sr.Dispose()
+        $text = & $Change $text
+        $entry.Delete()
+        $sw = New-Object System.IO.StreamWriter($zip.CreateEntry($Name).Open(), (New-Object System.Text.UTF8Encoding($false)))
+        $sw.Write($text); $sw.Dispose()
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
+Test-Case 'Compare-Excel: -OutHtml は、行の高さ・非表示の行と、図形の位置と文字を入れる' {
+    $dir = New-TestDir
+    $old = Join-Path $dir 'old.xlsx'; $new = Join-Path $dir 'new.xlsx'
+    foreach ($p in @($old, $new)) {
+        Copy-Item -LiteralPath (Join-Path $script:Fixtures 'grep/sample.xlsx') -Destination $p
+        Edit-ZipText $p 'xl/worksheets/sheet1.xml' { param($t) $t -replace '(<row r="3"[^>]*?) hidden="false"', '$1 hidden="true"' }
+    }
+    $null = & (Join-Path $script:ToolsDir 'Replace-Excel.ps1') -Pattern 'TODO 図形内' -Replacement '済 図形内' -SimpleMatch -Path $new -Force 6>$null
+    $out = Join-Path $dir 'diff.html'
+    $diffs = Invoke-Compare @{ Old = $old; New = $new; OutHtml = $out }
+    Assert-Equal '顧客一覧!G3|図形|変更' (@($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Kind, $_.Change }) -join ' / ')
+    $data = [regex]::Match([System.IO.File]::ReadAllText($out), 'var DATA = (\{.*?\});\r?\n').Groups[1].Value | ConvertFrom-Json
+    $sheet = @($data.files[0].sheets | Where-Object name -eq '顧客一覧')[0].new
+    Assert-Equal '20|0|38' ('{0}|{1}|{2}' -f $sheet.dh, $sheet.h.'3', $sheet.h.'4') '既定の行の高さ・非表示の行（0）・高い行（ピクセル）'
+    Assert-True ($null -eq $sheet.h.PSObject.Properties['2']) '既定と同じ高さの行は入れない'
+    # 互換用の代替表示（mc:Fallback）の重複は除く
+    Assert-Equal @('テキスト ボックス 1|sp|3|7|6|9', 'Button 1|sp|10|2|11|3') @($sheet.sh | ForEach-Object { '{0}|{1}|{2}|{3}|{4}|{5}' -f $_.n, $_.k, $_.r1, $_.c1, $_.r2, $_.c2 })
+    Assert-Equal "注意：済 図形内`n2行目" $sheet.sh[0].t
+    Assert-True ([System.IO.File]::ReadAllText($out).Contains('id="showShapes"')) '図形を重ねる表示'
+}
+
 Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定するとエラー' {
     Assert-Throws { & $CompareExcel -Old (Join-Path $cmpDir 'v1') -New (Join-Path $cmpDir 'v2/同じ.xlsx') 6>$null } '両方とも'
 }

@@ -1564,8 +1564,43 @@ function Test-HistoryCoverage {
 $script:HtmlBooks = @{}
 $script:HtmlAlign = @{}   # ファイル名 + [char]0 + 新のシート名 → 対応付けた旧と新の行・列の組
 
+function Read-SheetShapes {
+    #     シートの図形・画像・グラフの位置（左上のセルと、右下のセルまたは大きさ。ピクセル）と文字。線（コネクター）は除く
+    param($Package, [string] $SheetPart)
+    $shapes = New-Object System.Collections.Generic.List[object]
+    $px = { param($node, $name) $n = $node.SelectSingleNode("*[local-name()='$name']"); if ($n) { [int][math]::Round([double]$n.InnerText / 9525) } else { 0 } }
+    $num = { param($node, $name) $n = $node.SelectSingleNode("*[local-name()='$name']"); if ($n) { [int]$n.InnerText } else { 0 } }
+    # Get-PartRelationships は一覧を 1 つのまとまりで返すので、いったん変数に入れてから絞り込む
+    $rels = Get-PartRelationships -Package $Package -PartName $SheetPart
+    foreach ($rel in @($rels | Where-Object { $_.Kind -eq 'drawing' })) {
+        $doc = Read-PartXml -Package $Package -PartName $rel.Target
+        if (-not $doc) { continue }
+        # 互換用の代替表示（mc:Fallback）は同じ図形の重複なので除く
+        foreach ($a in $doc.SelectNodes("//*[(local-name()='twoCellAnchor' or local-name()='oneCellAnchor') and not(ancestor::*[local-name()='Fallback'])]")) {
+            $obj = $a.SelectSingleNode("*[local-name()='sp' or local-name()='pic' or local-name()='graphicFrame' or local-name()='grpSp']")
+            $from = $a.SelectSingleNode("*[local-name()='from']")
+            if (-not $obj -or -not $from) { continue }
+            $nv = $obj.SelectSingleNode(".//*[local-name()='cNvPr']")
+            $paragraphs = @($obj.SelectNodes(".//*[local-name()='txBody']/*[local-name()='p']") | ForEach-Object {
+                    -join @($_.SelectNodes(".//*[local-name()='t']") | ForEach-Object { $_.InnerText })
+                })
+            $shape = [ordered]@{
+                Name = $(if ($nv) { $nv.GetAttribute('name') } else { '' }); Kind = $obj.LocalName; Text = ($paragraphs -join "`n").TrimEnd("`n")
+                R1 = (& $num $from 'row') + 1; C1 = (& $num $from 'col') + 1; OX = (& $px $from 'colOff'); OY = (& $px $from 'rowOff')
+            }
+            $to = $a.SelectSingleNode("*[local-name()='to']")
+            $ext = $a.SelectSingleNode("*[local-name()='ext']")
+            if ($to) { $shape.R2 = (& $num $to 'row') + 1; $shape.C2 = (& $num $to 'col') + 1; $shape.EX = (& $px $to 'colOff'); $shape.EY = (& $px $to 'rowOff') }
+            elseif ($ext) { $shape.W = [int][math]::Round([double]$ext.GetAttribute('cx') / 9525); $shape.H = [int][math]::Round([double]$ext.GetAttribute('cy') / 9525) }
+            else { continue }
+            $shapes.Add([pscustomobject]$shape)
+        }
+    }
+    return , $shapes
+}
+
 function Read-SheetLayout {
-    #     xlsx のシートごとの列幅（ピクセル。非表示は 0）と結合セル。読めないブック（.xls など）は空
+    #     xlsx のシートごとの列幅（ピクセル。非表示は 0）・行の高さ（ピクセル。非表示は 0）・結合セル・図形。読めないブック（.xls など）は空
     param([string] $FilePath)
     $layout = @{}
     if (-not $FilePath -or @('.xlsx', '.xlsm') -notcontains [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()) { return $layout }
@@ -1591,7 +1626,24 @@ function Read-SheetLayout {
                     for ($i = [int]$c.GetAttribute('min'); $i -le $max; $i++) { $widths[$i] = $px }
                 }
                 $merges = @($doc.SelectNodes("//*[local-name()='mergeCells']/*[local-name()='mergeCell']") | ForEach-Object { $_.GetAttribute('ref') })
-                $layout[$name] = [pscustomobject]@{ Default = [int][math]::Round($default * 7 + 5); Widths = $widths; Merges = $merges }
+                # 行の高さ（ポイント → ピクセル）。既定と同じ高さの行は入れない
+                $rowPt = 15.0
+                if ($fmt -and $fmt.GetAttribute('defaultRowHeight')) { $v = 0.0; if ([double]::TryParse($fmt.GetAttribute('defaultRowHeight'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { $rowPt = $v } }
+                $rowPx = [int][math]::Round($rowPt * 4 / 3)
+                $heights = @{}
+                foreach ($row in $doc.SelectNodes("//*[local-name()='sheetData']/*[local-name()='row'][@ht or @hidden]")) {
+                    $r = 0
+                    if (-not [int]::TryParse($row.GetAttribute('r'), [ref]$r)) { continue }
+                    $hidden = $row.GetAttribute('hidden')
+                    if ($hidden -eq '1' -or $hidden -eq 'true') { $heights[$r] = 0; continue }
+                    $v = 0.0
+                    if ([double]::TryParse($row.GetAttribute('ht'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) {
+                        $h = [int][math]::Round($v * 4 / 3)
+                        if ($h -ne $rowPx) { $heights[$r] = $h }
+                    }
+                }
+                $shapes = Read-SheetShapes $pkg $parts.Sheets[$name]
+                $layout[$name] = [pscustomobject]@{ Default = [int][math]::Round($default * 7 + 5); Widths = $widths; Merges = $merges; RowDefault = $rowPx; Heights = $heights; Shapes = $shapes }
             }
         }
         finally { $pkg.Zip.Dispose() }
@@ -1646,7 +1698,28 @@ function Add-SheetJson {
     if ($Layout) { [void]$Builder.Append((@($Layout.Merges | ForEach-Object { '"{0}"' -f $_ }) -join ',')) }
     $default = 64
     if ($Layout) { $default = $Layout.Default }
-    [void]$Builder.Append(('],"rows":{0},"cols":{1},"def":{2}}}' -f $maxRow, $maxCol, $default))
+    [void]$Builder.Append(('],"rows":{0},"cols":{1},"def":{2}' -f $maxRow, $maxCol, $default))
+    # 行の高さ（既定と違う行・非表示は 0）と図形
+    $rowDefault = 20
+    if ($Layout -and $Layout.RowDefault) { $rowDefault = $Layout.RowDefault }
+    [void]$Builder.Append((',"dh":{0},"h":{{' -f $rowDefault))
+    if ($Layout -and $Layout.Heights) { [void]$Builder.Append((@($Layout.Heights.Keys | Sort-Object | ForEach-Object { '"{0}":{1}' -f $_, $Layout.Heights[$_] }) -join ',')) }
+    [void]$Builder.Append('},"sh":[')
+    if ($Layout -and $Layout.Shapes) {
+        $firstShape = $true
+        foreach ($sh in $Layout.Shapes) {
+            if (-not $firstShape) { [void]$Builder.Append(',') }
+            $firstShape = $false
+            [void]$Builder.Append('{"n":'); Add-JsonText $Builder $sh.Name
+            [void]$Builder.Append(',"k":'); Add-JsonText $Builder $sh.Kind
+            [void]$Builder.Append(',"t":'); Add-JsonText $Builder $sh.Text
+            foreach ($p in @('R1', 'C1', 'OX', 'OY', 'R2', 'C2', 'EX', 'EY', 'W', 'H')) {
+                if ($sh.PSObject.Properties[$p]) { [void]$Builder.Append((',"{0}":{1}' -f $p.ToLowerInvariant(), [int]$sh.$p)) }
+            }
+            [void]$Builder.Append('}')
+        }
+    }
+    [void]$Builder.Append(']}')
 }
 
 function Export-DiffHtml {
