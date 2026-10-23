@@ -70,9 +70,20 @@ Test-Case 'Start-ExcelTools: 入力から引数を作る（空は渡さず、必
     Assert-Equal @('D:\設計書`[旧`]', 'D:\b') $r.Arguments['Path'] 'ワイルドカードを使える引数のパスは逃がし、前後の空白と引用符は除く'
     Assert-Equal @('Value', 'Comment') $r.Arguments['Target']
 
-    $r = ConvertTo-GuiArguments $search $fields @{ Pattern = ' '; Path = @() }
+    $r = ConvertTo-GuiArguments $search $fields @{ Pattern = ''; Path = @() }
     Assert-Equal @('「探す文字」を入れてください', '「探すファイル・フォルダ」を入れてください') $r.Errors
     Assert-Equal @('Pattern', 'Path') $r.ErrorFields '誤りのある欄'
+    $r = ConvertTo-GuiArguments $search $fields @{ Pattern = ' "OK" '; Path = @('D:') }
+    Assert-Equal ' "OK" ' $r.Arguments['Pattern'] '探す文字は入力のまま（前後の空白と引用符を除かない）'
+
+    # 置換: 全角の空白を半角に・空欄なら消す
+    $replace = Get-TestEntry 'Replace'
+    $replaceFields = Get-GuiFields $replace
+    $r = ConvertTo-GuiArguments $replace $replaceFields @{ Pattern = '　'; Replacement = ' '; Path = @('D:') }
+    Assert-Equal '[　]→[ ]' ('[{0}]→[{1}]' -f $r.Arguments['Pattern'], $r.Arguments['Replacement']) '空白だけの入力も渡す'
+    $r = ConvertTo-GuiArguments $replace $replaceFields @{ Pattern = '(仮)'; Replacement = ''; Path = @('D:') }
+    Assert-True ($r.Arguments.Contains('Replacement') -and $r.Arguments['Replacement'] -eq '') '置き換えた後の文字が空欄なら、空の文字を渡す（消す）'
+    Assert-Match (Format-GuiCommandLine 'Replace-Excel.ps1' $r.Arguments) "-Replacement ''"
 
     $effort = Get-TestEntry 'Effort'
     $r = ConvertTo-GuiArguments $effort (Get-GuiFields $effort) @{ Path = @('a.xlsx'); HoursPerDay = '７.５'; Tolerance = 'たくさん'; AsOf = '2026/10/20' }

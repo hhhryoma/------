@@ -32,6 +32,7 @@ function Get-GuiCatalog {
             Summary = [string](& $get 'Summary' ''); Keywords = [string](& $get 'Keywords' '')
             Main = @(& $get 'Main' @()); Labels = (& $get 'Labels' @{}); Kinds = (& $get 'Kinds' @{}); Extensions = (& $get 'Extensions' @{})
             Required = @(& $get 'Required' @()); Hide = @(& $get 'Hide' @()); Defaults = (& $get 'Defaults' @{}); Fixed = (& $get 'Fixed' @{})
+            Verbatim = @(& $get 'Verbatim' @()); AllowEmpty = @(& $get 'AllowEmpty' @())
             Output = $output; OutputName = [string](& $get 'OutputName' $t.Label); Open = $open
             WhatIf = [bool](& $get 'WhatIf' $false); Confirm = [string](& $get 'Confirm' ''); ConfirmWhen = [string](& $get 'ConfirmWhen' '')
             ConfirmArguments = (& $get 'ConfirmArguments' @{}); Console = [bool](& $get 'Console' $false)
@@ -211,7 +212,10 @@ function ConvertTo-GuiArguments {
         if ($errors.Count -gt $counted) { $errorFields.Add($previous); $counted = $errors.Count }
         $previous = $f.Name
         $v = $Values[$f.Name]
+        # 探す文字・置き換える文字は入力のまま（全角の空白を半角にする・" を探す、など）
+        if ($Entry.Verbatim -contains $f.Name -and $v -is [string] -and $v.Length -gt 0) { $arguments[$f.Name] = $v; continue }
         if (Test-GuiEmpty $v) {
+            if ($Entry.AllowEmpty -contains $f.Name) { $arguments[$f.Name] = ''; continue }
             if ($f.Required) { $errors.Add(('「{0}」を入れてください' -f $f.Label)) }
             continue
         }
