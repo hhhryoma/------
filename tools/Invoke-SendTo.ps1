@@ -27,7 +27,7 @@ $actions = [ordered]@{
     Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック・Word 文書（またはフォルダ）を比べ、差分をシートの方眼のまま色付けした画面（ブラウザー）を開きます（一覧の Excel も保存）。版数（ファイル名）か更新日時の古い方を旧にします。3 つ以上か、版数の付いたファイルを置いたフォルダを 1 つ選ぶと、版を続けて比べます' }
     SpVersion   = @{ Label = 'SharePoint の版と比べる'; Tool = 'Compare-SharePointVersion.ps1'; Literal = $true; Detail = 'OneDrive で同期している SharePoint のファイルを 1 つ選び、バージョン履歴の番号（3.0 など）を入力すると、その版と現在の版の差分の画面（ブラウザー）を開きます（版は Excel で取り出します）' }
     Search      = @{ Label = '検索'; File = '検索'; Tool = 'Search-Excel.ps1'; Detail = '入力した文字を、値・数式・コメント・図形など（Word の文書も）から探し、結果の Excel を開きます' }
-    Terms       = @{ Label = '表記ゆれ'; File = '表記ゆれ'; Tool = 'Test-ExcelTerms.ps1'; Detail = '表記ゆれ（ユーザ／ユーザー など）を見つけ、結果の Excel を開きます' }
+    Terms       = @{ Label = '表記ゆれ'; File = '表記ゆれ'; Tool = 'Test-ExcelTerms.ps1'; Detail = '表記ゆれ（ユーザ／ユーザー など）を Excel・Word の文書から見つけ、結果の Excel を開きます' }
     Consistency = @{ Label = '設計書の整合性チェック'; File = '整合性チェック'; Tool = 'Test-DesignConsistency.ps1'; Detail = '設計書どうしの参照の食い違いを見つけ、結果の Excel を開きます' }
     TestDraft   = @{ Label = 'テスト仕様書の下書き'; File = 'テスト仕様書の下書き'; Tool = 'New-TestSpecDraft.ps1'; Literal = $true; Detail = '画面設計書（とコード定義書・メッセージ一覧）のフォルダかファイルを選ぶと、必須・桁数・型・コード値・イベントのテストケースの下書きを作り、Excel を開きます' }
     Size        = @{ Label = '規模の見積もり'; File = '規模'; Tool = 'Measure-DesignSize.ps1'; Detail = '設計書の規模を数えて工数の目安を出し、結果の Excel を開きます' }
@@ -203,6 +203,9 @@ try {
             if (Test-Path -LiteralPath $out -PathType Container) {
                 $out = @(Get-ChildItem -LiteralPath $targets[0] -Filter '*.xlsx' -File | Where-Object { $_.Name -notlike '~$*' } | Sort-Object LastWriteTime -Descending | ForEach-Object { $_.FullName })[0]
             }
+        }
+        'Terms' {
+            $null = & $tool -Path $toolPaths -IncludeWord -OutXlsx $out
         }
         default {
             $null = & $tool -Path $toolPaths -OutXlsx $out

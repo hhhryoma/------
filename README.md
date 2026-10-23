@@ -19,7 +19,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [New-DesignDocument.ps1](tools/README.md#new-designdocumentps1) | 一覧から雛形の差し込み欄を埋めた設計書を一括で作る（1 件 1 シートの設計書には、雛形のシートからシートを足す）。版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もし、前の版との差分から改訂内容を書ける | 不要 | － |
 | [Search-Excel.ps1](tools/README.md#search-excelps1) | フォルダ配下の Excel を横断検索（値・数式・コメント・図形・シート名・ヘッダー／フッター・名前の定義・入力規則）。Word の文書も探せる。結果から該当セルを開ける | 不要 ※1 | 検索 |
 | [Replace-Excel.ps1](tools/README.md#replace-excelps1) | 複数の Excel の文字を一括置換（値・コメント・図形・ヘッダー／フッター・入力規則のリスト、数式も可）。置換リストでまとめて置換もできる。確認してから書き換え、部分ごとの書式は保つ | 不要 | － |
-| [Test-ExcelTerms.ps1](tools/README.md#test-exceltermsps1) | 表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を用語集と自動の検出で見つけ、置換リストを作る | 不要 ※1 | 表記ゆれ |
+| [Test-ExcelTerms.ps1](tools/README.md#test-exceltermsps1) | 表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を用語集と自動の検出で見つけ、置換リストを作る。Word の文書も調べられる | 不要 ※1 | 表記ゆれ |
 | [Test-DesignConsistency.ps1](tools/README.md#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、画面遷移の食い違い、桁数・必須の違い）。CRUD 図と影響調査（使っている場所の一覧）も作る | 不要 ※1 | 設計書の整合性チェック |
 | [Export-TableDdl.ps1](tools/README.md#export-tableddlps1) | テーブル定義書から DDL（Oracle・PostgreSQL・SQL Server・MySQL）を作り、DB の列の一覧との食い違い（型・桁数・NULL）も確かめる | 不要 ※1 | － |
 

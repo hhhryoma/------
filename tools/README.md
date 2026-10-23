@@ -350,6 +350,7 @@ Word は不要です。文書の中の XML を直接読みます。
 ## Test-ExcelTerms.ps1
 
 複数の Excel ファイルの**表記ゆれ**を見つけます。見つけた揺れは、置換リストにして `Replace-Excel.ps1` でまとめて直せます。Excel は不要です。
+`-IncludeWord` を付けると Word の文書（.docx / .docm）も一緒に調べます（「送る」の表記ゆれは Word も調べます）。Word の揺れは `Replace-Excel.ps1` では直せないので、Word の置換（Ctrl+H）で直してください。
 
 ```powershell
 .\Test-ExcelTerms.ps1 D:\設計書                                              # 自動で見つける
@@ -393,7 +394,8 @@ ID               ＩＤ               2              31 全角・半角
 | `-NoAuto` | 自動の検出をせず、用語集だけで確かめる |
 | `-Target` | 調べる対象（Value / Comment / Shape / SheetName。既定は Value, Comment, Shape） |
 | `-OutCsv` | 置換リスト（置換前・置換後・種類・件数・例）を保存する。`Replace-Excel.ps1 -ListPath` で使える |
-| `-OutXlsx` | 表記ゆれの一覧と、出現箇所へのリンク付きの一覧を保存する |
+| `-OutXlsx` | 表記ゆれの一覧と、出現箇所へのリンク付きの一覧を保存する（Word の文書へのリンクは文書を開くだけ） |
+| `-IncludeWord` | Word の文書の本文・表・脚注・コメント・テキストボックスも調べる |
 | `-NoRecurse` / `-NoExcel` | サブフォルダを見ない／Excel を起動しない（.xls / .xlsb は調べない） |
 
 ## Test-ExcelDeliverable.ps1

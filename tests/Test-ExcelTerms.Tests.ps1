@@ -93,6 +93,26 @@ Test-Case 'Test-ExcelTerms: -OutXlsx で出現箇所へのリンク付きの一�
     Assert-True (@($detail.Links | Where-Object { $_.Location -eq "'機能'!A4" }).Count -eq 1) 'ＩＤ の出現箇所へのリンク'
 }
 
+Test-Case 'Test-ExcelTerms: -IncludeWord で Word の文書の揺れも数え、出現箇所のリンクは文書を開くだけにする' {
+    $dir = Copy-Fixture 'terms'
+    $fs = [System.IO.File]::Create((Join-Path $dir '基本設計書.docx'))
+    $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+    $sw = New-Object System.IO.StreamWriter($zip.CreateEntry('word/document.xml').Open(), (New-Object System.Text.UTF8Encoding($false)))
+    $sw.Write('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>サーバーを再起動する</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>ＩＤ</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>')
+    $sw.Dispose(); $zip.Dispose(); $fs.Dispose()
+
+    $before = Invoke-Terms @{ Path = $dir }
+    Assert-Equal 1 (@($before | Where-Object Variant -eq 'サーバ')[0].PreferredCount) '-IncludeWord が無ければ Word は調べない'
+    $out = Join-Path (New-TestDir) 'terms.xlsx'
+    $text = Get-HostText { $script:r = @(& $TermsTool -Path $dir -IncludeWord -OutXlsx $out 3>$null) }
+    Assert-Equal '1|2|2' ('{0}|{1}|{2}' -f @($script:r | Where-Object Variant -eq 'サーバ')[0].Count, @($script:r | Where-Object Variant -eq 'サーバ')[0].PreferredCount, @($script:r | Where-Object Variant -ceq 'ＩＤ')[0].Count) 'Word の本文の「サーバー」と表の「ＩＤ」も数える'
+    Assert-Match $text 'Word の文書の揺れ（基本設計書\.docx）は Replace-Excel\.ps1 では直せません'
+    $detail = Read-XlsxSheet -Path $out -Index 2
+    $wordLinks = @($detail.Links | Where-Object { $_.Target -like '*基本設計書.docx' })
+    Assert-Equal 1 $wordLinks.Count '揺れ（ＩＤ）の出現箇所'
+    Assert-True (@($wordLinks | Where-Object { $_.Location }).Count -eq 0) 'Word はセルの場所を付けない'
+}
+
 Test-Case 'Test-ExcelTerms: Get-Help でヘルプが表示される' {
     $h = Get-Help $TermsTool
     Assert-Match $h.Synopsis '表記ゆれ'
