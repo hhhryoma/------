@@ -266,6 +266,17 @@ function Get-GuiDefaultOutputs {
     return $result
 }
 
+function Find-GuiNewResult {
+    #     フォルダに保存する処理（週次報告・品質評価など）の結果のファイル: フォルダの直下で、実行を始めてから書いたもののうち、
+    #     Excel → HTML → PDF → CSV → 文字 の順、同じ種類なら新しいもの。無ければ $null
+    param([string] $Dir, [datetime] $Since)
+    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return $null }
+    $rank = @{ '.xlsx' = 1; '.xlsm' = 2; '.html' = 3; '.pdf' = 4; '.csv' = 5; '.txt' = 6; '.md' = 7 }
+    $files = @(Get-ChildItem -LiteralPath $Dir -File | Where-Object { $rank.ContainsKey($_.Extension.ToLowerInvariant()) -and $_.LastWriteTime -ge $Since -and -not $_.Name.StartsWith('~$') })
+    if ($files.Count -eq 0) { return $null }
+    return @($files | Sort-Object { $rank[$_.Extension.ToLowerInvariant()] }, @{ Expression = { $_.LastWriteTime }; Descending = $true })[0].FullName
+}
+
 function ConvertTo-GuiLiteral {
     #     値を PowerShell の式の文字にする（コマンドの表示・PowerShell の画面での実行に使う）
     param($Value)
@@ -1300,6 +1311,9 @@ function Invoke-GuiRun {
         Update-GuiTree $s.Find.Text
         return
     }
+    # ファイルの更新日時の細かさの違いを見込んで、少し前からにする
+    $s.RunStarted = (Get-Date).AddSeconds(-2)
+    $s.LastProgressText = ''
     $s.Run = Start-GuiToolRun $entry.ToolPath $arguments
     Set-GuiRunning $true
     $s.Timer.Start()
@@ -1345,7 +1359,14 @@ function Update-GuiRun {
             $s.Progress.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
             $s.Progress.Value = [Math]::Max(0, [Math]::Min(100, $r.Progress.Percent))
         }
-        $s.Status.Text = ('{0} {1}' -f $r.Progress.Activity, $r.Progress.Status).Trim()
+        $s.LastProgressText = ('{0} {1}' -f $r.Progress.Activity, $r.Progress.Status).Trim()
+        if ($r.Progress.Completed) { $s.LastProgressText = '' }
+    }
+    if (-not $r.Completed) {
+        # 進み具合と、かかっている時間
+        $text = $s.LastProgressText
+        if (-not $text) { $text = '実行しています…' }
+        $s.Status.Text = ('{0}（{1:N0} 秒）' -f $text, $r.Seconds)
     }
     if (-not $r.Completed) { return }
     $s.Timer.Stop()
@@ -1361,7 +1382,7 @@ function Update-GuiRun {
     if ($r.Succeeded) {
         Write-GuiLog ('終わりました（{0:N1} 秒）' -f $r.Seconds) 'Green'
         $s.Status.Text = '終わりました'
-        Set-GuiResult $s.Entry $s.RunArguments
+        Set-GuiResult $s.Entry $s.RunArguments $s.RunStarted
         if ($s.ResultPath -and $s.OpenResult.Checked -and -not $s.Quiet) { Open-GuiPath $s.ResultPath }
     }
     else {
@@ -1372,14 +1393,19 @@ function Update-GuiRun {
 }
 
 function Set-GuiResult {
-    #     結果のファイル・フォルダ（ツールの一覧の Open の順に、あるもの）を「結果を開く」「保存先のフォルダを開く」にする
-    param($Entry, $Arguments)
+    #     結果のファイル・フォルダ（ツールの一覧の Open の順に、あるもの）を「結果を開く」「保存先のフォルダを開く」にする。
+    #     フォルダなら、Since（実行を始めた時刻）よりあとにそのフォルダに書いた結果のファイルを開けるようにする
+    param($Entry, $Arguments, $Since)
     $s = $script:Gui
     foreach ($name in $Entry.Open) {
         if (-not $Arguments.Contains($name)) { continue }
         $p = [System.Management.Automation.WildcardPattern]::Unescape([string](@($Arguments[$name])[0]))
         if (Test-Path -LiteralPath $p -PathType Leaf) { $s.ResultPath = $p; $s.ResultDir = Split-Path -Parent $p; break }
-        if (Test-Path -LiteralPath $p -PathType Container) { $s.ResultDir = $p; break }
+        if (Test-Path -LiteralPath $p -PathType Container) {
+            $s.ResultDir = $p
+            if ($Since) { $s.ResultPath = Find-GuiNewResult $p $Since }
+            break
+        }
     }
     $s.OpenButton.Enabled = [bool]$s.ResultPath
     $s.FolderButton.Enabled = [bool]$s.ResultDir

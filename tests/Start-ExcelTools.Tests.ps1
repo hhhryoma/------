@@ -101,6 +101,17 @@ Test-Case 'Start-ExcelTools: 結果の既定の保存先（名前_日時。同�
     $arguments = [ordered]@{ Old = "D:\旧'版"; New = 'D:\新'; KeyColumn = [string[]]@('物理名', '項目ID'); NoRecurse = $true; AsOf = (Get-Date '2026-10-20'); MinBugs = 5 }
     Assert-Equal "& 'C:\tools\Compare-Excel.ps1' -Old 'D:\旧''版' -New 'D:\新' -KeyColumn '物理名', '項目ID' -NoRecurse -AsOf [datetime]'2026-10-20' -MinBugs 5" (Format-GuiCommandLine 'C:\tools\Compare-Excel.ps1' $arguments)
 
+    # フォルダに保存する処理の結果: 実行を始めてから書いた Excel を、文字や古いファイルより先にする
+    $results = Join-Path $dir '報告'
+    New-Item -ItemType Directory -Path (Join-Path $results 'sub') -Force | Out-Null
+    $start = Get-Date
+    foreach ($n in @('古い.xlsx', '報告.txt', '報告.xlsx', 'メモ.docx', 'sub/中.xlsx')) { [System.IO.File]::WriteAllText((Join-Path $results $n), 'x') }
+    (Get-Item -LiteralPath (Join-Path $results '古い.xlsx')).LastWriteTime = $start.AddDays(-1)
+    Assert-Equal '報告.xlsx' (Split-Path -Leaf (Find-GuiNewResult $results $start.AddSeconds(-2)))
+    Remove-Item -LiteralPath (Join-Path $results '報告.xlsx')
+    Assert-Equal '報告.txt' (Split-Path -Leaf (Find-GuiNewResult $results $start.AddSeconds(-2))) 'Excel が無ければ文字'
+    Assert-Equal $null (Find-GuiNewResult $results $start.AddMinutes(1)) '実行のあとに書いたものが無い'
+
     $script = New-GuiConsoleScript 'C:\tools\Invoke-QualityAnalysis.ps1' $arguments '定性分析' -Dir $dir
     $text = [System.IO.File]::ReadAllText($script)
     Assert-Match $text ([regex]::Escape("`$arguments['KeyColumn'] = @('物理名', '項目ID')"))
@@ -218,6 +229,16 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Assert-True (-not $s.AdvancedShown) '詳細な設定は隠す'
         $s.ShowAdvanced.Checked = $true
         Assert-True $s.AdvancedShown '詳細な設定を出す'
+
+        # フォルダに保存する処理は、そのフォルダに書いた結果のファイルを開けるようにする
+        Select-GuiTool 'Markdown'
+        Set-GuiValue 'Path' @((Join-Path $script:Fixtures 'grep/sample.xlsx'))
+        $mdDir = Join-Path $dir 'md'
+        Set-GuiValue 'OutDir' $mdDir
+        Invoke-GuiRun
+        Wait-GuiRun -TimeoutSeconds 120
+        Assert-Equal (Join-Path $mdDir 'sample.md') $s.ResultPath ($s.Log.Text)
+        Assert-Equal $mdDir $s.ResultDir
 
         # 途中で入力が要るツールは PowerShell の画面で実行する（テストでは起動しない）
         Select-GuiTool 'Analysis'
