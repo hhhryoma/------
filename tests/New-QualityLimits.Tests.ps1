@@ -47,6 +47,18 @@ Test-Case 'New-QualityLimits: 作った基準値の CSV を Measure-ReviewQualit
     Assert-Equal '0.25|少ない（レビュー不足の疑い）' ('{0}|{1}' -f $r[0].Density, $r[0].Judgement)
 }
 
+Test-Case 'New-QualityLimits: Excel で開いている（書き込みでロックされた）CSV も読める' -WindowsOnly {
+    $dir = New-TestDir
+    $csv = New-ActualsCsv $dir
+    # Excel で開いたときと同じく、書き込みのために開き、ほかには読み取りだけを許す
+    $lock = [System.IO.File]::Open($csv, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+    try {
+        $r = @(& $LimitsTool $csv 6>$null)
+        Assert-Equal @('バグ密度', '指摘密度') @($r | ForEach-Object { $_.Metric } | Sort-Object)
+    }
+    finally { $lock.Dispose() }
+}
+
 Test-Case 'New-QualityLimits: Get-Help でヘルプが表示される' {
     $h = Get-Help $LimitsTool
     Assert-Match $h.Synopsis '基準値'

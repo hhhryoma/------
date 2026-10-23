@@ -73,6 +73,16 @@ Test-Case 'Test-ExcelEstimate: -OutXlsx で該当セルへのリンク付きの�
     Assert-True (@($sheet.Links | Where-Object { $_.Location -eq "'見積'!D9" }).Count -eq 1) '合計のセルへのリンク'
 }
 
+Test-Case 'Test-ExcelEstimate: Excel で開いている（書き込みでロックされた）見積書もチェックする' -WindowsOnly {
+    $dir = Copy-Fixture 'estimate'
+    $file = Join-Path $dir '見積書.xlsx'
+    # Excel で開いたときと同じく、書き込みのために開き、ほかには読み取りだけを許す
+    $lock = [System.IO.File]::Open($file, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+    try { $issues = Invoke-Estimate @{ Path = $file } }
+    finally { $lock.Dispose() }
+    Assert-Equal $expectedEstimate (Get-EstimateKeys $issues)
+}
+
 Test-Case 'Test-ExcelEstimate: Get-Help でヘルプが表示される' {
     $h = Get-Help $EstimateTool
     Assert-Match $h.Synopsis '見積書'
