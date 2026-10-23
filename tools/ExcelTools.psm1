@@ -889,13 +889,22 @@ function Read-HeaderCandidates {
     return $candidates
 }
 
+function Get-PathItem {
+    #     引数のパスのファイル・フォルダ。その名前のものがあればそれ（「設計書[旧].xlsx」のように [ ] を含む名前のため）、
+    #     無ければワイルドカード（*.xlsx など）として探す。見つからなければ空
+    param([string] $Path)
+    if (-not $Path) { return @() }
+    try { if (Test-Path -LiteralPath $Path) { return @(Get-Item -LiteralPath $Path -Force) } } catch { }
+    return @(Get-Item -Path $Path -ErrorAction SilentlyContinue)
+}
+
 function Get-InputFiles {
     #     ファイル・フォルダを、Excel（Search-Excel に渡すパス）と CSV に分ける
     param([string[]] $Paths, [string] $What, [switch] $NoRecurse)
     $excel = New-Object System.Collections.Generic.List[string]
     $csv = New-Object System.Collections.Generic.List[object]
     foreach ($p in $Paths) {
-        $items = @(Get-Item -Path $p -ErrorAction SilentlyContinue)
+        $items = @(Get-PathItem $p)
         if ($items.Count -eq 0) { Write-Warning "${What}が見つかりません: $p"; continue }
         foreach ($item in $items) {
             if ($item.PSIsContainer) {
@@ -914,7 +923,7 @@ function Get-FilePathSet {
     param([string[]] $Paths, [switch] $NoRecurse)
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($p in $Paths) {
-        foreach ($item in @(Get-Item -Path $p -ErrorAction SilentlyContinue)) {
+        foreach ($item in @(Get-PathItem $p)) {
             if ($item.PSIsContainer) { foreach ($f in @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue)) { [void]$set.Add($f.FullName) } }
             else { [void]$set.Add($item.FullName) }
         }

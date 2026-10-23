@@ -854,7 +854,7 @@ function Get-FileKind {
 $files = New-Object System.Collections.Generic.List[object]
 $seen = @{}
 foreach ($p in $Path) {
-    $items = @(Get-Item -Path $p -ErrorAction SilentlyContinue)
+    $items = @(Get-PathItem $p)
     if ($items.Count -eq 0) { Write-Warning "見つかりません: $p"; continue }
     foreach ($item in $items) {
         if ($item.PSIsContainer) {

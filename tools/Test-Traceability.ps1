@@ -92,7 +92,7 @@ function Get-FilePaths {
     param([string[]] $Paths)
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($p in $Paths) {
-        foreach ($item in @(Get-Item -Path $p -ErrorAction SilentlyContinue)) {
+        foreach ($item in @(Get-PathItem $p)) {
             if ($item.PSIsContainer) { foreach ($f in @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue)) { [void]$set.Add($f.FullName) } }
             else { [void]$set.Add($item.FullName) }
         }
