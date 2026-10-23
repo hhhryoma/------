@@ -198,6 +198,15 @@ catch {
     Write-Host ('エラー: ' + $_.Exception.Message) -ForegroundColor Red
 }
 finally {
+    # Install-ExcelTools.ps1 で入れたツールなら、配布元が更新されていないかを確かめる（12 時間に 1 回まで。次の実行から新しい版になる）
+    $installDir = Split-Path -Parent $PSScriptRoot
+    if (Test-Path -LiteralPath (Join-Path $installDir 'install.json')) {
+        try {
+            $u = & (Join-Path $PSScriptRoot 'Install-ExcelTools.ps1') -InstallDir $installDir -CheckOnly 6>$null
+            if ($u -and $u.Result -eq '更新') { Write-Host ''; Write-Host ('Excel ツールを新しい版に更新しました（次の実行から使います）: {0} ファイル' -f $u.Copied) }
+        }
+        catch { Write-Host ''; Write-Host ('Excel ツールの更新を確かめられませんでした: ' + $_.Exception.Message) }
+    }
     if (-not $NoPause) {
         Write-Host ''
         $null = Read-Host 'Enter キーを押すと閉じます'
