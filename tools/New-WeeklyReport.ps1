@@ -11,6 +11,13 @@ param(
 
     [string[]] $IssueList,
 
+    [string[]] $EffortLog,
+
+    [ValidateSet('人日', '時間')]
+    [string] $Unit = '人日',
+
+    [double] $HoursPerDay = 8,
+
     [datetime] $AsOf = (Get-Date).Date,
 
     [datetime] $Since,
@@ -37,7 +44,8 @@ if ($Config) {
     $settings = Read-WeeklyReportConfig $Config
     foreach ($k in $settings.Keys) { if (-not $PSBoundParameters.ContainsKey($k)) { Set-Variable -Name $k -Value $settings[$k] } }
 }
-if (-not ($Wbs -or $Findings -or $BugList -or $IssueList)) { throw '-Wbs・-Findings・-BugList・-IssueList のどれか（または -Config の設定ファイル）を指定してください' }
+if (-not ($Wbs -or $Findings -or $BugList -or $IssueList -or $EffortLog)) { throw '-Wbs・-Findings・-BugList・-IssueList・-EffortLog のどれか（または -Config の設定ファイル）を指定してください' }
+if ($HoursPerDay -le 0) { throw '-HoursPerDay は 0 より大きい数にしてください' }
 foreach ($name in @('Holidays', 'OutDir', 'HistoryCsv')) {
     $v = Get-Variable -Name $name -ValueOnly
     if ($v) { Set-Variable -Name $name -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($v) }
@@ -242,6 +250,59 @@ if ($IssueList) {
     }
 }
 
+# ---------------------------------------------------------------- 工数実績
+
+
+# 予定工数のある WBS のタスクごとの予定・実績（-Unit の単位）と判定（Measure-Effort.ps1 と同じ。許容の幅は 0.1）
+$hasEffort = $false
+$effortRows = @()
+$effortFlagged = @()
+$effortOwners = @()
+$effortWeek = 0.0; $effortTotal = 0.0; $effortCpi = $null
+$perUnit = 1.0
+if ($Unit -eq '人日') { $perUnit = $HoursPerDay }
+$away = [System.MidpointRounding]::AwayFromZero
+function Format-Amount {
+    param($Value)
+    if ($null -eq $Value) { return '' }
+    return [math]::Round([double]$Value, 2, $away).ToString([System.Globalization.CultureInfo]::InvariantCulture)
+}
+if ($EffortLog) {
+    $wbsFiles = $null
+    if ($Wbs) { $wbsFiles = Get-FilePathSet $Wbs -NoRecurse }
+    $log = Read-EffortLog -Inputs (Get-InputFiles $EffortLog '工数実績' -NoRecurse:$NoRecurse) -Headers (Join-Path $PSScriptRoot 'progress/工数実績の見出し.csv') -Tasks $tasks -AsOf $AsOf `
+        -HoursPerDay $HoursPerDay -Skip (Join-Skip @($outFiles, $findingFiles, $bugFiles, $issueFiles, $wbsFiles)) -NoRecurse:$NoRecurse -NoExcel:$NoExcel
+    # @() で包まない（New-Object で作った List を @() で包むと、PowerShell 7.4 では例外になる）
+    $effortEntries = $log.Entries
+    if ($log.Unreadable -gt 0) { Write-Warning ('工数が数として読めない行 {0} 件は数えていません' -f $log.Unreadable) }
+    if ($effortEntries.Count -eq 0) { Write-Warning '工数実績が見つかりませんでした（工数と、WBS 番号かタスクの見出しがある表を探します）' }
+    else { $hasEffort = $true }
+    $hoursOf = New-Object double[] ([math]::Max(1, $tasks.Count))
+    foreach ($e in $effortEntries) { if ($e.Task -ge 0) { $hoursOf[$e.Task] += $e.Hours } }
+    for ($i = 0; $i -lt $tasks.Count; $i++) {
+        $t = $tasks[$i]
+        if ($null -eq $t.Effort -or $t.Effort -le 0) { continue }
+        $planned = [double]$t.Effort
+        $actual = $hoursOf[$i] / $perUnit
+        if ($t.Done) { $eac = $actual } elseif ($t.Progress -gt 0) { $eac = $actual / $t.Progress } else { $eac = [math]::Max($planned, $actual) }
+        $effortRows += [pscustomobject]@{ Task = $t; Planned = $planned; Actual = $actual; Eac = $eac; Judgement = (Get-EffortJudgement $planned $actual $t.Progress ([bool]$t.Done) 0.1) }
+    }
+    $effortFlagged = @($effortRows | Where-Object { $_.Judgement -in @('予定超過', '超過の見込み') } |
+            Sort-Object @{ e = { if ($_.Judgement -eq '予定超過') { 0 } else { 1 } } }, @{ e = { $_.Eac - $_.Planned }; Descending = $true })
+    $sumActual = ($effortRows | Measure-Object Actual -Sum).Sum
+    if ($sumActual -gt 0) { $effortCpi = [math]::Round((@($effortRows | ForEach-Object { $_.Planned * $_.Task.Progress }) | Measure-Object -Sum).Sum / $sumActual, 2, $away) }
+    $effortTotal = ($effortEntries | Measure-Object Hours -Sum).Sum
+    $effortWeek = (@($effortEntries | Where-Object { Test-InRange $_.Date $Since $AsOf }) | Measure-Object Hours -Sum).Sum
+    $byOwner = @{}
+    foreach ($e in $effortEntries) {
+        $key = Get-OwnerKey $e.Owner
+        if (-not $byOwner.ContainsKey($key)) { $byOwner[$key] = [pscustomobject]@{ Owner = (Get-OwnerName $key); Week = 0.0; Total = 0.0 } }
+        $byOwner[$key].Total += $e.Hours
+        if (Test-InRange $e.Date $Since $AsOf) { $byOwner[$key].Week += $e.Hours }
+    }
+    $effortOwners = @($byOwner.Values | Sort-Object @{ e = { $_.Week }; Descending = $true }, Owner)
+}
+
 # 表の種類: 種類・報告の見出し・指定したか・読めたか・読めないときの表の名前
 $issueKinds = @(
     [pscustomobject]@{ Kind = '指摘'; Heading = 'レビューの指摘'; Given = [bool]$Findings; Read = $hasFindings; Table = '指摘管理表' },
@@ -297,6 +358,11 @@ foreach ($t in $tasks) {
     elseif (Test-InRange $t.PlanEnd $nextStart $nextEnd) { Add-Item $t.OwnerKey '来週終了' 1 'タスク' $name '予定終了' $t.PlanEnd $progress $t.Place $t }
     elseif (Test-InRange $t.PlanStart $nextStart $nextEnd) { Add-Item $t.OwnerKey '来週開始' 2 'タスク' $name '予定開始' $t.PlanStart '' $t.Place $t }
 }
+foreach ($f in $effortFlagged) {
+    $t = $f.Task
+    $note = '予定 {0} / 実績 {1} / 進捗 {2}% → 完了見込 {3}（{4}）' -f (Format-Amount $f.Planned), (Format-Amount $f.Actual), [math]::Round($t.Progress * 100), (Format-Amount $f.Eac), $Unit
+    Add-Item $t.OwnerKey $f.Judgement $(if ($f.Judgement -eq '予定超過') { 0 } else { 1 }) '工数' (('{0} {1}' -f $t.WbsNo, $t.Task).Trim()) '予定終了' $t.PlanEnd $note $t.Place $t
+}
 foreach ($i in $issues) {
     if ($i.Closed) { continue }
     $note = $i.Status
@@ -339,6 +405,15 @@ if ($Wbs) {
     Add-Metric '進捗' '今週の完了' ([double]$doneInPeriod.Count)
     Add-Metric '進捗' '今週に終わる予定' ([double]$plannedInPeriod.Count)
     Add-Metric '進捗' '来週の予定' ([double]$nextTasks.Count)
+}
+if ($EffortLog) {
+    Add-Metric '工数' '今週（時間）' ([double][math]::Round($effortWeek, 2, $away))
+    Add-Metric '工数' '累計（時間）' ([double][math]::Round($effortTotal, 2, $away))
+    if ($Wbs) {
+        Add-Metric '工数' 'CPI' $(if ($null -ne $effortCpi) { [double]$effortCpi } else { $null })
+        Add-Metric '工数' '予定超過' ([double]@($effortFlagged | Where-Object Judgement -eq '予定超過').Count)
+        Add-Metric '工数' '超過の見込み' ([double]@($effortFlagged | Where-Object Judgement -eq '超過の見込み').Count)
+    }
 }
 foreach ($k in $givenKinds) {
     $list = @($issues | Where-Object { $_.Kind -eq $k.Kind })
@@ -446,6 +521,24 @@ foreach ($k in $givenKinds) {
     $overdueList = @($open | Where-Object Overdue | Sort-Object Due)
     Add-List $overdueList { param($i) '期限 {0} {1}{2}' -f (Format-Day $i.Due), (Get-IssueTitle $i 40), (Format-Owner $i.Owner) }
 }
+if ($EffortLog) {
+    $lines.Add('')
+    $lines.Add('■ 工数')
+    if (-not $hasEffort) { $lines.Add('・工数実績が読めませんでした') }
+    else {
+        $lines.Add(('・今週: {0}（{1} 人日）・累計 {2} 時間' -f (Format-Count '工数' '今週（時間）' ' 時間'), (Format-Amount ($effortWeek / $HoursPerDay)), (Format-Amount $effortTotal)))
+        $weekOwners = @($effortOwners | Where-Object { $_.Week -gt 0 })
+        if ($weekOwners.Count -gt 0) { $lines.Add(('・担当者別（今週）: {0}（時間）' -f ((@($weekOwners | ForEach-Object { '{0} {1}' -f $_.Owner, (Format-Amount $_.Week) })) -join '・'))) }
+        if ($effortRows.Count -gt 0) {
+            $line = '・予定工数のあるタスク {0} 件: 予定 {1} / 実績 {2}（{3}）' -f $effortRows.Count, (Format-Amount ($effortRows | Measure-Object Planned -Sum).Sum), (Format-Amount ($effortRows | Measure-Object Actual -Sum).Sum), $Unit
+            if ($null -ne $effortCpi) { $line += '・CPI {0:0.00}' -f $effortCpi }
+            $lines.Add($line)
+            $lines.Add(('・予定超過 {0}・超過の見込み {1}' -f (Format-Count '工数' '予定超過'), (Format-Count '工数' '超過の見込み')))
+            Add-List $effortFlagged { param($f) '[{0}] {1} {2}{3}: 予定 {4} / 実績 {5} / 進捗 {6}% → 完了見込 {7}' -f $f.Judgement, $f.Task.WbsNo, $f.Task.Task, (Format-Owner $f.Task.Owner), (Format-Amount $f.Planned), (Format-Amount $f.Actual), [math]::Round($f.Task.Progress * 100), (Format-Amount $f.Eac) }
+        }
+        elseif ($Wbs -and $tasks.Count -gt 0) { $lines.Add('・WBS に予定工数の列が無いため、予定との比較はしていません') }
+    }
+}
 if ($owners.Count -gt 0) {
     $lines.Add('')
     $lines.Add('■ 担当者別（遅延・期限切れと、来週までのもの）')
@@ -453,7 +546,7 @@ if ($owners.Count -gt 0) {
         $urgent = @($o.Items | Where-Object { $_.Rank -lt 3 })
         $rest = $o.Items.Count - $urgent.Count
         $counts = New-Object System.Collections.Generic.List[string]
-        foreach ($s in @('遅延', '期限切れ', '来週終了', '期限間近', '来週開始')) {
+        foreach ($s in @('遅延', '期限切れ', '予定超過', '来週終了', '期限間近', '超過の見込み', '来週開始')) {
             $n = @($urgent | Where-Object { $_.State -eq $s }).Count
             if ($n -gt 0) { $counts.Add(('{0} {1}' -f $s, $n)) }
         }
@@ -461,7 +554,7 @@ if ($owners.Count -gt 0) {
         $lines.Add(('【{0}】{1}' -f $o.Owner, ($counts -join '・')))
         Add-List $urgent {
             param($x)
-            $text = '[{0}] {1}: {2}（{3} {4}' -f $x.State, $x.Kind, $(if ($x.Kind -eq 'タスク') { $x.Title } else { Format-Short $x.Title 50 }), $x.DateLabel, (Format-Day $x.Date)
+            $text = '[{0}] {1}: {2}（{3} {4}' -f $x.State, $x.Kind, $(if ($x.Kind -in @('タスク', '工数')) { $x.Title } else { Format-Short $x.Title 50 }), $x.DateLabel, (Format-Day $x.Date)
             if ($x.Note) { $text += '・' + $x.Note }
             $text + '）'
         }
@@ -547,6 +640,11 @@ if ($OutDir) {
         @{ Name = '担当者別'; Columns = @(@{ Header = '担当'; Width = 14 }, @{ Header = '状態'; Width = 9 }, @{ Header = '種類'; Width = 6 }, @{ Header = '内容'; Width = 60 }, @{ Header = '日付の種類'; Width = 10 }, @{ Header = '日付'; Width = 11 }, @{ Header = '補足'; Width = 30 }, @{ Header = '場所'; Width = 30 }); Rows = $itemRows })
     if ($Wbs) { $sheets += @{ Name = 'タスク'; Columns = @(@{ Header = '区分'; Width = 12 }, @{ Header = 'WBS'; Width = 8 }, @{ Header = 'タスク'; Width = 30 }, @{ Header = '担当'; Width = 12 }, @{ Header = '予定開始'; Width = 11 }, @{ Header = '予定終了'; Width = 11 }, @{ Header = '実績／見込終了'; Width = 13 }, @{ Header = '進捗率'; Width = 7 }, @{ Header = '遅れ（営業日）'; Width = 12 }, @{ Header = '状態'; Width = 10 }, @{ Header = 'WBS の場所'; Width = 30 }); Rows = $taskRows } }
     if ($givenKinds.Count -gt 0) { $sheets += @{ Name = (@($givenKinds | ForEach-Object { $_.Kind }) -join '・'); Columns = @(@{ Header = '種類'; Width = 6 }, @{ Header = '区分'; Width = 10 }, @{ Header = '番号'; Width = 9 }, @{ Header = '設計書・機能・区分'; Width = 24 }, @{ Header = '内容'; Width = 50 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '担当'; Width = 12 }, @{ Header = '起票日'; Width = 11 }, @{ Header = '期限'; Width = 11 }, @{ Header = '完了日'; Width = 11 }, @{ Header = '状態'; Width = 10 }, @{ Header = '場所'; Width = 30 }); Rows = $issueRows } }
+    if ($EffortLog) {
+        $effortSheetRows = New-Object System.Collections.Generic.List[object]
+        foreach ($o in $effortOwners) { $effortSheetRows.Add(@{ Values = @($o.Owner, [double][math]::Round($o.Week, 2, $away), [double][math]::Round($o.Total, 2, $away)) }) }
+        $sheets += @{ Name = '工数'; Columns = @(@{ Header = '担当'; Width = 14 }, @{ Header = '今週（時間）'; Width = 12 }, @{ Header = '累計（時間）'; Width = 12 }); Rows = $effortSheetRows }
+    }
     # 推移: 直近（最大 12 回）の数字を、時点ごとに 1 行で並べる
     if ($HistoryCsv) {
         $byDate = @{}
@@ -565,10 +663,11 @@ if ($OutDir) {
         }
         # 残っているもの（遅延・未完了・期限切れ）の推移と、SPI の推移
         $remaining = @()
-        for ($c = 0; $c -lt $metrics.Count; $c++) { if ($metrics[$c].Name -match '^(遅延|未完了|期限切れ)$') { $remaining += @{ Column = $c + 1 } } }
+        for ($c = 0; $c -lt $metrics.Count; $c++) { if ($metrics[$c].Name -match '^(遅延|未完了|期限切れ)$' -and $metrics[$c].Area -ne '工数') { $remaining += @{ Column = $c + 1 } } }
         $charts = @()
         if ($remaining.Count -gt 0) { $charts += @{ Type = 'Line'; Title = '遅延・未完了・期限切れの推移'; Category = 0; Series = $remaining; YTitle = '件' } }
-        for ($c = 0; $c -lt $metrics.Count; $c++) { if ($metrics[$c].Name -eq 'SPI') { $charts += @{ Type = 'Line'; Title = 'SPI の推移'; Category = 0; Series = @(@{ Column = $c + 1 }) } } }
+        $indexes = @(for ($c = 0; $c -lt $metrics.Count; $c++) { if ($metrics[$c].Name -in @('SPI', 'CPI')) { @{ Column = $c + 1 } } })
+        if ($indexes.Count -gt 0) { $charts += @{ Type = 'Line'; Title = 'SPI・CPI の推移'; Category = 0; Series = $indexes } }
         $sheets += @{ Name = '推移'; Columns = $trendColumns; Rows = $trendRows; Charts = $charts }
     }
     try { Export-Workbook -FilePath $outXlsx -Sheets $sheets }
@@ -611,6 +710,7 @@ if ($HistoryCsv) {
 #       指摘      今週の起票・完了、未完了（重要度の内訳）・期限切れ
 #       障害      今週の起票・完了、未完了（重要度の内訳）・期限切れ
 #       課題・QA  今週の起票・完了、未完了（重要度の内訳）・期限切れ
+#       工数      今週・累計の工数、担当者別の今週の工数、予定超過・超過の見込みのタスク（-EffortLog）
 #       担当者別  遅延したタスク・期限切れの指摘・障害・課題、来週に終わるタスク・期限が来るもの、来週に始まるタスク（担当者ごと）
 #
 #     「今週」は -Since から -AsOf まで（既定は -AsOf までの 7 日）、「来週」は -AsOf の翌日から 7 日です。
@@ -632,6 +732,16 @@ if ($HistoryCsv) {
 #
 # .PARAMETER IssueList
 #     課題・QA の管理表のファイルまたはフォルダ（Excel・CSV。複数可）。見出しは tools\weekly-report\課題管理表の見出し.csv で探します。
+#
+# .PARAMETER EffortLog
+#     日報・工数実績表のファイルまたはフォルダ（Excel・CSV。複数可）。読み方は Measure-Effort.ps1 と同じです（見出しは tools\progress\工数実績の見出し.csv）。
+#     今週・累計の工数と担当者別の今週の工数を出し、-Wbs の予定工数と比べて予定超過・超過の見込みのタスクを知らせます。
+#
+# .PARAMETER Unit
+#     WBS の予定工数の単位（人日・時間）。既定は人日。
+#
+# .PARAMETER HoursPerDay
+#     1 人日の時間。既定は 8。
 #
 # .PARAMETER AsOf
 #     報告の基準日。既定は今日。
