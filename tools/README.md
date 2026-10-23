@@ -21,6 +21,7 @@
 | [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違いをまとめて確認する（プロパティの個人名など、機械で直せるものは `-Fix` で直す） |
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
+| [New-TestSpecDraft.ps1](#new-testspecdraftps1) | 画面設計書（画面項目定義・イベント定義）とコード定義書・メッセージ一覧から、必須・桁数の境界・型・入力チェック・コード値・イベントのテストケースの下書きを、メッセージの文言付きで作る（Excel 不要） |
 | [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系・必須・型・境界値・コード値のケースの不足を見つける（Excel 不要） |
 | [Test-Traceability.ps1](#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、設計の要素（画面・イベント・メッセージ・IF）にテストがあるかを確かめる。テストの抜けを全件、機械で見つける（Excel 不要） |
 | [Select-RegressionTests.ps1](#select-regressiontestsps1) | 設計書の旧版と新版の差分から、変更した項目・イベント・メッセージなどが出てくるテストケースを、再テストするケースとして選ぶ（改修の回帰テストの範囲決め。Excel 不要） |
@@ -51,7 +52,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -1823,6 +1824,34 @@ SCR002,受注登録|受注登録画面,DD02_画面設計書_SCR002_受注登録
 | `-RecentDays` | 直近の新規バグを数える日数（既定 7） |
 | `-AsOf` | 集計の時点（予定日を過ぎても未実施の判定。既定は今日） |
 | `-OutXlsx` | サマリー・機能別・ゾーン分析・推移・バグの内訳・食い違いを保存する |
+
+## New-TestSpecDraft.ps1
+
+画面設計書から、**テスト仕様書の下書き（単体テストのケース）**を作ります。必須・桁数・型・コード値・イベントのような、設計書を見れば決まるケースを機械で書き出すので、担当者は画面固有のケースと条件の書き足しに時間を使えます。Excel は不要です。
+
+```powershell
+# 画面設計書・コード定義書・メッセージ一覧のあるフォルダから、全画面の下書きを作る
+.\New-TestSpecDraft.ps1 D:\設計書 -OutXlsx D:\テスト\UT_テスト仕様書_下書き.xlsx
+
+# 受注登録の画面だけ
+.\New-TestSpecDraft.ps1 D:\設計書 -Screen SCR002 -OutXlsx D:\テスト\UT_SCR002.xlsx
+```
+
+| 元にする設計書 | 作るケース |
+| --- | --- |
+| 画面項目定義の必須 | 未入力にして登録する → 必須のメッセージ（`E0001「受注日は必須入力です。」`） |
+| 画面項目定義の桁数 | 最大の桁数（エラーにならない）と、最大＋1（桁数のメッセージ、または入力できない） |
+| 画面項目定義の型・入力チェック | 日付は存在しない日付、数字は数字以外、半角英数は全角 など、形式に合わない値 |
+| 入力チェック欄のそのほかのチェック | 「存在」は登録されていない値（項目のフォーカスアウトなどのイベントで確かめる）、「1以上」は 0、「受注日以降」は受注日より前の日付 |
+| コード定義書（項目名と同じコード区分名） | 表示名ごとに選んで登録する |
+| チェックボックス | チェックする・しない |
+| イベント定義 | 初期表示（初期値）、各イベントの実行（処理概要・遷移先）、確認メッセージでキャンセル、入力項目のケースで確かめていないエラー（在庫不足など。なる条件は書き足す） |
+
+- 期待結果には、メッセージ一覧の文言を入れます（`{0}` は項目名、`{1}` は桁数・「1以上」の 1 などに置き換えます）
+- シートは画面 ID ごとで、列は テストID・機能・観点・区分（正常・異常・境界）・確認内容・手順・入力値・期待結果・予定日・実施日・結果・障害番号・設計書（根拠の場所）です
+- 作った下書きは [Test-TestSpec.ps1](#test-testspecps1)・[Test-Traceability.ps1](#test-traceabilityps1)・[Measure-TestQuality.ps1](#measure-testqualityps1) でそのまま読めます。詳細設計サンプルから作った下書きは、Test-TestSpec の必須・型・境界値・コード値・メッセージの抜けが 0 件、Test-Traceability の画面・イベント・メッセージの網羅が 100% です
+- 同じ名前のファイルがあるときは上書きしません（書き足したテスト仕様書を消さないため。`-Force` で上書き）
+- 「送る」→「Excel テスト仕様書の下書き」で、設計書のフォルダを選んでも作れます
 
 ## Test-TestSpec.ps1
 

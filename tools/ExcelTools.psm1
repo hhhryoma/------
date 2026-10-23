@@ -606,6 +606,76 @@ function Export-Workbook {
 
 $script:Nfkc = [System.Text.NormalizationForm]::FormKC
 
+function Read-ScreenDesign {
+    #     画面設計書の画面項目定義・イベント定義と、コード定義書・メッセージ一覧を読む（Books は ConvertTo-DesignBooks の結果）。
+    #     戻り値: @{ Items（画面項目。Input は入力のある項目）; Events（イベント）; Codes（コード区分名 → 表示名の一覧）;
+    #             Messages（メッセージID（大文字）→ @{ Text; File; Sheet; Row }） }
+    param($Books)
+    $nfkc = [System.Text.NormalizationForm]::FormKC
+    $items = New-Object System.Collections.Generic.List[object]
+    $events = New-Object System.Collections.Generic.List[object]
+    $codes = @{}
+    $messages = @{}
+    foreach ($book in $Books.Values) {
+        foreach ($sheetName in $book.Sheets.Keys) {
+            $grid = $book.Sheets[$sheetName]
+            # コード定義書: コード区分名ごとの表示名
+            foreach ($t in (Find-DesignTables $grid @('コード区分名', '表示名') 'コード区分名')) {
+                foreach ($dr in $t.Rows) {
+                    $k = ConvertTo-Label ([string]$dr.Cells[$t.ColumnOf['コード区分名']])
+                    $name = ([string]$dr.Cells[$t.ColumnOf['表示名']]).Trim()
+                    if (-not $k -or -not $name) { continue }
+                    if (-not $codes.ContainsKey($k)) { $codes[$k] = New-Object System.Collections.Generic.List[string] }
+                    if (-not $codes[$k].Contains($name)) { $codes[$k].Add($name) }
+                }
+            }
+            # メッセージ一覧: メッセージID → 文言
+            foreach ($t in (Find-DesignTables $grid @('メッセージID', 'メッセージ') 'メッセージID')) {
+                foreach ($dr in $t.Rows) {
+                    $id = ([string]$dr.Cells[$t.ColumnOf['メッセージID']]).Normalize($nfkc).Trim().ToUpperInvariant()
+                    $text = ([string]$dr.Cells[$t.ColumnOf['メッセージ']]).Normalize($nfkc).Trim()
+                    # 画面設計書のメッセージ欄（ID だけを書いた列）は文言ではない
+                    if ($id -notmatch '^[A-Z]+\d+$' -or -not $text -or $text -match '^[A-Za-z]+\d+$' -or $messages.ContainsKey($id)) { continue }
+                    $messages[$id] = [pscustomobject]@{ Text = $text; File = $book.File; Sheet = $sheetName; Row = $dr.Row }
+                }
+            }
+            $screen = Find-LabelValue $grid '画面ID'
+            if (-not $screen) { continue }
+            $screen = $screen.Trim()
+            $screenName = Find-LabelValue $grid '画面名'
+            if ($screenName) { $screenName = $screenName.Trim() }
+            # 画面項目定義
+            foreach ($t in (Find-DesignTables $grid @('項目名', '桁数') '項目名')) {
+                $cell = { param($dr, $name) if ($t.ColumnOf.ContainsKey($name)) { ([string]$dr.Cells[$t.ColumnOf[$name]]).Normalize($nfkc).Trim() } else { '' } }
+                foreach ($dr in $t.Rows) {
+                    $io = & $cell $dr '入出力'
+                    $digits = & $cell $dr '桁数'
+                    $items.Add([pscustomobject]@{
+                            Screen = $screen; ScreenName = $screenName; Item = ([string]$dr.Cells[$t.ColumnOf['項目名']]).Trim(); ItemId = (& $cell $dr '項目ID')
+                            Kind = (& $cell $dr '区分'); Io = $io; Input = (-not $t.ColumnOf.ContainsKey('入出力') -or $io -match 'I')
+                            Type = (& $cell $dr '型'); Digits = $(if ($digits -match '^\d+$') { [int]$digits } else { $null })
+                            Required = ((& $cell $dr '必須') -match '^(○|〇|◯|必須|要|Y|YES|1)$'); Initial = (& $cell $dr '初期値')
+                            Checks = (& $cell $dr '入力チェック'); Note = (& $cell $dr '備考')
+                            File = $book.File; Sheet = $sheetName; Row = $dr.Row
+                        })
+                }
+            }
+            # イベント定義
+            foreach ($t in (Find-DesignTables $grid @('イベントID', 'イベント名') 'イベントID')) {
+                $cell = { param($dr, $name) if ($t.ColumnOf.ContainsKey($name)) { ([string]$dr.Cells[$t.ColumnOf[$name]]).Trim() } else { '' } }
+                foreach ($dr in $t.Rows) {
+                    $events.Add([pscustomobject]@{
+                            Screen = $screen; ScreenName = $screenName; Id = (& $cell $dr 'イベントID'); Name = (& $cell $dr 'イベント名')
+                            Trigger = (& $cell $dr 'トリガー'); Summary = (& $cell $dr '処理概要'); Messages = (& $cell $dr 'メッセージ'); Next = (& $cell $dr '遷移先')
+                            File = $book.File; Sheet = $sheetName; Row = $dr.Row
+                        })
+                }
+            }
+        }
+    }
+    return [pscustomobject]@{ Items = $items; Events = $events; Codes = $codes; Messages = $messages }
+}
+
 function ConvertTo-Label {
     #     見出しや項目名を比べるための形（全角・半角をそろえ、空白を除く）
     param([string] $Text)
