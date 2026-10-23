@@ -91,6 +91,15 @@ Test-Case 'New-WeeklyReport: WBS・指摘・障害から、今週の実績・遅
     Assert-True (@($list.Links | Where-Object { $_.Location -eq "'WBS'!B5" }).Count -eq 1) 'WBS の該当セルへのリンク'
     $issues = Read-XlsxSheet -Path $xlsx -Index 5
     Assert-Equal 8 $issues.Rows.Count '見出しと、未完了 5 件・今週の完了 2 件'
+    # 担当者ごとの文章（本人に送るリマインド）
+    $ownerDir = Join-Path $out '週次報告_20261023_担当者別'
+    $names = [string[]]@(Get-ChildItem -LiteralPath $ownerDir -File | ForEach-Object { $_.Name })
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    Assert-Equal @('佐藤.txt', '山田.txt', '担当なし.txt', '鈴木.txt') $names
+    $sato = [System.IO.File]::ReadAllText((Join-Path $ownerDir '佐藤.txt'))
+    Assert-Match $sato '^佐藤 さん\r\n\r\n週次報告（2026/10/17～2026/10/23）の、担当の分です。\r\n\r\n■ 遅延・期限切れ（3 件）\r\n  - \[期限切れ\] 指摘: DD03 テーブル定義書: 型が誤り（期限 10/21・高・未対応） … 指摘管理表\.xlsx C2\r\n'
+    Assert-Match $sato '■ 来週まで（1 件）\r\n  - \[期限間近\] 指摘: DD03 テーブル定義書: 桁数が違う'
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $ownerDir '担当なし.txt'))) '^週次報告（2026/10/17～2026/10/23）の、担当者が決まっていないものの分です。'
     Assert-Equal @('時点,区分,項目,値', '2026/10/23,進捗,タスク,6') @(Get-Content -LiteralPath $history -Encoding UTF8 | Select-Object -First 2 | ForEach-Object { $_ -replace '"', '' })
 }
 
@@ -116,7 +125,7 @@ Test-Case 'New-WeeklyReport: 実績の CSV で前回と比べ、推移とグラ�
     $trend = Read-XlsxSheet -Path $xlsx -Index 6
     Assert-Equal 3 $trend.Rows.Count '見出しと 2 回'
     Assert-Equal '2026/10/16' $trend.Rows[2]['A']
-    Assert-Equal @('遅延・未完了・期限切れの推移', 'SPI の推移') @(Read-XlsxCharts $xlsx | ForEach-Object { $_.Title })
+    Assert-Equal @('遅延・未完了・期限切れの推移', 'SPI・CPI の推移') @(Read-XlsxCharts $xlsx | ForEach-Object { $_.Title })
 }
 
 Test-Case 'New-WeeklyReport: 案件のフォルダの「週次報告の設定.csv」を読む。コマンドの指定が優先し、結果のフォルダは読まない' {
@@ -133,7 +142,7 @@ Test-Case 'New-WeeklyReport: 案件のフォルダの「週次報告の設定.cs
     Assert-Match $text '・今週: 起票 3 件・完了 1 件'
     Assert-Match $text '受注システム 週報（2026/10/17～2026/10/23）'
 
-    Assert-Throws { & $WeeklyReport -AsOf '2026-10-23' 6>$null } '-Wbs・-Findings・-BugList・-IssueList のどれか'
+    Assert-Throws { & $WeeklyReport -AsOf '2026-10-23' 6>$null } '-Wbs・-Findings・-BugList・-IssueList・-EffortLog のどれか'
     Assert-Throws { & $WeeklyReport -Wbs $p.Wbs -AsOf '2026-10-23' -Since '2026-10-24' 6>$null } 'より後です'
     @('項目,値', '設計書,設計') | Set-Content -LiteralPath (Join-Path $dir '週次報告の設定.csv') -Encoding UTF8
     Assert-Throws { & $WeeklyReport $dir 6>$null } '週次報告の設定に知らない項目があります: 設計書'
@@ -160,8 +169,31 @@ Test-Case 'New-WeeklyReport: 課題・QA の管理表の未完了・期限切れ
     Assert-Equal '担当|遅延タスク|来週終了のタスク|課題の未完了|うち期限切れ' ((@('A', 'B', 'C', 'D', 'E') | ForEach-Object { $people.Rows[1][$_] }) -join '|')
 }
 
+Test-Case 'New-WeeklyReport: 工数実績から今週・累計の工数を出し、WBS の予定工数を超えた・超えそうなタスクを担当者ごとのやることに入れる' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $cols = @('WBS', 'タスク名', '担当者', '予定開始日', '予定終了日', '進捗率', '予定工数') | ForEach-Object { @{ Header = $_; Width = 10 } }
+    $rows = @(@('1.2', 'テーブル設計', '佐藤', '2026/10/12', '2026/10/16', '50%', '5'), @('1.3', 'IF 設計', '佐藤', '2026/10/19', '2026/10/23', '20%', '4'))
+    Export-Workbook -FilePath (Join-Path $dir 'WBS.xlsx') -Sheets @(@{ Name = 'WBS'; Columns = $cols; Rows = @($rows | ForEach-Object { @{ Values = $_ } }) })
+    New-Item -ItemType Directory -Path (Join-Path $dir '工数') | Out-Null
+    @('日付,氏名,WBS,作業内容,時間', '2026/10/12,佐藤,1.2,,8', '2026/10/13,佐藤,1.2,,8', '2026/10/14,佐藤,1.2,,8', '2026/10/15,佐藤,1.2,,8', '2026/10/16,佐藤,1.2,,8',
+        '2026/10/19,佐藤,1.2,,4', '2026/10/19,佐藤,1.3,,4', '2026/10/20,山田,,定例会議,1:30', '2026/10/22,佐藤,1.3,,6') | Set-Content -LiteralPath (Join-Path $dir '工数/工数実績.csv') -Encoding UTF8
+    @('項目,値', 'WBS,WBS.xlsx', '工数実績,工数') | Set-Content -LiteralPath (Join-Path $dir '週次報告の設定.csv') -Encoding UTF8
+    $text = Get-HostText { $script:items = @(& $WeeklyReport $dir -AsOf '2026-10-23') }
+    Assert-Match $text '■ 工数\n・今週: 15\.5 時間（1\.94 人日）・累計 55\.5 時間\n・担当者別（今週）: 佐藤 14・山田 1\.5（時間）\n'
+    Assert-Match $text '・予定工数のあるタスク 2 件: 予定 9 / 実績 6\.75（人日）・CPI 0\.49\n・予定超過 1 件・超過の見込み 1 件\n'
+    Assert-Match $text '  - \[予定超過\] 1\.2 テーブル設計（佐藤）: 予定 5 / 実績 5\.5 / 進捗 50% → 完了見込 11\n  - \[超過の見込み\] 1\.3 IF 設計（佐藤）: 予定 4 / 実績 1\.25 / 進捗 20% → 完了見込 6\.25\n'
+    Assert-Equal @('予定超過|1.2 テーブル設計|予定 5 / 実績 5.5 / 進捗 50% → 完了見込 11（人日）', '超過の見込み|1.3 IF 設計|予定 4 / 実績 1.25 / 進捗 20% → 完了見込 6.25（人日）') @($script:items | Where-Object { $_.Kind -eq '工数' } | ForEach-Object { '{0}|{1}|{2}' -f $_.State, $_.Title, $_.Note })
+    Assert-Match $text '【佐藤】遅延 2・予定超過 1・超過の見込み 1'
+    $xlsx = Join-Path $dir '週次報告/週次報告_20261023.xlsx'
+    $sheet = Read-XlsxSheet -Path $xlsx -Index 1
+    Assert-Equal @('概要', '担当者', '担当者別', 'タスク', '工数') $sheet.Sheets
+    $effort = Read-XlsxSheet -Path $xlsx -Index 5
+    Assert-Equal '佐藤|14|54' ((@('A', 'B', 'C') | ForEach-Object { $effort.Rows[2][$_] }) -join '|')
+}
+
 Test-Case 'New-WeeklyReport: Get-Help でヘルプが表示される' {
     $h = Get-Help $WeeklyReport
     Assert-Match $h.Synopsis '週次報告'
-    Assert-Equal 13 @($h.parameters.parameter | Where-Object { $_.description }).Count
+    Assert-Equal 16 @($h.parameters.parameter | Where-Object { $_.description }).Count
 }
