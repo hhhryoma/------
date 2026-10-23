@@ -657,6 +657,33 @@ Test-Case 'Compare-Excel: Word（.docx）の段落と表の行を、行の挿入
     Assert-Equal '本文|1|480' ('{0}|{1}|{2}' -f $sheet.name, $sheet.new.wrap, $sheet.new.w.'1') '段落の列は読める幅で、折り返して表示する'
 }
 
+Test-Case 'Compare-Excel: Word のテキストボックスは、互換用の写しを二重に読まず、それのある段落の下の行として比べる' {
+    $dir = New-TestDir
+    $make = {
+        param([string] $Path, [string] $BoxText)
+        $ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml"'
+        $box = '<w:txbxContent><w:p><w:r><w:t>' + $BoxText + '</w:t></w:r></w:p></w:txbxContent>'
+        $body = '<w:p><w:r><w:t>画面のイメージ</w:t></w:r><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing>' + $box + '</w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape><v:textbox>' + $box + '</v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>' +
+            '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>項目</w:t></w:r></w:p><w:p><w:r><w:t>（必須）</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>桁数</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>以上</w:t></w:r></w:p>'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+        $fs = [System.IO.File]::Create($Path)
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        $sw = New-Object System.IO.StreamWriter($zip.CreateEntry('word/document.xml').Open(), (New-Object System.Text.UTF8Encoding($false)))
+        $sw.Write('<w:document ' + $ns + '><w:body>' + $body + '</w:body></w:document>')
+        $sw.Dispose(); $zip.Dispose(); $fs.Dispose()
+    }
+    & $make (Join-Path $dir 'v1/画面.docx') '検索ボタンを押す'
+    & $make (Join-Path $dir 'v2/画面.docx') '検索ボタンを押すと一覧を表示する'
+    $out = Join-Path $dir 'diff.html'
+    $d = Invoke-Compare @{ Old = (Join-Path $dir 'v1'); New = (Join-Path $dir 'v2'); OutHtml = $out }
+    Assert-Equal @('本文!A2|値|変更|検索ボタンを押す|検索ボタンを押すと一覧を表示する') @($d | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Location, $_.Kind, $_.Change, $_.Old, $_.New }) '段落（A1）にテキストボックスの文字は入らない'
+    $html = [System.IO.File]::ReadAllText($out)
+    $data = [regex]::Match($html, 'var DATA = (\{.*?\});\r?\n').Groups[1].Value | ConvertFrom-Json
+    $cells = $data.files[0].sheets[0].new.c
+    Assert-Equal '画面のイメージ|検索ボタンを押すと一覧を表示する' ('{0}|{1}' -f $cells.'1,1', $cells.'2,1')
+    Assert-Equal "項目`n（必須）|桁数|以上" ('{0}|{1}|{2}' -f $cells.'3,1', $cells.'3,2', $cells.'4,1') 'セルの中の段落は改行でつなぐ'
+}
+
 Test-Case 'Compare-Excel: -Versions で、版数だけが違うファイル・版のフォルダを版数の順に続けて比べる' {
     $dir = New-TestDir
     $hist = Join-Path $dir '履歴'
