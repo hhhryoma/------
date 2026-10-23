@@ -81,7 +81,16 @@
   .list tr.item { cursor: pointer; }
   .list tr.item:hover { background: #f3f8f4; }
   .list tr.item.current { background: #fff1e6; }
-  .list td.val { max-width: 34vw; white-space: pre-wrap; word-break: break-all; }
+  .list td.val { max-width: 30vw; white-space: pre-wrap; word-break: break-all; }
+  .list th, .list td { white-space: nowrap; }
+  .list td.note { width: 28%; }
+  .list td.rv select { font: inherit; padding: 1px 2px; }
+  .list td.note input { font: inherit; width: 100%; min-width: 14em; padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px; }
+  .list tr.ok td { color: var(--muted); }
+  .list tr.ok td.val ins, .list tr.ok td.val del { opacity: .6; }
+  .list tr.issue td.rv select, .list tr.issue td.note input { border-color: #c0392b; background: #fdecea; }
+  nav .badge.done { background: var(--add); color: #155724; }
+  #review { font-size: 12px; }
   .chip { display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 11px; }
   .chip.chg { background: var(--chg); } .chip.add { background: var(--add); } .chip.del { background: var(--del); }
   .chip.mov { background: var(--mov); } .chip.fmt { background: var(--fmt); } .chip.hist { background: var(--hist); }
@@ -115,6 +124,7 @@
         <button id="next" title="次の差分（j）">▼ 次</button>
         <span id="pos" class="muted"></span>
       </div>
+      <div class="group" id="review"><span id="progress" class="muted"></span><button id="saveCsv" title="「指摘」にした差分（またはメモを書いた差分）を、指摘管理表の形の CSV に保存します（Measure-ReviewQuality.ps1 でそのまま集計できます）">指摘を CSV に保存</button></div>
       <div class="group"><label title="差分のある行と、その前後 2 行だけを表示（大きなシートで便利）"><input type="checkbox" id="compact">変わった行だけ</label></div>
       <div class="group" id="kinds"></div>
       <div class="group legend"><span style="background:var(--chg)">変更</span><span style="background:var(--add)">追加</span><span style="background:var(--del)">削除</span><span style="background:var(--mov)">移動</span><span style="background:var(--fmt)">書式</span><span class="gapchip" id="gapLegend" title="片方にしか無い行・列の、もう片方の側">対応なし</span></div>
@@ -153,12 +163,20 @@ var DATA = /*DIFF_DATA*/null;
 
   var chip = function (d) { return cls(d, d.ch === '削除' ? 'old' : 'new'); };
 
+  // レビューの記録（差分ごとの 確認: ok / issue と、指摘のメモ）。このブラウザーに残し、開き直しても消えない
+  var notes = {}, storeKey = DATA ? 'compare-excel-review|' + DATA.old + '|' + DATA['new'] + '|' + DATA.created : '';
+  try { notes = JSON.parse(localStorage.getItem(storeKey) || '{}') || {}; } catch (e) { notes = {}; }
+  var saveNotes = function () { try { localStorage.setItem(storeKey, JSON.stringify(notes)); } catch (e) { } };
+  var noteOf = function (d) { return notes[d.key] || {}; };
+
   if (!DATA) { document.body.innerHTML = '<p style="padding:24px">差分のデータがありません。Compare-Excel.ps1 -OutHtml で作ってください。</p>'; return; }
   $('oldPath').textContent = '旧: ' + DATA.old;
   $('newPath').textContent = '新: ' + DATA.new;
   var total = 0, changed = 0;
   DATA.files.forEach(function (f) { total += f.count; if (f.count > 0) changed++; });
   $('summary').textContent = DATA.files.length + ' ファイル（差分のあるファイル ' + changed + '）・差分 ' + total + ' 件・' + DATA.created;
+
+  DATA.files.forEach(function (f, fi) { f.diffs.forEach(function (d, di) { d.key = fi + '-' + di; d.file = f.name; }); });
 
   // 種類の絞り込み
   var kinds = {};
@@ -188,7 +206,7 @@ var DATA = /*DIFF_DATA*/null;
       var badge = !s.oldName ? 'add' : !s.name ? 'del' : n ? '' : 'zero';
       var label = s.name || s.oldName;
       if (s.name && s.oldName && s.name !== s.oldName) label = s.oldName + ' → ' + s.name;
-      html += '<div class="sheet" data-f="' + fi + '" data-s="' + si + '" title="' + esc(label) + '"><span class="name">' + esc(label) + '</span><span class="badge ' + badge + '">' + (!s.oldName ? '追加' : !s.name ? '削除' : n) + '</span></div>';
+      html += '<div class="sheet" data-f="' + fi + '" data-s="' + si + '" title="' + esc(label) + '"><span class="name">' + esc(label) + '</span><span class="badge ' + badge + '" data-n="' + n + '">' + (!s.oldName ? '追加' : !s.name ? '削除' : n) + '</span></div>';
     });
   });
   nav.innerHTML = html;
@@ -223,6 +241,8 @@ var DATA = /*DIFF_DATA*/null;
     if (e.ctrlKey || e.metaKey || e.altKey || /^(SELECT|TEXTAREA)$/.test(e.target.tagName) || (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox')) return;
     if (e.key === 'j' || e.key === 'n') go(1);
     if (e.key === 'k' || e.key === 'p') go(-1);
+    // o: 見ている差分を OK にして次へ
+    if (e.key === 'o' && state.items[state.index]) { setNote(state.items[state.index], { st: 'ok' }); var sel = document.querySelector('#list tr.item[data-i="' + state.index + '"] select'); if (sel) sel.value = 'ok'; go(1); }
   });
 
   function select(fi, si) {
@@ -476,15 +496,83 @@ var DATA = /*DIFF_DATA*/null;
     var rows = state.items.map(function (d, i) {
       var where = d.nc ? (d.s + '!' + d.nc) : d.oc ? ((d.os || d.s) + '!' + d.oc + '（旧）') : d.s;
       if (d.ho == null) { d.ho = diffHtml(d.a, d.b, 'old'); d.hn = diffHtml(d.a, d.b, 'new'); }
-      return '<tr class="item' + (i === state.index ? ' current' : '') + '" data-i="' + i + '"><td>' + esc(where) + '</td><td>' + esc(d.k) +
-        '</td><td><span class="chip ' + chip(d) + '">' + esc(d.ch) + '</span></td><td class="val">' + d.ho + '</td><td class="val">' + d.hn + '</td></tr>';
+      var n = noteOf(d);
+      return '<tr class="item' + (i === state.index ? ' current' : '') + (n.st ? ' ' + n.st : '') + '" data-i="' + i + '"><td>' + esc(where) + '</td><td>' + esc(d.k) +
+        '</td><td><span class="chip ' + chip(d) + '">' + esc(d.ch) + '</span></td><td class="val">' + d.ho + '</td><td class="val">' + d.hn + '</td>' +
+        '<td class="rv"><select data-i="' + i + '" title="確認した差分は OK、直してほしい差分は 指摘（キーの o で OK にして次へ）"><option value="">－</option><option value="ok"' + (n.st === 'ok' ? ' selected' : '') + '>OK</option><option value="issue"' + (n.st === 'issue' ? ' selected' : '') + '>指摘</option></select></td>' +
+        '<td class="note"><input type="text" data-i="' + i + '" placeholder="指摘の内容" value="' + esc(n.text || '') + '"></td></tr>';
     });
-    $('list').innerHTML = rows.length ? '<table><thead><tr><th>場所</th><th>種類</th><th>変更</th><th>変更前</th><th>変更後</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>'
+    $('list').innerHTML = rows.length ? '<table><thead><tr><th>場所</th><th>種類</th><th>変更</th><th>変更前</th><th>変更後</th><th>確認</th><th>指摘の内容</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>'
       : '<div class="empty" style="padding:10px 12px">このシートに差分はありません（絞り込みで隠れている差分も含めて）。</div>';
   }
   $('list').addEventListener('click', function (e) {
     var tr = e.target.closest('tr.item');
-    if (tr) { state.index = +tr.getAttribute('data-i'); focusItem(); }
+    if (tr && !/^(SELECT|INPUT|OPTION)$/.test(e.target.tagName)) { state.index = +tr.getAttribute('data-i'); focusItem(); }
+  });
+  // 確認・指摘の内容を書いたら、すぐに残す（指摘の内容を書けば「指摘」にする）
+  $('list').addEventListener('change', function (e) {
+    var d = state.items[+e.target.getAttribute('data-i')];
+    if (!d) return;
+    if (e.target.tagName === 'SELECT') setNote(d, { st: e.target.value });
+  });
+  $('list').addEventListener('input', function (e) {
+    var d = state.items[+e.target.getAttribute('data-i')];
+    if (!d || e.target.tagName !== 'INPUT') return;
+    var text = e.target.value, patch = { text: text };
+    if (text.trim() && noteOf(d).st !== 'issue') { patch.st = 'issue'; var sel = e.target.closest('tr').querySelector('select'); if (sel) sel.value = 'issue'; }
+    setNote(d, patch);
+  });
+
+  function setNote(d, patch) {
+    var n = notes[d.key] || {};
+    for (var k in patch) n[k] = patch[k];
+    if (!n.st && !(n.text || '').trim()) delete notes[d.key]; else notes[d.key] = n;
+    saveNotes();
+    var tr = document.querySelector('#list tr.item[data-i="' + state.items.indexOf(d) + '"]');
+    if (tr) { tr.classList.toggle('ok', n.st === 'ok'); tr.classList.toggle('issue', n.st === 'issue'); }
+    updateProgress();
+  }
+
+  // 確認の進み具合（レビューできる差分 = シートを表示できるファイルの、ファイル以外の差分）
+  function reviewable() {
+    var out = [];
+    DATA.files.forEach(function (f) { if (f.sheets.length) f.diffs.forEach(function (d) { if (d.k !== 'ファイル') out.push(d); }); });
+    return out;
+  }
+  function updateProgress() {
+    var all = reviewable(), done = 0, issues = 0;
+    all.forEach(function (d) { var n = noteOf(d); if (n.st) done++; if (n.st === 'issue') issues++; });
+    $('progress').textContent = all.length ? '確認 ' + done + ' / ' + all.length + ' 件・指摘 ' + issues + ' 件' : '';
+    $('saveCsv').disabled = issues === 0;
+    // シートの一覧: すべて確認したシートは緑にする
+    each(nav.querySelectorAll('.sheet'), function (el) {
+      var f = DATA.files[+el.getAttribute('data-f')], s = f.sheets[+el.getAttribute('data-s')], ds = sheetDiffs(f, s);
+      var badge = el.querySelector('.badge');
+      badge.classList.toggle('done', ds.length > 0 && ds.every(function (d) { return noteOf(d).st; }));
+    });
+  }
+
+  // 指摘を、指摘管理表の形の CSV（Excel で開ける UTF-8）に保存する
+  $('saveCsv').addEventListener('click', function () {
+    var pad = function (x) { return (x < 10 ? '0' : '') + x; }, now = new Date();
+    var today = now.getFullYear() + '/' + pad(now.getMonth() + 1) + '/' + pad(now.getDate());
+    var q = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+    var lines = [['No', '設計書', 'シート', '場所', '種類', '変更', '変更前', '変更後', '指摘内容', '分類', '重要度', '状態', '起票日', '期限', '完了日', '対応者'].map(q).join(',')];
+    var no = 0;
+    reviewable().forEach(function (d) {
+      var n = noteOf(d);
+      if (n.st !== 'issue') return;
+      var cell = d.nc || (d.oc ? d.oc + '（旧）' : '');
+      var text = (n.text || '').trim() || ('差分を確認してください: ' + d.d);
+      lines.push([++no, d.file, d.s || d.os, cell, d.k, d.ch, d.a, d.b, text, '', '', '未対応', today, '', '', ''].map(q).join(','));
+    });
+    var blob = new Blob(['\ufeff' + lines.join('\r\n') + '\r\n'], { type: 'text/csv' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    // ファイル名は英数字にする（ブラウザーによっては日本語の名前が「download」になるため）
+    a.download = 'diff-review_' + now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()) + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
   });
 
   function updatePos() {
@@ -586,6 +674,7 @@ var DATA = /*DIFF_DATA*/null;
     return out;
   }
 
+  updateProgress();
   // 最初の差分のあるシートを開く
   for (var fi = 0; fi < DATA.files.length; fi++) {
     var f = DATA.files[fi];
