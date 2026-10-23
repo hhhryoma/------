@@ -792,6 +792,90 @@ function Find-DesignTables {
 # ---------------------------------------------------------------- 表を見出しの候補で読む（テスト仕様書・障害管理表など）
 
 
+function ConvertTo-Hours {
+    #     工数の文字（1.5・1.5h・1時間30分・1:30・90分）を時間にする（読めなければ $null）
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($script:Nfkc).Trim() -replace '[,\s]', ''
+    if (-not $t) { return $null }
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $m = [regex]::Match($t, '^(\d+):(\d{1,2})$')
+    if ($m.Success) { return [double]$m.Groups[1].Value + [double]$m.Groups[2].Value / 60 }
+    $m = [regex]::Match($t, '^(?:(\d+(?:\.\d+)?)時間)?(?:(\d+(?:\.\d+)?)分)?$')
+    if ($m.Success -and ($m.Groups[1].Success -or $m.Groups[2].Success)) {
+        $h = 0.0
+        if ($m.Groups[1].Success) { $h += [double]::Parse($m.Groups[1].Value, $invariant) }
+        if ($m.Groups[2].Success) { $h += [double]::Parse($m.Groups[2].Value, $invariant) / 60 }
+        return $h
+    }
+    $t = $t -replace '(?i)(h|hr|hrs|時間)$', ''
+    $n = 0.0
+    if ([double]::TryParse($t, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$n)) { return $n }
+    return $null
+}
+
+function Read-EffortLog {
+    #     工数実績の表（1 行が日付・担当・WBS 番号かタスク・工数）を読む（Measure-Effort.ps1・New-WeeklyReport.ps1）。
+    #       Headers: 見出しの候補の CSV。Tasks: Measure-Progress.ps1 のタスク（WBS 番号、無ければタスク名で対応付ける）
+    #       工数は時間で読む（見出しに「人日」があれば HoursPerDay を掛ける）。AsOf より後の日付の行は数えない
+    #       日付・担当が空の行は同じ表の上の行のもの。担当の列が無い表は、シート名（表が複数のブック）かファイル名を担当にする
+    #     戻り値: @{ Entries = @(@{ Date; Owner; WbsNo; TaskName; Hours; Task（Tasks の位置。対応しなければ -1）; Place }); Unreadable; Future }
+    param($Inputs, [string] $Headers, $Tasks, [datetime] $AsOf, [double] $HoursPerDay = 8, $Skip, [string] $Exclude, [switch] $NoRecurse, [switch] $NoExcel, $ReadLog)
+    $byWbs = @{}
+    $byName = @{}
+    $list = @($Tasks)
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        if ($list[$i].WbsNo) { $byWbs[$list[$i].WbsNo] = $i }
+        $k = ConvertTo-NameKey $list[$i].Task
+        if ($byName.ContainsKey($k)) { $byName[$k] = -1 } else { $byName[$k] = $i }   # 同じ名前のタスクが複数あれば名前では対応付けない
+    }
+    $fields = @('日付', '担当', 'WBS番号', 'タスク', '工数')
+    $records = Read-HeaderRecords -Inputs $Inputs -Candidates (Read-HeaderCandidates $Headers $fields) -Fields $fields -Need @('工数', @('WBS番号', 'タスク')) `
+        -Key @('工数') -What '工数実績' -Skip $Skip -Exclude $Exclude -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $ReadLog
+    $entries = New-Object System.Collections.Generic.List[object]
+    $unreadable = 0; $future = 0
+    $last = @{}   # 表ごとの前の行の日付・担当（結合したセルや、同じ日の 2 行目以降の空欄を埋める）
+    foreach ($rec in $records) {
+        $v = $rec.Values
+        $hours = ConvertTo-Hours $v['工数']
+        if ($null -eq $hours) { $unreadable++; continue }
+        if ($rec.Labels['工数'] -match '人日') { $hours = $hours * $HoursPerDay }
+        $table = '{0}|{1}' -f $rec.Path, $rec.Sheet
+        if (-not $last.ContainsKey($table)) { $last[$table] = @{ Date = $null; Owner = '' } }
+        $date = ConvertTo-DateValue $v['日付'] $AsOf
+        if ($date) { $last[$table].Date = $date } elseif (-not ([string]$v['日付']).Trim()) { $date = $last[$table].Date }
+        if ($date -and $date -gt $AsOf) { $future++; continue }
+        $owner = ([string]$v['担当']).Trim()
+        if ($owner) { $last[$table].Owner = $owner }
+        elseif ($rec.Labels['担当']) { $owner = $last[$table].Owner }
+        elseif ($rec.SheetCount -gt 1) { $owner = $rec.Sheet }
+        else { $owner = [System.IO.Path]::GetFileNameWithoutExtension($rec.File) }
+        $wbsNo = ((([string]$v['WBS番号']).Normalize($script:Nfkc).Trim() -replace '[\-_]', '.').TrimEnd('.'))
+        $taskName = ([string]$v['タスク']).Trim()
+        $task = -1
+        if ($wbsNo -and $byWbs.ContainsKey($wbsNo)) { $task = $byWbs[$wbsNo] }
+        elseif ($taskName -and $byName.ContainsKey((ConvertTo-NameKey $taskName))) { $task = $byName[(ConvertTo-NameKey $taskName)] }
+        $cell = '{0} 行目' -f $rec.Row
+        if ($rec.Sheet) { $cell = '{0}{1}' -f (ConvertTo-ColumnName $rec.Column), $rec.Row }
+        $entries.Add([pscustomobject]@{
+                Date = $date; Owner = $owner; WbsNo = $wbsNo; TaskName = $taskName; Hours = $hours; Task = $task
+                Place = [pscustomobject]@{ File = $rec.File; Path = $rec.Path; Sheet = $rec.Sheet; Cell = $cell }
+            })
+    }
+    return [pscustomobject]@{ Entries = $entries; Unreadable = $unreadable; Future = $future }
+}
+
+function Get-EffortJudgement {
+    #     工数の判定: 予定超過（未完了で実績が予定を超えた）・超過の見込み（実績 ÷ 進捗率 が予定 ×（1 + Tolerance）を超える）・
+    #     完了・超過（完了して実績が予定 ×（1 + Tolerance）を超えた）。予定が無ければ空
+    param($Planned, [double] $Actual, [double] $Progress, [bool] $Done, [double] $Tolerance)
+    if ($null -eq $Planned -or $Planned -le 0) { return '' }
+    $limit = $Planned * (1 + $Tolerance)
+    if ($Done) { if ($Actual -gt $limit) { return '完了・超過' } else { return '' } }
+    if ($Actual -gt $Planned) { return '予定超過' }
+    if ($Progress -gt 0 -and $Actual / $Progress -gt $limit) { return '超過の見込み' }
+    return ''
+}
+
 function Read-HeaderCandidates {
     #     見出しの候補の CSV（項目・見出し。見出しは | 区切り）を、項目 → ConvertTo-Label 済みの候補の配列にする。
     #     Fields のうち CSV に無い項目は空の配列
