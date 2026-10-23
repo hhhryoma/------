@@ -81,10 +81,11 @@ PL・PM・品質管理の担当が、見積もり・進捗・品質を数字で�
 
 ### 導入
 
-最初に 1 回だけ使います。
+最初に 1 回だけ使います。チームに配るときは Install-ExcelTools を使います。
 
 | ツール | できること | Excel | 「送る」 |
 | --- | --- | --- | --- |
+| [Install-ExcelTools.ps1](tools/README.md#install-exceltoolsps1) | 共有フォルダに置いたツールを、担当者の PC に 1 回のダブルクリック（`Install-ExcelTools.cmd`）で入れ、「送る」に登録する。共有フォルダを更新すると、担当者の PC も自動で新しい版になる | 不要 | － |
 | [Install-SendTo.ps1](tools/README.md#install-sendtops1) | 右クリックの「送る」に各ツールを登録し、PowerShell を使わずにファイルを選ぶだけで実行できるようにする | 不要 ※3 | － |
 
 ※1 .xls / .xlsb を扱う場合のみ Excel が必要です。
@@ -101,7 +102,9 @@ PL・PM・品質管理の担当が、見積もり・進捗・品質を数字で�
 
 実行ポリシーで止まる場合は `powershell -ExecutionPolicy Bypass -File .\tools\Search-Excel.ps1 ...` のように実行してください。
 
-PowerShell に慣れていない人には、`.\tools\Install-SendTo.ps1` を 1 回実行してもらうと、エクスプローラーでファイルやフォルダを選んで右クリック →「送る」→「Excel 提出前チェック」などから使えます（結果の Excel が開きます）。
+**チームに配るとき（管理者）**は、`tools` フォルダを共有フォルダに置き、担当者にその中の `Install-ExcelTools.cmd` をダブルクリックしてもらいます。ツールが担当者の PC に入り、「送る」に登録されます。共有フォルダの `tools` を入れ替えれば、担当者の PC も自動で新しい版になります（[Install-ExcelTools.ps1](tools/README.md#install-exceltoolsps1)）。
+
+自分だけで使うときは、`.\tools\Install-SendTo.ps1` を 1 回実行すると、エクスプローラーでファイルやフォルダを選んで右クリック →「送る」→「Excel 提出前チェック」などから使えます（結果の Excel が開きます）。
 
 ## フォルダ構成
 

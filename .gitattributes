@@ -3,3 +3,4 @@
 *.xlsx binary
 *.xlsm binary
 *.xls  binary
+*.cmd  text eol=crlf
