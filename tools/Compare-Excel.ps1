@@ -118,31 +118,17 @@ function Read-Book {
 }
 
 function Read-WordBook {
-    #     Word（.docx）の本文を、段落と表の行を文書の順に並べた 1 つのシート「本文」として読む。
-    #     段落は A 列、表の行はセルを A 列から並べる（セルの中の段落は改行でつなぐ）。空の段落は読まない。
-    #     行の対応付け・文字単位の差分は Excel と同じ方法を使える
+    #     Word（.docx）の本文を、段落と表の行を文書の順に並べた 1 つのシート「本文」として読む（読み方は ExcelTools.psm1 の Get-WordBlocks）。
+    #     段落は A 列、表の行はセルを A 列から並べる（セルの中の段落は改行でつなぐ）。テキストボックスは、それのある段落・表の行のすぐ下の行。
+    #     空の段落は読まない。行の対応付け・文字単位の差分は Excel と同じ方法を使える
     param([string] $FilePath)
     $pkg = Open-ZipPackage $FilePath
-    try { $doc = Read-PartXml -Package $pkg -PartName 'word/document.xml' }
+    try { $parts = Get-WordParts $pkg }
     finally { $pkg.Zip.Dispose() }
-    if (-not $doc) { throw 'Word の本文（word/document.xml）がありません' }
-    $ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    $doc = $parts[0].Doc
+    $nsm = New-WordNamespaceManager $doc
     $sheet = [pscustomobject]@{ Rows = @{}; Comments = @{}; Shapes = @{}; Formats = @{} }
     $script:WordRow = 0
-    $paragraphText = {
-        param($p)
-        $sb = New-Object System.Text.StringBuilder
-        foreach ($n in $p.SelectNodes('.//*')) {
-            if ($n.NamespaceURI -ne $ns) { continue }
-            switch ($n.LocalName) {
-                't' { [void]$sb.Append($n.InnerText) }
-                'tab' { [void]$sb.Append("`t") }
-                'br' { [void]$sb.Append("`n") }
-                'cr' { [void]$sb.Append("`n") }
-            }
-        }
-        $sb.ToString().Trim()
-    }
     $addRow = {
         param([string[]] $Cells)
         if (@($Cells | Where-Object { $_ }).Count -eq 0) { return }
@@ -151,29 +137,11 @@ function Read-WordBook {
         for ($i = 0; $i -lt $Cells.Count; $i++) { if ($Cells[$i]) { $v[(ConvertTo-ColumnName ($i + 1))] = $Cells[$i] } }
         $sheet.Rows[[string]$script:WordRow] = @{ V = $v; F = @{} }
     }
-    # 本文の段落・表（内容コントロール w:sdt の中も）を文書の順にたどる
-    $walk = {
-        param($parent)
-        foreach ($child in $parent.ChildNodes) {
-            if ($child.NamespaceURI -ne $ns) { continue }
-            switch ($child.LocalName) {
-                'p' { & $addRow @(, (& $paragraphText $child)) }
-                'tbl' {
-                    foreach ($tr in $child.ChildNodes) {
-                        if ($tr.LocalName -ne 'tr') { continue }
-                        $cells = @(foreach ($tc in $tr.ChildNodes) {
-                                if ($tc.LocalName -ne 'tc') { continue }
-                                (@(foreach ($p in $tc.SelectNodes('.//*[local-name()="p"]')) { & $paragraphText $p }) | Where-Object { $_ }) -join "`n"
-                            })
-                        & $addRow $cells
-                    }
-                }
-                'sdt' { foreach ($c in $child.ChildNodes) { if ($c.LocalName -eq 'sdtContent') { & $walk $c } } }
-            }
-        }
+    foreach ($b in (Get-WordBlocks $doc $nsm)) {
+        & $addRow $b.Cells
+        # テキストボックス（互換用の写しは除く）
+        foreach ($box in $b.Node.SelectNodes('.//w:txbxContent[not(ancestor::mc:Fallback)]', $nsm)) { & $addRow @(, (Get-WordTextBoxText $box $nsm)) }
     }
-    $body = $doc.DocumentElement.ChildNodes | Where-Object { $_.LocalName -eq 'body' } | Select-Object -First 1
-    if ($body) { & $walk $body }
     $book = [ordered]@{}
     $book['本文'] = $sheet
     return $book

@@ -1792,7 +1792,7 @@ function Get-WordParagraphText {
 function Get-WordBlocks {
     #     本文・ヘッダーなどの段落と表の行を、文書の順に場所付きで返す（内容コントロール w:sdt の中も。脚注は区切り線などを除く）。
     #     Cell は「段落 n」（表の外の段落を上から数えた番号。空の段落も数える）と「表 n の m 行目」。どのツールでも同じ場所を指す。
-    #     Text は段落の文字、表の行はセルの文字を「 | 」でつないだもの。Cells はセルごとの文字、Node は w:p・w:tr
+    #     Text は段落の文字、表の行はセルの文字を「 | 」でつないだもの（1 行）。Cells はセルごとの文字（セルの中の段落は改行でつなぐ）、Node は w:p・w:tr
     param($Doc, $Nsm)
     $wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     $root = $Doc.DocumentElement
@@ -1823,12 +1823,22 @@ function Get-WordBlocks {
                 $rowNo++
                 $cells = @(foreach ($tc in $tr.SelectNodes('w:tc | w:sdt/w:sdtContent/w:tc', $Nsm)) {
                         # セルの中のテキストボックスは Get-WordTextBoxes で別に読む
-                        (@(foreach ($p in $tc.SelectNodes('.//w:p[not(ancestor::w:txbxContent) and not(ancestor::mc:Fallback)]', $Nsm)) { Get-WordParagraphText $p $Nsm }) | Where-Object { $_ }) -join ' '
+                        (@(foreach ($p in $tc.SelectNodes('.//w:p[not(ancestor::w:txbxContent) and not(ancestor::mc:Fallback)]', $Nsm)) { Get-WordParagraphText $p $Nsm }) | Where-Object { $_ }) -join "`n"
                     })
-                [pscustomobject]@{ Kind = '表'; Cell = ('表 {0} の {1} 行目' -f $tableNo, $rowNo); Text = ($cells -join ' | '); Cells = $cells; Node = $tr }
+                $text = (@($cells | ForEach-Object { $_ -replace '\s*\n\s*', ' ' })) -join ' | '
+                [pscustomobject]@{ Kind = '表'; Cell = ('表 {0} の {1} 行目' -f $tableNo, $rowNo); Text = $text; Cells = $cells; Node = $tr }
             }
         }
     }
+}
+
+function Get-WordTextBoxText {
+    #     テキストボックス（w:txbxContent）の中の段落の文字を改行でつなぐ（中にある別のテキストボックスの文字は含めない）
+    param($Box, $Nsm)
+    $depth = $Box.SelectNodes('ancestor-or-self::w:txbxContent', $Nsm).Count
+    $fallback = $Box.SelectNodes('ancestor::mc:Fallback', $Nsm).Count
+    $xpath = './/w:p[count(ancestor::w:txbxContent) = {0} and count(ancestor::mc:Fallback) = {1}]' -f $depth, $fallback
+    return (@(foreach ($p in $Box.SelectNodes($xpath, $Nsm)) { Get-WordParagraphText $p $Nsm }) | Where-Object { $_ }) -join "`n"
 }
 
 function Get-WordTextBoxes {
@@ -1837,8 +1847,7 @@ function Get-WordTextBoxes {
     $n = 0
     foreach ($box in $Doc.SelectNodes('//w:txbxContent[not(ancestor::mc:Fallback)]', $Nsm)) {
         $n++
-        $text = (@(foreach ($p in $box.SelectNodes('w:p | w:tbl//w:p', $Nsm)) { Get-WordParagraphText $p $Nsm }) | Where-Object { $_ }) -join "`n"
-        [pscustomobject]@{ Name = ('テキストボックス {0}' -f $n); Text = $text }
+        [pscustomobject]@{ Name = ('テキストボックス {0}' -f $n); Text = (Get-WordTextBoxText $box $Nsm) }
     }
 }
 
