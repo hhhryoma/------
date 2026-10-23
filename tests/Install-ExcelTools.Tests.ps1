@@ -33,7 +33,7 @@ Test-Case 'Install-ExcelTools: 配布元の tools をこの PC に写し、配�
     Assert-Equal '最新' (& (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -Update 6>$null).Result
 
     # 配布元を更新する（書き換え・追加・削除）
-    Add-Content -LiteralPath (Join-Path $share 'README.md') -Value '追記'
+    Add-Content -LiteralPath (Join-Path $share 'README.md') -Value '追記' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $share 'term-lists/new.csv') -Value 'a,b' -Encoding UTF8
     Remove-Item -LiteralPath (Join-Path $share 'Measure-CodeSize.ps1')
     $r = & (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -Update 6>$null
@@ -43,7 +43,7 @@ Test-Case 'Install-ExcelTools: 配布元の tools をこの PC に写し、配�
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $dir 'tools/Measure-CodeSize.ps1'))) '配布元に無いファイルは消す'
 
     # -CheckOnly は、前の確認から間隔がたつまで配布元を見ない
-    Add-Content -LiteralPath (Join-Path $share 'README.md') -Value '追記 2'
+    Add-Content -LiteralPath (Join-Path $share 'README.md') -Value '追記 2' -Encoding UTF8
     Assert-Equal '確認済み' (& (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -CheckOnly 6>$null).Result
     Set-LastCheck $dir
     Assert-Equal '更新' (& (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -CheckOnly 6>$null).Result
@@ -59,7 +59,7 @@ Test-Case 'Install-ExcelTools: 入れたツールを「送る」から使った�
     $share = New-ToolsShare
     $dir = Join-Path (New-TestDir) 'ExcelTools'
     $null = & (Join-Path $share 'Install-ExcelTools.ps1') -InstallDir $dir -NoSendTo 6>$null
-    Add-Content -LiteralPath (Join-Path $share 'README.md') -Value '更新した版'
+    Add-Content -LiteralPath (Join-Path $share 'README.md') -Value '更新した版' -Encoding UTF8
     Set-LastCheck $dir
     $data = New-TestDir
     Copy-Item -LiteralPath (Join-Path $script:Fixtures 'deliverable/bad.xlsx') -Destination (Join-Path $data 'a.xlsx')
@@ -93,8 +93,8 @@ Test-Case 'Install-ExcelTools: 「送る」には、この PC に入れた写し
     Assert-Equal @('Excel 差分（2 つ選ぶ）', 'Excel 提出前チェック') $made
     $link = [ExcelTools.ShellLink]::Read((Join-Path $links 'Excel 提出前チェック.lnk'))
     Assert-Match $link.Arguments ([regex]::Escape((Join-Path $dir 'tools\Invoke-SendTo.ps1')))
-    Remove-Item -LiteralPath (Join-Path $links '*.lnk')
-    Add-Content -LiteralPath (Join-Path $share 'README.md') -Value '追記'
+    Get-ChildItem -LiteralPath $links -Filter '*.lnk' | Remove-Item
+    Add-Content -LiteralPath (Join-Path $share 'README.md') -Value '追記' -Encoding UTF8
     $null = & (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -Update 6>$null
     Assert-Equal 2 @(Get-ChildItem -LiteralPath $links -Filter '*.lnk').Count '更新のときも、入れたときの -Action で登録する'
     $null = & (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -Uninstall 6>$null

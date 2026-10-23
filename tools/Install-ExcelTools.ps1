@@ -120,11 +120,23 @@ function Register-SendTo {
     $null = & (Join-Path $toolsDir 'Install-SendTo.ps1') @sendArgs 6>$null
 }
 
+# ---------------------------------------------------------------- 入れたときの指定
+
+
+# 指定が無ければ、入れたときの「送る」の登録の指定を使う（更新・削除も同じ指定で行う）
+$info = Read-InstallInfo
+if ($info) {
+    if (-not $PSBoundParameters.ContainsKey('Action') -and $info.Action) { $Action = @($info.Action | Where-Object { $_ }) }
+    if (-not $PSBoundParameters.ContainsKey('OutDir') -and $info.OutDir) { $OutDir = $info.OutDir }
+    if (-not $PSBoundParameters.ContainsKey('SendToDir') -and $info.SendToDir) { $SendToDir = $info.SendToDir }
+    if (-not $PSBoundParameters.ContainsKey('NoSendTo') -and $info.NoSendTo) { $NoSendTo = [switch]$true }
+}
+
 # ---------------------------------------------------------------- 削除
 
 
 if ($Uninstall) {
-    if (-not (Read-InstallInfo)) { throw "Install-ExcelTools.ps1 で入れたツールが見つかりません: $InstallDir" }
+    if (-not $info) { throw "Install-ExcelTools.ps1 で入れたツールが見つかりません: $InstallDir" }
     if ($isWin -and -not $NoSendTo -and (Test-Path -LiteralPath (Join-Path $toolsDir 'Install-SendTo.ps1'))) {
         $sendArgs = @{ Uninstall = $true }
         if ($SendToDir) { $sendArgs['SendToDir'] = $SendToDir }
@@ -139,14 +151,6 @@ if ($Uninstall) {
 # ---------------------------------------------------------------- 更新の確認（Invoke-SendTo.ps1 が実行の後に呼ぶ）
 
 
-$info = Read-InstallInfo
-if ($info) {
-    # 指定が無ければ、入れたときの「送る」の登録の指定を使う
-    if (-not $PSBoundParameters.ContainsKey('Action') -and $info.Action) { $Action = @($info.Action | Where-Object { $_ }) }
-    if (-not $PSBoundParameters.ContainsKey('OutDir') -and $info.OutDir) { $OutDir = $info.OutDir }
-    if (-not $PSBoundParameters.ContainsKey('SendToDir') -and $info.SendToDir) { $SendToDir = $info.SendToDir }
-    if (-not $PSBoundParameters.ContainsKey('NoSendTo') -and $info.NoSendTo) { $NoSendTo = [switch]$true }
-}
 if ($Update -or $CheckOnly) {
     if (-not $info) { throw "Install-ExcelTools.ps1 で入れたツールが見つかりません: $InstallDir" }
     if (-not $Source) { $Source = $info.Source }
