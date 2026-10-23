@@ -22,7 +22,7 @@ $ErrorActionPreference = 'Stop'
 #     「送る」メニューの項目。Label はショートカットの名前（Install-SendTo.ps1 が使う）、File は結果のファイル名。
 #     Literal はツールが -Path をワイルドカードとして扱わない（そのまま渡す）もの
 $actions = [ordered]@{
-    Check       = @{ Label = '提出前チェック'; File = '提出前チェック'; Tool = 'Test-ExcelDeliverable.ps1'; Detail = '体裁・消し忘れ・情報漏れ・印刷のはみ出しなどを確かめ、結果の Excel を開きます' }
+    Check       = @{ Label = '提出前チェック'; File = '提出前チェック'; Tool = 'Test-ExcelDeliverable.ps1'; Detail = '体裁・消し忘れ・情報漏れ・印刷のはみ出し（Word は変更履歴・コメント・隠し文字の残り）などを確かめ、結果の Excel を開きます' }
     ResetView   = @{ Label = '表示を整える'; Tool = 'Reset-ExcelView.ps1'; Detail = '開いたときに先頭シートの A1 が倍率 100% で表示される状態に直します（上書きします）' }
     Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック・Word 文書（またはフォルダ）を比べ、差分をシートの方眼のまま色付けした画面（ブラウザー）を開きます（一覧の Excel も保存）。版数（ファイル名）か更新日時の古い方を旧にします。3 つ以上か、版数の付いたファイルを置いたフォルダを 1 つ選ぶと、版を続けて比べます' }
     SpVersion   = @{ Label = 'SharePoint の版と比べる'; Tool = 'Compare-SharePointVersion.ps1'; Literal = $true; Detail = 'OneDrive で同期している SharePoint のファイルを 1 つ選び、バージョン履歴の番号（3.0 など）を入力すると、その版と現在の版の差分の画面（ブラウザー）を開きます（版は Excel で取り出します）' }

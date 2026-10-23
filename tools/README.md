@@ -18,7 +18,7 @@
 | [Compare-SharePointVersion.ps1](#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの 2 つの版（バージョン履歴）を取り出して比べ、差分の画面を開く（版は Excel で取り出す） |
 | [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
-| [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違いをまとめて確認する（プロパティの個人名など、機械で直せるものは `-Fix` で直す） |
+| [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違いをまとめて確認する（プロパティの個人名など、機械で直せるものは `-Fix` で直す）。Word（.docx）の変更履歴・コメント・隠し文字の残りも見つける |
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [New-TestSpecDraft.ps1](#new-testspecdraftps1) | 画面設計書（画面項目定義・イベント定義）とコード定義書・メッセージ一覧から、必須・桁数の境界・型・入力チェック・コード値・イベントのテストケースの下書きを、メッセージの文言付きで作る（Excel 不要） |
@@ -374,7 +374,7 @@ ID               ＩＤ               2              31 全角・半角
 
 ## Test-ExcelDeliverable.ps1
 
-Excel ファイルを社外へ提出する前に、**体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所**がないかをまとめて確認します。
+Excel・Word ファイルを社外へ提出する前に、**体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所**がないかをまとめて確認します。
 Excel を使わずにファイルの中身を直接読むので速く、**ファイルは変更しません**（`-Fix` を付けたときだけ、機械で直せる指摘を直します）。
 
 ```powershell
@@ -411,6 +411,20 @@ File      Location  Level  Detail
 | ファイル | 情報 | パスワード付き・xls / xlsb（中身を読めないためチェックしていない） |
 
 区分の目安: **エラー**は必ず直す、**警告**は原則直す、**情報**は意図どおりか確認する。
+
+#### Word（.docx / .docm）のチェック項目
+
+Word の設計書・仕様書も、Word を使わずにチェックします（フォルダの中の .docx / .docm も対象）。場所は「本文!段落 12」「フッター!段落 1」のように示します。
+
+| 分類 | 区分 | 内容（`-Check` の名前） |
+| --- | --- | --- |
+| 消し忘れ | 警告 | **変更履歴**（挿入・削除・移動・書式の変更の数。Revision）、**コメント**（作成者と文。Comment）、**隠し文字**（Hidden）、TODO などの文言（本文・ヘッダー・フッター・脚注。Word） |
+| 消し忘れ | 情報 | 変更履歴の記録がオンのまま保存（Revision）、蛍光ペンの残り（Comment） |
+| 情報漏れ | 警告 | ファイルのプロパティの作成者・最終更新者・会社名・管理者（Property）、社内のファイルやフォルダへのハイパーリンク（Link） |
+| 情報漏れ | 情報 | 文書のテンプレートの場所（`C:\Users\…\設計書.dotx` など。Link） |
+| マクロ | 情報 | VBA を含む文書（.docm） |
+
+`-Fix` で直すのは、Word ではプロパティの個人名・会社名だけです（変更履歴・コメントは内容を確かめて Word で直してください）。
 
 ### 機械で直せる指摘を直す（`-Fix`）
 

@@ -229,6 +229,65 @@ Test-Case 'Test-ExcelDeliverable: -Fix でプロパティの個人名・ヘッ�
     Assert-Equal $hash (Get-FileHash -LiteralPath (Join-Path $backup 'bad.xlsx')).Hash '直す前のファイル'
 }
 
+function New-DeliverableDocx {
+    #     変更履歴・コメント・隠し文字・蛍光ペン・TODO・社内パスへのリンク・テンプレートの場所・作成者の残った Word 文書を作る
+    param([string] $Path, [switch] $Clean)
+    $w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+    $body = '<w:p><w:r><w:t>受注一覧画面の仕様</w:t></w:r></w:p>'
+    $parts = [ordered]@{}
+    if (-not $Clean) {
+        $body += '<w:p><w:ins w:id="1" w:author="山田"><w:r><w:t>追加した文</w:t></w:r></w:ins><w:del w:id="2" w:author="山田"><w:r><w:delText>消した文</w:delText></w:r></w:del></w:p>' +
+            '<w:p><w:r><w:t>検索条件は TODO で決める</w:t></w:r></w:p>' +
+            '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>社内メモ</w:t></w:r><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>要確認</w:t></w:r></w:p>' +
+            '<w:p><w:hyperlink r:id="rId9"><w:r><w:t>共有フォルダ</w:t></w:r></w:hyperlink></w:p>'
+        $parts['word/comments.xml'] = '<?xml version="1.0" encoding="UTF-8"?><w:comments ' + $w + '><w:comment w:id="0" w:author="佐藤"><w:p><w:r><w:t>ここは仮です</w:t></w:r></w:p></w:comment></w:comments>'
+        $parts['word/settings.xml'] = '<?xml version="1.0" encoding="UTF-8"?><w:settings ' + $w + '><w:trackRevisions/></w:settings>'
+        $parts['word/_rels/document.xml.rels'] = '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="\\fs01\share\受注" TargetMode="External"/></Relationships>'
+        $parts['word/_rels/settings.xml.rels'] = '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="file:///C:\Users\yamada\テンプレート\設計書.dotx" TargetMode="External"/></Relationships>'
+        $parts['word/footer1.xml'] = '<?xml version="1.0" encoding="UTF-8"?><w:ftr ' + $w + '><w:p><w:r><w:t>（仮）社外秘</w:t></w:r></w:p></w:ftr>'
+    }
+    $parts['docProps/core.xml'] = '<?xml version="1.0" encoding="UTF-8"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>' + $(if ($Clean) { '' } else { '山田 太郎' }) + '</dc:creator></cp:coreProperties>'
+    $parts['word/document.xml'] = '<?xml version="1.0" encoding="UTF-8"?><w:document ' + $w + '><w:body>' + $body + '</w:body></w:document>'
+    $parts['[Content_Types].xml'] = '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+    $fs = [System.IO.File]::Create($Path)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        foreach ($k in $parts.Keys) {
+            $sw = New-Object System.IO.StreamWriter($zip.CreateEntry($k).Open(), (New-Object System.Text.UTF8Encoding($false)))
+            $sw.Write($parts[$k]); $sw.Dispose()
+        }
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
+Test-Case 'Test-ExcelDeliverable: Word の変更履歴・コメント・隠し文字・蛍光ペン・TODO・社内パスへのリンク・テンプレートの場所・作成者を見つける' {
+    $dir = New-TestDir
+    New-DeliverableDocx (Join-Path $dir '画面仕様書.docx')
+    New-DeliverableDocx (Join-Path $dir '問題なし.docx') -Clean
+    $issues = Invoke-Check @{ Path = $dir }
+    Assert-Equal @(@(
+        '警告|コメント|',
+        '警告|ファイルへのリンク|本文',
+        '警告|プロパティ|',
+        '警告|変更履歴|',
+        '警告|残っている文言|フッター!段落 1',
+        '警告|残っている文言|本文!段落 3',
+        '警告|残っている文言|本文!段落 4',
+        '警告|隠し文字|本文',
+        '情報|テンプレートの場所|',
+        '情報|変更履歴|',
+        '情報|蛍光ペン|') | Sort-Object) (Get-IssueKeys $issues) '問題なしの文書は指摘なし'
+    Assert-True (@($issues | Where-Object { $_.Detail -match '変更履歴が残っています（挿入 1・削除 1）' }).Count -eq 1) '変更履歴の数'
+    Assert-True (@($issues | Where-Object { $_.Detail -match 'コメントが残っています（佐藤）: ここは仮です' }).Count -eq 1) 'コメントの作成者と文'
+    Assert-True (@($issues | Where-Object { $_.Detail -match '隠し文字が 1 か所あります: 社内メモ' }).Count -eq 1) '隠し文字'
+
+    # -Fix はプロパティの作成者だけを直す（変更履歴・コメントは手で直す）
+    $fixed = Invoke-Check @{ Path = (Join-Path $dir '画面仕様書.docx'); Fix = $true; Confirm = $false }
+    Assert-Equal 0 @($fixed | Where-Object Item -eq 'プロパティ').Count 'プロパティを消した'
+    Assert-True (@($fixed | Where-Object Item -eq '変更履歴').Count -gt 0) '変更履歴は残る'
+}
+
 Test-Case 'Test-ExcelDeliverable: Get-Help でヘルプが表示される' {
     $h = Get-Help $Deliverable
     Assert-Match $h.Synopsis '提出'

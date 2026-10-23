@@ -3,8 +3,8 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string[]] $Path,
 
-    [ValidateSet('View', 'Hidden', 'Comment', 'Word', 'Property', 'Link', 'Error', 'Macro', 'Print', 'Version')]
-    [string[]] $Check = @('View', 'Hidden', 'Comment', 'Word', 'Property', 'Link', 'Error', 'Macro', 'Print', 'Version'),
+    [ValidateSet('View', 'Hidden', 'Comment', 'Revision', 'Word', 'Property', 'Link', 'Error', 'Macro', 'Print', 'Version')]
+    [string[]] $Check = @('View', 'Hidden', 'Comment', 'Revision', 'Word', 'Property', 'Link', 'Error', 'Macro', 'Print', 'Version'),
 
     [string] $Words = 'TODO|TBD|FIXME|要確認|未定|検討中|仮置き|（仮）|\(仮\)|XXX|○○|××',
 
@@ -676,20 +676,7 @@ function Test-Workbook {
             }
         }
 
-        if ($checkSet['Property']) {
-            $labels = $propertyLabels
-            foreach ($part in @('docProps/core.xml', 'docProps/app.xml')) {
-                $doc = Read-PartXml -Package $pkg -PartName $part
-                if ($null -eq $doc) { continue }
-                foreach ($key in $labels.Keys) {
-                    $node = $doc.SelectSingleNode("//*[local-name()='$key']")
-                    if ($null -eq $node) { continue }
-                    $value = $node.InnerText.Trim()
-                    if (-not $value -or (Test-AllowedName $value)) { continue }
-                    Add-Issue '警告' '情報漏れ' 'プロパティ' ("ファイルのプロパティに{0}「{1}」が残っています" -f $labels[$key], $value)
-                }
-            }
-        }
+        if ($checkSet['Property']) { Test-PackageProperties $pkg }
 
         if ($checkSet['Macro'] -and (Get-PackageEntry -Package $pkg -PartName 'xl/vbaProject.bin')) {
             Add-Issue '情報' 'マクロ' 'マクロ' 'マクロ（VBA）が含まれています'
@@ -699,6 +686,147 @@ function Test-Workbook {
         $pkg.Zip.Dispose()
     }
     if ($checkSet['Version']) { Test-VersionConsistency -FilePath $FilePath -Sheets $sheets -FileName ([System.IO.Path]::GetFileName($FilePath)) }
+}
+
+function Test-PackageProperties {
+    #     ファイルのプロパティ（docProps）に残っている個人名・会社名（Excel・Word 共通）
+    param($Package)
+    foreach ($part in @('docProps/core.xml', 'docProps/app.xml')) {
+        $doc = Read-PartXml -Package $Package -PartName $part
+        if ($null -eq $doc) { continue }
+        foreach ($key in $propertyLabels.Keys) {
+            $node = $doc.SelectSingleNode("//*[local-name()='$key']")
+            if ($null -eq $node) { continue }
+            $value = $node.InnerText.Trim()
+            if (-not $value -or (Test-AllowedName $value)) { continue }
+            Add-Issue '警告' '情報漏れ' 'プロパティ' ("ファイルのプロパティに{0}「{1}」が残っています" -f $propertyLabels[$key], $value)
+        }
+    }
+}
+
+# ---------------------------------------------------------------- Word（.docx / .docm）
+
+
+function Get-WordText {
+    #     段落・ラン（w:p・w:r）の文字（w:t。削除した文字 w:delText は含めない）
+    param($Node, $Nsm)
+    return ((@($Node.SelectNodes('.//w:t', $Nsm) | ForEach-Object { $_.InnerText })) -join '').Trim()
+}
+
+function Test-WordDocument {
+    #     Word の提出前チェック: 変更履歴・コメント・隠し文字・蛍光ペン・残っている文言・社内のファイルへのリンク・テンプレートの場所・プロパティ・マクロ
+    param([string] $FilePath)
+    $ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    $pkg = Open-ZipPackage $FilePath
+    try {
+        $doc = Read-PartXml -Package $pkg -PartName 'word/document.xml'
+        if ($null -eq $doc) { throw 'Word の本文（word/document.xml）がありません' }
+        $nsm = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+        $nsm.AddNamespace('w', $ns)
+        # 本文・ヘッダー・フッター・脚注・文末脚注
+        $parts = New-Object System.Collections.Generic.List[object]
+        $parts.Add([pscustomobject]@{ Name = '本文'; Part = 'word/document.xml'; Doc = $doc })
+        foreach ($e in @($pkg.Entries.Keys | Sort-Object)) {
+            $name = $null
+            if ($e -match '^word/header\d*\.xml$') { $name = 'ヘッダー' }
+            elseif ($e -match '^word/footer\d*\.xml$') { $name = 'フッター' }
+            elseif ($e -eq 'word/footnotes.xml') { $name = '脚注' }
+            elseif ($e -eq 'word/endnotes.xml') { $name = '文末脚注' }
+            if (-not $name) { continue }
+            $d = Read-PartXml -Package $pkg -PartName $e
+            if ($d) { $parts.Add([pscustomobject]@{ Name = $name; Part = $e; Doc = $d }) }
+        }
+        $count = { param([string] $XPath) $n = 0; foreach ($p in $parts) { $n += $p.Doc.SelectNodes($XPath, $nsm).Count }; $n }
+
+        if ($checkSet['Revision']) {
+            $kinds = [ordered]@{ '挿入' = (& $count '//w:ins'); '削除' = (& $count '//w:del'); '移動' = (& $count '//w:moveFrom')
+                '書式の変更' = (& $count '//w:rPrChange | //w:pPrChange | //w:tblPrChange | //w:trPrChange | //w:tcPrChange | //w:sectPrChange') }
+            $found = @($kinds.Keys | Where-Object { $kinds[$_] -gt 0 } | ForEach-Object { '{0} {1}' -f $_, $kinds[$_] })
+            if ($found.Count -gt 0) { Add-Issue '警告' '消し忘れ' '変更履歴' ("変更履歴が残っています（{0}）。すべて承諾するか元に戻してから提出してください" -f ($found -join '・')) }
+            $settings = Read-PartXml -Package $pkg -PartName 'word/settings.xml'
+            if ($settings -and $settings.SelectSingleNode('//*[local-name()="trackRevisions"]')) { Add-Issue '情報' '消し忘れ' '変更履歴' '変更履歴の記録がオンのまま保存されています' }
+        }
+
+        if ($checkSet['Comment']) {
+            $comments = Read-PartXml -Package $pkg -PartName 'word/comments.xml'
+            if ($comments) {
+                $list = @($comments.SelectNodes('//*[local-name()="comment"]'))
+                $n = 0
+                foreach ($c in $list) {
+                    $n++
+                    if ($n -gt $maxPerSheet) { break }
+                    $text = ((@($c.SelectNodes('.//*[local-name()="t"]') | ForEach-Object { $_.InnerText })) -join '').Trim()
+                    if ($text.Length -gt 40) { $text = $text.Substring(0, 40) + '…' }
+                    $author = $c.GetAttribute('author', $ns)
+                    Add-Issue '警告' '消し忘れ' 'コメント' ("コメントが残っています（{0}）: {1}" -f $author, $text)
+                }
+                if ($list.Count -gt $maxPerSheet) { Add-Issue '警告' '消し忘れ' 'コメント' ("ほかにもコメントが {0} 件あります" -f ($list.Count - $maxPerSheet)) }
+            }
+            # 蛍光ペン（レビューの印のまま残りやすい）
+            $marks = 0
+            foreach ($p in $parts) { foreach ($h in $p.Doc.SelectNodes('//w:rPr/w:highlight', $nsm)) { if ($h.GetAttribute('val', $ns) -ne 'none') { $marks++ } } }
+            if ($marks -gt 0) { Add-Issue '情報' '消し忘れ' '蛍光ペン' ("蛍光ペンの色が {0} か所に残っています（レビューの印なら消してください）" -f $marks) }
+        }
+
+        if ($checkSet['Hidden']) {
+            foreach ($p in $parts) {
+                $runs = @($p.Doc.SelectNodes('//w:r[w:rPr/w:vanish]', $nsm) | Where-Object {
+                        $v = $_.SelectSingleNode('w:rPr/w:vanish', $nsm).GetAttribute('val', $ns)
+                        $v -notin @('0', 'false', 'off') -and (Get-WordText $_ $nsm)
+                    })
+                if ($runs.Count -eq 0) { continue }
+                $text = (@($runs | Select-Object -First 3 | ForEach-Object { Get-WordText $_ $nsm }) -join ' / ')
+                if ($text.Length -gt 40) { $text = $text.Substring(0, 40) + '…' }
+                Add-Issue '警告' '消し忘れ' '隠し文字' ("隠し文字が {0} か所あります: {1}" -f $runs.Count, $text) -Sheet $p.Name
+            }
+        }
+
+        if ($checkSet['Word'] -and $Words) {
+            foreach ($p in $parts) {
+                $index = 0; $n = 0
+                foreach ($para in $p.Doc.SelectNodes('//w:p', $nsm)) {
+                    $index++
+                    $text = Get-WordText $para $nsm
+                    if (-not $text) { continue }
+                    $m = [regex]::Match($text, $Words, 'IgnoreCase')
+                    if (-not $m.Success) { continue }
+                    $n++
+                    if ($n -gt $maxPerSheet) { continue }
+                    if ($text.Length -gt 40) { $text = $text.Substring(0, 40) + '…' }
+                    Add-Issue '警告' '消し忘れ' '残っている文言' ("「{0}」が残っています: {1}" -f $m.Value, $text) -Sheet $p.Name -Cell ('段落 {0}' -f $index)
+                }
+                if ($n -gt $maxPerSheet) { Add-Issue '警告' '消し忘れ' '残っている文言' ("ほかにも消し忘れの文言のある段落が {0} 個あります" -f ($n - $maxPerSheet)) -Sheet $p.Name }
+            }
+        }
+
+        if ($checkSet['Link']) {
+            foreach ($p in $parts) {
+                $slash = $p.Part.LastIndexOf('/')
+                $rels = Read-PartXml -Package $pkg -PartName ($p.Part.Substring(0, $slash) + '/_rels/' + $p.Part.Substring($slash + 1) + '.rels')
+                if (-not $rels) { continue }
+                foreach ($r in $rels.SelectNodes('//*[local-name()="Relationship"]')) {
+                    $target = $r.GetAttribute('Target')
+                    if ($r.GetAttribute('TargetMode') -eq 'External' -and $target -match '^(file:|\\\\|[A-Za-z]:\\)') {
+                        Add-Issue '警告' '情報漏れ' 'ファイルへのリンク' "社内のファイルやフォルダへのリンクがあります（$target）" -Sheet $p.Name
+                    }
+                }
+            }
+            # 文書のテンプレートの場所（ユーザー名やサーバー名が入りやすい）
+            $settingsRels = Read-PartXml -Package $pkg -PartName 'word/_rels/settings.xml.rels'
+            if ($settingsRels) {
+                foreach ($r in $settingsRels.SelectNodes('//*[local-name()="Relationship"]')) {
+                    $target = $r.GetAttribute('Target')
+                    if ($r.GetAttribute('Type') -like '*/attachedTemplate' -and $target -match '^(file:|\\\\|[A-Za-z]:\\)') {
+                        Add-Issue '情報' '情報漏れ' 'テンプレートの場所' "文書のテンプレートの場所が残っています（$target）"
+                    }
+                }
+            }
+        }
+
+        if ($checkSet['Property']) { Test-PackageProperties $pkg }
+        if ($checkSet['Macro'] -and (Get-PackageEntry -Package $pkg -PartName 'word/vbaProject.bin')) { Add-Issue '情報' 'マクロ' 'マクロ' 'マクロ（VBA）が含まれています' }
+    }
+    finally { $pkg.Zip.Dispose() }
 }
 
 function Get-ExternalTarget {
@@ -751,7 +879,7 @@ foreach ($p in $Path) {
             $found = @($item)
         }
         foreach ($f in $found) {
-            if (@('.xlsx', '.xlsm', '.xltx', '.xltm', '.xls', '.xlsb') -notcontains $f.Extension.ToLowerInvariant()) { continue }
+            if (@('.xlsx', '.xlsm', '.xltx', '.xltm', '.xls', '.xlsb', '.docx', '.docm') -notcontains $f.Extension.ToLowerInvariant()) { continue }
             if ($f.Name.StartsWith('~$')) { continue }
             if ($OutXlsx -and [string]::Equals($f.FullName, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
             if ($seen.ContainsKey($f.FullName)) { continue }
@@ -760,7 +888,7 @@ foreach ($p in $Path) {
         }
     }
 }
-if ($files.Count -eq 0) { Write-Warning 'チェックする Excel ファイルがありません。'; return }
+if ($files.Count -eq 0) { Write-Warning 'チェックする Excel・Word ファイルがありません。'; return }
 
 function Invoke-FileChecks {
     #     1 ファイルをチェックし、指摘を $script:Issues に足す
@@ -775,6 +903,12 @@ function Invoke-FileChecks {
     $ext = $Entry.Info.Extension.ToLowerInvariant()
     try {
         $kind = Get-FileKind -FilePath $Entry.Info.FullName
+        if (@('.docx', '.docm') -contains $ext) {
+            if ($kind -eq 'Ole') { Add-Issue '情報' 'ファイル' 'パスワード' 'パスワードで保護（暗号化）されているためチェックしていません'; return }
+            if ($kind -ne 'Zip') { Add-Issue '情報' 'ファイル' '形式' 'docx / docm 形式ではないためチェックしていません'; return }
+            Test-WordDocument -FilePath $Entry.Info.FullName
+            return
+        }
         if ($ext -eq '.xlsb' -or ($kind -eq 'Ole' -and $ext -eq '.xls') -or $kind -eq 'Unknown') {
             Add-Issue '情報' 'ファイル' '形式' 'xlsx / xlsm 形式ではないためチェックしていません（xlsx に保存し直すとチェックできます）'
             return
@@ -950,7 +1084,7 @@ if ($OutXlsx) {
         $sheet = $i.Sheet
         $cell = $i.Cell
         if (-not $cell) { $cell = 'A1' }
-        if ($sheet) { $row.Link = @{ Column = 4; Path = $i.Path; Location = ("'{0}'!{1}" -f $sheet.Replace("'", "''"), $cell) } }
+        if ($sheet -and $i.Path -notmatch '\.doc[xm]$') { $row.Link = @{ Column = 4; Path = $i.Path; Location = ("'{0}'!{1}" -f $sheet.Replace("'", "''"), $cell) } }
         else { $row.Link = @{ Column = 0; Path = $i.Path; Location = '' } }
         $issueRows.Add($row)
     }
@@ -998,7 +1132,7 @@ if ($Fix) {
 }
 
 # .SYNOPSIS
-#     Excel ファイルを社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所がないかをまとめて確認します。
+#     Excel・Word ファイルを社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所がないかをまとめて確認します。
 #
 # .DESCRIPTION
 #     フォルダ配下の xlsx / xlsm を Excel を使わずに読み、次の項目をチェックします。ファイルは変更しません。
@@ -1013,19 +1147,26 @@ if ($Fix) {
 #                  用紙のサイズ・向きがシートによって違う（情報）
 #       マクロ     VBA を含むブック（情報）
 #
+#     Word（.docx / .docm）は、Word を使わずに次の項目をチェックします（場所は「本文!段落 12」のように示します）。
+#
+#       消し忘れ   変更履歴（挿入・削除・移動・書式の変更）と、変更履歴の記録がオンのまま（情報）、コメント、隠し文字、
+#                  TODO などの文言（本文・ヘッダー・フッター・脚注）、蛍光ペン（情報）
+#       情報漏れ   作成者・最終更新者・会社名などのプロパティ、社内パスへのハイパーリンク、テンプレートの場所（情報）
+#       マクロ     VBA を含む文書（情報）
+#
 #     結果は 1 指摘 1 行のオブジェクトで出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
 #     区分は エラー（必ず直す）／警告（原則直す）／情報（意図どおりか確認する）の 3 つです。
 #
 #     -Fix を付けると、機械で直せる指摘（プロパティの個人名・会社名、ヘッダー／フッターのファイルの場所、
-#     表示の状態）を直してから、直したあとの状態で残っている指摘を出力します（このときだけファイルを書き換えます）。
+#     表示の状態。Word はプロパティだけ）を直してから、直したあとの状態で残っている指摘を出力します（このときだけファイルを書き換えます）。
 #
 # .PARAMETER Path
 #     チェックするフォルダまたはファイル（複数指定可、ワイルドカード可）。
 #
 # .PARAMETER Check
-#     チェックする項目。View（体裁）/ Hidden（非表示）/ Comment（コメント）/ Word（残っている文言）/
-#     Property（プロパティ）/ Link（外部リンク・名前の定義）/ Error（エラー値）/ Macro（マクロ）/
-#     Print（印刷）/ Version（表紙と改訂履歴の版数）。既定はすべて。
+#     チェックする項目。View（体裁）/ Hidden（非表示・隠し文字）/ Comment（コメント・蛍光ペン）/ Revision（Word の変更履歴）/
+#     Word（残っている文言）/ Property（プロパティ）/ Link（外部リンク・名前の定義・テンプレートの場所）/ Error（エラー値）/
+#     Macro（マクロ）/ Print（印刷）/ Version（表紙と改訂履歴の版数）。既定はすべて。
 #
 # .PARAMETER Words
 #     消し忘れとして探す文言の正規表現（大文字小文字は区別しません）。
