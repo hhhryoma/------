@@ -77,14 +77,20 @@ function Read-Book {
             $book[$h.Sheet] = [pscustomobject]@{ Rows = @{}; Comments = @{}; Shapes = @{}; Formats = @{} }
         }
         $s = $book[$h.Sheet]
-        switch ($h.Kind) {
-            { $_ -eq '値' -or $_ -eq '数式' } {
-                $m = [regex]::Match($h.Cell, '^([A-Z]+)(\d+)$')
-                $row = $m.Groups[2].Value
-                if (-not $s.Rows.ContainsKey($row)) { $s.Rows[$row] = @{ V = @{}; F = @{} } }
-                if ($h.Kind -eq '値') { $s.Rows[$row].V[$m.Groups[1].Value] = $h.Text }
-                else { $s.Rows[$row].F[$m.Groups[1].Value] = $h.Text }
-            }
+        $kind = $h.Kind
+        if ($kind -eq '値' -or $kind -eq '数式') {
+            # セルの数だけ回るので、正規表現を使わずに列と行に分ける
+            $cell = $h.Cell
+            $i = 0
+            while ($i -lt $cell.Length -and [char]::IsLetter($cell[$i])) { $i++ }
+            $row = $cell.Substring($i)
+            $rowData = $s.Rows[$row]
+            if ($null -eq $rowData) { $rowData = @{ V = @{}; F = @{} }; $s.Rows[$row] = $rowData }
+            if ($kind -eq '値') { $rowData.V[$cell.Substring(0, $i)] = $h.Text }
+            else { $rowData.F[$cell.Substring(0, $i)] = $h.Text }
+            continue
+        }
+        switch ($kind) {
             'コメント' { $s.Comments[$h.Cell] = $h.Text }
             '図形' {
                 $key = $h.Name
@@ -1099,6 +1105,16 @@ function Compare-Sheet {
         Add-Diff $Sheet $null "A$r" '行' '削除' (Format-RowContent $OldSheet.Rows[$r]) $null
     }
 
+    # グラフィカルな差分（-OutHtml）の「左右に並べる」で、旧と新の行・列をそろえるのに使う（移動した行は除く）
+    if ($OutHtml) {
+        $movedPair = @{}
+        foreach ($mv in $moved) { $movedPair['{0},{1}' -f $mv[0], $mv[1]] = $true }
+        $rowPairs = @($pairs | Where-Object { -not $movedPair.ContainsKey(('{0},{1}' -f $_[0], $_[1])) } | ForEach-Object { , @([int]$_[0], [int]$_[1]) })
+        $colPairs = $null
+        if ($cm) { $colPairs = @($cm.NewToOld.Keys | ForEach-Object { , @((Get-ColumnIndex $cm.NewToOld[$_]), (Get-ColumnIndex $_)) }) }
+        $script:HtmlAlign[$script:CurrentFile + [char]0 + $Sheet] = [pscustomobject]@{ Rows = $rowPairs; Cols = $colPairs }
+    }
+
     if ($CompareFormat) { Compare-SheetFormat -Sheet $Sheet -Pairs $pairs -OldSheet $OldSheet -NewSheet $NewSheet -OldView $oldView -NewView $newView -ColumnMap $cm -ToNew $toNew }
 
     # ---- コメント: 旧の位置を行・列の対応で新の位置に読み替えて比べる
@@ -1274,7 +1290,7 @@ function Merge-Renumbering {
             OldLocation = $oldLocation; OldSheet = $first.OldSheet; Kind = '連番'; Change = '変更'
             Old = '{0}～{1}' -f $first.Old, $last.Old; New = '{0}～{1}' -f $first.New, $last.New
             Detail = '連番の振り直し: {0}～{1} → {2}～{3}（{4} 個）' -f $first.Old, $last.Old, $first.New, $last.New, $run.Count
-            Path = $first.Path; OldPath = $first.OldPath; Segments = $null
+            Path = $first.Path; OldPath = $first.OldPath; Segments = $null; NewCell = $range; OldCell = $oldRange
         }
         $summary.PSObject.TypeNames.Insert(0, 'CompareExcel.Diff')
         $summaryAt[(@($run | Sort-Object Index)[0].Index)] = $summary
@@ -1364,6 +1380,8 @@ function Compare-Book {
         }
     }
     if ($CheckHistory) { Test-HistoryCoverage -NewBook $newBook -Diffs $diffs -Groups $groups }
+    # 差分の無いファイルのシートは HTML に入れないので、メモリーから外す
+    if ($OutHtml -and $diffs.Count -eq 0) { $script:HtmlBooks.Remove($script:CurrentFile) }
 }
 
 # ---------------------------------------------------------------- 改訂履歴の記載漏れ（-CheckHistory）
@@ -1544,6 +1562,7 @@ function Test-HistoryCoverage {
 
 
 $script:HtmlBooks = @{}
+$script:HtmlAlign = @{}   # ファイル名 + [char]0 + 新のシート名 → 対応付けた旧と新の行・列の組
 
 function Read-SheetLayout {
     #     xlsx のシートごとの列幅（ピクセル。非表示は 0）と結合セル。読めないブック（.xls など）は空
@@ -1597,21 +1616,26 @@ function Add-SheetJson {
     if ($null -eq $Sheet) { [void]$Builder.Append('null'); return }
     $maxRow = 0; $maxCol = 0
     [void]$Builder.Append('{"c":{')
+    # セルの数が多いので、関数の呼び出しを減らす（列番号は列ごとに 1 回だけ求め、逃がす文字が無ければそのまま足す）
+    $colIndex = @{}
     $first = $true
     foreach ($rowKey in $Sheet.Rows.Keys) {
         $r = [int]$rowKey
         $row = $Sheet.Rows[$rowKey]
-        $cols = @($row.V.Keys) + @($row.F.Keys | Where-Object { -not $row.V.ContainsKey($_) })
+        $cols = New-Object System.Collections.Generic.List[string]
+        foreach ($k in $row.V.Keys) { $cols.Add($k) }
+        foreach ($k in $row.F.Keys) { if (-not $row.V.ContainsKey($k)) { $cols.Add($k) } }
+        if ($cols.Count -gt 0 -and $r -gt $maxRow) { $maxRow = $r }
         foreach ($colKey in $cols) {
-            $c = Get-ColumnIndex $colKey
+            $c = $colIndex[$colKey]
+            if ($null -eq $c) { $c = Get-ColumnIndex $colKey; $colIndex[$colKey] = $c; if ($c -gt $maxCol) { $maxCol = $c } }
             $text = $row.V[$colKey]
             if ($null -eq $text) { $text = $row.F[$colKey]; if (-not $text.StartsWith('=')) { $text = '=' + $text } }
             if (-not $first) { [void]$Builder.Append(',') }
             $first = $false
-            [void]$Builder.Append(('"{0},{1}":' -f $r, $c))
-            Add-JsonText $Builder $text
-            if ($r -gt $maxRow) { $maxRow = $r }
-            if ($c -gt $maxCol) { $maxCol = $c }
+            [void]$Builder.Append('"').Append($r).Append(',').Append($c).Append('":')
+            if ($script:JsonEscape.IsMatch($text)) { Add-JsonText $Builder $text }
+            else { [void]$Builder.Append('"').Append($text).Append('"') }
         }
     }
     [void]$Builder.Append('},"w":{')
@@ -1635,6 +1659,11 @@ function Export-DiffHtml {
     [void]$sb.Append(',"new":'); Add-JsonText $sb $newItem.FullName
     [void]$sb.Append(',"created":'); Add-JsonText $sb (Get-Date -Format 'yyyy/MM/dd HH:mm')
     [void]$sb.Append(',"files":[')
+    $diffsByFile = @{}
+    foreach ($d in $script:Diffs) {
+        if (-not $diffsByFile.ContainsKey($d.File)) { $diffsByFile[$d.File] = New-Object System.Collections.Generic.List[object] }
+        $diffsByFile[$d.File].Add($d)
+    }
     $firstFile = $true
     foreach ($s in $Summary) {
         if (-not $firstFile) { [void]$sb.Append(',') }
@@ -1642,7 +1671,8 @@ function Export-DiffHtml {
         [void]$sb.Append('{"name":'); Add-JsonText $sb $s.File
         [void]$sb.Append(',"state":'); Add-JsonText $sb $s.State
         [void]$sb.Append(',"count":' + $s.Count)
-        $fileDiffs = @($script:Diffs | Where-Object { $_.File -eq $s.File })
+        $fileDiffs = @()
+        if ($diffsByFile.ContainsKey($s.File)) { $fileDiffs = $diffsByFile[$s.File].ToArray() }
         [void]$sb.Append(',"diffs":[')
         $firstDiff = $true
         foreach ($d in $fileDiffs) {
@@ -1684,6 +1714,12 @@ function Export-DiffHtml {
                 [void]$sb.Append(',"oldName":'); Add-JsonText $sb $x.Old
                 [void]$sb.Append(',"new":'); Add-SheetJson $sb $(if ($x.New) { $books.New[$x.New] } else { $null }) $(if ($x.New) { $newLayout[$x.New] } else { $null })
                 [void]$sb.Append(',"oldSheet":'); Add-SheetJson $sb $(if ($x.Old) { $books.Old[$x.Old] } else { $null }) $(if ($x.Old) { $oldLayout[$x.Old] } else { $null })
+                $align = $null
+                if ($x.New -and $x.Old) { $align = $script:HtmlAlign[$s.File + [char]0 + $x.New] }
+                if ($align) {
+                    [void]$sb.Append(',"rp":[' + ((@($align.Rows | ForEach-Object { '[{0},{1}]' -f $_[0], $_[1] })) -join ',') + ']')
+                    if ($null -ne $align.Cols) { [void]$sb.Append(',"cp":[' + ((@($align.Cols | ForEach-Object { '[{0},{1}]' -f $_[0], $_[1] })) -join ',') + ']') }
+                }
                 [void]$sb.Append('}')
             }
         }
@@ -1691,9 +1727,11 @@ function Export-DiffHtml {
     }
     [void]$sb.Append(']}')
     $html = [System.IO.File]::ReadAllText($template, (New-Object System.Text.UTF8Encoding($false)))
-    $marker = '/*DIFF_DATA*/null'
-    if (-not $html.Contains($marker)) { throw "差分を見る HTML のひな形に、データを入れる場所（$marker）がありません: $template" }
-    $html = $html.Replace($marker, $sb.ToString())
+    # データを入れるのは script の中の 1 か所だけ（説明の文などにある同じ文字は置き換えない）
+    $marker = 'var DATA = /*DIFF_DATA*/null;'
+    $at = $html.IndexOf($marker)
+    if ($at -lt 0) { throw "差分を見る HTML のひな形に、データを入れる場所（$marker）がありません: $template" }
+    $html = $html.Substring(0, $at) + 'var DATA = ' + $sb.ToString() + ';' + $html.Substring($at + $marker.Length)
     $dir = Split-Path -Path $OutPath -Parent
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     [System.IO.File]::WriteAllText($OutPath, $html, (New-Object System.Text.UTF8Encoding($false)))
@@ -2439,6 +2477,7 @@ if ($OutHistory) {
 #     差分をシートの方眼のまま色付けして見る HTML を保存します（1 ファイル。ブラウザーで開きます。外部のファイル・通信は使いません）。
 #     列幅・結合セルを Excel に近い形で表示し、変更・追加・削除・移動したセルや行に色を付けます。
 #     マウスを重ねたセルの変更前・変更後（変わった文字に色）、新・旧・左右に並べる表示の切り替え、差分の一覧からのジャンプ、前後の差分への移動ができます。
+#     左右に並べると、対応する行・列をそろえて表示します。「変わった行だけ」で、差分のある行の前後だけを表示できます。
 #
 # .PARAMETER OutMarkedDir
 #     差分のあった新のブック（.xlsx / .xlsm）の写しを、このフォルダーに同じ名前（フォルダーどうしなら同じ相対パス）で保存し、
