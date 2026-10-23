@@ -27,7 +27,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 
 | ツール | できること | Excel | 「送る」 |
 | --- | --- | --- | --- |
-| [Compare-Excel.ps1](tools/README.md#compare-excelps1) | 2 つのブック・フォルダ（サブフォルダも含む）のセル単位の差分（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写し、シートの方眼のまま色付けしてブラウザーで見る HTML、改訂履歴の記載漏れの確認・下書きもできる） | 不要 ※1 | 差分（2 つ選ぶ） |
+| [Compare-Excel.ps1](tools/README.md#compare-excelps1) | 2 つのブック・フォルダ（サブフォルダも含む）のセル単位の差分（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写し、シートの方眼のまま色付けしてブラウザーで見る HTML、改訂履歴の記載漏れの確認・下書きもできる。Word（.docx）も段落・表の行で比べる） | 不要 ※1 | 差分（2 つ選ぶ） |
 | [Compare-SharePointVersion.ps1](tools/README.md#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの版（バージョン履歴の 3.0 など）を取り出し、現在の版や別の版と比べて差分の画面を開く | 必要 ※4 | SharePoint の版と比べる |
 | [Export-ExcelToMarkdown.ps1](tools/README.md#export-exceltomarkdownps1) | Excel を Markdown にする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見られる | 不要 ※1 | － |
 

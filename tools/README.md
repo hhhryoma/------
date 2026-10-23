@@ -14,7 +14,7 @@
 | [Test-ExcelTerms.ps1](#test-exceltermsps1) | 複数の Excel の表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を見つけ、Replace-Excel 用の置換リストを作る |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、桁数・必須の違いなど）を全件見つける。CRUD 図と影響調査も（Excel 不要） |
 | [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
-| [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる） |
+| [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる。Word（.docx）の設計書も段落・表の行で比べる） |
 | [Compare-SharePointVersion.ps1](#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの 2 つの版（バージョン履歴）を取り出して比べ、差分の画面を開く（版は Excel で取り出す） |
 | [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
@@ -548,6 +548,8 @@ File                Location    Change Detail
 `[-…-]` が削除した部分、`{+…+}` が追加した部分です。ほとんど書き換えた場合は、変更前と変更後の全体を示します。
 `-OutXlsx` の「変更前」「変更後」の列では、削除した部分を赤の取り消し線、追加した部分を赤の太字で示します。
 
+Word（.docx）の設計書・仕様書も比べられます（フォルダどうしでは .docx も対象）。本文の段落と表の行を、文書の順に 1 つのシート「本文」の行として読み（段落は A 列、表の行はセルを A 列から並べる）、Excel と同じ方法で行を対応付けて、変わった文字を示します。`-OutHtml` では長い段落を折り返して表示します。Word は不要です。
+
 ### 比べるもの
 
 | 種類 | 内容 |
@@ -738,6 +740,7 @@ Location        Kind Detail
 - 書式は `-CompareFormat` を付けたときだけ比べ、罫線・フォントの種類と大きさ・表示形式は比べません
 - 内容がまったく同じ行が何度も出てくる表で行を入れ替えた場合、対応付けが直感と違うことがあります
 - 値の少ない列（ほとんど空の列など）は、列の挿入・削除を見つけにくいことがあります
+- Word は本文の文字だけを比べます。書式・コメント・ヘッダーとフッター・図、自動の段落番号（「1.」「(1)」など）は比べず、変更履歴の削除した文字は読みません。`-CompareFormat`・`-OutMarkedDir`・`-CheckHistory` は Word には使えません
 
 ## Compare-SharePointVersion.ps1
 
