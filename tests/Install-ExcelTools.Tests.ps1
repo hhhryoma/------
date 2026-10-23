@@ -84,21 +84,28 @@ Test-Case 'Install-ExcelTools: 入れ直し・削除と、使えない指定を�
     Assert-True (-not (Test-Path -LiteralPath $dir))
 }
 
-Test-Case 'Install-ExcelTools: 「送る」には、この PC に入れた写しのツールを登録し、更新のときも同じ指定で登録し直す' -WindowsOnly {
+Test-Case 'Install-ExcelTools: 「送る」とスタートメニューの「Excel ツール」には、この PC に入れた写しのツールを登録し、更新のときも同じ指定で登録し直す' -WindowsOnly {
     $share = New-ToolsShare
     $dir = Join-Path (New-TestDir) 'ExcelTools'
     $links = New-TestDir
-    $null = & (Join-Path $share 'Install-ExcelTools.ps1') -InstallDir $dir -SendToDir $links -Action Check, Compare 6>$null
+    $menu = Join-Path (New-TestDir) 'スタートメニュー'
+    $text = Get-HostText { $null = & (Join-Path $share 'Install-ExcelTools.ps1') -InstallDir $dir -SendToDir $links -ShortcutDir $menu -Action Check, Compare }
+    Assert-Match $text 'スタートメニューの「Excel ツール」から、ツールの画面を開けます'
     $made = @(Get-ChildItem -LiteralPath $links -Filter '*.lnk' | ForEach-Object { $_.BaseName } | Sort-Object)
     Assert-Equal @('Excel 差分（2 つ選ぶ）', 'Excel 提出前チェック') $made
     $link = [ExcelTools.ShellLink]::Read((Join-Path $links 'Excel 提出前チェック.lnk'))
     Assert-Match $link.Arguments ([regex]::Escape((Join-Path $dir 'tools\Invoke-SendTo.ps1')))
+    $gui = [ExcelTools.ShellLink]::Read((Join-Path $menu 'Excel ツール.lnk'))
+    Assert-Equal ('-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}"' -f (Join-Path $dir 'tools\Start-ExcelTools.ps1')) $gui.Arguments
     Get-ChildItem -LiteralPath $links -Filter '*.lnk' | Remove-Item
+    Remove-Item -LiteralPath (Join-Path $menu 'Excel ツール.lnk')
     Add-Content -LiteralPath (Join-Path $share 'README.md') -Value '追記' -Encoding UTF8
     $null = & (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -Update 6>$null
     Assert-Equal 2 @(Get-ChildItem -LiteralPath $links -Filter '*.lnk').Count '更新のときも、入れたときの -Action で登録する'
+    Assert-True (Test-Path -LiteralPath (Join-Path $menu 'Excel ツール.lnk')) '更新のときも、入れたときのフォルダに画面のショートカットを作る'
     $null = & (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -Uninstall 6>$null
     Assert-Equal 0 @(Get-ChildItem -LiteralPath $links -Filter '*.lnk').Count
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $menu -Filter '*.lnk').Count '画面のショートカットも消す'
 }
 
 Test-Case 'Install-ExcelTools: Get-Help でヘルプが表示される' {

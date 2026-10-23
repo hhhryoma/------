@@ -6,7 +6,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 
 ## 画面から使う（PowerShell を使わない）
 
-`tools` フォルダの **`Start-ExcelTools.cmd` をダブルクリック**すると、ツールの画面が開きます。
+`tools` フォルダの **`Start-ExcelTools.cmd` をダブルクリック**すると、ツールの画面が開きます。Install-ExcelTools で入れた PC では、**スタートメニューの「Excel ツール」**から開けます（右クリックの「送る」→「Excel ツールの画面で開く」なら、選んだファイルを入れた状態で開きます）。
 
 1. 左の一覧から、やりたいこと（提出前チェック・2 つを比べる・文字を探す など）を選ぶ
 2. 右の入力欄に、ファイルやフォルダを入れる（「ファイル…」「フォルダ…」のボタンか、エクスプローラーからドラッグ＆ドロップ）
@@ -120,7 +120,7 @@ PL・PM・品質管理の担当が、見積もり・進捗・品質を数字で�
 
 実行ポリシーで止まる場合は `powershell -ExecutionPolicy Bypass -File .\tools\Search-Excel.ps1 ...` のように実行してください。
 
-**チームに配るとき（管理者）**は、`tools` フォルダを共有フォルダに置き、担当者にその中の `Install-ExcelTools.cmd` をダブルクリックしてもらいます。ツールが担当者の PC に入り、「送る」に登録されます。共有フォルダの `tools` を入れ替えれば、担当者の PC も自動で新しい版になります（[Install-ExcelTools.ps1](tools/README.md#install-exceltoolsps1)）。
+**チームに配るとき（管理者）**は、`tools` フォルダを共有フォルダに置き、担当者にその中の `Install-ExcelTools.cmd` をダブルクリックしてもらいます。ツールが担当者の PC に入り、スタートメニューの「Excel ツール」（画面）と「送る」に登録されます。共有フォルダの `tools` を入れ替えれば、担当者の PC も自動で新しい版になります（[Install-ExcelTools.ps1](tools/README.md#install-exceltoolsps1)）。
 
 自分だけで使うときは、`.\tools\Install-SendTo.ps1` を 1 回実行すると、エクスプローラーでファイルやフォルダを選んで右クリック →「送る」→「Excel 提出前チェック」などから使えます（結果の Excel が開きます）。
 

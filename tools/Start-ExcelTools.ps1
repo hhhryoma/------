@@ -42,6 +42,12 @@ $form = New-GuiWindow @windowArgs
 try { [System.Windows.Forms.Application]::Run($form) }
 finally { $form.Dispose() }
 
+# Install-ExcelTools.ps1 で入れたツールなら、閉じたあとに配布元が更新されていないかを確かめる（12 時間に 1 回まで。次に開いたときから新しい版になる）
+$installDir = Split-Path -Parent $PSScriptRoot
+if (Test-Path -LiteralPath (Join-Path $installDir 'install.json')) {
+    try { $null = & (Join-Path $PSScriptRoot 'Install-ExcelTools.ps1') -InstallDir $installDir -CheckOnly 6>$null } catch { }
+}
+
 # .SYNOPSIS
 #     Excel ツールを画面（ウィンドウ）から使います。やりたいことを選び、ファイルやフォルダを入れて「実行」を押すだけで、PowerShell を使わずに各ツールを実行できます。
 #
@@ -77,3 +83,4 @@ finally { $form.Dispose() }
 # .NOTES
 #     要件: Windows の PowerShell 5.1 以降（PowerShell 7 でも動作）。同じフォルダに ExcelToolsGui.psm1・各ツールと gui フォルダが必要です。
 #     エクスプローラーからは、同じフォルダの Start-ExcelTools.cmd をダブルクリックして開けます。
+#     Install-ExcelTools.ps1 で入れると、スタートメニューの「Excel ツール」と、「送る」→「Excel ツールの画面で開く」からも開けます。
