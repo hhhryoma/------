@@ -288,7 +288,7 @@ foreach ($r in $rows) {
     $task = [pscustomobject]@{
         WbsNo = $r.Wbs; Task = $v['タスク'].Trim(); Owner = ([string]$v['担当']).Trim(); PlanStart = $start; PlanEnd = $end
         ActualStart = $actualStartShown; ExpectedEnd = $expectedEnd; Progress = [math]::Round($rate, 3); PlannedProgress = [math]::Round($planned, 3)
-        Delay = $delay; Status = $status; PV = ($weight * $planned); EV = ($weight * $rate); AC = (ConvertTo-Number $v['実績工数']); BAC = $weight
+        Delay = $delay; Status = $status; PV = ($weight * $planned); EV = ($weight * $rate); AC = (ConvertTo-Number $v['実績工数']); BAC = $weight; Effort = $effort
         Done = $done; DoneOn = $actualEnd; Place = $r.Place
     }
     $task.PSObject.TypeNames.Insert(0, 'Progress.Task')

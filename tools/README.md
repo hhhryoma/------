@@ -33,6 +33,7 @@
 | [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す。前の版との変更の規模や、実績の工数からの係数表づくりも（Excel 不要） |
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
 | [Measure-Progress.ps1](#measure-progressps1) | WBS から子のタスクごとの遅れ（営業日）・状態と PV／EV／SPI を出し、遅延タスクと週ごとの完了数をスケジュール遅延リカバリ計画のテンプレートに書き込む（Excel 不要） |
+| [Measure-Effort.ps1](#measure-effortps1) | 日報・工数実績表（日付・担当・WBS 番号かタスク・工数）を、タスク・担当者×週ごとに集計し、WBS の予定工数と比べて予定超過・超過の見込みのタスクと CPI を出す。WBS に無い作業（会議など）の工数も出す（Excel 不要） |
 | [New-WeeklyReport.ps1](#new-weeklyreportps1) | WBS・指摘管理表・障害管理表・課題（QA）管理表から週次報告（今週の完了・遅延・来週の予定、指摘・障害・課題の起票・完了・期限切れ、担当者ごとのやること）を作り、メールに貼れる文章と Excel（元の表へのリンク付き）に保存する。毎週の数字を残して前回と比べる（Excel 不要） |
 | [Measure-ReviewQuality.ps1](#measure-reviewqualityps1) | レビューの指摘管理表を集計し、設計書ごとの指摘件数・指摘密度（ページ数・規模あたり）・未完了・期限切れを出し、基準値から外れた設計書を知らせる。レビュー記録の工数も使うと、レビュー工数密度 × 指摘密度のゾーン分析もする（Excel 不要） |
 | [Measure-TestQuality.ps1](#measure-testqualityps1) | テスト仕様書と障害管理表を集計し、機能ごとのテスト密度・バグ密度とゾーン分析、テストの消化とバグの収束の推移、信頼度成長曲線（潜在バグ数の推定・収束の判定）、NG なのにバグ番号が無いなどの食い違いを出す（Excel 不要） |
@@ -53,7 +54,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -1308,6 +1309,65 @@ PV 12 / EV 8 / BAC 22 / SPI 0.67 / AC 11 / CPI 0.73
 
 - 日付の列が無く、セルの色でバーを描いたガントチャートだけの WBS は読めません
 - 先行・後続の関係（クリティカルパス）は見ていません
+
+## Measure-Effort.ps1
+
+日報・工数実績表の工数を集計し、WBS の予定工数と比べます。毎週の工数の集計と、予定を超えそうなタスクの早めの発見に使えます。Excel は不要です。
+
+```powershell
+.\Measure-Effort.ps1 D:\PJ\工数実績 -Wbs D:\PJ\WBS.xlsx -OutXlsx D:\PJ\工数集計.xlsx
+```
+
+```
+WbsNo Task         Owner Planned Actual Progress  Eac Judgement
+----- ----         ----- ------- ------ --------  --- ---------
+1.1   画面設計     山田        4   4.94        1 4.94 完了・超過
+1.2   テーブル設計 佐藤        5    5.5      0.5   11 予定超過
+1.3   IF 設計      佐藤        4    0.5      0.2  2.5
+
+工数の実績: 89.5 時間（11.2 人日。2026/10/05～2026/10/20・2 人・14 行）
+WBS のタスクに対応した工数: 87.5 時間（98%） / WBS に無い作業: 定例会議 0.25（人日）
+予定工数のあるタスク 4 件: 予定 16 / 実績 10.9（人日） / EV 7.3 / CPI 0.67
+予定超過 1 件・超過の見込み 0 件
+  - [予定超過] 1.2 テーブル設計（佐藤）: 予定 5 / 実績 5.5 / 進捗 50% → 完了見込 11
+```
+
+### 読む表
+
+1 行が「日付・担当・WBS 番号かタスク・工数」の表（日報・工数実績表）を、見出しの文字で探して読みます。見出しの候補は `tools\progress\工数実績の見出し.csv` です。
+
+| 項目 | 見出しの候補（一部） | 使い方 |
+| --- | --- | --- |
+| 工数 | 工数・作業時間・時間・実績（「人日」の入った見出しは人日で読む） | （必須）1.5・1.5h・1:30・1時間30分・90分 のどれでも |
+| WBS番号・タスク | WBS・WBS番号・タスク番号 / タスク名・作業・作業内容 | （どちらか必須）WBS 番号、無ければタスク名で WBS のタスクに対応付ける |
+| 日付 | 日付・作業日・実施日 | 担当者×週の集計。`-AsOf` より後の行は数えない |
+| 担当 | 担当者・氏名・作業者 | 無ければ、シート名（ブックに表が複数あるとき）かファイル名（人ごとの日報） |
+
+- 日付・担当が空の行は、同じ表の上の行の日付・担当とみなします（結合したセルや、同じ日の 2 行目以降）
+- 日付を列に並べた工数表（行がタスク、列が日付のマトリクス）は読めません
+
+### 判定
+
+| 判定 | 条件 |
+| --- | --- |
+| 予定超過 | 未完了で、実績が予定工数を超えた |
+| 超過の見込み | 未完了で、完了見込（実績 ÷ 進捗率）が予定工数 ×（1 + `-Tolerance`）を超える |
+| 完了・超過 | 完了したが、実績が予定工数 ×（1 + `-Tolerance`）を超えた（次の見積もりの参考） |
+
+- 予定工数・進捗率は、WBS を [Measure-Progress.ps1](#measure-progressps1) で読みます（予定工数の列が無ければ比べません）
+- CPI は、予定工数のあるタスクの EV（予定工数 × 進捗率）の合計 ÷ 実績の合計です
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 工数実績の表（ファイル・フォルダ。複数可） |
+| `-Wbs` | WBS（予定工数・進捗率） |
+| `-AsOf` | 集計する日（既定は今日） |
+| `-Unit` | 結果の単位と、WBS の予定工数の単位（`人日`・`時間`。既定は人日） |
+| `-HoursPerDay` | 1 人日の時間（既定は 8） |
+| `-Tolerance` | 超過の見込み・完了・超過とみなす、予定を超える割合（既定は 0.1） |
+| `-OutXlsx` | タスク（WBS へのリンク付き）・担当者×週・WBS に無い作業・読み取り結果を保存する |
 
 ## New-WeeklyReport.ps1
 

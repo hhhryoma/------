@@ -87,6 +87,12 @@ New-Book (Join-Path $data 'WBS.xlsx') 'WBS' @('WBS', 'タスク名', '担当者'
     , @('1.1', '画面設計', '山田', '2026/10/01', '2026/10/07', '2026/10/01', '2026/10/09', '100%', '5', '7')
     , @('1.2', 'テーブル設計', '佐藤', '2026/10/05', '2026/10/09', '2026/10/05', '', '60%', '5', '4')
     , @('1.3', 'IF 設計', '佐藤', '2026/10/12', '2026/10/16', '', '', '0%', '4', ''))
+New-Book (Join-Path $data '工数実績.xlsx') '10月' @('日付', '氏名', 'WBS', '作業内容', '時間') @(
+    , @('2026/10/01', '山田', '1.1', '画面設計', '8')
+    , @('2026/10/02', '山田', '1.1', '', '7:30')
+    , @('2026/10/05', '佐藤', '1.2', 'テーブル設計', '8')
+    , @('2026/10/06', '佐藤', '1.2', '', '8')
+    , @('', '', '', '定例会議', '1'))
 
 # 書き換えるツール用の写し（元のサンプルは変えない）
 $copies = Join-Path $data '書き換え用'
@@ -136,6 +142,7 @@ Invoke-Step 'Test-ExcelEstimate（見積書の検算）' '08_見積書の検算.
 Invoke-Step 'Export-TableDdl（DDL）' '09_DDL.xlsx' 'DB との差異・定義書の指摘・テーブルのシート（09_DDL.sql も作る）' { param($o) & (& $t 'Export-TableDdl.ps1') -Path $design -OutFile (Join-Path $OutDir '09_DDL.sql') -CompareCatalog (Join-Path $fixtures 'ddl/postgresql_columns.csv') -OutXlsx $o }
 Invoke-Step 'Measure-Progress（進捗）' '10_進捗.xlsx' 'タスク・担当者別・週次のシート' { param($o) & (& $t 'Measure-Progress.ps1') -Path (Join-Path $data 'WBS.xlsx') -AsOf '2026-10-14' -OutXlsx $o }
 Invoke-Step 'New-WeeklyReport（週次報告）' '10b_週次報告/週次報告_20261020.xlsx' '担当者別のシートのリンクで WBS・指摘管理表の該当セルが開く。同じフォルダの週次報告_20261020.txt をメールに貼って読める' { param($o) & (& $t 'New-WeeklyReport.ps1') -Wbs (Join-Path $data 'WBS.xlsx') -Findings (Join-Path $data 'レビュー') -BugList (Join-Path $data '障害管理表.xlsx') -AsOf '2026-10-20' -OutDir (Split-Path -Parent $o) }
+Invoke-Step 'Measure-Effort（工数実績）' '10c_工数.xlsx' 'タスクのシートの予定・実績・判定と、WBS へのリンク。担当者×週・WBS に無い作業のシート' { param($o) & (& $t 'Measure-Effort.ps1') -Path (Join-Path $data '工数実績.xlsx') -Wbs (Join-Path $data 'WBS.xlsx') -AsOf '2026-10-14' -OutXlsx $o }
 Invoke-Step 'Measure-ReviewQuality（レビュー）' '11_レビュー.xlsx' 'グラフ（2 つ）が表示される（ゾーン分析・推移のシート）' { param($o) & (& $t 'Measure-ReviewQuality.ps1') -Path (Join-Path $data 'レビュー') -DesignPath $design -ReviewLog (Join-Path $data 'レビュー記録.csv') -AsOf '2026-10-20' -OutXlsx $o }
 Invoke-Step 'Measure-TestQuality（テスト）' '12_テスト.xlsx' 'グラフ（3 つ）が表示される（推移・機能別などのシート）' { param($o) & (& $t 'Measure-TestQuality.ps1') -Path (Join-Path $data 'テスト') -BugList (Join-Path $data '障害管理表.xlsx') -DesignPath $design -MinBugs 5 -AsOf '2026-10-12' -OutXlsx $o }
 Invoke-Step 'Test-TestSpec（テスト仕様書）' '13_テスト仕様書.xlsx' 'リンクでテスト仕様書の該当セルが開く（必須・型・コード値・メッセージの指摘）' { param($o) & (& $t 'Test-TestSpec.ps1') -Path (Join-Path $data 'テスト') -DesignPath $design -OutXlsx $o }

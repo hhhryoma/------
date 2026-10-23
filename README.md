@@ -60,6 +60,7 @@ PL・PM・品質管理の担当が、見積もり・進捗・品質を数字で�
 | [Measure-DesignSize.ps1](tools/README.md#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す。前の版との変更の規模（追加見積もりの根拠）と、実績の工数から係数表も作れる | 不要 ※1 | 規模の見積もり |
 | [Test-ExcelEstimate.ps1](tools/README.md#test-excelestimateps1) | 見積書の検算（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算の日数や単価の食い違い） | 不要 | 見積書の検算 |
 | [Measure-Progress.ps1](tools/README.md#measure-progressps1) | WBS から遅延タスク（営業日）と PV／EV／SPI を出し、スケジュール遅延リカバリ計画のテンプレートに書き込む | 不要 ※1 | － |
+| [Measure-Effort.ps1](tools/README.md#measure-effortps1) | 日報・工数実績表の工数を、タスク・担当者・週ごとに集計し、WBS の予定工数と比べて予定超過・超過の見込みのタスクと CPI を出す（WBS に無い作業も） | 不要 ※1 | － |
 | [New-WeeklyReport.ps1](tools/README.md#new-weeklyreportps1) | WBS・指摘管理表・障害管理表・課題（QA）管理表から週次報告（今週の完了・遅延・来週の予定、指摘・障害・課題の起票・完了・期限切れ、担当者ごとのやること）を作り、メールに貼れる文章と Excel に保存する。毎週の数字を残して前回と比べる | 不要 ※1 | 週次報告 |
 
 #### 品質の集計・分析
