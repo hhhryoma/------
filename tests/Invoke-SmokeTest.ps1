@@ -32,6 +32,50 @@ function New-Book {
     Export-Workbook -FilePath $FilePath -Sheets @(@{ Name = $Sheet; Columns = @($Header | ForEach-Object { @{ Header = $_; Width = 14 } }); Rows = @($Rows | ForEach-Object { @{ Values = $_ } }) })
 }
 
+function New-WordDocx {
+    #     Word で開ける最小の文書を作る。Body: 文字は段落、配列の配列は罫線付きの表（行ごとのセル）
+    #     Comment は最初の段落へのコメント、Inserted は「以上」の前に挿入した変更履歴（どちらも消し忘れの例）
+    param([string] $FilePath, [object[]] $Body, [string] $Comment, [string] $Inserted)
+    $w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    $run = { param($t) '<w:r><w:t xml:space="preserve">' + [System.Security.SecurityElement]::Escape($t) + '</w:t></w:r>' }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($b in $Body) {
+        if ($b -is [string]) {
+            if ($Inserted -and $b -eq '以上') { [void]$sb.Append('<w:p><w:ins w:id="1" w:author="山田" w:date="2026-10-20T10:00:00Z">' + (& $run $Inserted) + '</w:ins></w:p>') }
+            if ($Comment -and $sb.Length -eq 0) { [void]$sb.Append('<w:p><w:commentRangeStart w:id="0"/>' + (& $run $b) + '<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>') }
+            else { [void]$sb.Append('<w:p>' + (& $run $b) + '</w:p>') }
+            continue
+        }
+        $cols = ($b | ForEach-Object { @($_).Count } | Measure-Object -Maximum).Maximum
+        $borders = (@('top', 'left', 'bottom', 'right', 'insideH', 'insideV') | ForEach-Object { '<w:{0} w:val="single" w:sz="4" w:space="0" w:color="auto"/>' -f $_ }) -join ''
+        [void]$sb.Append('<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>' + $borders + '</w:tblBorders></w:tblPr><w:tblGrid>' + ('<w:gridCol w:w="2400"/>' * $cols) + '</w:tblGrid>')
+        foreach ($row in $b) { [void]$sb.Append('<w:tr>' + ((@($row | ForEach-Object { '<w:tc><w:p>' + (& $run $_) + '</w:p></w:tc>' })) -join '') + '</w:tr>') }
+        [void]$sb.Append('</w:tbl>')
+    }
+    $parts = [ordered]@{}
+    $types = '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+    $rels = ''
+    if ($Comment) {
+        $types += '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>'
+        $rels = '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>'
+        $parts['word/comments.xml'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments ' + $w + '><w:comment w:id="0" w:author="佐藤" w:date="2026-10-20T10:00:00Z" w:initials="S"><w:p>' + (& $run $Comment) + '</w:p></w:comment></w:comments>'
+    }
+    $parts['[Content_Types].xml'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' + $types + '</Types>'
+    $parts['_rels/.rels'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+    $parts['word/_rels/document.xml.rels'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + $rels + '</Relationships>'
+    $parts['word/document.xml'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ' + $w + '><w:body>' + $sb.ToString() + '</w:body></w:document>'
+    $fs = [System.IO.File]::Create($FilePath)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        foreach ($k in $parts.Keys) {
+            $sw = New-Object System.IO.StreamWriter($zip.CreateEntry($k).Open(), (New-Object System.Text.UTF8Encoding($false)))
+            $sw.Write($parts[$k]); $sw.Dispose()
+        }
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
 $scr1 = 'DD02_画面設計書_SCR001_受注一覧'
 $scr2 = 'DD02_画面設計書_SCR002_受注登録'
 New-Item -ItemType Directory -Force -Path (Join-Path $data 'レビュー'), (Join-Path $data 'テスト') | Out-Null
@@ -107,6 +151,15 @@ New-Item -ItemType Directory -Force -Path $designV2 | Out-Null
 Get-ChildItem -LiteralPath $design -Filter '*.xlsx' | Copy-Item -Destination $designV2
 $null = & (Join-Path $tools 'Replace-Excel.ps1') -Pattern '銀行振込' -Replacement 'クレジットカード' -SimpleMatch -Path (Join-Path $designV2 "$scr2.xlsx") -SheetNamePattern '画面項目定義' -Force 6>$null
 $null = & (Join-Path $tools 'Replace-Excel.ps1') -Pattern '日付の形式が正しくありません' -Replacement '日付の形式が違います' -SimpleMatch -Path (Join-Path $designV2 'DD05_メッセージ一覧.xlsx') -Force 6>$null
+# 版数の付いた設計書（版を続けて比べる）。Word は 3 版で、v1.2 は変更履歴とコメントを消し忘れたもの（提出前チェックで見つける）
+$versions = Join-Path $data '版'
+New-Item -ItemType Directory -Force -Path $versions | Out-Null
+$wordV11 = @('1. 概要', '受注を登録・更新する画面である。受注番号は自動で採番する。', @(@('項目', '桁数', '必須'), @('受注番号', '12', '○'), @('受注日', '8', '○'), @('顧客', '20', '')), '2. 補足', '取消は当日中のみ可能とする。', '以上')
+New-WordDocx (Join-Path $versions '基本設計書_v1.0.docx') @('1. 概要', '受注を登録する画面である。受注番号は自動で採番する。', @(@('項目', '桁数', '必須'), @('受注番号', '10', '○'), @('受注日', '8', '○')), '2. 補足', '取消は当日中のみ可能とする。', '以上')
+New-WordDocx (Join-Path $versions '基本設計書_v1.1.docx') $wordV11
+New-WordDocx (Join-Path $versions '基本設計書_v1.2.docx') @($wordV11 | ForEach-Object { if ($_ -eq '取消は当日中のみ可能とする。') { '取消は翌日まで可能とする。' } else { , $_ } }) -Comment 'ここは仮です' -Inserted '締め日の扱いは TODO'
+Copy-Item -LiteralPath (Join-Path $design "$scr2.xlsx") -Destination (Join-Path $versions "${scr2}_v1.0.xlsx")
+Copy-Item -LiteralPath (Join-Path $designV2 "$scr2.xlsx") -Destination (Join-Path $versions "${scr2}_v1.1.xlsx")
 
 # ---------------------------------------------------------------- ツールを順に実行する
 
@@ -132,10 +185,11 @@ function Invoke-Step {
 $t = { param($name) Join-Path $tools $name }
 Write-Host "動作確認の結果を作っています: $OutDir"
 Invoke-Step 'Search-Excel（検索）' '01_検索.xlsx' 'リンクをクリックすると、該当のブック・シート・セルが開く' { param($o) & (& $t 'Search-Excel.ps1') -Pattern 'TODO' -Path (Join-Path $fixtures 'grep') -NoExcel -OutXlsx $o }
-Invoke-Step 'Test-ExcelDeliverable（提出前チェック）' '02_提出前チェック.xlsx' '指摘一覧のリンクで、該当のブックのセルが開く（ファイル別のシートもある）' { param($o) & (& $t 'Test-ExcelDeliverable.ps1') -Path (Join-Path $fixtures 'deliverable/bad.xlsx'), (Join-Path $fixtures 'print') -OutXlsx $o }
+Invoke-Step 'Test-ExcelDeliverable（提出前チェック）' '02_提出前チェック.xlsx' '指摘一覧のリンクで、該当のブックのセルが開く（ファイル別のシートもある）。Word（基本設計書_v1.2.docx）の変更履歴・コメント・残っている文言（TODO）の行があり、リンクで文書が開く。Word で開いても同じ変更履歴とコメントが見える' { param($o) & (& $t 'Test-ExcelDeliverable.ps1') -Path (Join-Path $fixtures 'deliverable/bad.xlsx'), (Join-Path $fixtures 'print'), (Join-Path $versions '基本設計書_v1.2.docx') -OutXlsx $o }
 Invoke-Step 'Test-ExcelTerms（表記ゆれ）' '03_表記ゆれ.xlsx' '表記ゆれ・出現箇所のシートが読める（文字化け・列幅）' { param($o) & (& $t 'Test-ExcelTerms.ps1') -Path $design -OutXlsx $o }
 Invoke-Step 'Compare-Excel（差分）' '04_差分.xlsx' '差分一覧のリンクが開く。04_差分_色付け フォルダの写しで、変更のあったセルに色が付いている' { param($o) & (& $t 'Compare-Excel.ps1') -Old (Join-Path $fixtures 'compare/v1') -New (Join-Path $fixtures 'compare/v2') -OutXlsx $o -OutMarkedDir (Join-Path $OutDir '04_差分_色付け') }
 Invoke-Step 'Compare-Excel（差分をブラウザーで見る）' '04b_差分.html' 'ブラウザーで開き、変わったセルに色が付く・マウスを重ねると変更前後が出る・左右に並べるとスクロールが連動する・一覧のクリックで該当セルへ移る' { param($o) & (& $t 'Compare-Excel.ps1') -Old $design -New $designV2 -OutHtml $o }
+Invoke-Step 'Compare-Excel（版を続けて比べる・Word）' '04c_版の差分.html' '一覧に 基本設計書（v1.0 → v1.1）・（v1.1 → v1.2）と SCR002（v1.0 → v1.1）が版の順に並ぶ。Word の段落は折り返して表示され、表の行の追加で左右の行がずれない。検索欄（/ キー）で「受注」を探すと、ファイルをまたいで次へ進む' { param($o) & (& $t 'Compare-Excel.ps1') -Versions $versions -OutHtml $o }
 Invoke-Step 'Test-DesignConsistency（設計書の整合性）' '05_整合性.xlsx' '指摘一覧のリンクで設計書の該当セルが開く。CRUD のシートが読める' { param($o) & (& $t 'Test-DesignConsistency.ps1') -Path (Join-Path $fixtures 'consistency') -OutXlsx $o }
 Invoke-Step 'Test-Traceability（網羅）' '06_網羅.xlsx' '抜け・網羅・要件のシートと、場所のリンク' { param($o) & (& $t 'Test-Traceability.ps1') -DesignPath $design -TestPath (Join-Path $data 'テスト') -Requirement (Join-Path $data '要件一覧.csv') -OutXlsx $o }
 Invoke-Step 'Select-RegressionTests（再テストするケース）' '06b_再テスト.xlsx' '選んだ理由の列と、テスト仕様書の場所のリンク（該当セルが開く）' { param($o) & (& $t 'Select-RegressionTests.ps1') -Old $design -New $designV2 -TestPath (Join-Path $data 'テスト') -OutXlsx $o }
@@ -149,6 +203,7 @@ Invoke-Step 'Export-ActionItems（議事録の宿題）' '10d_議事録の宿題
 Invoke-Step 'Measure-ReviewQuality（レビュー）' '11_レビュー.xlsx' 'グラフ（2 つ）が表示される（ゾーン分析・推移のシート）' { param($o) & (& $t 'Measure-ReviewQuality.ps1') -Path (Join-Path $data 'レビュー') -DesignPath $design -ReviewLog (Join-Path $data 'レビュー記録.csv') -AsOf '2026-10-20' -OutXlsx $o }
 Invoke-Step 'Measure-TestQuality（テスト）' '12_テスト.xlsx' 'グラフ（3 つ）が表示される（推移・機能別などのシート）' { param($o) & (& $t 'Measure-TestQuality.ps1') -Path (Join-Path $data 'テスト') -BugList (Join-Path $data '障害管理表.xlsx') -DesignPath $design -MinBugs 5 -AsOf '2026-10-12' -OutXlsx $o }
 Invoke-Step 'Test-TestSpec（テスト仕様書）' '13_テスト仕様書.xlsx' 'リンクでテスト仕様書の該当セルが開く（必須・型・コード値・メッセージの指摘）' { param($o) & (& $t 'Test-TestSpec.ps1') -Path (Join-Path $data 'テスト') -DesignPath $design -OutXlsx $o }
+Invoke-Step 'New-TestSpecDraft（テスト仕様書の下書き）' '13b_テスト仕様書の下書き.xlsx' '一覧と画面ごと（SCR001〜SCR003）のシート。期待結果にメッセージの文言が入り、そのまま書き足せる（列幅・折り返し）' { param($o) & (& $t 'New-TestSpecDraft.ps1') $design -OutXlsx $o }
 Invoke-Step 'Measure-DefectRemoval（工程別の摘出）' '14_工程別の摘出.xlsx' '工程別のシートのパレート図が表示される' { param($o) & (& $t 'Measure-DefectRemoval.ps1') -BugList (Join-Path $data '障害管理表.xlsx') -Findings (Join-Path $data 'レビュー') -OutXlsx $o }
 Invoke-Step 'Measure-ReviewEffectiveness（レビューの効き目）' '15_レビューの効き目.xlsx' '設計書別のシートのグラフが表示される' { param($o) & (& $t 'Measure-ReviewEffectiveness.ps1') -Findings (Join-Path $data 'レビュー') -BugList (Join-Path $data '障害管理表.xlsx') -DesignPath $design -AsOf '2026-10-20' -OutXlsx $o }
 Invoke-Step 'Compare-ReviewFindings（AI と人の指摘）' '16_AIと人の指摘.xlsx' '観点表への反映案のシートの B〜G 列が観点表と同じ並び' { param($o) & (& $t 'Compare-ReviewFindings.ps1') (Join-Path $data 'AIのレビュー結果.xlsx') (Join-Path $data 'レビュー') -OutXlsx $o }
