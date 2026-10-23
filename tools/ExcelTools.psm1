@@ -54,7 +54,14 @@ function ConvertTo-XmlText {
 function Read-TextFile {
     #     テキストファイル（CSV など）を読む。BOM 付き・BOM なしの UTF-8 と、Excel が日本語の Windows で保存する Shift_JIS に対応する
     param([string] $Path)
-    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    # Excel で開いている最中のファイルも読めるよう、共有モードで開く（ReadAllBytes は開いている CSV を読めない）
+    $stream = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    try {
+        $buffer = New-Object System.IO.MemoryStream
+        $stream.CopyTo($buffer)
+        $bytes = $buffer.ToArray()
+    }
+    finally { $stream.Dispose() }
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { return [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3) }
     if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { return [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2) }
     try { return (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes) }

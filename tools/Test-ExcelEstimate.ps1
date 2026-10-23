@@ -428,7 +428,8 @@ foreach ($entry in $files) {
     Write-Progress -Activity '見積書の検算' -Status ("{0}/{1}  {2}" -f $index, $files.Count, $entry.Relative) -PercentComplete ([int](100 * $index / $files.Count))
     try {
         # パスワード付きのファイルは中身が暗号化された別の形式（OLE）になっていて読めない
-        $fs = [System.IO.File]::OpenRead($entry.Info.FullName)
+        # Excel で開いている最中のファイルも読めるよう、共有モードで開く
+        $fs = New-Object System.IO.FileStream($entry.Info.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
         try { $head = New-Object byte[] 2; $n = $fs.Read($head, 0, 2) } finally { $fs.Dispose() }
         if ($n -eq 2 -and $head[0] -eq 0xD0 -and $head[1] -eq 0xCF) {
             Add-Issue '情報' 'パスワード' 'パスワードで保護（暗号化）されているためチェックしていません'
