@@ -168,7 +168,8 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Assert-Equal '文字を探す（検索）' $s.Title.Text
         Assert-Equal @('Pattern', 'Path', 'SimpleMatch', 'IncludeWord', 'OutXlsx') @($s.Bindings | Where-Object { $_.Field.Main } | ForEach-Object { $_.Field.Name })
         Assert-Equal $true $s.Bindings[2].Input.Checked '最初の値（入力した文字そのものを探す）'
-        Assert-True (-not $s.WhatIf.Visible) '書き換えない処理には「試しに実行」を出さない'
+        # 表示していない画面では Visible が false になるので、画面が覚えている状態で確かめる
+        Assert-True (-not $s.WhatIfShown) '書き換えない処理には「試しに実行」を出さない'
         Assert-True (@($s.Tree.Nodes | ForEach-Object { $_.Text }) -contains '担当者向け') '一覧'
 
         # 実行: 結果の欄が空なら既定の保存先を入れ、記録に出力が出て、結果を開けるようになる
@@ -195,7 +196,7 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
 
         # 書き換える処理は、最初は「試しに実行」（ファイルは変わらない）
         Select-GuiTool 'ResetView'
-        Assert-True ($s.WhatIf.Visible -and $s.WhatIf.Checked) '試しに実行'
+        Assert-True ($s.WhatIfShown -and $s.WhatIf.Checked) '試しに実行'
         $book = Copy-Fixture 'deliverable/bad.xlsx'
         $before = (Get-FileHash -LiteralPath $book).Hash
         Add-GuiPaths @($book)
@@ -206,11 +207,10 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Assert-Equal $before (Get-FileHash -LiteralPath $book).Hash 'ファイルは書き換えない'
 
         # 詳細な設定
-        $advanced = @($s.Bindings | Where-Object { -not $_.Field.Main })[0]
         $s.ShowAdvanced.Checked = $false
-        Assert-True (-not $advanced.Rows[1].Visible) '詳細な設定は隠す'
+        Assert-True (-not $s.AdvancedShown) '詳細な設定は隠す'
         $s.ShowAdvanced.Checked = $true
-        Assert-True $advanced.Rows[1].Visible '詳細な設定を出す'
+        Assert-True $s.AdvancedShown '詳細な設定を出す'
 
         # 途中で入力が要るツールは PowerShell の画面で実行する（テストでは起動しない）
         Select-GuiTool 'Analysis'

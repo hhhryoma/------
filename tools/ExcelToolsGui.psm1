@@ -839,7 +839,9 @@ function Select-GuiTool {
         $target = @($s.Bindings | Where-Object { $_.Field.Main -and @('File', 'Folder', 'Path') -contains $_.Field.Kind })[0]
         if ($target) { Set-GuiControlValue $target $s.InitialPaths }
     }
+    # 表示する前の画面では Visible を読んでも false になるので、出しているかは WhatIfShown に覚える
     $s.WhatIf.Visible = $entry.WhatIf
+    $s.WhatIfShown = $entry.WhatIf
     $s.WhatIf.Checked = $true
     if ($entry.Console) { $s.RunButton.Text = 'PowerShell の画面で実行' } else { $s.RunButton.Text = '実行' }
     $s.ResultPath = $null
@@ -1069,6 +1071,7 @@ function Update-GuiAdvanced {
     }
     finally { $s.Fields.ResumeLayout() }
     $s.Settings.ShowAdvanced = $show
+    $s.AdvancedShown = $show
 }
 
 function Update-GuiWrap {
