@@ -480,6 +480,8 @@ Test-Case 'Compare-Excel: -OutHtml で、シートの値・列幅・結合セル
     Assert-True (-not $m.Groups[1].Value.Contains('<')) 'データの中の < は逃がす（</script> で HTML が壊れないように）'
     Assert-Equal 1 ([regex]::Matches($html, '"files":\[').Count) 'データは 1 か所だけに入れる'
     Assert-True ($html.Contains('id="saveCsv"') -and $html.Contains('指摘内容')) '差分のレビュー（確認・指摘を CSV に保存）'
+    Assert-True ($html.Contains('id="saveNotes"') -and $html.Contains('id="loadNotes"')) 'レビューの記録の書き出し・読み込み'
+    Assert-True ($html.Contains('id="navchanged"')) 'フォルダどうしでは、差分のあるファイルだけを一覧に出せる'
     $data = $m.Groups[1].Value | ConvertFrom-Json
     Assert-Equal @('同じ.xlsx|同じ|0', '追加された.xlsx|追加|1', '項目定義.xlsx|差分あり|7', '削除された.xlsx|削除|1') @($data.files | ForEach-Object { '{0}|{1}|{2}' -f $_.name, $_.state, $_.count })
     $file = @($data.files | Where-Object name -eq '項目定義.xlsx')[0]
