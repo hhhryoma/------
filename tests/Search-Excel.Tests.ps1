@@ -200,9 +200,16 @@ Test-Case 'Search-Excel: -SkipHiddenSheets と -SheetNameExclude でシートを
     Assert-Equal @('顧客一覧!B10', '顧客一覧!B4', '顧客一覧!G3') @($hits | ForEach-Object { $_.Location } | Sort-Object)
 }
 
-Test-Case 'Search-Excel: -Path にワイルドカードを使える' {
+Test-Case 'Search-Excel: -Path にワイルドカードを使える。[ ] を含む名前は、その名前のファイルがあればそのまま探す' {
     $hits = Invoke-Search -Pattern 'TODO' -Path (Join-Path $grep 'sub/*.xlsx')
     Assert-Equal 3 $hits.Count
+
+    $book = Join-Path (New-TestDir) '設計書[旧].xlsx'
+    Copy-Item -LiteralPath (Join-Path $grep 'sample.xlsx') -Destination $book
+    $hits = Invoke-Search -Pattern 'TODO' -Path $book -NoExcel
+    Assert-Equal 5 $hits.Count ($script:LastWarnings -join ' / ')
+    $escaped = [System.Management.Automation.WildcardPattern]::Escape($book)
+    Assert-Equal 5 (Invoke-Search -Pattern 'TODO' -Path $escaped -NoExcel).Count 'ワイルドカードの記号を逃がしたパス（画面から）でも探す'
 }
 
 Test-Case 'Search-Excel: -OutCsv は BOM 付き UTF-8 で日本語の列名' {

@@ -50,6 +50,15 @@ Test-Case 'Export-ExcelToMarkdown: -OutDir にフォルダ構成のまま保存�
     Assert-Match $text '2 ファイルを Markdown にしました'
 }
 
+Test-Case 'Export-ExcelToMarkdown: [ ] を含む名前のファイルも Markdown にする（ワイルドカードとして読まない）' {
+    $src = New-TestDir
+    Copy-Item -LiteralPath $scr001 -Destination (Join-Path $src '画面設計書[旧].xlsx')
+    $out = Join-Path (New-TestDir) 'md'
+    $text = Get-HostText { & $MarkdownTool -Path (Join-Path $src '画面設計書[旧].xlsx') -OutDir $out 3>$null }
+    Assert-Match $text '1 ファイルを Markdown にしました'
+    Assert-True (Test-Path -LiteralPath (Join-Path $out '画面設計書[旧].md')) $text
+}
+
 Test-Case 'Export-ExcelToMarkdown: -TextConv は Markdown だけを UTF-8 で標準出力に書く（git の textconv 用）' {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = (Get-Process -Id $PID).Path

@@ -651,7 +651,7 @@ function Get-FileSignature {
 $files = New-Object System.Collections.Generic.List[object]
 $seen = @{}
 foreach ($p in $Path) {
-    $found = @(Get-Item -Path $p -ErrorAction SilentlyContinue)
+    $found = @(Get-PathItem $p)
     if ($found.Count -eq 0) { Write-Warning "見つかりません: $p"; continue }
     foreach ($item in $found) {
         if ($item.PSIsContainer) {

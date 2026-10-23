@@ -42,7 +42,7 @@ $headerOf = @{
 
 $samples = New-Object System.Collections.Generic.List[object]
 foreach ($p in $Path) {
-    foreach ($item in @(Get-Item -Path $p -ErrorAction SilentlyContinue)) {
+    foreach ($item in @(Get-PathItem $p)) {
         $files = @($item)
         if ($item.PSIsContainer) { $files = @(Get-ChildItem -LiteralPath $item.FullName -File -Filter '*.csv' -Recurse) }
         foreach ($f in $files) {
