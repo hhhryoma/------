@@ -288,6 +288,27 @@ Test-Case 'Test-ExcelDeliverable: Word の変更履歴・コメント・隠し�
     Assert-True (@($fixed | Where-Object Item -eq '変更履歴').Count -gt 0) '変更履歴は残る'
 }
 
+Test-Case 'Test-ExcelDeliverable: Word の残っている文言の場所（表の行・テキストボックス）は、検索（Search-Excel -IncludeWord）と同じ' {
+    $dir = New-TestDir
+    $path = Join-Path $dir '仕様書.docx'
+    $ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml"'
+    $p = { param($t) '<w:p><w:r><w:t>' + $t + '</w:t></w:r></w:p>' }
+    $box = '<w:txbxContent>' + (& $p '要確認の図') + '</w:txbxContent>'
+    $body = (& $p '概要') + '<w:tbl><w:tr><w:tc>' + (& $p '項目') + '</w:tc><w:tc>' + (& $p '内容') + '</w:tc></w:tr><w:tr><w:tc>' + (& $p '締め日') + '</w:tc><w:tc>' + (& $p 'TBD') + '</w:tc></w:tr></w:tbl>' +
+        (& $p 'TODO の段落') + '<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing>' + $box + '</w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape><v:textbox>' + $box + '</v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>'
+    $fs = [System.IO.File]::Create($path)
+    $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+    $sw = New-Object System.IO.StreamWriter($zip.CreateEntry('word/document.xml').Open(), (New-Object System.Text.UTF8Encoding($false)))
+    $sw.Write('<w:document ' + $ns + '><w:body>' + $body + '</w:body></w:document>')
+    $sw.Dispose(); $zip.Dispose(); $fs.Dispose()
+
+    $issues = Invoke-Check @{ Path = $path; Check = 'Word' }
+    $expected = @(@('本文!段落 2', '本文!テキストボックス 1', '本文!表 1 の 2 行目') | Sort-Object)
+    Assert-Equal $expected @($issues | ForEach-Object { $_.Location } | Sort-Object) '表の中の段落は段落の番号に数えない。テキストボックスは互換用の写しを数えない'
+    $hits = @(& (Join-Path $script:ToolsDir 'Search-Excel.ps1') 'TODO|TBD|要確認' $path -IncludeWord 6>$null)
+    Assert-Equal $expected @($hits | ForEach-Object { $_.Location } | Sort-Object)
+}
+
 Test-Case 'Test-ExcelDeliverable: Get-Help でヘルプが表示される' {
     $h = Get-Help $Deliverable
     Assert-Match $h.Synopsis '提出'
