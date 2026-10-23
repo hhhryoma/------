@@ -199,11 +199,17 @@ function ConvertTo-GuiNumber {
 
 function ConvertTo-GuiArguments {
     #     入力（引数の名前 → 値）から、ツールに渡す引数（スプラッティング用のハッシュテーブル）を作る。
-    #     空の欄は渡さない。戻り値: Arguments と Errors（入力の誤りの文）
+    #     空の欄は渡さない。戻り値: Arguments と Errors（入力の誤りの文）・ErrorFields（誤りのある欄の引数の名前）
     param($Entry, $Fields, [hashtable] $Values)
     $arguments = [ordered]@{}
     $errors = New-Object System.Collections.Generic.List[string]
+    $errorFields = New-Object System.Collections.Generic.List[string]
+    $previous = $null
+    $counted = 0
     foreach ($f in $Fields) {
+        # 前の欄で誤りが増えていれば、その欄を覚える（欄の途中で continue するため、次の欄の頭で数える）
+        if ($errors.Count -gt $counted) { $errorFields.Add($previous); $counted = $errors.Count }
+        $previous = $f.Name
         $v = $Values[$f.Name]
         if (Test-GuiEmpty $v) {
             if ($f.Required) { $errors.Add(('「{0}」を入れてください' -f $f.Label)) }
@@ -237,8 +243,9 @@ function ConvertTo-GuiArguments {
             }
         }
     }
+    if ($errors.Count -gt $counted) { $errorFields.Add($previous) }
     foreach ($k in $Entry.Fixed.Keys) { $arguments[$k] = $Entry.Fixed[$k] }
-    return [pscustomobject]@{ Arguments = $arguments; Errors = $errors.ToArray() }
+    return [pscustomobject]@{ Arguments = $arguments; Errors = $errors.ToArray(); ErrorFields = $errorFields.ToArray() }
 }
 
 function Get-GuiResultDir {
@@ -477,14 +484,17 @@ function Get-GuiSettingsPath {
 }
 
 function Read-GuiSettings {
-    #     保存した入力を読む。戻り値: Tools（処理の Id → 引数の名前 → 値）・LastTool・Recent（最近実行した処理の Id）・OpenResult・ShowAdvanced
+    #     保存した入力を読む。戻り値: Tools（処理の Id → 引数の名前 → 値）・LastTool・Recent（最近実行した処理の Id）・OpenResult・ShowAdvanced・
+    #     Window（画面の位置と大きさ「左,上,幅,高さ」。最大化なら末尾に「,max」）・Splitter（左の一覧の幅）
     param([string] $Path = (Get-GuiSettingsPath))
-    $settings = [pscustomobject]@{ Tools = @{}; LastTool = ''; Recent = @(); OpenResult = $true; ShowAdvanced = $false }
+    $settings = [pscustomobject]@{ Tools = @{}; LastTool = ''; Recent = @(); OpenResult = $true; ShowAdvanced = $false; Window = ''; Splitter = 0 }
     if (-not (Test-Path -LiteralPath $Path)) { return $settings }
     try { $json = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json }
     catch { return $settings }
     if ($json.LastTool) { $settings.LastTool = [string]$json.LastTool }
     if ($json.Recent) { $settings.Recent = @($json.Recent | ForEach-Object { [string]$_ } | Where-Object { $_ }) }
+    if ($json.Window -and [string]$json.Window -match '^-?\d+,-?\d+,\d+,\d+(,max)?$') { $settings.Window = [string]$json.Window }
+    if ($json.Splitter) { $settings.Splitter = [int]$json.Splitter }
     if ($null -ne $json.OpenResult) { $settings.OpenResult = [bool]$json.OpenResult }
     if ($null -ne $json.ShowAdvanced) { $settings.ShowAdvanced = [bool]$json.ShowAdvanced }
     if ($json.Tools) {
@@ -514,7 +524,7 @@ function Save-GuiSettings {
         }
         $tools[$id] = $values
     }
-    $json = [ordered]@{ LastTool = $Settings.LastTool; Recent = @($Settings.Recent); OpenResult = [bool]$Settings.OpenResult; ShowAdvanced = [bool]$Settings.ShowAdvanced; Tools = $tools } | ConvertTo-Json -Depth 6
+    $json = [ordered]@{ LastTool = $Settings.LastTool; Recent = @($Settings.Recent); Window = [string]$Settings.Window; Splitter = [int]$Settings.Splitter; OpenResult = [bool]$Settings.OpenResult; ShowAdvanced = [bool]$Settings.ShowAdvanced; Tools = $tools } | ConvertTo-Json -Depth 6
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
@@ -566,6 +576,7 @@ function New-GuiWindow {
     $form.MinimumSize = New-Object System.Drawing.Size(880, 620)
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
     $s.Form = $form
+    Restore-GuiWindowBounds
     $s.ToolTip = New-Object System.Windows.Forms.ToolTip
     $s.ToolTip.AutoPopDelay = 20000
 
@@ -717,7 +728,7 @@ function New-GuiWindow {
     $s.HelpButton.Add_Click({ Invoke-GuiSafe { Show-GuiToolHelp } })
     $s.CopyButton.Add_Click({ Invoke-GuiSafe { Copy-GuiCommand } })
     $host1.Add_Resize({ Update-GuiWrap })
-    $form.Add_Load({ try { $script:Gui.Split.SplitterDistance = 300 } catch { } })
+    $form.Add_Load({ $d = 300; if ($script:Gui.Settings.Splitter -ge 150) { $d = $script:Gui.Settings.Splitter }; try { $script:Gui.Split.SplitterDistance = $d } catch { } })
     $form.Add_FormClosing({ Close-GuiWindow $_ })
     if ($s.CanDrop) {
         # ファイル・フォルダを画面のどこに落としても、空いているパスの欄に入れる
@@ -1276,19 +1287,31 @@ function Get-GuiRunArguments {
     param([switch] $NoDefaults)
     $s = $script:Gui
     $values = Get-GuiValues
+    $defaults = @{}
     if (-not $NoDefaults) {
         $defaults = Get-GuiDefaultOutputs $s.Entry $s.CurrentFields $values
-        foreach ($k in $defaults.Keys) {
-            $values[$k] = $defaults[$k]
-            $b = @($s.Bindings | Where-Object { $_.Field.Name -eq $k })[0]
-            if ($b) { Set-GuiControlValue $b $defaults[$k] }
-        }
+        foreach ($k in $defaults.Keys) { $values[$k] = $defaults[$k] }
     }
     $built = ConvertTo-GuiArguments $s.Entry $s.CurrentFields $values
     $s.LastErrors = $built.Errors
+    # 誤りのある欄の色を変え、最初の欄に移る（直した欄は元の色に戻す）
+    $first = $null
+    foreach ($b in $s.Bindings) {
+        $bad = $built.ErrorFields -contains $b.Field.Name
+        if ($b.Input -isnot [System.Windows.Forms.CheckBox]) {
+            if ($bad) { $b.Input.BackColor = [System.Drawing.Color]::MistyRose } else { $b.Input.BackColor = [System.Drawing.SystemColors]::Window }
+        }
+        if ($bad -and -not $first) { $first = $b }
+    }
     if ($built.Errors.Count -gt 0) {
+        if ($first) { [void]$first.Input.Focus() }
         [void](Show-GuiMessage (($built.Errors -join "`n")) -Warning)
         return $null
+    }
+    # 空だった結果の欄に、既定の保存先を入れて見せる
+    foreach ($k in $defaults.Keys) {
+        $b = @($s.Bindings | Where-Object { $_.Field.Name -eq $k })[0]
+        if ($b) { Set-GuiControlValue $b $defaults[$k] }
     }
     return $built.Arguments
 }
@@ -1509,7 +1532,33 @@ function Close-GuiWindow {
         Stop-GuiToolRun $s.Run
     }
     $s.Timer.Stop()
+    Save-GuiWindowBounds
     Save-GuiCurrentValues
+}
+
+function Restore-GuiWindowBounds {
+    #     前に閉じたときの画面の位置と大きさにする（どの画面にも入らないなら、真ん中に出す）
+    $s = $script:Gui
+    $m = [regex]::Match([string]$s.Settings.Window, '^(-?\d+),(-?\d+),(\d+),(\d+)(,max)?$')
+    if (-not $m.Success) { return }
+    $rect = New-Object System.Drawing.Rectangle([int]$m.Groups[1].Value, [int]$m.Groups[2].Value, [int]$m.Groups[3].Value, [int]$m.Groups[4].Value)
+    if ($rect.Width -lt $s.Form.MinimumSize.Width -or $rect.Height -lt $s.Form.MinimumSize.Height) { return }
+    if (@([System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.WorkingArea.IntersectsWith($rect) }).Count -eq 0) { return }
+    $s.Form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $s.Form.Bounds = $rect
+    if ($m.Groups[5].Success) { $s.Form.WindowState = [System.Windows.Forms.FormWindowState]::Maximized }
+}
+
+function Save-GuiWindowBounds {
+    #     閉じるときの画面の位置と大きさ（最大化・最小化しているときは、元の大きさ）と、左の一覧の幅を覚える
+    $s = $script:Gui
+    $f = $s.Form
+    $b = $f.Bounds
+    if ($f.WindowState -ne [System.Windows.Forms.FormWindowState]::Normal) { $b = $f.RestoreBounds }
+    $text = '{0},{1},{2},{3}' -f $b.X, $b.Y, $b.Width, $b.Height
+    if ($f.WindowState -eq [System.Windows.Forms.FormWindowState]::Maximized) { $text += ',max' }
+    $s.Settings.Window = $text
+    $s.Settings.Splitter = $s.Split.SplitterDistance
 }
 
 Export-ModuleMember -Function *

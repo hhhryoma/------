@@ -72,10 +72,12 @@ Test-Case 'Start-ExcelTools: 入力から引数を作る（空は渡さず、必
 
     $r = ConvertTo-GuiArguments $search $fields @{ Pattern = ' '; Path = @() }
     Assert-Equal @('「探す文字」を入れてください', '「探すファイル・フォルダ」を入れてください') $r.Errors
+    Assert-Equal @('Pattern', 'Path') $r.ErrorFields '誤りのある欄'
 
     $effort = Get-TestEntry 'Effort'
     $r = ConvertTo-GuiArguments $effort (Get-GuiFields $effort) @{ Path = @('a.xlsx'); HoursPerDay = '７.５'; Tolerance = 'たくさん'; AsOf = '2026/10/20' }
     Assert-Equal @('「超過の見込みとみなす、予定工数を超える割合」は数で入れてください') $r.Errors
+    Assert-Equal @('Tolerance') $r.ErrorFields
     Assert-Equal '7.5' ([string]$r.Arguments['HoursPerDay']) '全角の数字も読む'
     Assert-True ($r.Arguments['AsOf'] -is [datetime] -and $r.Arguments['AsOf'].Day -eq 20) '日付の引数には日付を渡す'
 
@@ -169,9 +171,11 @@ Test-Case 'Start-ExcelTools: 入力を保存して次に読む（結果の保存
     $settings.Tools['Effort'] = $keep
     $settings.LastTool = 'Effort'
     $settings.ShowAdvanced = $true
+    $settings.Window = '-8,20,1200,900,max'
+    $settings.Splitter = 340
     Save-GuiSettings $settings $path
     $back = Read-GuiSettings $path
-    Assert-Equal 'Effort|True' ('{0}|{1}' -f $back.LastTool, $back.ShowAdvanced)
+    Assert-Equal 'Effort|True|-8,20,1200,900,max|340' ('{0}|{1}|{2}|{3}' -f $back.LastTool, $back.ShowAdvanced, $back.Window, $back.Splitter) '画面の位置・大きさ・左の一覧の幅も覚える'
     $v = $back.Tools['Effort']
     Assert-Equal @('D:\工数', 'D:\日報') $v['Path']
     Assert-Equal '時間|True' ('{0}|{1}' -f $v['Unit'], $v['NoRecurse'])
@@ -218,6 +222,8 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Invoke-GuiRun
         Assert-Equal @('「旧（変更前）のファイル・フォルダ」を入れてください', '「新（変更後）のファイル・フォルダ」を入れてください') $s.LastErrors
         Assert-True ($null -eq $s.Run) '実行していない'
+        Assert-Equal 'MistyRose|Window' ('{0}|{1}' -f $s.Bindings[0].Input.BackColor.Name, $s.Bindings[2].Input.BackColor.Name) '誤りのある欄の色を変える'
+        Assert-Equal '' $s.Bindings[2].Input.Text '誤りがあるときは、結果の欄に既定の保存先を入れない'
 
         # 前の入力を戻す
         Select-GuiTool 'Search'
@@ -265,6 +271,11 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Set-GuiValue 'Path' $dir
         Invoke-GuiRun
         Assert-True (Test-Path -LiteralPath $s.LastConsoleScript) 'PowerShell の画面で実行するスクリプト'
+
+        # 閉じるときに画面の大きさを覚える
+        Save-GuiWindowBounds
+        # 画面より大きい大きさは Windows が縮めるので、いまの大きさと比べる
+        Assert-Equal ('{0},{1},{2},{3}' -f $form.Bounds.X, $form.Bounds.Y, $form.Bounds.Width, $form.Bounds.Height) $s.Settings.Window
 
         # やりたいことを言葉で探す
         Update-GuiTree '検索'
