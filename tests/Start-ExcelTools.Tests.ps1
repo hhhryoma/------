@@ -112,6 +112,17 @@ Test-Case 'Start-ExcelTools: 結果の既定の保存先（名前_日時。同�
     Assert-Equal '報告.txt' (Split-Path -Leaf (Find-GuiNewResult $results $start.AddSeconds(-2))) 'Excel が無ければ文字'
     Assert-Equal $null (Find-GuiNewResult $results $start.AddMinutes(1)) '実行のあとに書いたものが無い'
 
+    # 旧・新の順（版数があれば版数、無ければ更新日時）
+    $v10 = Join-Path $dir '画面設計書_v1.10.xlsx'
+    $v9 = Join-Path $dir '画面設計書_v1.9.xlsx'
+    foreach ($p in @($v10, $v9)) { [System.IO.File]::WriteAllText($p, 'x') }
+    Assert-Equal @($v9, $v10) (Get-GuiOldNewOrder @($v10, $v9)) '版数は数で比べる（1.9 → 1.10）'
+    $a = Join-Path $dir 'a.xlsx'
+    $b = Join-Path $dir 'b.xlsx'
+    foreach ($p in @($a, $b)) { [System.IO.File]::WriteAllText($p, 'x') }
+    (Get-Item -LiteralPath $a).LastWriteTime = (Get-Date).AddDays(-1)
+    Assert-Equal @($a, $b) (Get-GuiOldNewOrder @($b, $a)) '版数が無ければ更新日時の古い方が旧'
+
     $script = New-GuiConsoleScript 'C:\tools\Invoke-QualityAnalysis.ps1' $arguments '定性分析' -Dir $dir
     $text = [System.IO.File]::ReadAllText($script)
     Assert-Match $text ([regex]::Escape("`$arguments['KeyColumn'] = @('物理名', '項目ID')"))
@@ -229,6 +240,14 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Assert-True (-not $s.AdvancedShown) '詳細な設定は隠す'
         $s.ShowAdvanced.Checked = $true
         Assert-True $s.AdvancedShown '詳細な設定を出す'
+
+        # 2 つ落とすと旧・新に分けて入れる（版数の古い方が旧）
+        Select-GuiTool 'Compare'
+        $v1 = Join-Path $dir '設計書_v1.0.xlsx'
+        $v2 = Join-Path $dir '設計書_v1.1.xlsx'
+        foreach ($p in @($v1, $v2)) { Copy-Item -LiteralPath (Join-Path $script:Fixtures 'grep/sample.xlsx') -Destination $p }
+        Add-GuiPaths @($v2, $v1)
+        Assert-Equal "$v1|$v2" ('{0}|{1}' -f $s.Bindings[0].Input.Text, $s.Bindings[1].Input.Text)
 
         # フォルダに保存する処理は、そのフォルダに書いた結果のファイルを開けるようにする
         Select-GuiTool 'Markdown'

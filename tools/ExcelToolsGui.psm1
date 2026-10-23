@@ -277,6 +277,21 @@ function Find-GuiNewResult {
     return @($files | Sort-Object { $rank[$_.Extension.ToLowerInvariant()] }, @{ Expression = { $_.LastWriteTime }; Descending = $true })[0].FullName
 }
 
+function Get-GuiOldNewOrder {
+    #     2 つのパスを旧・新の順にする（「送る」の差分と同じ。両方に版数があって違えば版数で、そうでなければ更新日時で）
+    param([string[]] $Paths)
+    if (@($Paths).Count -ne 2) { return @($Paths) }
+    Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -DisableNameChecking
+    $a = Get-Item -LiteralPath $Paths[0] -ErrorAction SilentlyContinue
+    $b = Get-Item -LiteralPath $Paths[1] -ErrorAction SilentlyContinue
+    if (-not $a -or -not $b) { return @($Paths) }
+    $va = Get-NameVersion $a.Name
+    $vb = Get-NameVersion $b.Name
+    if ($null -ne $va -and $null -ne $vb -and $va -ne $vb) { $swap = $va -gt $vb } else { $swap = $a.LastWriteTime -gt $b.LastWriteTime }
+    if ($swap) { return @($Paths[1], $Paths[0]) }
+    return @($Paths)
+}
+
 function ConvertTo-GuiLiteral {
     #     値を PowerShell の式の文字にする（コマンドの表示・PowerShell の画面での実行に使う）
     param($Value)
@@ -869,10 +884,7 @@ function Select-GuiTool {
         elseif ($null -ne $b.Field.Default) { $v = $b.Field.Default }
         if ($null -ne $v) { Set-GuiControlValue $b $v }
     }
-    if ($s.InitialPaths.Count -gt 0) {
-        $target = @($s.Bindings | Where-Object { $_.Field.Main -and @('File', 'Folder', 'Path') -contains $_.Field.Kind })[0]
-        if ($target) { Set-GuiControlValue $target $s.InitialPaths }
-    }
+    if ($s.InitialPaths.Count -gt 0) { Add-GuiPaths $s.InitialPaths -Replace }
     # 表示する前の画面では Visible を読んでも false になるので、出しているかは WhatIfShown に覚える
     $s.WhatIf.Visible = $entry.WhatIf
     $s.WhatIfShown = $entry.WhatIf
@@ -1133,21 +1145,35 @@ function Enable-GuiDrop {
 }
 
 function Add-GuiPaths {
-    #     パスを入力欄に入れる（複数の欄は足す。欄を指定しなければ、最初の空いているパスの欄、無ければ最初のパスの欄）
-    param([string[]] $Paths, $Binding)
+    #     パスを入力欄に入れる（複数の欄は足す）。欄を指定しなければ、最初の空いているパスの欄に入れ、1 つしか入らない欄が
+    #     続くときは順に入れる（旧・新の 2 つの欄には、版数か更新日時の古い方を旧に）。Replace は空いていなくても先頭の欄から入れ直す（「送る」から）
+    param([string[]] $Paths, $Binding, [switch] $Replace)
     $s = $script:Gui
     $Paths = @($Paths | Where-Object { $_ })
     if ($Paths.Count -eq 0) { return }
-    if (-not $Binding) {
-        $candidates = @($s.Bindings | Where-Object { $_.Field.Main -and @('File', 'Folder', 'Path') -contains $_.Field.Kind })
-        $Binding = @($candidates | Where-Object { Test-GuiEmpty (Get-GuiControlValue $_) })[0]
-        if (-not $Binding) { $Binding = $candidates[0] }
-        if (-not $Binding) { return }
+    if ($Binding) {
+        if ($Binding.Input -is [System.Windows.Forms.ListBox]) {
+            foreach ($p in $Paths) { if (-not $Binding.Input.Items.Contains($p)) { [void]$Binding.Input.Items.Add($p) } }
+        }
+        else { Set-GuiControlValue $Binding $Paths[0] }
+        return
     }
-    if ($Binding.Input -is [System.Windows.Forms.ListBox]) {
-        foreach ($p in $Paths) { if (-not $Binding.Input.Items.Contains($p)) { [void]$Binding.Input.Items.Add($p) } }
+    $candidates = @($s.Bindings | Where-Object { $_.Field.Main -and @('File', 'Folder', 'Path') -contains $_.Field.Kind })
+    if (-not $Replace) {
+        $empty = @($candidates | Where-Object { Test-GuiEmpty (Get-GuiControlValue $_) })
+        if ($empty.Count -gt 0) { $candidates = @($candidates | Where-Object { $empty -contains $_ }) }
     }
-    else { Set-GuiControlValue $Binding $Paths[0] }
+    if ($candidates.Count -eq 0) { return }
+    if ($candidates[0].Input -is [System.Windows.Forms.ListBox]) {
+        if ($Replace) { $candidates[0].Input.Items.Clear() }
+        Add-GuiPaths $Paths $candidates[0]
+        return
+    }
+    # 1 つしか入らない欄が続くところへ、順に入れる
+    $singles = New-Object System.Collections.Generic.List[object]
+    foreach ($c in $candidates) { if ($c.Input -is [System.Windows.Forms.ListBox]) { break }; $singles.Add($c) }
+    if ($Paths.Count -eq 2 -and $singles.Count -ge 2 -and $singles[0].Field.Name -eq 'Old' -and $singles[1].Field.Name -eq 'New') { $Paths = Get-GuiOldNewOrder $Paths }
+    for ($i = 0; $i -lt [Math]::Min($Paths.Count, $singles.Count); $i++) { Set-GuiControlValue $singles[$i] $Paths[$i] }
 }
 
 function Invoke-GuiListKey {
