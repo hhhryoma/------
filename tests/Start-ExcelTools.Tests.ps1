@@ -101,6 +101,28 @@ Test-Case 'Start-ExcelTools: 結果の既定の保存先（名前_日時。同�
     $arguments = [ordered]@{ Old = "D:\旧'版"; New = 'D:\新'; KeyColumn = [string[]]@('物理名', '項目ID'); NoRecurse = $true; AsOf = (Get-Date '2026-10-20'); MinBugs = 5 }
     Assert-Equal "& 'C:\tools\Compare-Excel.ps1' -Old 'D:\旧''版' -New 'D:\新' -KeyColumn '物理名', '項目ID' -NoRecurse -AsOf [datetime]'2026-10-20' -MinBugs 5" (Format-GuiCommandLine 'C:\tools\Compare-Excel.ps1' $arguments)
 
+    # フォルダに保存する処理の結果: 実行を始めてから書いた Excel を、文字や古いファイルより先にする
+    $results = Join-Path $dir '報告'
+    New-Item -ItemType Directory -Path (Join-Path $results 'sub') -Force | Out-Null
+    $start = Get-Date
+    foreach ($n in @('古い.xlsx', '報告.txt', '報告.xlsx', 'メモ.docx', 'sub/中.xlsx')) { [System.IO.File]::WriteAllText((Join-Path $results $n), 'x') }
+    (Get-Item -LiteralPath (Join-Path $results '古い.xlsx')).LastWriteTime = $start.AddDays(-1)
+    Assert-Equal '報告.xlsx' (Split-Path -Leaf (Find-GuiNewResult $results $start.AddSeconds(-2)))
+    Remove-Item -LiteralPath (Join-Path $results '報告.xlsx')
+    Assert-Equal '報告.txt' (Split-Path -Leaf (Find-GuiNewResult $results $start.AddSeconds(-2))) 'Excel が無ければ文字'
+    Assert-Equal $null (Find-GuiNewResult $results $start.AddMinutes(1)) '実行のあとに書いたものが無い'
+
+    # 旧・新の順（版数があれば版数、無ければ更新日時）
+    $v10 = Join-Path $dir '画面設計書_v1.10.xlsx'
+    $v9 = Join-Path $dir '画面設計書_v1.9.xlsx'
+    foreach ($p in @($v10, $v9)) { [System.IO.File]::WriteAllText($p, 'x') }
+    Assert-Equal @($v9, $v10) (Get-GuiOldNewOrder @($v10, $v9)) '版数は数で比べる（1.9 → 1.10）'
+    $a = Join-Path $dir 'a.xlsx'
+    $b = Join-Path $dir 'b.xlsx'
+    foreach ($p in @($a, $b)) { [System.IO.File]::WriteAllText($p, 'x') }
+    (Get-Item -LiteralPath $a).LastWriteTime = (Get-Date).AddDays(-1)
+    Assert-Equal @($a, $b) (Get-GuiOldNewOrder @($b, $a)) '版数が無ければ更新日時の古い方が旧'
+
     $script = New-GuiConsoleScript 'C:\tools\Invoke-QualityAnalysis.ps1' $arguments '定性分析' -Dir $dir
     $text = [System.IO.File]::ReadAllText($script)
     Assert-Match $text ([regex]::Escape("`$arguments['KeyColumn'] = @('物理名', '項目ID')"))
@@ -218,6 +240,24 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Assert-True (-not $s.AdvancedShown) '詳細な設定は隠す'
         $s.ShowAdvanced.Checked = $true
         Assert-True $s.AdvancedShown '詳細な設定を出す'
+
+        # 2 つ落とすと旧・新に分けて入れる（版数の古い方が旧）
+        Select-GuiTool 'Compare'
+        $v1 = Join-Path $dir '設計書_v1.0.xlsx'
+        $v2 = Join-Path $dir '設計書_v1.1.xlsx'
+        foreach ($p in @($v1, $v2)) { Copy-Item -LiteralPath (Join-Path $script:Fixtures 'grep/sample.xlsx') -Destination $p }
+        Add-GuiPaths @($v2, $v1)
+        Assert-Equal "$v1|$v2" ('{0}|{1}' -f $s.Bindings[0].Input.Text, $s.Bindings[1].Input.Text)
+
+        # フォルダに保存する処理は、そのフォルダに書いた結果のファイルを開けるようにする
+        Select-GuiTool 'Markdown'
+        Set-GuiValue 'Path' @((Join-Path $script:Fixtures 'grep/sample.xlsx'))
+        $mdDir = Join-Path $dir 'md'
+        Set-GuiValue 'OutDir' $mdDir
+        Invoke-GuiRun
+        Wait-GuiRun -TimeoutSeconds 120
+        Assert-Equal (Join-Path $mdDir 'sample.md') $s.ResultPath ($s.Log.Text)
+        Assert-Equal $mdDir $s.ResultDir
 
         # 途中で入力が要るツールは PowerShell の画面で実行する（テストでは起動しない）
         Select-GuiTool 'Analysis'
