@@ -15,6 +15,8 @@
 #       Hide         画面に出さない引数
 #       Defaults     入力欄の最初の値
 #       Fixed        いつも付ける引数
+#       Verbatim     入力のまま渡す文字の引数（探す文字・置き換える文字。前後の空白・引用符を除かず、空白だけの入力も渡す）
+#       AllowEmpty   空欄なら空の文字を渡す引数（置き換えた後の文字。空欄なら文字を消す）
 #       Output       空欄なら「ドキュメント\Excel ツールの結果\OutputName_日時.拡張子」を入れる引数（結果のファイル）
 #       Open         終わったら開く引数（ファイルかフォルダ。先に書いたものから、あるものを開く）。省略時は Output
 #       WhatIf       「試しに実行（ファイルを書き換えない）」を出す（最初は選んだ状態）
@@ -41,15 +43,15 @@
             Summary = 'フォルダの中の Excel・Word を横断して、セルの値・数式・コメント・図形などから文字を探します。結果の Excel の場所をクリックすると、そのセルが開きます。'
             Main = @('Pattern', 'Path', 'SimpleMatch', 'IncludeWord', 'OutXlsx')
             Labels = @{ Pattern = '探す文字'; Path = '探すファイル・フォルダ'; SimpleMatch = '入力した文字そのものを探す（正規表現として扱わない）'; IncludeWord = 'Word の文書も探す'; OutXlsx = '結果の保存先' }
-            Required = @('Path'); Hide = @('Open'); Defaults = @{ SimpleMatch = $true; IncludeWord = $true }
+            Required = @('Path'); Hide = @('Open'); Defaults = @{ SimpleMatch = $true; IncludeWord = $true }; Verbatim = @('Pattern')
             Output = @('OutXlsx'); OutputName = '検索'; Keywords = 'grep 検索 探す'
         }
         @{
             Id = 'Replace'; Label = '文字を置き換える（置換）'; Group = '設計書を作る・直す'; Tool = 'Replace-Excel.ps1'
             Summary = '複数の Excel の文字をまとめて置き換えます（値・コメント・図形・ヘッダー／フッターなど）。最初は「試しに実行」で、置き換える箇所を確かめてください。'
             Main = @('Pattern', 'Replacement', 'Path', 'SimpleMatch', 'ListPath', 'BackupDir', 'OutXlsx')
-            Labels = @{ Pattern = '置き換える文字'; Replacement = '置き換えた後の文字'; Path = '対象のファイル・フォルダ'; SimpleMatch = '入力した文字そのものを置き換える（正規表現として扱わない）'; ListPath = '置換リスト（CSV。まとめて置き換えるとき）'; BackupDir = '書き換える前のファイルの保存先'; OutXlsx = '置き換えた箇所の一覧の保存先' }
-            Required = @('Path'); Hide = @('Force'); Defaults = @{ SimpleMatch = $true }
+            Labels = @{ Pattern = '置き換える文字'; Replacement = '置き換えた後の文字（空欄なら消す）'; Path = '対象のファイル・フォルダ'; SimpleMatch = '入力した文字そのものを置き換える（正規表現として扱わない）'; ListPath = '置換リスト（CSV。まとめて置き換えるとき）'; BackupDir = '書き換える前のファイルの保存先'; OutXlsx = '置き換えた箇所の一覧の保存先' }
+            Required = @('Path'); Hide = @('Force'); Defaults = @{ SimpleMatch = $true }; Verbatim = @('Pattern', 'Replacement'); AllowEmpty = @('Replacement')
             Output = @('OutXlsx'); OutputName = '置換'
             WhatIf = $true; Confirm = 'ファイルの文字を置き換えます（元に戻せません）。よろしいですか？'; ConfirmArguments = @{ Force = $true }
             Keywords = '置換 一括'
