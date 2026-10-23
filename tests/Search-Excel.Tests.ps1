@@ -122,6 +122,17 @@ Test-Case 'Search-Excel: -SimpleMatch で記号を含む文字列をそのまま
     Assert-Equal @('顧客一覧!B2', '顧客一覧!E5') @($hits | ForEach-Object { $_.Location } | Sort-Object)
 }
 
+Test-Case 'Search-Excel: 結果は File・Location・Kind・Text を表示し、写し（PSObject.Copy）は元と別のものになる' {
+    $hits = Invoke-Search -Pattern '(株)' -Path (Join-Path $grep 'sample.xlsx') -SimpleMatch -Target Value
+    $shown = ($hits[0] | Format-Table | Out-String)
+    Assert-Match $shown 'File\s+Location\s+Kind\s+Text'
+    Assert-True (-not $shown.Contains('Path')) "表示する列: $shown"
+    Assert-Equal 'sample.xlsx|顧客一覧|B2|値' ('{0}|{1}|{2}|{3}' -f $hits[0].File, $hits[0].Sheet, $hits[0].Cell, $hits[0].Kind)
+    $copy = $hits[0].PSObject.Copy()
+    $copy.Text = '書き換え'
+    Assert-True ($hits[0].Text -ne '書き換え') '読み取り結果の使い回しは写しを渡す'
+}
+
 Test-Case 'Search-Excel: -IgnoreWidth で全角半角を区別しない' {
     Assert-Equal 0 (Invoke-Search -Pattern 'abc' -Path (Join-Path $grep 'sample.xlsx') -SimpleMatch).Count
     $hits = Invoke-Search -Pattern 'abc' -Path (Join-Path $grep 'sample.xlsx') -SimpleMatch -IgnoreWidth
