@@ -64,6 +64,7 @@ function Read-Book {
     #     Rows のキーは行番号の文字列（[ordered] に整数で引くと位置指定になるため）
     param([string] $FilePath)
 
+    if ([System.IO.Path]::GetExtension($FilePath).ToLowerInvariant() -eq '.docx') { return Read-WordBook $FilePath }
     $searchArgs = @{
         Pattern = '[\s\S]'
         Path    = [System.Management.Automation.WildcardPattern]::Escape($FilePath)
@@ -111,6 +112,106 @@ function Read-Book {
         else { foreach ($name in $book.Keys) { if ($formats.ContainsKey($name)) { $book[$name].Formats = $formats[$name] } } }
     }
     return $book
+}
+
+function Read-WordBook {
+    #     Word（.docx）の本文を、段落と表の行を文書の順に並べた 1 つのシート「本文」として読む。
+    #     段落は A 列、表の行はセルを A 列から並べる（セルの中の段落は改行でつなぐ）。空の段落は読まない。
+    #     行の対応付け・文字単位の差分は Excel と同じ方法を使える
+    param([string] $FilePath)
+    $pkg = Open-ZipPackage $FilePath
+    try { $doc = Read-PartXml -Package $pkg -PartName 'word/document.xml' }
+    finally { $pkg.Zip.Dispose() }
+    if (-not $doc) { throw 'Word の本文（word/document.xml）がありません' }
+    $ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    $sheet = [pscustomobject]@{ Rows = @{}; Comments = @{}; Shapes = @{}; Formats = @{} }
+    $script:WordRow = 0
+    $paragraphText = {
+        param($p)
+        $sb = New-Object System.Text.StringBuilder
+        foreach ($n in $p.SelectNodes('.//*')) {
+            if ($n.NamespaceURI -ne $ns) { continue }
+            switch ($n.LocalName) {
+                't' { [void]$sb.Append($n.InnerText) }
+                'tab' { [void]$sb.Append("`t") }
+                'br' { [void]$sb.Append("`n") }
+                'cr' { [void]$sb.Append("`n") }
+            }
+        }
+        $sb.ToString().Trim()
+    }
+    $addRow = {
+        param([string[]] $Cells)
+        if (@($Cells | Where-Object { $_ }).Count -eq 0) { return }
+        $script:WordRow++
+        $v = @{}
+        for ($i = 0; $i -lt $Cells.Count; $i++) { if ($Cells[$i]) { $v[(ConvertTo-ColumnName ($i + 1))] = $Cells[$i] } }
+        $sheet.Rows[[string]$script:WordRow] = @{ V = $v; F = @{} }
+    }
+    # 本文の段落・表（内容コントロール w:sdt の中も）を文書の順にたどる
+    $walk = {
+        param($parent)
+        foreach ($child in $parent.ChildNodes) {
+            if ($child.NamespaceURI -ne $ns) { continue }
+            switch ($child.LocalName) {
+                'p' { & $addRow @(, (& $paragraphText $child)) }
+                'tbl' {
+                    foreach ($tr in $child.ChildNodes) {
+                        if ($tr.LocalName -ne 'tr') { continue }
+                        $cells = @(foreach ($tc in $tr.ChildNodes) {
+                                if ($tc.LocalName -ne 'tc') { continue }
+                                (@(foreach ($p in $tc.SelectNodes('.//*[local-name()="p"]')) { & $paragraphText $p }) | Where-Object { $_ }) -join "`n"
+                            })
+                        & $addRow $cells
+                    }
+                }
+                'sdt' { foreach ($c in $child.ChildNodes) { if ($c.LocalName -eq 'sdtContent') { & $walk $c } } }
+            }
+        }
+    }
+    $body = $doc.DocumentElement.ChildNodes | Where-Object { $_.LocalName -eq 'body' } | Select-Object -First 1
+    if ($body) { & $walk $body }
+    $book = [ordered]@{}
+    $book['本文'] = $sheet
+    return $book
+}
+
+function Get-WordLayout {
+    #     Word の本文のシートの、列幅（段落の A 列は読める幅）と、折り返した文字の行数から見積もった行の高さ（-OutHtml）
+    param($Book)
+    $layout = @{}
+    foreach ($name in $Book.Keys) {
+        $sheet = $Book[$name]
+        # 左右に並べても表の列まで見えるよう、段落の A 列は 480、表の列は 160 ピクセルにする
+        $widths = @{ 1 = 480 }
+        $maxCol = 1
+        foreach ($row in $sheet.Rows.Values) { foreach ($k in $row.V.Keys) { $c = Get-ColumnIndex $k; if ($c -gt $maxCol) { $maxCol = $c } } }
+        for ($c = 2; $c -le $maxCol; $c++) { $widths[$c] = 160 }
+        $heights = @{}
+        foreach ($rk in $sheet.Rows.Keys) {
+            $lines = 1
+            $row = $sheet.Rows[$rk]
+            foreach ($k in $row.V.Keys) {
+                $n = Get-WrappedLines $row.V[$k] ($widths[(Get-ColumnIndex $k)] - 6)
+                if ($n -gt $lines) { $lines = $n }
+            }
+            if ($lines -gt 1) { $heights[[int]$rk] = 4 + 18 * $lines }
+        }
+        $layout[$name] = [pscustomobject]@{ Default = 64; Widths = $widths; Merges = @(); RowDefault = 20; Heights = $heights; Shapes = @(); Wrap = $true }
+    }
+    return $layout
+}
+
+function Get-WrappedLines {
+    #     12px の文字で Width ピクセルに折り返したときの行数の見積もり（全角は 12.5、半角は 7 ピクセル）
+    param([string] $Text, [int] $Width)
+    $lines = 0
+    foreach ($part in ([string]$Text -split "`n")) {
+        $px = 0.0
+        foreach ($ch in $part.ToCharArray()) { if ([int]$ch -lt 0x2E80) { $px += 7 } else { $px += 12.5 } }
+        $lines += [math]::Max(1, [int][math]::Ceiling($px / [math]::Max(1, $Width)))
+    }
+    return $lines
 }
 
 # ---------------------------------------------------------------- 書式の読み取り（-CompareFormat）
@@ -1746,6 +1847,8 @@ function Add-SheetJson {
     $default = 64
     if ($Layout) { $default = $Layout.Default }
     [void]$Builder.Append(('],"rows":{0},"cols":{1},"def":{2}' -f $maxRow, $maxCol, $default))
+    # Word の本文などは、セルの中で文字を折り返して表示する
+    if ($Layout -and $Layout.PSObject.Properties['Wrap'] -and $Layout.Wrap) { [void]$Builder.Append(',"wrap":1') }
     # 行の高さ（既定と違う行・非表示は 0）と図形
     $rowDefault = 20
     if ($Layout -and $Layout.RowDefault) { $rowDefault = $Layout.RowDefault }
@@ -1813,8 +1916,8 @@ function Export-DiffHtml {
         [void]$sb.Append('],"sheets":[')
         $books = $script:HtmlBooks[$s.File]
         if ($books -and $s.State -eq '差分あり') {
-            $oldLayout = Read-SheetLayout $s.Old
-            $newLayout = Read-SheetLayout $s.New
+            if ([System.IO.Path]::GetExtension($s.New).ToLowerInvariant() -eq '.docx') { $oldLayout = Get-WordLayout $books.Old; $newLayout = Get-WordLayout $books.New }
+            else { $oldLayout = Read-SheetLayout $s.Old; $newLayout = Read-SheetLayout $s.New }
             # 名前を変えたシート（新の名前 → 旧の名前）
             $renamed = @{}
             foreach ($d in @($fileDiffs | Where-Object { $_.Kind -eq 'シート' -and $_.Change -eq '名前変更' })) { $renamed[$d.New] = $d.Old }
@@ -2342,7 +2445,7 @@ function Get-ExcelFiles {
     $map = [ordered]@{}
     $root = (Resolve-Path -LiteralPath $Dir).ProviderPath.TrimEnd('\', '/')
     foreach ($f in (Get-ChildItem -LiteralPath $root -File -Recurse:(-not $NoRecurse) | Sort-Object FullName)) {
-        if (@('.xlsx', '.xlsm', '.xltx', '.xltm', '.xls', '.xlsb') -notcontains $f.Extension.ToLowerInvariant()) { continue }
+        if (@('.xlsx', '.xlsm', '.xltx', '.xltm', '.xls', '.xlsb', '.docx') -notcontains $f.Extension.ToLowerInvariant()) { continue }
         if ($f.Name.StartsWith('~$')) { continue }
         if ($OutXlsx -and [string]::Equals($f.FullName, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
         $rel = $f.FullName.Substring($root.Length).TrimStart('\', '/')
@@ -2531,7 +2634,7 @@ if ($OutHistory) {
 }
 
 # .SYNOPSIS
-#     2 つの Excel ファイル（またはフォルダ）を比べ、セル単位の差分を一覧にします（Excel 不要）。
+#     2 つの Excel ファイル（またはフォルダ）を比べ、セル単位の差分を一覧にします（Excel 不要）。Word（.docx）も段落・表の行で比べます。
 #
 # .DESCRIPTION
 #     値・数式・コメント・図形の文字・シートの追加削除を比べます。
@@ -2542,6 +2645,8 @@ if ($OutHistory) {
 #     長い文字列の変更は、変わった部分だけを「…受注を[-登録-]{+更新+}する…」の形で示します。
 #     -CompareFormat を付けると、文字の書式（太字・斜体・下線・取り消し線・文字色）と塗りつぶし、文字列の一部だけの書式も比べます。
 #     全角・半角などの表記だけの変更と、版数・更新日・改訂履歴の変更には分類（表記・版情報）を付け、-Ignore で外せます。
+#
+#     Word（.docx）は、本文の段落と表の行を文書の順に 1 つのシート「本文」の行として読み、同じ方法で比べます（書式・図・コメントは比べません）。
 #
 #     フォルダどうしを指定すると、同じ相対パスのファイルを比べ、片方にしかないファイルは追加・削除として出力します。
 #     版数だけが違う名前のファイル（_v1.0 と _v1.1、第1.0版 と 第1.1版 など）は、1 対 1 なら同じファイルとして比べます。

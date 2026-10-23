@@ -616,6 +616,46 @@ Test-Case 'Compare-Excel: 表記だけの変更と、版数・更新日・改訂
     Assert-Match $text '除いた差分: 表記のみ 1 件・版情報 3 件'
 }
 
+function New-WordDoc {
+    #     段落と表だけの最小の Word 文書を作る。Body: 文字は段落、配列の配列は表（行ごとのセル）
+    param([string] $Path, [object[]] $Body)
+    $esc = { param($t) [System.Security.SecurityElement]::Escape($t) }
+    $p = { param($t) '<w:p><w:r><w:t xml:space="preserve">' + (& $esc $t) + '</w:t></w:r></w:p>' }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($b in $Body) {
+        if ($b -is [string]) { [void]$sb.Append((& $p $b)); continue }
+        [void]$sb.Append('<w:tbl>')
+        foreach ($row in $b) { [void]$sb.Append('<w:tr>' + ((@($row | ForEach-Object { '<w:tc>' + (& $p $_) + '</w:tc>' })) -join '') + '</w:tr>') }
+        [void]$sb.Append('</w:tbl>')
+    }
+    $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + $sb.ToString() + '</w:body></w:document>'
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $fs = [System.IO.File]::Create($Path)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        $sw = New-Object System.IO.StreamWriter($zip.CreateEntry('word/document.xml').Open(), (New-Object System.Text.UTF8Encoding($false)))
+        $sw.Write($xml); $sw.Dispose()
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
+Test-Case 'Compare-Excel: Word（.docx）の段落と表の行を、行の挿入を考えて比べ、HTML では折り返して見せる' {
+    $dir = New-TestDir
+    New-WordDoc (Join-Path $dir 'v1/画面仕様書.docx') @('1. 概要', '受注を登録する画面である。受注番号は自動で採番する。', @(@('項目', '桁数'), @('受注番号', '10'), @('受注日', '8')), 'ＡＢＣ　の補足', '以上')
+    New-WordDoc (Join-Path $dir 'v2/画面仕様書.docx') @('1. 概要', '受注を登録・更新する画面である。受注番号は自動で採番する。', @(@('項目', '桁数'), @('受注番号', '12'), @('受注日', '8'), @('顧客', '20')), 'ABC の補足', '以上')
+    $out = Join-Path $dir 'diff.html'
+    $d = Invoke-Compare @{ Old = (Join-Path $dir 'v1'); New = (Join-Path $dir 'v2'); OutHtml = $out }
+    Assert-Equal @('本文!A2|値|変更|', '本文!B4|値|変更|', '本文!A6|行|追加|', '本文!A7|値|変更|表記') @($d | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Location, $_.Kind, $_.Change, $_.Tag })
+    Assert-Match $d[0].Detail '登録{\+・更新\+}する'
+    Assert-Equal '本文!A6' $d[3].OldLocation '挿入した表の行より下の段落も対応付ける'
+    $html = [System.IO.File]::ReadAllText($out)
+    $data = [regex]::Match($html, 'var DATA = (\{.*?\});\r?\n').Groups[1].Value | ConvertFrom-Json
+    $sheet = $data.files[0].sheets[0]
+    Assert-Equal '本文|1|480' ('{0}|{1}|{2}' -f $sheet.name, $sheet.new.wrap, $sheet.new.w.'1') '段落の列は読める幅で、折り返して表示する'
+}
+
 Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定するとエラー' {
     Assert-Throws { & $CompareExcel -Old (Join-Path $cmpDir 'v1') -New (Join-Path $cmpDir 'v2/同じ.xlsx') 6>$null } '両方とも'
 }

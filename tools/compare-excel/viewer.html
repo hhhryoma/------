@@ -63,6 +63,7 @@
   table.grid tbody th { left: 0; text-align: right; padding: 0 4px; z-index: 3; }
   table.grid thead th.corner { left: 0; z-index: 4; }
   table.grid td { border: 1px solid var(--grid); padding: 0 2px; white-space: pre; overflow: hidden; text-overflow: ellipsis; vertical-align: top; }
+  table.grid.wrap td { white-space: pre-wrap; word-break: break-all; text-overflow: clip; line-height: 18px; }
   table.grid td.ov { overflow: visible; text-overflow: clip; }
   table.grid td.chg { background: var(--chg); }
   table.grid td.add, table.grid tr.add td { background: var(--add); }
@@ -571,7 +572,7 @@ var DATA = /*DIFF_DATA*/null;
       return { h: Math.max(h, 8), cls: '' };
     };
     // 列幅どおりに並べるため、表の幅を列幅の合計にする（table-layout: fixed は幅の指定が要る）
-    var out = ['<table class="grid' + (info.whole ? ' whole-' + info.whole : '') + '" data-side="' + side + '" style="width:' + total + 'px"><colgroup><col style="width:44px">'];
+    var out = ['<table class="grid' + (info.whole ? ' whole-' + info.whole : '') + (sheet.wrap ? ' wrap' : '') + '" data-side="' + side + '" style="width:' + total + 'px"><colgroup><col style="width:44px">'];
     widths.forEach(function (x) { out.push('<col style="width:' + x.w + 'px">'); });
     out.push('</colgroup><thead><tr><th class="corner"></th>');
     cols.forEach(function (e, j) {
