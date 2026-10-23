@@ -1,7 +1,7 @@
 ﻿[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Pdf')]
+    [ValidateSet('List', 'Check', 'ResetView', 'Compare', 'SpVersion', 'Search', 'Terms', 'Consistency', 'TestDraft', 'Size', 'Estimate', 'Quality', 'Analysis', 'Weekly', 'Pdf')]
     [string] $Action,
 
     # 「送る」は選んだファイルを引数の最後に並べるため、名前の無い引数はすべてここに入れる（PositionalBinding = $false）
@@ -34,6 +34,7 @@ $actions = [ordered]@{
     Estimate    = @{ Label = '見積書の検算'; File = '見積書の検算'; Tool = 'Test-ExcelEstimate.ps1'; Detail = '見積書の合計の範囲漏れ・手入力の合計などを見つけ、結果の Excel を開きます' }
     Quality     = @{ Label = '品質評価'; Tool = 'New-QualityReport.ps1'; Literal = $true; Detail = '案件のフォルダ（品質評価の設定.csv を置いたもの）を選ぶと、品質の各ツールを実行して品質評価のブックを作り、開きます' }
     Analysis    = @{ Label = '品質評価の定性分析'; Tool = 'Invoke-QualityAnalysis.ps1'; Literal = $true; Detail = '品質評価のブック（またはそのフォルダ）を選ぶと、× と △ の指標の定性分析・対策の下書きを Copilot とクリップボードでやり取りして書き込み、開きます' }
+    Weekly      = @{ Label = '週次報告'; Tool = 'New-WeeklyReport.ps1'; Literal = $true; Detail = '案件のフォルダ（週次報告の設定.csv を置いたもの）を選ぶと、WBS・指摘管理表・障害管理表から週次報告（進捗・指摘・障害と担当者ごとのやること）を作って開き、報告の文章をクリップボードに写します' }
     Pdf         = @{ Label = 'PDF にする'; Tool = 'Export-ExcelToPdf.ps1'; Literal = $true; Detail = 'Excel を PDF にして、元のファイルと同じフォルダに保存します（Excel が必要）' }
 }
 
@@ -171,6 +172,29 @@ try {
             $null = & $tool @reportArgs
             $out = Join-Path $dir ('{0}_{1}.xlsx' -f $title, (Get-Date).ToString('yyyyMMdd'))
         }
+        'Weekly' {
+            if ($targets.Count -ne 1) { throw "案件のフォルダ（週次報告の設定.csv を置いたフォルダ）か、設定ファイルを 1 つ選んでください（$($targets.Count) 件選ばれています）" }
+            Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
+            $settings = Read-WeeklyReportConfig $targets[0]
+            $reportArgs = @{ Config = $targets[0] }
+            $dir = $settings.OutDir
+            if ($OutDir) { $reportArgs['OutDir'] = $OutDir; $dir = $OutDir }
+            $title = '週次報告'
+            if ($settings.Contains('Title')) { $title = $settings.Title }
+            $null = & $tool @reportArgs
+            $name = '{0}_{1}' -f $title, (Get-Date).ToString('yyyyMMdd')
+            $out = Join-Path $dir ($name + '.xlsx')
+            # 報告の文章は、メールやチャットにそのまま貼れるようにクリップボードに写す
+            $textFile = Join-Path $dir ($name + '.txt')
+            if (-not $NoOpen -and (Test-Path -LiteralPath $textFile)) {
+                try {
+                    Set-Clipboard -Value ([System.IO.File]::ReadAllText($textFile))
+                    Write-Host ''
+                    Write-Host '報告の文章をクリップボードに写しました（メールやチャットに貼り付けられます）'
+                }
+                catch { Write-Host ('報告の文章をクリップボードに写せませんでした: ' + $_.Exception.Message) }
+            }
+        }
         'Analysis' {
             if ($targets.Count -ne 1) { throw "品質評価のブックか、それを置いたフォルダを 1 つ選んでください（$($targets.Count) 件選ばれています）" }
             & $tool -Path $targets[0] | Format-Table No, Judgement, Name, Cause -AutoSize -Wrap | Out-Host
@@ -232,20 +256,21 @@ if ($failure) { throw $failure }
 # .PARAMETER Action
 #     実行する処理。Check（提出前チェック）・ResetView（表示を整える）・Compare（差分）・SpVersion（SharePoint の版と比べる）・Search（検索）・
 #     Terms（表記ゆれ）・Consistency（設計書の整合性チェック）・TestDraft（テスト仕様書の下書き）・Size（規模の見積もり）・Estimate（見積書の検算）・
-#     Quality（品質評価。案件のフォルダの「品質評価の設定.csv」を読む）・Analysis（品質評価の定性分析の下書き）・Pdf（PDF にする）。
+#     Quality（品質評価。案件のフォルダの「品質評価の設定.csv」を読む）・Analysis（品質評価の定性分析の下書き）・
+#     Weekly（週次報告。案件のフォルダの「週次報告の設定.csv」を読む）・Pdf（PDF にする）。
 #     List は処理の一覧を返します。
 #
 # .PARAMETER Path
 #     対象のファイル・フォルダ（「送る」から渡されます）。
 #
 # .PARAMETER OutDir
-#     結果のファイルを保存するフォルダ。既定は「ドキュメント\Excel ツールの結果」（品質評価は設定ファイルの出力先）。
+#     結果のファイルを保存するフォルダ。既定は「ドキュメント\Excel ツールの結果」（品質評価・週次報告は設定ファイルの出力先）。
 #
 # .PARAMETER Text
 #     検索（Search）で探す文字、SharePoint の版と比べる（SpVersion）ときの旧の版の番号。指定しなければ入力を求めます。
 #
 # .PARAMETER NoOpen
-#     結果のファイルを開きません。
+#     結果のファイルを開きません（週次報告の文章もクリップボードに写しません）。
 #
 # .PARAMETER NoPause
 #     終わったときに Enter キーを待ちません。

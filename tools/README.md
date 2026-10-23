@@ -33,6 +33,7 @@
 | [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す。前の版との変更の規模や、実績の工数からの係数表づくりも（Excel 不要） |
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
 | [Measure-Progress.ps1](#measure-progressps1) | WBS から子のタスクごとの遅れ（営業日）・状態と PV／EV／SPI を出し、遅延タスクと週ごとの完了数をスケジュール遅延リカバリ計画のテンプレートに書き込む（Excel 不要） |
+| [New-WeeklyReport.ps1](#new-weeklyreportps1) | WBS・指摘管理表・障害管理表から週次報告（今週の完了・遅延・来週の予定、指摘と障害の起票・完了・期限切れ、担当者ごとのやること）を作り、メールに貼れる文章と Excel（元の表へのリンク付き）に保存する。毎週の数字を残して前回と比べる（Excel 不要） |
 | [Measure-ReviewQuality.ps1](#measure-reviewqualityps1) | レビューの指摘管理表を集計し、設計書ごとの指摘件数・指摘密度（ページ数・規模あたり）・未完了・期限切れを出し、基準値から外れた設計書を知らせる。レビュー記録の工数も使うと、レビュー工数密度 × 指摘密度のゾーン分析もする（Excel 不要） |
 | [Measure-TestQuality.ps1](#measure-testqualityps1) | テスト仕様書と障害管理表を集計し、機能ごとのテスト密度・バグ密度とゾーン分析、テストの消化とバグの収束の推移、信頼度成長曲線（潜在バグ数の推定・収束の判定）、NG なのにバグ番号が無いなどの食い違いを出す（Excel 不要） |
 | [Measure-DefectRemoval.ps1](#measure-defectremovalps1) | 障害管理表とレビューの指摘から、欠陥の混入工程 × 摘出工程と、工程ごとの摘出率・後の工程への流出・原因の多い順を出す（Excel 不要） |
@@ -52,7 +53,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -1307,6 +1308,98 @@ PV 12 / EV 8 / BAC 22 / SPI 0.67 / AC 11 / CPI 0.73
 
 - 日付の列が無く、セルの色でバーを描いたガントチャートだけの WBS は読めません
 - 先行・後続の関係（クリティカルパス）は見ていません
+
+## New-WeeklyReport.ps1
+
+WBS・レビューの指摘管理表・障害管理表から、**週次報告**を作ります。毎週、表を開いて数え、遅れや期限切れを拾って文章にまとめる作業を機械でします。Excel は不要です。
+
+```powershell
+.\New-WeeklyReport.ps1 -Wbs D:\PJ\WBS.xlsx -Findings D:\PJ\レビュー -BugList D:\PJ\テスト\障害管理表.xlsx -OutDir D:\PJ\週次報告 -HistoryCsv D:\PJ\週次報告\実績.csv
+# 案件のフォルダの「週次報告の設定.csv」を読んで作る（「送る」→「週次報告」も同じ）
+.\New-WeeklyReport.ps1 D:\PJ
+```
+
+```
+週次報告（2026/10/17～2026/10/23）
+
+■ 進捗（WBS）
+・タスク 6 件: 完了 2・遅延 1・予定どおり 1・未着手 2 / SPI 0.89（前回 0.95）
+・今週の完了: 1 件 / 今週に終わる予定: 2 件（うち未完了 1 件）
+  - 1.2 テーブル設計（佐藤）
+・遅延: 1 件（前回 0）
+  - 1.3 IF 設計（佐藤）: 3 営業日の遅れ・進捗 40%・予定終了 10/23・見込 10/28
+・来週（10/24～10/30）の予定: 3 件
+  - 開始 10/28 2.2 バッチ詳細（鈴木）
+  - 終了 10/28 2.3 帳票詳細
+
+■ レビューの指摘
+・今週: 起票 3 件・完了 1 件
+・未完了: 3 件（前回 1）・うち期限切れ 1 件（前回 0） / 重要度 高 1・中 2
+  - 期限 10/21 DD03 テーブル定義書: 型が誤り（佐藤）
+
+■ 担当者別（遅延・期限切れと、来週までのもの）
+【佐藤】遅延 1・期限切れ 2・期限間近 1
+  - [期限切れ] 指摘: DD03 テーブル定義書: 型が誤り（期限 10/21・高・未対応）
+  - [遅延] タスク: 1.3 IF 設計（予定終了 10/23・3 営業日の遅れ・進捗 40%・見込 10/28）
+【鈴木】期限間近 1・来週開始 1
+  - [期限間近] 障害: B-003: 合計が違う（期限 10/29・高・未対応）
+```
+
+### 報告の内容
+
+| 区分 | 内容 |
+| --- | --- |
+| 進捗 | WBS を [Measure-Progress.ps1](#measure-progressps1) で集計した、タスクの状態・SPI、今週の完了（実績終了日）、遅延（遅れの大きい順）、来週に終わる・始まるタスク |
+| 指摘・障害 | 今週の起票・完了、未完了（重要度の内訳）・期限切れ（期限の古い順） |
+| 担当者別 | 担当者ごとに、遅延したタスク・期限切れの指摘と障害、来週に終わるタスク・期限が来る指摘と障害、来週に始まるタスク。そのほかの未完了は件数だけ（Excel には全件） |
+
+- **今週**は `-Since` から `-AsOf` まで（既定は `-AsOf` までの 7 日）、**来週**は `-AsOf` の翌日から 7 日です。金曜日の報告を翌週に作るときは、`-AsOf` に金曜日を指定します（基準日より後に起票・完了したものは、基準日の時点の状態で数えます）
+- 文章は、各一覧を 10 件まで載せ、残りは「ほか N 件」にします（Excel には全件）
+- 担当者の名前は、全角・半角と空白の違いをそろえて同じ人とみなします（「山田」と「山田 太郎」は別の人になるので、表の書き方をそろえてください）
+
+### 読む表
+
+| 表 | 見出しの候補 | 読む項目 |
+| --- | --- | --- |
+| WBS | `tools\progress\WBSの見出し.csv` | Measure-Progress.ps1 と同じ |
+| 指摘管理表 | `tools\review-quality\指摘管理表の見出し.csv` | 設計書・指摘内容・重要度・状態・対応要否・起票日・期限・完了日・対応者（Measure-ReviewQuality.ps1 と同じ） |
+| 障害管理表 | `tools\test-quality\見出し.csv` | 障害ID・機能・障害内容・重要度・状態・起票日・完了日、**担当・期限**（担当者・修正予定日など） |
+
+完了・取下げの見分け方は、指摘は Measure-ReviewQuality.ps1、障害は Measure-TestQuality.ps1 と同じです（取下げ・重複・仕様どおりなどは数えません）。
+
+### 保存するもの（`-OutDir`）
+
+| ファイル | 内容 |
+| --- | --- |
+| `週次報告_yyyyMMdd.txt` | 上の報告の文章（メールやチャットに貼る。「送る」から作ると、クリップボードにも写します） |
+| `週次報告_yyyyMMdd.xlsx` | 概要（今回・前回・増減）・担当者（遅延と未完了の件数）・担当者別（やることの一覧）・タスク・指摘・障害（未完了と今週の完了）・推移（`-HistoryCsv` のとき。グラフ付き）。一覧から WBS・指摘管理表・障害管理表の該当セルへのリンク付き |
+
+- `-HistoryCsv` の CSV（時点・区分・項目・値）に毎週の数字を足し、前回の数字と比べます（同じ日に作り直すと、その日の数字を置き換えます）
+- `-OutDir` のフォルダのファイル（前の週の報告）は、表として読みません
+
+### 週次報告の設定（`週次報告の設定.csv`）
+
+案件のフォルダに `tools\weekly-report\週次報告の設定_ひな形.csv` を `週次報告の設定.csv` の名前で写し、WBS・指摘管理表・障害管理表の場所を書いておくと、`.\New-WeeklyReport.ps1 D:\PJ` や「送る」→「週次報告」（案件のフォルダを選ぶ）で作れます。
+
+| 項目 | 値 |
+| --- | --- |
+| 出力先 | 報告を保存するフォルダ（既定は設定ファイルのフォルダの「週次報告」） |
+| WBS・指摘管理表・障害管理表 | ファイルかフォルダ（設定ファイルのフォルダからの相対パスか絶対パス。`\|` で区切って複数書ける）。空の表は報告しない |
+| 休日 | 休日の CSV（遅れの営業日の計算） |
+| 実績 | 毎週の数字を残す CSV |
+| タイトル | 報告のタイトルとファイル名（既定は「週次報告」） |
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Config` | 週次報告の設定ファイル（または、それを置いた案件のフォルダ）。コマンドで指定したパラメーターのほうを使う |
+| `-Wbs` / `-Findings` / `-BugList` | WBS・指摘管理表・障害管理表（ファイル・フォルダ。複数可）。どれか 1 つ以上 |
+| `-AsOf` / `-Since` | 報告の基準日（既定は今日）/ 今週の始まりの日（既定は基準日の 6 日前） |
+| `-Holidays` | 休日の CSV |
+| `-OutDir` | 報告の Excel と文章を保存するフォルダ |
+| `-HistoryCsv` | 毎週の数字を残す CSV（前回との比較・推移） |
+| `-Title` | 報告のタイトルとファイル名 |
 
 ## Measure-DesignSize.ps1
 

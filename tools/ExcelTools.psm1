@@ -998,32 +998,24 @@ function Resolve-PhaseName {
     return $best
 }
 
-function Read-QualityReportConfig {
-    #     品質評価の設定の CSV（項目・値）を、New-QualityReport.ps1 のパラメーター → 値 にする。
-    #     Path がフォルダなら、その中の「品質評価の設定.csv」を読む。値の相対パスは設定ファイルのフォルダからのパスとし、
-    #     | で区切って複数書ける。出力先が無ければ設定ファイルのフォルダの「品質報告」、プロジェクトが無ければそのフォルダの名前
-    param([string] $Path)
+function Read-SettingsFile {
+    #     設定の CSV（項目・値）を、パラメーター → 値 にする。Path がフォルダなら、その中の FileName を読む。
+    #       Keys: 項目 → @(パラメーター, 複数か, パスか)。値の相対パスは設定ファイルのフォルダからのパスとし、複数の値は | で区切る
+    #       What: 設定の名前（メッセージ用）。Template: 写して使うひな形（見つからないときのメッセージ用）
+    #     戻り値: @{ Settings = パラメーター → 値; BaseDir = 設定ファイルのフォルダ }
+    param([string] $Path, [string] $FileName, $Keys, [string] $What, [string] $Template)
     $file = $Path
-    if (Test-Path -LiteralPath $Path -PathType Container) { $file = Join-Path $Path '品質評価の設定.csv' }
-    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "品質評価の設定ファイルが見つかりません: $file（tools\quality-report\品質評価の設定_ひな形.csv を写して書いてください）" }
+    if (Test-Path -LiteralPath $Path -PathType Container) { $file = Join-Path $Path $FileName }
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "${What}ファイルが見つかりません: $file（$Template を写して書いてください）" }
     $file = (Resolve-Path -LiteralPath $file).ProviderPath
     $base = Split-Path -Path $file -Parent
-    # 項目 → パラメーター・複数か・パスか
-    $keys = [ordered]@{
-        '出力先' = @('OutDir', $false, $true); 'タイトル' = @('Title', $false, $false); 'プロジェクト' = @('Project', $false, $false)
-        '設計書' = @('DesignPath', $true, $true); '指摘管理表' = @('Findings', $true, $true); 'AIレビュー' = @('AiReview', $true, $true); 'レビュー記録' = @('ReviewLog', $true, $true)
-        'ページ数' = @('PageCsv', $false, $true); 'テスト仕様書' = @('TestPath', $true, $true); '障害管理表' = @('BugList', $true, $true)
-        '要件一覧' = @('Requirement', $true, $true); '規模' = @('SizeCsv', $false, $true); '機能の対応表' = @('FunctionMap', $false, $true)
-        'レビューの基準値' = @('ReviewLimits', $false, $true); 'テストの基準値' = @('TestLimits', $false, $true); '判定基準' = @('Criteria', $false, $true)
-        '実績' = @('HistoryCsv', $false, $true)
-    }
     $settings = [ordered]@{}
-    foreach ($r in (Read-CsvFile $file @('項目', '値') '品質評価の設定')) {
+    foreach ($r in (Read-CsvFile $file @('項目', '値') $What)) {
         $key = ([string]$r.'項目').Trim()
         $value = ([string]$r.'値').Trim()
         if (-not $key -or -not $value) { continue }
-        if (-not $keys.Contains($key)) { throw ("品質評価の設定に知らない項目があります: {0}（使える項目: {1}）: {2}" -f $key, (@($keys.Keys) -join '・'), $file) }
-        $def = $keys[$key]
+        if (-not $Keys.Contains($key)) { throw ("{0}に知らない項目があります: {1}（使える項目: {2}）: {3}" -f $What, $key, (@($Keys.Keys) -join '・'), $file) }
+        $def = $Keys[$key]
         $values = @($value)
         if ($def[1]) { $values = @($value -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
         if ($def[2]) {
@@ -1033,8 +1025,41 @@ function Read-QualityReportConfig {
         }
         if ($def[1]) { $settings[$def[0]] = [string[]]$values } else { $settings[$def[0]] = [string]$values[0] }
     }
-    if (-not $settings.Contains('OutDir')) { $settings['OutDir'] = Join-Path $base '品質報告' }
-    if (-not $settings.Contains('Project')) { $settings['Project'] = Split-Path -Path $base -Leaf }
+    return [pscustomobject]@{ Settings = $settings; BaseDir = $base }
+}
+
+function Read-QualityReportConfig {
+    #     品質評価の設定の CSV（項目・値）を、New-QualityReport.ps1 のパラメーター → 値 にする。
+    #     Path がフォルダなら、その中の「品質評価の設定.csv」を読む。値の相対パスは設定ファイルのフォルダからのパスとし、
+    #     | で区切って複数書ける。出力先が無ければ設定ファイルのフォルダの「品質報告」、プロジェクトが無ければそのフォルダの名前
+    param([string] $Path)
+    # 項目 → パラメーター・複数か・パスか
+    $keys = [ordered]@{
+        '出力先' = @('OutDir', $false, $true); 'タイトル' = @('Title', $false, $false); 'プロジェクト' = @('Project', $false, $false)
+        '設計書' = @('DesignPath', $true, $true); '指摘管理表' = @('Findings', $true, $true); 'AIレビュー' = @('AiReview', $true, $true); 'レビュー記録' = @('ReviewLog', $true, $true)
+        'ページ数' = @('PageCsv', $false, $true); 'テスト仕様書' = @('TestPath', $true, $true); '障害管理表' = @('BugList', $true, $true)
+        '要件一覧' = @('Requirement', $true, $true); '規模' = @('SizeCsv', $false, $true); '機能の対応表' = @('FunctionMap', $false, $true)
+        'レビューの基準値' = @('ReviewLimits', $false, $true); 'テストの基準値' = @('TestLimits', $false, $true); '判定基準' = @('Criteria', $false, $true)
+        '実績' = @('HistoryCsv', $false, $true)
+    }
+    $read = Read-SettingsFile $Path '品質評価の設定.csv' $keys '品質評価の設定' 'tools\quality-report\品質評価の設定_ひな形.csv'
+    $settings = $read.Settings
+    if (-not $settings.Contains('OutDir')) { $settings['OutDir'] = Join-Path $read.BaseDir '品質報告' }
+    if (-not $settings.Contains('Project')) { $settings['Project'] = Split-Path -Path $read.BaseDir -Leaf }
+    return $settings
+}
+
+function Read-WeeklyReportConfig {
+    #     週次報告の設定の CSV（項目・値）を、New-WeeklyReport.ps1 のパラメーター → 値 にする。
+    #     Path がフォルダなら、その中の「週次報告の設定.csv」を読む。出力先が無ければ設定ファイルのフォルダの「週次報告」
+    param([string] $Path)
+    $keys = [ordered]@{
+        '出力先' = @('OutDir', $false, $true); 'タイトル' = @('Title', $false, $false); 'WBS' = @('Wbs', $true, $true); '休日' = @('Holidays', $false, $true)
+        '指摘管理表' = @('Findings', $true, $true); '障害管理表' = @('BugList', $true, $true); '実績' = @('HistoryCsv', $false, $true)
+    }
+    $read = Read-SettingsFile $Path '週次報告の設定.csv' $keys '週次報告の設定' 'tools\weekly-report\週次報告の設定_ひな形.csv'
+    $settings = $read.Settings
+    if (-not $settings.Contains('OutDir')) { $settings['OutDir'] = Join-Path $read.BaseDir '週次報告' }
     return $settings
 }
 
