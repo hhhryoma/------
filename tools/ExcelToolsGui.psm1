@@ -340,10 +340,13 @@ function Start-GuiToolRun {
     $runner = {
         param($ToolPath, $Arguments)
         $ErrorActionPreference = 'Stop'
+        # 失敗を exit 1 で知らせるツール（PDF にする）のため、終了コードも受け取る
+        $global:LASTEXITCODE = 0
         $result = @(& $ToolPath @Arguments)
+        $code = $global:LASTEXITCODE
         $text = ''
         if ($result.Count -gt 0) { $text = ($result | Select-Object -First 200 | Format-Table -AutoSize -Wrap | Out-String -Width 220).Trim() }
-        [pscustomobject]@{ Count = $result.Count; Text = $text }
+        [pscustomobject]@{ Count = $result.Count; Text = $text; ExitCode = [int]$code }
     }
     $splat = @{}
     foreach ($k in $Arguments.Keys) { $splat[$k] = $Arguments[$k] }
@@ -394,6 +397,10 @@ function Receive-GuiToolRun {
         $out = @($Run.PowerShell.EndInvoke($Run.Handle))
         $state.Summary = @($out | Where-Object { $_ -and $_.PSObject.Properties['Count'] -and $_.PSObject.Properties['Text'] })[0]
         $state.Succeeded = $true
+        if ($state.Summary -and $state.Summary.ExitCode -ne 0) {
+            $state.Succeeded = $false
+            $state.Error = ('ツールが失敗を知らせました（終了コード {0}）。記録の欄の「失敗」の行を確かめてください' -f $state.Summary.ExitCode)
+        }
     }
     catch {
         $ex = $_.Exception
@@ -1437,7 +1444,12 @@ function Update-GuiRun {
     else {
         Write-GuiLog $r.Error 'Red'
         $s.Status.Text = $r.Error
-        if (-not $r.Stopped) { [void](Show-GuiMessage ('エラーで止まりました: ' + $r.Error) -Warning) }
+        if ($r.Summary) {
+            # 最後まで動いて失敗を知らせたとき（一部が失敗）は、できた結果も開けるようにする
+            Set-GuiResult $s.Entry $s.RunArguments $s.RunStarted
+            [void](Show-GuiMessage $r.Error -Warning)
+        }
+        elseif (-not $r.Stopped) { [void](Show-GuiMessage ('エラーで止まりました: ' + $r.Error) -Warning) }
     }
 }
 

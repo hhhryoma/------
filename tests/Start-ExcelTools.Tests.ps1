@@ -152,6 +152,13 @@ Test-Case 'Start-ExcelTools: ツールを別の実行空間で動かし、Write-
     Assert-Equal 'False|読めません' ('{0}|{1}' -f $r.Succeeded, $r.Error)
     Assert-Equal @('始めます: 設計書|Cyan', '警告: 注意|DarkYellow') @($r.Messages | ForEach-Object { '{0}|{1}' -f $_.Text, $_.Color })
 
+    # 失敗を exit で知らせるツールは失敗にする
+    $exit = Join-Path $dir 'exit.ps1'
+    [System.IO.File]::WriteAllText($exit, "Write-Host '1 件失敗'`r`nexit 1`r`n")
+    $r = Wait-GuiToolRun (Start-GuiToolRun $exit @{}) -TimeoutSeconds 60
+    Assert-Equal 'False|1' ('{0}|{1}' -f $r.Succeeded, $r.Summary.ExitCode)
+    Assert-Match $r.Error '終了コード 1'
+
     $slow = Join-Path $dir 'slow.ps1'
     [System.IO.File]::WriteAllText($slow, "Start-Sleep -Seconds 60`r`n")
     $run = Start-GuiToolRun $slow @{}
