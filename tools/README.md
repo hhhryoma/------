@@ -46,11 +46,12 @@
 
 | スクリプト | 内容 |
 | --- | --- |
+| [Install-ExcelTools.ps1](#install-exceltoolsps1) | 共有フォルダ（配布元）に置いた tools を、担当者の PC に 1 回のダブルクリック（`Install-ExcelTools.cmd`）で入れて「送る」に登録する。配布元が更新されると、「送る」で使ったあとに自動で新しい版を写す |
 | [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールを、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Search-Excel.ps1
 
@@ -2623,6 +2624,42 @@ Copilot は 1 回に貼り付けられる文字数に上限があり、ライセ
 - 設計書の内容を Copilot に送信します。顧客の資料を扱う場合は、社内の Copilot 利用規程に従ってください
 - 設計書か観点表を変えて再実行すると、内容が変わった依頼の古い回答は `answers\R001.txt.old` のように退避され、もう一度依頼し直しになります
 - 図形の中の文字・コメントもテキスト化します。画像（スクリーンショット）の中身は読めません
+
+## Install-ExcelTools.ps1
+
+管理者が共有フォルダに置いたツールを、**担当者が 1 回のダブルクリックで自分の PC に入れて「送る」に登録**できるようにします。配布元を更新すると、担当者の PC も自動で新しい版になります。管理者の権限は要りません。
+
+### 配布のしかた（管理者）
+
+1. このリポジトリの `tools` フォルダを、まるごと共有フォルダに置きます（例: `\\server\share\ExcelTools\tools`）
+2. 担当者に「`\\server\share\ExcelTools\tools\Install-ExcelTools.cmd` をダブルクリックしてください」と伝えます
+3. ツールを新しくするときは、共有フォルダの `tools` フォルダを入れ替えるだけです。担当者の PC は、「送る」でツールを使ったあとに配布元を確かめ（12 時間に 1 回まで）、変わったファイルだけを写します。次の実行から新しい版になります
+
+### 担当者の PC で起きること
+
+- 配布元の `tools` フォルダを `%LOCALAPPDATA%\ExcelTools\tools` に写し、右クリックの「送る」に各ツールを登録します（共有フォルダから直接動かすより速く、ネットワークが切れても使えます）
+- 配布元と「送る」の登録の指定は `%LOCALAPPDATA%\ExcelTools\install.json` に覚え、更新のときも同じ指定で登録し直します
+- 写したファイルは「ブロック」を外すので、実行のたびに確認は出ません
+
+```powershell
+# 「送る」に登録する処理と結果の保存先を決めて配る（担当者は .cmd の代わりにこれを実行）
+\\server\share\ExcelTools\tools\Install-ExcelTools.ps1 -Action Check, Compare -OutDir \\server\share\チェック結果
+
+# すぐに新しい版にする / 消す（「送る」の項目と PC の写しを消す）
+& "$env:LOCALAPPDATA\ExcelTools\tools\Install-ExcelTools.ps1" -Update
+& "$env:LOCALAPPDATA\ExcelTools\tools\Install-ExcelTools.ps1" -Uninstall
+```
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Source` | 配布元の tools フォルダ。既定はこのスクリプトのあるフォルダ（PC に入れた写しから実行したときは、覚えている配布元） |
+| `-InstallDir` | PC に入れるフォルダ。既定は `%LOCALAPPDATA%\ExcelTools` |
+| `-Action` / `-OutDir` | 「送る」に登録する処理と結果の保存先（Install-SendTo.ps1 と同じ） |
+| `-NoSendTo` | 「送る」に登録しない（ツールを写すだけ） |
+| `-Update` | 配布元が変わっていれば、変わったファイルだけを写す |
+| `-Uninstall` | 「送る」の項目と PC に入れたツールを消す |
 
 ## Install-SendTo.ps1
 
