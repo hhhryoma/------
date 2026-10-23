@@ -125,7 +125,11 @@ Test-Case 'Start-ExcelTools: 結果の既定の保存先（名前_日時。同�
     (Get-Item -LiteralPath $a).LastWriteTime = (Get-Date).AddDays(-1)
     Assert-Equal @($a, $b) (Get-GuiOldNewOrder @($b, $a)) '版数が無ければ更新日時の古い方が旧'
 
+    $old = Join-Path $dir '実行_old.ps1'
+    [System.IO.File]::WriteAllText($old, '')
+    (Get-Item -LiteralPath $old).LastWriteTime = (Get-Date).AddDays(-2)
     $script = New-GuiConsoleScript 'C:\tools\Invoke-QualityAnalysis.ps1' $arguments '定性分析' -Dir $dir
+    Assert-True (-not (Test-Path -LiteralPath $old)) '前に作った古いスクリプトは消す'
     $text = [System.IO.File]::ReadAllText($script)
     Assert-Match $text ([regex]::Escape("`$arguments['KeyColumn'] = @('物理名', '項目ID')"))
     Assert-Match $text 'Enter キーを押すと閉じます'
@@ -151,6 +155,13 @@ Test-Case 'Start-ExcelTools: ツールを別の実行空間で動かし、Write-
     $r = Wait-GuiToolRun (Start-GuiToolRun $script @{ Name = '設計書' }) -TimeoutSeconds 60
     Assert-Equal 'False|読めません' ('{0}|{1}' -f $r.Succeeded, $r.Error)
     Assert-Equal @('始めます: 設計書|Cyan', '警告: 注意|DarkYellow') @($r.Messages | ForEach-Object { '{0}|{1}' -f $_.Text, $_.Color })
+
+    # 失敗を exit で知らせるツールは失敗にする
+    $exit = Join-Path $dir 'exit.ps1'
+    [System.IO.File]::WriteAllText($exit, "Write-Host '1 件失敗'`r`nexit 1`r`n")
+    $r = Wait-GuiToolRun (Start-GuiToolRun $exit @{}) -TimeoutSeconds 60
+    Assert-Equal 'False|1' ('{0}|{1}' -f $r.Succeeded, $r.Summary.ExitCode)
+    Assert-Match $r.Error '終了コード 1'
 
     $slow = Join-Path $dir 'slow.ps1'
     [System.IO.File]::WriteAllText($slow, "Start-Sleep -Seconds 60`r`n")
