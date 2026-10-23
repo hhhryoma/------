@@ -125,7 +125,11 @@ Test-Case 'Start-ExcelTools: 結果の既定の保存先（名前_日時。同�
     (Get-Item -LiteralPath $a).LastWriteTime = (Get-Date).AddDays(-1)
     Assert-Equal @($a, $b) (Get-GuiOldNewOrder @($b, $a)) '版数が無ければ更新日時の古い方が旧'
 
+    $old = Join-Path $dir '実行_old.ps1'
+    [System.IO.File]::WriteAllText($old, '')
+    (Get-Item -LiteralPath $old).LastWriteTime = (Get-Date).AddDays(-2)
     $script = New-GuiConsoleScript 'C:\tools\Invoke-QualityAnalysis.ps1' $arguments '定性分析' -Dir $dir
+    Assert-True (-not (Test-Path -LiteralPath $old)) '前に作った古いスクリプトは消す'
     $text = [System.IO.File]::ReadAllText($script)
     Assert-Match $text ([regex]::Escape("`$arguments['KeyColumn'] = @('物理名', '項目ID')"))
     Assert-Match $text 'Enter キーを押すと閉じます'

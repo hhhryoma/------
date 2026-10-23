@@ -466,6 +466,8 @@ function New-GuiConsoleScript {
     #     PowerShell の画面で実行するためのスクリプト（途中で入力が要るツール用）。引数を書き込んだ一時ファイルを作り、そのパスを返す
     param([string] $ToolPath, $Arguments, [string] $Title, [string] $Dir = (Join-Path ([System.IO.Path]::GetTempPath()) 'ExcelTools'))
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    # 前に作ったスクリプトのうち、1 日より古いものは消す（たまらないように）
+    Get-ChildItem -LiteralPath $Dir -Filter '実行_*.ps1' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } | Remove-Item -Force -ErrorAction SilentlyContinue
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add('$ErrorActionPreference = ''Stop''')
     $lines.Add('try { $Host.UI.RawUI.WindowTitle = ' + (ConvertTo-GuiLiteral ('Excel ツール - ' + $Title)) + ' } catch { }')
