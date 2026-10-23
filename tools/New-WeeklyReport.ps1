@@ -9,6 +9,8 @@ param(
 
     [string[]] $BugList,
 
+    [string[]] $IssueList,
+
     [datetime] $AsOf = (Get-Date).Date,
 
     [datetime] $Since,
@@ -35,7 +37,7 @@ if ($Config) {
     $settings = Read-WeeklyReportConfig $Config
     foreach ($k in $settings.Keys) { if (-not $PSBoundParameters.ContainsKey($k)) { Set-Variable -Name $k -Value $settings[$k] } }
 }
-if (-not ($Wbs -or $Findings -or $BugList)) { throw '-Wbs・-Findings・-BugList のどれか（または -Config の設定ファイル）を指定してください' }
+if (-not ($Wbs -or $Findings -or $BugList -or $IssueList)) { throw '-Wbs・-Findings・-BugList・-IssueList のどれか（または -Config の設定ファイル）を指定してください' }
 foreach ($name in @('Holidays', 'OutDir', 'HistoryCsv')) {
     $v = Get-Variable -Name $name -ValueOnly
     if ($v) { Set-Variable -Name $name -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($v) }
@@ -158,9 +160,10 @@ function Add-Issue {
         })
 }
 
-$findingFiles = $null; $bugFiles = $null
+$findingFiles = $null; $bugFiles = $null; $issueFiles = $null
 if ($Findings) { $findingFiles = Get-FilePathSet $Findings -NoRecurse:$NoRecurse }
 if ($BugList) { $bugFiles = Get-FilePathSet $BugList -NoRecurse:$NoRecurse }
+if ($IssueList) { $issueFiles = Get-FilePathSet $IssueList -NoRecurse:$NoRecurse }
 function Join-Skip {
     param($Sets)
     $all = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -177,7 +180,7 @@ if ($Findings) {
     $fields = @('設計書', '指摘内容', '分類', '重要度', '状態', '対応要否', '起票日', '期限', '完了日', '対応者')
     $candidates = Read-HeaderCandidates (Join-Path $PSScriptRoot 'review-quality/指摘管理表の見出し.csv') $fields
     $records = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $Findings '指摘管理表' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
-        -Need @('指摘内容', @('設計書', '状態', '重要度', '分類')) -Key @('指摘内容') -What '指摘管理表' -Skip (Join-Skip @($outFiles, $bugFiles))
+        -Need @('指摘内容', @('設計書', '状態', '重要度', '分類')) -Key @('指摘内容') -What '指摘管理表' -Skip (Join-Skip @($outFiles, $bugFiles, $issueFiles))
     if ($records.Count -eq 0) { Write-Warning '指摘管理表が見つかりませんでした（指摘内容と、設計書・状態・重要度・分類のどれかの見出しがある表を探します）' }
     foreach ($rec in $records) {
         $v = $rec.Values
@@ -200,7 +203,7 @@ if ($BugList) {
     $fields = @('障害ID', '機能', '障害内容', '起票日', '完了日', '状態', '重要度', '担当', '期限')
     $candidates = Read-HeaderCandidates (Join-Path $PSScriptRoot 'test-quality/見出し.csv') $fields
     $records = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $BugList '障害管理表' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
-        -Need @('障害内容', @('起票日', '状態', '重要度', '障害ID')) -Key @('障害内容') -What '障害管理表' -Skip (Join-Skip @($outFiles, $findingFiles))
+        -Need @('障害内容', @('起票日', '状態', '重要度', '障害ID')) -Key @('障害内容') -What '障害管理表' -Skip (Join-Skip @($outFiles, $findingFiles, $issueFiles))
     if ($records.Count -eq 0) { Write-Warning '障害管理表が見つかりませんでした（障害内容と、起票日・状態・重要度・障害番号のどれかの見出しがある表を探します）' }
     foreach ($rec in $records) {
         $v = $rec.Values
@@ -213,6 +216,39 @@ if ($BugList) {
             (ConvertTo-DateValue $v['起票日'] $AsOf) (ConvertTo-DateValue $v['期限'] $AsOf) $closedOn ([bool]$closed)
     }
 }
+
+$hasIssues = $false
+if ($IssueList) {
+    # 課題・QA の管理表。回答済み・解決は終わったもの、取下げ・重複などは数えない
+    $closedPattern = '完了|済|クローズ|close|done|解決|対応不要|不要'
+    $excludedPattern = '取下げ|取り下げ|取消|却下|対象外|重複'
+    $fields = @('課題ID', '区分', '件名', '内容', '重要度', '状態', '起票日', '期限', '完了日', '担当')
+    $candidates = Read-HeaderCandidates (Join-Path $PSScriptRoot 'weekly-report/課題管理表の見出し.csv') $fields
+    $records = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $IssueList '課題管理表' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
+        -Need @(@('件名', '内容'), @('状態', '期限', '担当', '完了日')) -Key @('件名', '内容') -What '課題管理表' -Skip (Join-Skip @($outFiles, $findingFiles, $bugFiles))
+    if ($records.Count -eq 0) { Write-Warning '課題管理表が見つかりませんでした（件名か内容と、状態・期限・担当・完了日のどれかの見出しがある表を探します）' }
+    foreach ($rec in $records) {
+        $v = $rec.Values
+        $content = ([string]$v['件名']).Trim()
+        if (-not $content) { $content = ([string]$v['内容']).Trim() }
+        if (-not $content) { continue }
+        $status = ([string]$v['状態']).Trim()
+        if ($status -match $excludedPattern) { continue }
+        $hasIssues = $true
+        $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
+        $closed = ($status -match $closedPattern) -or ((-not $status) -and $closedOn)
+        Add-Issue '課題' $rec ([string]$v['課題ID']).Trim() ([string]$v['区分']).Trim() $content ([string]$v['重要度']).Trim() ([string]$v['担当']).Trim() $status `
+            (ConvertTo-DateValue $v['起票日'] $AsOf) (ConvertTo-DateValue $v['期限'] $AsOf) $closedOn ([bool]$closed)
+    }
+}
+
+# 表の種類: 種類・報告の見出し・指定したか・読めたか・読めないときの表の名前
+$issueKinds = @(
+    [pscustomobject]@{ Kind = '指摘'; Heading = 'レビューの指摘'; Given = [bool]$Findings; Read = $hasFindings; Table = '指摘管理表' },
+    [pscustomobject]@{ Kind = '障害'; Heading = '障害'; Given = [bool]$BugList; Read = $hasBugs; Table = '障害管理表' },
+    [pscustomobject]@{ Kind = '課題'; Heading = '課題・QA'; Given = [bool]$IssueList; Read = $hasIssues; Table = '課題管理表' })
+$givenKinds = @($issueKinds | Where-Object Given)
+$kindRank = @{ '指摘' = 0; '障害' = 1; '課題' = 2 }
 
 function Get-SeverityRank {
     #     重要度の並び（高いものから。知らない書き方は最後）
@@ -284,8 +320,7 @@ foreach ($key in $ownerKeys) {
     $owners.Add([pscustomobject]@{
             Owner = $list[0].Owner; Items = $list
             Delayed = @($list | Where-Object { $_.State -eq '遅延' }).Count; EndingNext = @($list | Where-Object { $_.State -eq '来週終了' }).Count
-            OpenFindings = @($ownerIssues | Where-Object { $_.Kind -eq '指摘' }).Count; OverdueFindings = @($ownerIssues | Where-Object { $_.Kind -eq '指摘' -and $_.Overdue }).Count
-            OpenBugs = @($ownerIssues | Where-Object { $_.Kind -eq '障害' }).Count; OverdueBugs = @($ownerIssues | Where-Object { $_.Kind -eq '障害' -and $_.Overdue }).Count
+            OpenIssues = $ownerIssues
         })
 }
 
@@ -305,13 +340,12 @@ if ($Wbs) {
     Add-Metric '進捗' '今週に終わる予定' ([double]$plannedInPeriod.Count)
     Add-Metric '進捗' '来週の予定' ([double]$nextTasks.Count)
 }
-foreach ($kind in @(@('指摘', [bool]$Findings), @('障害', [bool]$BugList))) {
-    if (-not $kind[1]) { continue }
-    $list = @($issues | Where-Object { $_.Kind -eq $kind[0] })
-    Add-Metric $kind[0] '今週の起票' ([double]@($list | Where-Object OpenedInPeriod).Count)
-    Add-Metric $kind[0] '今週の完了' ([double]@($list | Where-Object ClosedInPeriod).Count)
-    Add-Metric $kind[0] '未完了' ([double]@($list | Where-Object { -not $_.Closed }).Count)
-    Add-Metric $kind[0] '期限切れ' ([double]@($list | Where-Object Overdue).Count)
+foreach ($k in $givenKinds) {
+    $list = @($issues | Where-Object { $_.Kind -eq $k.Kind })
+    Add-Metric $k.Kind '今週の起票' ([double]@($list | Where-Object OpenedInPeriod).Count)
+    Add-Metric $k.Kind '今週の完了' ([double]@($list | Where-Object ClosedInPeriod).Count)
+    Add-Metric $k.Kind '未完了' ([double]@($list | Where-Object { -not $_.Closed }).Count)
+    Add-Metric $k.Kind '期限切れ' ([double]@($list | Where-Object Overdue).Count)
 }
 
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
@@ -399,14 +433,13 @@ if ($Wbs) {
         }
     }
 }
-foreach ($kind in @(@('指摘', 'レビューの指摘', $Findings, $hasFindings), @('障害', '障害', $BugList, $hasBugs))) {
-    if (-not $kind[2]) { continue }
+foreach ($k in $givenKinds) {
     $lines.Add('')
-    $lines.Add(('■ {0}' -f $kind[1]))
-    if (-not $kind[3]) { $lines.Add(('・{0}が読めませんでした' -f $(if ($kind[0] -eq '指摘') { '指摘管理表' } else { '障害管理表' }))); continue }
-    $lines.Add(('・今週: 起票 {0} 件・完了 {1} 件' -f (Get-Metric $kind[0] '今週の起票').Value, (Get-Metric $kind[0] '今週の完了').Value))
-    $open = @($issues | Where-Object { $_.Kind -eq $kind[0] -and -not $_.Closed })
-    $line = '・未完了: {0}・うち期限切れ {1}' -f (Format-Count $kind[0] '未完了'), (Format-Count $kind[0] '期限切れ')
+    $lines.Add(('■ {0}' -f $k.Heading))
+    if (-not $k.Read) { $lines.Add(('・{0}が読めませんでした' -f $k.Table)); continue }
+    $lines.Add(('・今週: 起票 {0} 件・完了 {1} 件' -f (Get-Metric $k.Kind '今週の起票').Value, (Get-Metric $k.Kind '今週の完了').Value))
+    $open = @($issues | Where-Object { $_.Kind -eq $k.Kind -and -not $_.Closed })
+    $line = '・未完了: {0}・うち期限切れ {1}' -f (Format-Count $k.Kind '未完了'), (Format-Count $k.Kind '期限切れ')
     $severities = @($open | Where-Object { $_.Severity } | Group-Object Severity | Sort-Object @{ e = { Get-SeverityRank $_.Name } }, Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
     if ($severities.Count -gt 0) { $line += ' / 重要度 {0}' -f ($severities -join '・') }
     $lines.Add($line)
@@ -471,7 +504,13 @@ if ($OutDir) {
         $metricRows.Add(@{ Values = @($m.Area, $m.Name, $value, $prev, $change) })
     }
     $ownerRows = New-Object System.Collections.Generic.List[object]
-    foreach ($o in $owners) { $ownerRows.Add(@{ Values = @($o.Owner, [double]$o.Delayed, [double]$o.EndingNext, [double]$o.OpenFindings, [double]$o.OverdueFindings, [double]$o.OpenBugs, [double]$o.OverdueBugs) }) }
+    foreach ($o in $owners) {
+        $values = @($o.Owner, [double]$o.Delayed, [double]$o.EndingNext)
+        foreach ($k in $givenKinds) { $values += @([double]@($o.OpenIssues | Where-Object { $_.Kind -eq $k.Kind }).Count, [double]@($o.OpenIssues | Where-Object { $_.Kind -eq $k.Kind -and $_.Overdue }).Count) }
+        $ownerRows.Add(@{ Values = $values })
+    }
+    $ownerColumns = @(@{ Header = '担当'; Width = 14 }, @{ Header = '遅延タスク'; Width = 10 }, @{ Header = '来週終了のタスク'; Width = 15 })
+    foreach ($k in $givenKinds) { $ownerColumns += @(@{ Header = ($k.Kind + 'の未完了'); Width = 12 }, @{ Header = 'うち期限切れ'; Width = 12 }) }
     $itemRows = New-Object System.Collections.Generic.List[object]
     foreach ($x in $sortedItems) {
         $row = @{ Values = @($x.Owner, $x.State, $x.Kind, $x.Title, $x.DateLabel, (Format-DateCell $x.Date), $x.Note, (Format-PlaceText $x.Place)) }
@@ -493,7 +532,7 @@ if ($OutDir) {
     }
     $issueRows = New-Object System.Collections.Generic.List[object]
     $issueOrder = @($issues | Where-Object { -not $_.Closed -or $_.ClosedInPeriod } |
-            Sort-Object Kind, @{ e = { if ($_.Overdue) { 0 } elseif ($_.DueSoon) { 1 } elseif (-not $_.Closed) { 2 } else { 3 } } }, @{ e = { if ($_.Due) { $_.Due } else { [datetime]::MaxValue } } })
+            Sort-Object @{ e = { $kindRank[$_.Kind] } }, @{ e = { if ($_.Overdue) { 0 } elseif ($_.DueSoon) { 1 } elseif (-not $_.Closed) { 2 } else { 3 } } }, @{ e = { if ($_.Due) { $_.Due } else { [datetime]::MaxValue } } })
     foreach ($i in $issueOrder) {
         $state = '未完了'
         if ($i.Overdue) { $state = '期限切れ' } elseif ($i.DueSoon) { $state = '期限間近' } elseif ($i.Closed) { $state = '今週の完了' }
@@ -504,10 +543,10 @@ if ($OutDir) {
     }
     $sheets = @(
         @{ Name = '概要'; Columns = @(@{ Header = '区分'; Width = 8 }, @{ Header = '項目'; Width = 18 }, @{ Header = '今回'; Width = 9 }, @{ Header = $previousHeader; Width = 16 }, @{ Header = '増減'; Width = 8 }); Rows = $metricRows },
-        @{ Name = '担当者'; Columns = @(@{ Header = '担当'; Width = 14 }, @{ Header = '遅延タスク'; Width = 10 }, @{ Header = '来週終了のタスク'; Width = 15 }, @{ Header = '指摘の未完了'; Width = 12 }, @{ Header = 'うち期限切れ'; Width = 12 }, @{ Header = '障害の未完了'; Width = 12 }, @{ Header = 'うち期限切れ'; Width = 12 }); Rows = $ownerRows },
+        @{ Name = '担当者'; Columns = $ownerColumns; Rows = $ownerRows },
         @{ Name = '担当者別'; Columns = @(@{ Header = '担当'; Width = 14 }, @{ Header = '状態'; Width = 9 }, @{ Header = '種類'; Width = 6 }, @{ Header = '内容'; Width = 60 }, @{ Header = '日付の種類'; Width = 10 }, @{ Header = '日付'; Width = 11 }, @{ Header = '補足'; Width = 30 }, @{ Header = '場所'; Width = 30 }); Rows = $itemRows })
     if ($Wbs) { $sheets += @{ Name = 'タスク'; Columns = @(@{ Header = '区分'; Width = 12 }, @{ Header = 'WBS'; Width = 8 }, @{ Header = 'タスク'; Width = 30 }, @{ Header = '担当'; Width = 12 }, @{ Header = '予定開始'; Width = 11 }, @{ Header = '予定終了'; Width = 11 }, @{ Header = '実績／見込終了'; Width = 13 }, @{ Header = '進捗率'; Width = 7 }, @{ Header = '遅れ（営業日）'; Width = 12 }, @{ Header = '状態'; Width = 10 }, @{ Header = 'WBS の場所'; Width = 30 }); Rows = $taskRows } }
-    if ($Findings -or $BugList) { $sheets += @{ Name = '指摘・障害'; Columns = @(@{ Header = '種類'; Width = 6 }, @{ Header = '区分'; Width = 10 }, @{ Header = '番号'; Width = 9 }, @{ Header = '設計書・機能'; Width = 24 }, @{ Header = '内容'; Width = 50 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '担当'; Width = 12 }, @{ Header = '起票日'; Width = 11 }, @{ Header = '期限'; Width = 11 }, @{ Header = '完了日'; Width = 11 }, @{ Header = '状態'; Width = 10 }, @{ Header = '場所'; Width = 30 }); Rows = $issueRows } }
+    if ($givenKinds.Count -gt 0) { $sheets += @{ Name = (@($givenKinds | ForEach-Object { $_.Kind }) -join '・'); Columns = @(@{ Header = '種類'; Width = 6 }, @{ Header = '区分'; Width = 10 }, @{ Header = '番号'; Width = 9 }, @{ Header = '設計書・機能・区分'; Width = 24 }, @{ Header = '内容'; Width = 50 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '担当'; Width = 12 }, @{ Header = '起票日'; Width = 11 }, @{ Header = '期限'; Width = 11 }, @{ Header = '完了日'; Width = 11 }, @{ Header = '状態'; Width = 10 }, @{ Header = '場所'; Width = 30 }); Rows = $issueRows } }
     # 推移: 直近（最大 12 回）の数字を、時点ごとに 1 行で並べる
     if ($HistoryCsv) {
         $byDate = @{}
@@ -563,7 +602,7 @@ if ($HistoryCsv) {
 }
 
 # .SYNOPSIS
-#     WBS・レビューの指摘管理表・障害管理表から、週次報告（進捗・指摘・障害の数字と、担当者ごとのやること）を作ります（Excel 不要）。
+#     WBS・レビューの指摘管理表・障害管理表・課題管理表から、週次報告（進捗・指摘・障害・課題の数字と、担当者ごとのやること）を作ります（Excel 不要）。
 #
 # .DESCRIPTION
 #     毎週の進捗報告のために、表を見て数え、文章にまとめる作業を機械でします。
@@ -571,14 +610,15 @@ if ($HistoryCsv) {
 #       進捗      WBS を Measure-Progress.ps1 で集計し、タスクの状態・SPI、今週の完了、遅延（遅れの大きい順）、来週に終わる・始まるタスク
 #       指摘      今週の起票・完了、未完了（重要度の内訳）・期限切れ
 #       障害      今週の起票・完了、未完了（重要度の内訳）・期限切れ
-#       担当者別  遅延したタスク・期限切れの指摘と障害、来週に終わるタスク・期限が来るもの、来週に始まるタスク（担当者ごと）
+#       課題・QA  今週の起票・完了、未完了（重要度の内訳）・期限切れ
+#       担当者別  遅延したタスク・期限切れの指摘・障害・課題、来週に終わるタスク・期限が来るもの、来週に始まるタスク（担当者ごと）
 #
 #     「今週」は -Since から -AsOf まで（既定は -AsOf までの 7 日）、「来週」は -AsOf の翌日から 7 日です。
-#     -OutDir を指定すると、報告の Excel（概要・担当者・担当者別・タスク・指摘・障害。元の表へのリンク付き）と、
+#     -OutDir を指定すると、報告の Excel（概要・担当者・担当者別・タスク・指摘・障害・課題。元の表へのリンク付き）と、
 #     メールやチャットに貼る文章（.txt）を保存します。-HistoryCsv を指定すると毎週の数字を残し、前回と比べます。
 #
 # .PARAMETER Config
-#     週次報告の設定ファイル（または、それを置いた案件のフォルダ）。WBS・指摘管理表・障害管理表・休日・出力先・実績を書いておきます。
+#     週次報告の設定ファイル（または、それを置いた案件のフォルダ）。WBS・指摘管理表・障害管理表・課題管理表・休日・出力先・実績を書いておきます。
 #     ひな形は tools\weekly-report\週次報告の設定_ひな形.csv。コマンドで指定したパラメーターのほうを使います。
 #
 # .PARAMETER Wbs
@@ -589,6 +629,9 @@ if ($HistoryCsv) {
 #
 # .PARAMETER BugList
 #     障害管理表のファイルまたはフォルダ（Excel・CSV。複数可）。見出しは tools\test-quality\見出し.csv で探します（担当・期限の列も読みます）。
+#
+# .PARAMETER IssueList
+#     課題・QA の管理表のファイルまたはフォルダ（Excel・CSV。複数可）。見出しは tools\weekly-report\課題管理表の見出し.csv で探します。
 #
 # .PARAMETER AsOf
 #     報告の基準日。既定は今日。
@@ -609,7 +652,7 @@ if ($HistoryCsv) {
 #     毎週の数字を残す CSV（時点・区分・項目・値）。前回の数字と比べ、報告の Excel に推移とグラフを足します。
 #
 # .PARAMETER NoRecurse
-#     指摘管理表・障害管理表のフォルダの、サブフォルダを読みません。
+#     指摘管理表・障害管理表・課題管理表のフォルダの、サブフォルダを読みません。
 #
 # .PARAMETER NoExcel
 #     Excel を起動しません（.xls / .xlsb は読まなくなります）。

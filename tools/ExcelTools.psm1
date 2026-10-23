@@ -1055,7 +1055,7 @@ function Read-WeeklyReportConfig {
     param([string] $Path)
     $keys = [ordered]@{
         '出力先' = @('OutDir', $false, $true); 'タイトル' = @('Title', $false, $false); 'WBS' = @('Wbs', $true, $true); '休日' = @('Holidays', $false, $true)
-        '指摘管理表' = @('Findings', $true, $true); '障害管理表' = @('BugList', $true, $true); '実績' = @('HistoryCsv', $false, $true)
+        '指摘管理表' = @('Findings', $true, $true); '障害管理表' = @('BugList', $true, $true); '課題管理表' = @('IssueList', $true, $true); '実績' = @('HistoryCsv', $false, $true)
     }
     $read = Read-SettingsFile $Path '週次報告の設定.csv' $keys '週次報告の設定' 'tools\weekly-report\週次報告の設定_ひな形.csv'
     $settings = $read.Settings

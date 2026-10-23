@@ -133,15 +133,35 @@ Test-Case 'New-WeeklyReport: 案件のフォルダの「週次報告の設定.cs
     Assert-Match $text '・今週: 起票 3 件・完了 1 件'
     Assert-Match $text '受注システム 週報（2026/10/17～2026/10/23）'
 
-    Assert-Throws { & $WeeklyReport -AsOf '2026-10-23' 6>$null } '-Wbs・-Findings・-BugList のどれか'
+    Assert-Throws { & $WeeklyReport -AsOf '2026-10-23' 6>$null } '-Wbs・-Findings・-BugList・-IssueList のどれか'
     Assert-Throws { & $WeeklyReport -Wbs $p.Wbs -AsOf '2026-10-23' -Since '2026-10-24' 6>$null } 'より後です'
     @('項目,値', '設計書,設計') | Set-Content -LiteralPath (Join-Path $dir '週次報告の設定.csv') -Encoding UTF8
     Assert-Throws { & $WeeklyReport $dir 6>$null } '週次報告の設定に知らない項目があります: 設計書'
     Assert-Throws { & $WeeklyReport (Join-Path $dir 'テスト') 6>$null } '週次報告の設定ファイルが見つかりません'
 }
 
+Test-Case 'New-WeeklyReport: 課題・QA の管理表の未完了・期限切れを報告し、担当者ごとのやることに入れる' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $cols = @('課題No', '区分', '件名', '起票日', '回答期限', '回答日', 'ステータス', 'ボール') | ForEach-Object { @{ Header = $_; Width = 12 } }
+    $rows = @(
+        @('Q-01', 'QA', '締め日の扱いを確認したい', '2026/10/19', '2026/10/22', '', '回答待ち', '田中'),
+        @('Q-02', 'QA', '税の端数処理', '2026/10/15', '2026/10/20', '2026/10/21', '回答済', '田中'),
+        @('K-01', '課題', '帳票の出力先が未定', '2026/10/20', '2026/10/28', '', '対応中', '佐藤'),
+        @('K-02', '課題', '性能の目標値', '2026/10/21', '', '', '取下げ', '佐藤'))
+    Export-Workbook -FilePath (Join-Path $dir '課題管理表.xlsx') -Sheets @(@{ Name = '課題'; Columns = $cols; Rows = @($rows | ForEach-Object { @{ Values = $_ } }) })
+    @('項目,値', '課題管理表,課題管理表.xlsx') | Set-Content -LiteralPath (Join-Path $dir '週次報告の設定.csv') -Encoding UTF8
+    $text = Get-HostText { $script:items = @(& $WeeklyReport $dir -AsOf '2026-10-23') }
+    Assert-Equal @('佐藤|期限間近|課題|K-01: 帳票の出力先が未定|10/28', '田中|期限切れ|課題|Q-01: 締め日の扱いを確認したい|10/22') @($script:items | ForEach-Object { '{0}|{1}|{2}|{3}|{4:MM/dd}' -f $_.Owner, $_.State, $_.Kind, $_.Title, $_.Date } | Sort-Object) '回答済み・取下げは載せない'
+    Assert-Match $text '■ 課題・QA\n・今週: 起票 2 件・完了 1 件\n・未完了: 2 件・うち期限切れ 1 件\n  - 期限 10/22 Q-01: 締め日の扱いを確認したい（田中）\n'
+    $xlsx = Join-Path $dir '週次報告/週次報告_20261023.xlsx'
+    $people = Read-XlsxSheet -Path $xlsx -Index 2
+    Assert-Equal @('概要', '担当者', '担当者別', '課題') $people.Sheets
+    Assert-Equal '担当|遅延タスク|来週終了のタスク|課題の未完了|うち期限切れ' ((@('A', 'B', 'C', 'D', 'E') | ForEach-Object { $people.Rows[1][$_] }) -join '|')
+}
+
 Test-Case 'New-WeeklyReport: Get-Help でヘルプが表示される' {
     $h = Get-Help $WeeklyReport
     Assert-Match $h.Synopsis '週次報告'
-    Assert-Equal 12 @($h.parameters.parameter | Where-Object { $_.description }).Count
+    Assert-Equal 13 @($h.parameters.parameter | Where-Object { $_.description }).Count
 }
