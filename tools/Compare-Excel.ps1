@@ -1,10 +1,13 @@
-﻿[CmdletBinding()]
+﻿[CmdletBinding(DefaultParameterSetName = 'Pair')]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(Mandatory = $true, Position = 0, ParameterSetName = 'Pair')]
     [string] $Old,
 
-    [Parameter(Mandatory = $true, Position = 1)]
+    [Parameter(Mandatory = $true, Position = 1, ParameterSetName = 'Pair')]
     [string] $New,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Versions')]
+    [string[]] $Versions,
 
     [string[]] $KeyColumn,
 
@@ -2454,45 +2457,92 @@ function Get-ExcelFiles {
     return $map
 }
 
-if (-not (Test-Path -LiteralPath $Old)) { throw "見つかりません: $Old" }
-if (-not (Test-Path -LiteralPath $New)) { throw "見つかりません: $New" }
-$oldItem = Get-Item -LiteralPath $Old
-$newItem = Get-Item -LiteralPath $New
-if ($oldItem.PSIsContainer -ne $newItem.PSIsContainer) { throw '-Old と -New は、両方ともファイルか、両方ともフォルダにしてください。' }
-
 $pairs = New-Object System.Collections.Generic.List[object]
-if ($oldItem.PSIsContainer) {
-    $oldFiles = Get-ExcelFiles $oldItem.FullName
-    $newFiles = Get-ExcelFiles $newItem.FullName
-    # 同じ相対パスが無いファイルは、版数（_v1.0 など）を除いた名前が 1 つずつ一致すれば対応付ける
-    $byVersionless = @{}
-    foreach ($side in @('Old', 'New')) {
-        $files = $oldFiles; $other = $newFiles
-        if ($side -eq 'New') { $files = $newFiles; $other = $oldFiles }
-        foreach ($k in $files.Keys) {
-            if ($other.Contains($k)) { continue }
-            $vk = Get-VersionlessName $k
-            if (-not $byVersionless.ContainsKey($vk)) { $byVersionless[$vk] = @{ Old = @(); New = @() } }
-            $byVersionless[$vk][$side] += $k
+function Add-ComparePairs {
+    #     比べる組（旧・新のファイル）を $pairs に足す。フォルダどうしなら、同じ相対パスと、版数だけが違う名前のファイルを組にする。
+    #     Label を指定すると、ファイル名の後ろに「（v1.0 → v1.1）」のように付ける（-Versions）
+    param([string] $OldPath, [string] $NewPath, [string] $Label)
+    if (-not (Test-Path -LiteralPath $OldPath)) { throw "見つかりません: $OldPath" }
+    if (-not (Test-Path -LiteralPath $NewPath)) { throw "見つかりません: $NewPath" }
+    $oldItem = Get-Item -LiteralPath $OldPath
+    $newItem = Get-Item -LiteralPath $NewPath
+    if ($oldItem.PSIsContainer -ne $newItem.PSIsContainer) { throw '-Old と -New は、両方ともファイルか、両方ともフォルダにしてください。' }
+    $suffix = ''
+    if ($Label) { $suffix = '（{0}）' -f $Label }
+    if ($oldItem.PSIsContainer) {
+        $oldFiles = Get-ExcelFiles $oldItem.FullName
+        $newFiles = Get-ExcelFiles $newItem.FullName
+        # 同じ相対パスが無いファイルは、版数（_v1.0 など）を除いた名前が 1 つずつ一致すれば対応付ける
+        $byVersionless = @{}
+        foreach ($side in @('Old', 'New')) {
+            $files = $oldFiles; $other = $newFiles
+            if ($side -eq 'New') { $files = $newFiles; $other = $oldFiles }
+            foreach ($k in $files.Keys) {
+                if ($other.Contains($k)) { continue }
+                $vk = Get-VersionlessName $k
+                if (-not $byVersionless.ContainsKey($vk)) { $byVersionless[$vk] = @{ Old = @(); New = @() } }
+                $byVersionless[$vk][$side] += $k
+            }
+        }
+        $renamedOld = @{}   # 旧の相対パス → 新の相対パス
+        $renamedNew = @{}
+        foreach ($v in $byVersionless.Values) {
+            if ($v.Old.Count -eq 1 -and $v.New.Count -eq 1) { $renamedOld[$v.Old[0]] = $v.New[0]; $renamedNew[$v.New[0]] = $v.Old[0] }
+        }
+        foreach ($k in $newFiles.Keys) {
+            $o = $null
+            if ($oldFiles.Contains($k)) { $o = $oldFiles[$k].Path }
+            elseif ($renamedNew.ContainsKey($k)) { $o = $oldFiles[$renamedNew[$k]].Path }
+            $pairs.Add([pscustomobject]@{ Relative = $newFiles[$k].Relative + $suffix; Old = $o; New = $newFiles[$k].Path })
+        }
+        foreach ($k in $oldFiles.Keys) {
+            if (-not $newFiles.Contains($k) -and -not $renamedOld.ContainsKey($k)) { $pairs.Add([pscustomobject]@{ Relative = $oldFiles[$k].Relative + $suffix; Old = $oldFiles[$k].Path; New = $null }) }
         }
     }
-    $renamedOld = @{}   # 旧の相対パス → 新の相対パス
-    $renamedNew = @{}
-    foreach ($v in $byVersionless.Values) {
-        if ($v.Old.Count -eq 1 -and $v.New.Count -eq 1) { $renamedOld[$v.Old[0]] = $v.New[0]; $renamedNew[$v.New[0]] = $v.Old[0] }
+    else {
+        $pairs.Add([pscustomobject]@{ Relative = $newItem.Name + $suffix; Old = $oldItem.FullName; New = $newItem.FullName })
     }
-    foreach ($k in $newFiles.Keys) {
-        $o = $null
-        if ($oldFiles.Contains($k)) { $o = $oldFiles[$k].Path }
-        elseif ($renamedNew.ContainsKey($k)) { $o = $oldFiles[$renamedNew[$k]].Path }
-        $pairs.Add([pscustomobject]@{ Relative = $newFiles[$k].Relative; Old = $o; New = $newFiles[$k].Path })
+    return [pscustomobject]@{ Old = $oldItem; New = $newItem }
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'Versions') {
+    # 版を続けて比べる（v1.0 → v1.1 → v1.2）。フォルダ 1 つなら、版数だけが違う名前のファイルを版数の順に並べる
+    $items = @($Versions | ForEach-Object {
+            if (-not (Test-Path -LiteralPath $_)) { throw "見つかりません: $_" }
+            Get-Item -LiteralPath $_
+        })
+    $steps = New-Object System.Collections.Generic.List[object]
+    if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+        $groups = [ordered]@{}
+        foreach ($f in (Get-ExcelFiles $items[0].FullName).Values) {
+            if ($null -eq (Get-NameVersion ([System.IO.Path]::GetFileName($f.Relative)))) { continue }
+            $key = Get-VersionlessName $f.Relative
+            if (-not $groups.Contains($key)) { $groups[$key] = New-Object System.Collections.Generic.List[object] }
+            $groups[$key].Add((Get-Item -LiteralPath $f.Path))
+        }
+        foreach ($key in $groups.Keys) {
+            $list = @($groups[$key] | Sort-Object @{ e = { Get-NameVersion $_.Name } }, LastWriteTime)
+            for ($i = 1; $i -lt $list.Count; $i++) { $steps.Add(@($list[$i - 1], $list[$i])) }
+        }
+        if ($steps.Count -eq 0) { throw ('版数（_v1.0・第1.0版 など）だけが違う名前のファイルが 2 つ以上ありません: {0}' -f $items[0].FullName) }
     }
-    foreach ($k in $oldFiles.Keys) {
-        if (-not $newFiles.Contains($k) -and -not $renamedOld.ContainsKey($k)) { $pairs.Add([pscustomobject]@{ Relative = $oldFiles[$k].Relative; Old = $oldFiles[$k].Path; New = $null }) }
+    else {
+        if ($items.Count -lt 2) { throw '-Versions には、版を 2 つ以上（ファイルかフォルダ）か、版数の付いたファイルを置いたフォルダを 1 つ指定してください' }
+        if (@($items | Where-Object { $_.PSIsContainer }).Count -notin @(0, $items.Count)) { throw '-Versions は、すべてファイルか、すべてフォルダにしてください' }
+        # すべてに版数があれば版数の順、そうでなければ指定した順
+        if (@($items | Where-Object { $null -eq (Get-NameVersion $_.Name) }).Count -eq 0) { $items = @($items | Sort-Object @{ e = { Get-NameVersion $_.Name } }, LastWriteTime) }
+        for ($i = 1; $i -lt $items.Count; $i++) { $steps.Add(@($items[$i - 1], $items[$i])) }
+    }
+    foreach ($st in $steps) {
+        $r = Add-ComparePairs $st[0].FullName $st[1].FullName ('{0} → {1}' -f (Get-NameVersionText $st[0].Name), (Get-NameVersionText $st[1].Name))
+        if (-not $oldItem) { $oldItem = $r.Old }
+        $newItem = $r.New
     }
 }
 else {
-    $pairs.Add([pscustomobject]@{ Relative = $newItem.Name; Old = $oldItem.FullName; New = $newItem.FullName })
+    $r = Add-ComparePairs $Old $New
+    $oldItem = $r.Old
+    $newItem = $r.New
 }
 
 $summary = New-Object System.Collections.Generic.List[object]
@@ -2662,6 +2712,11 @@ if ($OutHistory) {
 # .PARAMETER New
 #     比較先（変更後）のファイルまたはフォルダ。
 #
+# .PARAMETER Versions
+#     版を続けて比べます（-Old / -New の代わり）。版のファイル・フォルダを 3 つ以上並べると v1.0 → v1.1 → v1.2 のように隣どうしを比べ、
+#     結果を 1 つの一覧・HTML にまとめます（どれも版数が付いていれば版数の順、そうでなければ指定した順）。
+#     フォルダを 1 つだけ指定すると、その中の版数（_v1.0・第1.0版 など）だけが違う名前のファイルを版数の順に比べます。
+#
 # .PARAMETER KeyColumn
 #     行をキーの値で対応付ける表の、キー列の見出し（複数指定可）。例: -KeyColumn '物理名', '項目ID'
 #     見出しと同じ文字のセルを探し、その下でキー列に値がある行を 1 つの表として、キーが同じ行どうしを比べます。
@@ -2723,6 +2778,10 @@ if ($OutHistory) {
 #     差分の印を付けます。変更したセルは黄、追加したセル・行・列は緑、値を消したセルは赤、移動した行は青で塗り、
 #     セルを選ぶと変更前の値などが出るようにします（データの入力規則の入力時メッセージ。既に入力規則のあるセルには付けません）。
 #     末尾に、各セルへのリンク付きの「差分一覧」シートを足します。元のブックは変更しません。
+#
+# .EXAMPLE
+#     # 版の履歴をまとめて見る（v1.0 → v1.1 → v1.2 の変更を 1 つの画面に）
+#     .\Compare-Excel.ps1 -Versions D:\設計書\履歴 -OutHtml D:\版の履歴.html
 #
 # .EXAMPLE
 #     .\Compare-Excel.ps1 .\v1.0\テーブル定義書.xlsx .\v1.1\テーブル定義書.xlsx

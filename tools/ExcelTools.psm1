@@ -1370,6 +1370,24 @@ function Update-SheetDimension {
     if ($m.Success -and [int]$m.Groups[3].Value -lt $Row) { $dim.SetAttribute('ref', ('{0}:{1}{2}' -f $m.Groups[1].Value, $m.Groups[2].Value, $Row)) }
 }
 
+function Get-NameVersion {
+    #     ファイル名・フォルダ名の版数（_v1.2・Ver1.2・第1.2版）を比べられる形（System.Version）にする。版数が無ければ $null
+    param([string] $Name)
+    $m = [regex]::Match($Name.Normalize($script:Nfkc).ToLowerInvariant(), '(?:(?<![a-z])v(?:er)?\.?\s*|第\s*)(\d+(?:\.\d+){0,3})')
+    if (-not $m.Success) { return $null }
+    $parts = @($m.Groups[1].Value.Split('.') | ForEach-Object { [int]$_ })
+    while ($parts.Count -lt 4) { $parts += 0 }
+    return New-Object System.Version($parts[0], $parts[1], $parts[2], $parts[3])
+}
+
+function Get-NameVersionText {
+    #     ファイル名・フォルダ名の版数の部分（v1.2・Ver1.2・第1.2版）。版数が無ければ名前（拡張子を除く）
+    param([string] $Name)
+    $m = [regex]::Match($Name, '(?:(?<![A-Za-z])[vVｖＶ](?:[eE][rR])?\.?\s*|第\s*)[\d０-９]+(?:[.．][\d０-９]+){0,3}(?:版)?')
+    if ($m.Success) { return $m.Value.Trim() }
+    return [System.IO.Path]::GetFileNameWithoutExtension($Name)
+}
+
 function Get-VersionlessName {
     #     ファイル名（相対パス）から版数（_v1.0・Ver1.0・第1.0版 など）を除いた形（版数だけが違うファイルどうしを対応付けるため）
     param([string] $Name)
