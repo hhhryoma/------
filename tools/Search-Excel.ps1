@@ -309,8 +309,10 @@ function Read-DateStyles {
 function New-Hit {
     param([string] $Kind, [string] $Sheet, [string] $Cell, [string] $Text, [string] $Name)
 
+    # セルの数だけ呼ばれるので、-f や関数の呼び出しを避ける（改行が無ければ ConvertTo-OneLine と同じ）
     $location = $Sheet
-    if ($Cell) { $location = '{0}!{1}' -f $Sheet, $Cell }
+    if ($Cell) { $location = $Sheet + '!' + $Cell }
+    if ($Text.IndexOf([char]10) -ge 0 -or $Text.IndexOf([char]13) -ge 0) { $Text = ConvertTo-OneLine $Text }
 
     $hit = [pscustomobject]@{
         File     = $script:CurrentFile
@@ -318,7 +320,7 @@ function New-Hit {
         Sheet    = $Sheet
         Cell     = $Cell
         Kind     = $Kind
-        Text     = (ConvertTo-OneLine $Text)
+        Text     = $Text
         Name     = $Name
         Path     = $script:CurrentPath
     }

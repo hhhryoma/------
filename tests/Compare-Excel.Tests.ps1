@@ -478,6 +478,7 @@ Test-Case 'Compare-Excel: -OutHtml で、シートの値・列幅・結合セル
     $m = [regex]::Match($html, 'var DATA = (\{.*?\});\r?\n')
     Assert-True $m.Success 'データ（JSON）が入っている'
     Assert-True (-not $m.Groups[1].Value.Contains('<')) 'データの中の < は逃がす（</script> で HTML が壊れないように）'
+    Assert-Equal 1 ([regex]::Matches($html, '"files":\[').Count) 'データは 1 か所だけに入れる'
     $data = $m.Groups[1].Value | ConvertFrom-Json
     Assert-Equal @('同じ.xlsx|同じ|0', '追加された.xlsx|追加|1', '項目定義.xlsx|差分あり|7', '削除された.xlsx|削除|1') @($data.files | ForEach-Object { '{0}|{1}|{2}' -f $_.name, $_.state, $_.count })
     $file = @($data.files | Where-Object name -eq '項目定義.xlsx')[0]
@@ -505,6 +506,35 @@ Test-Case 'Compare-Excel: -OutHtml は、設計書の列幅と結合セルを入
     Assert-True (@($sheet.new.w.PSObject.Properties).Count -gt 0) '列幅'
     Assert-Equal 'K9' @($data.files[0].diffs)[0].nc
     Assert-Throws { & $CompareExcel $design $new -OutHtml (Join-Path $dir 'diff.txt') 6>$null } '拡張子は .html'
+}
+
+Test-Case 'Compare-Excel: -OutHtml は、左右に並べてそろえるための行・列の対応と、範囲の差分の場所を入れる' {
+    $dir = New-TestDir
+    $old = @(1..10 | ForEach-Object { , @("$_", "項目$_", "$($_ * 100)") })
+    $new = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $old) { $new.Add(@($r[0], "区分$($r[0] % 3)", $r[1], $r[2])) }
+    $new.RemoveAt(7)                                    # 項目8 を削除
+    $new.Insert(4, @('5', '区分9', '追加項目', '999'))   # 5 番目に挿入し、No を振り直す
+    for ($i = 0; $i -lt $new.Count; $i++) { $new[$i][0] = "$($i + 1)" }
+    New-TableBook -Path (Join-Path $dir 'old.xlsx') -Header @('No', '項目', '金額') -Rows $old
+    New-TableBook -Path (Join-Path $dir 'new.xlsx') -Header @('No', '区分', '項目', '金額') -Rows $new
+    $out = Join-Path $dir 'diff.html'
+    $null = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx'); OutHtml = $out }
+    $data = [regex]::Match([System.IO.File]::ReadAllText($out), 'var DATA = (\{.*?\});\r?\n').Groups[1].Value | ConvertFrom-Json
+    $sheet = $data.files[0].sheets[0]
+    # 追加した新の 6 行目と、削除した旧の 9 行目は対応が無い
+    Assert-Equal '1-1 2-2 3-3 4-4 5-5 6-7 7-8 8-9 10-10 11-11' ((@($sheet.rp) | Sort-Object { $_[0] } | ForEach-Object { '{0}-{1}' -f $_[0], $_[1] }) -join ' ') '行の対応（旧-新）'
+    Assert-Equal '1-1 2-3 3-4' ((@($sheet.cp) | Sort-Object { $_[0] } | ForEach-Object { '{0}-{1}' -f $_[0], $_[1] }) -join ' ') '列の対応（挿入した B 列は無し）'
+    $renum = @($data.files[0].diffs | Where-Object k -eq '連番')[0]
+    Assert-Equal 'A7:A9|A6:A8' ('{0}|{1}' -f $renum.nc, $renum.oc) '連番の振り直しは範囲で色を付ける'
+
+    # 列の挿入が無いシートは列の対応を入れない（同じ列どうしで並べる）
+    $null = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'old.xlsx'); OutHtml = $out }
+    New-TableBook -Path (Join-Path $dir 'new2.xlsx') -Header @('No', '項目', '金額') -Rows @($old | Select-Object -First 9)
+    $null = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new2.xlsx'); OutHtml = $out }
+    $sheet = ([regex]::Match([System.IO.File]::ReadAllText($out), 'var DATA = (\{.*?\});\r?\n').Groups[1].Value | ConvertFrom-Json).files[0].sheets[0]
+    Assert-True ($null -eq $sheet.PSObject.Properties['cp']) '列の対応なし'
+    Assert-Equal 10 @($sheet.rp).Count
 }
 
 Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定するとエラー' {

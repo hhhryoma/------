@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Excel の差分</title>
 <!--
-  Compare-Excel.ps1 -OutHtml のひな形。/*DIFF_DATA*/null の所に差分のデータ（JSON）を入れて保存する。
+  Compare-Excel.ps1 -OutHtml のひな形。script の中の「var DATA = 」の所に差分のデータ（JSON）を入れて保存する。
   外部のファイル・通信を使わないので、社内の PC のブラウザーでそのまま開ける。
 -->
 <style>
@@ -62,9 +62,15 @@
   table.grid td.mov, table.grid tr.mov td { background: var(--mov); }
   table.grid td.fmt { background: var(--fmt); }
   table.grid td.hist { background: var(--hist); }
+  table.grid.whole-add tbody td { background: var(--add); }
+  table.grid.whole-del tbody td { background: var(--del); }
   table.grid td.colmark { box-shadow: inset 0 0 0 9999px rgba(198, 239, 206, .45); }
   table.grid td.colmark.del { box-shadow: inset 0 0 0 9999px rgba(255, 199, 206, .55); }
   table.grid td.mark { cursor: help; }
+  table.grid td.gap, table.grid tr.gap th, table.grid thead th.gap, .legend .gapchip { background: repeating-linear-gradient(135deg, #f4f5f7 0 4px, #e6e9ed 4px 8px); }
+  table.grid thead th.hid { color: #a0a7b0; font-style: italic; }
+  table.grid tr.skip td { background: #f6f7f9; color: var(--muted); padding: 2px 0; overflow: visible; }
+  table.grid tr.skip td span { display: inline-block; position: sticky; left: 56px; padding: 0 8px; }
   table.grid td.focus { outline: 3px solid var(--focus); outline-offset: -2px; animation: blink 1.2s ease-out 2; }
   @keyframes blink { 50% { outline-color: transparent; } }
   .banner { padding: 6px 10px; background: #fff3cd; border-bottom: 1px solid var(--line); }
@@ -102,15 +108,16 @@
       <div class="group" id="modes">
         <button data-mode="new" class="on" title="新のシートを表示（変更・追加したセルに色）">新</button>
         <button data-mode="old" title="旧のシートを表示（変更・削除したセルに色）">旧</button>
-        <button data-mode="both" title="旧と新を左右に並べる（スクロールは連動）">左右に並べる</button>
+        <button data-mode="both" title="旧と新を左右に並べる（対応する行・列をそろえ、スクロールは連動）">左右に並べる</button>
       </div>
       <div class="group">
         <button id="prev" title="前の差分（k）">▲ 前</button>
         <button id="next" title="次の差分（j）">▼ 次</button>
         <span id="pos" class="muted"></span>
       </div>
+      <div class="group"><label title="差分のある行と、その前後 2 行だけを表示（大きなシートで便利）"><input type="checkbox" id="compact">変わった行だけ</label></div>
       <div class="group" id="kinds"></div>
-      <div class="group legend"><span style="background:var(--chg)">変更</span><span style="background:var(--add)">追加</span><span style="background:var(--del)">削除</span><span style="background:var(--mov)">移動</span><span style="background:var(--fmt)">書式</span></div>
+      <div class="group legend"><span style="background:var(--chg)">変更</span><span style="background:var(--add)">追加</span><span style="background:var(--del)">削除</span><span style="background:var(--mov)">移動</span><span style="background:var(--fmt)">書式</span><span class="gapchip" id="gapLegend" title="片方にしか無い行・列の、もう片方の側">対応なし</span></div>
     </div>
     <div class="panes" id="panes"></div>
     <div class="list" id="list"></div>
@@ -121,13 +128,20 @@
 var DATA = /*DIFF_DATA*/null;
 (function () {
   'use strict';
-  var MAX_ROWS = 3000, MAX_COLS = 300;   // 大きなシートは先頭だけ表示する
-  var state = { file: -1, sheet: -1, mode: 'new', hidden: {}, items: [], index: -1 };
+  // 描く列の上限・1 画面に描くセルの上限・開いたときに「変わった行だけ」にするセルの数・「変わった行だけ」で前後に見せる行数
+  var MAX_COLS = 300, MAX_CELLS = 150000, BIG_SHEET = 40000, CONTEXT = 2;
+  var state = { file: -1, sheet: -1, mode: 'new', compact: false, hidden: {}, items: [], index: -1 };
   var $ = function (id) { return document.getElementById(id); };
   var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
   var colName = function (n) { var s = ''; while (n > 0) { var m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
   var colIndex = function (s) { var n = 0; for (var i = 0; i < s.length; i++) n = n * 26 + s.charCodeAt(i) - 64; return n; };
   var parseCell = function (a) { var m = /^([A-Z]+)(\d+)$/.exec(a || ''); return m ? { r: +m[2], c: colIndex(m[1]) } : null; };
+  // セル（A1）と範囲（A5:F5）を、左上と右下の行・列にする
+  var parseRef = function (a) {
+    var x = String(a || '').split(':'), p = parseCell(x[0]), q = parseCell(x[1] || x[0]);
+    return p && q ? { r1: Math.min(p.r, q.r), c1: Math.min(p.c, q.c), r2: Math.max(p.r, q.r), c2: Math.max(p.c, q.c) } : null;
+  };
+  var each = function (list, fn) { Array.prototype.forEach.call(list, fn); };
   var cls = function (d, side) {
     if (d.k === '書式') return 'fmt';
     if (d.k === '改訂履歴') return 'hist';
@@ -136,6 +150,8 @@ var DATA = /*DIFF_DATA*/null;
     if (d.ch === '移動') return 'mov';
     return 'chg';
   };
+
+  var chip = function (d) { return cls(d, d.ch === '削除' ? 'old' : 'new'); };
 
   if (!DATA) { document.body.innerHTML = '<p style="padding:24px">差分のデータがありません。Compare-Excel.ps1 -OutHtml で作ってください。</p>'; return; }
   $('oldPath').textContent = '旧: ' + DATA.old;
@@ -146,9 +162,17 @@ var DATA = /*DIFF_DATA*/null;
 
   // 種類の絞り込み
   var kinds = {};
-  DATA.files.forEach(function (f) { f.diffs.forEach(function (d) { kinds[d.k] = (kinds[d.k] || 0) + 1; }); });
+  DATA.files.forEach(function (f) { f.diffs.forEach(function (d) { if (d.k !== 'ファイル') kinds[d.k] = (kinds[d.k] || 0) + 1; }); });
   $('kinds').innerHTML = Object.keys(kinds).map(function (k) { return '<label><input type="checkbox" checked data-kind="' + esc(k) + '">' + esc(k) + '</label>'; }).join('');
-  $('kinds').addEventListener('change', function (e) { state.hidden[e.target.getAttribute('data-kind')] = !e.target.checked; show(); });
+  $('kinds').addEventListener('change', function (e) {
+    state.hidden[e.target.getAttribute('data-kind')] = !e.target.checked;
+    // 見ていた差分が残っていれば、その差分を見たままにする
+    var cur = state.items[state.index];
+    show();
+    state.index = state.items.indexOf(cur);
+    if (state.index >= 0) focusItem(); else updatePos();
+  });
+  $('compact').addEventListener('change', function (e) { state.compact = e.target.checked; show(); if (state.index >= 0) focusItem(); });
 
   // 左: ファイルとシート
   var nav = $('nav'), html = '';
@@ -181,24 +205,35 @@ var DATA = /*DIFF_DATA*/null;
   }
 
   // 表示の切り替え
+  function setMode(m) {
+    state.mode = m;
+    each($('modes').children, function (b) { b.classList.toggle('on', b.getAttribute('data-mode') === m); });
+  }
   $('modes').addEventListener('click', function (e) {
     var m = e.target.getAttribute('data-mode');
     if (!m) return;
-    state.mode = m;
-    Array.prototype.forEach.call($('modes').children, function (b) { b.classList.toggle('on', b.getAttribute('data-mode') === m); });
+    setMode(m);
     show();
+    if (state.index >= 0) focusItem();
   });
   $('prev').addEventListener('click', function () { go(-1); });
   $('next').addEventListener('click', function () { go(1); });
   document.addEventListener('keydown', function (e) {
-    if (e.target.tagName === 'INPUT') return;
+    // Ctrl+P（印刷）などはブラウザーに任せる
+    if (e.ctrlKey || e.metaKey || e.altKey || /^(SELECT|TEXTAREA)$/.test(e.target.tagName) || (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox')) return;
     if (e.key === 'j' || e.key === 'n') go(1);
     if (e.key === 'k' || e.key === 'p') go(-1);
   });
 
   function select(fi, si) {
     state.file = fi; state.sheet = si; state.index = -1;
-    Array.prototype.forEach.call(nav.querySelectorAll('.sheet'), function (el) {
+    // 大きなシートは、描くのに時間がかかるので「変わった行だけ」で開く
+    var s = DATA.files[fi].sheets[si], big = [s['new'], s.oldSheet].some(function (x) { return x && x.rows * Math.min(x.cols, MAX_COLS) > BIG_SHEET; });
+    if (big && !state.compact) { state.compact = true; $('compact').checked = true; }
+    // 片方にしか無いシートは、あるほうを表示する
+    if (state.mode === 'new' && !s.name) setMode('old');
+    if (state.mode === 'old' && !s.oldName) setMode('new');
+    each(nav.querySelectorAll('.sheet'), function (el) {
       el.classList.toggle('active', +el.getAttribute('data-f') === fi && +el.getAttribute('data-s') === si);
     });
     show();
@@ -211,6 +246,7 @@ var DATA = /*DIFF_DATA*/null;
     var panes = $('panes');
     if (!s) { panes.innerHTML = '<div class="pane"><div class="empty">左の一覧からシートを選んでください。</div></div>'; $('list').innerHTML = ''; return; }
     state.items = sheetDiffs(f, s).filter(function (d) { return !state.hidden[d.k]; });
+    if (state.index >= state.items.length) state.index = -1;
     var sheetDiff = state.items.filter(function (d) { return d.k === 'シート'; });
     var sides = state.mode === 'both' ? ['old', 'new'] : [state.mode];
     panes.className = 'panes' + (sides.length > 1 ? ' both' : '');
@@ -218,76 +254,230 @@ var DATA = /*DIFF_DATA*/null;
       var name = side === 'new' ? s.name : s.oldName;
       return '<div class="pane"><div class="title"><span class="side">' + (side === 'new' ? '新' : '旧') + '</span>' + esc(name || '（このシートはありません）') + '</div><div class="scroll" id="scroll-' + side + '"></div></div>';
     }).join('');
+    var infos = {};
+    sides.forEach(function (side) { infos[side] = sideInfo(side === 'new' ? s['new'] : s.oldSheet, side); });
+    // 左右に並べるときは、対応する行・列を同じ高さ・位置にそろえる（片方にしか無い行・列は空けておく）
+    var shared = null;
+    if (sides.length > 1 && infos.old && infos['new']) {
+      shared = { rows: align(s.rp, infos.old.rows, infos['new'].rows, infos.old.rowHas, infos['new'].rowHas),
+        cols: align(s.cp, infos.old.cols, infos['new'].cols, infos.old.colHas, infos['new'].colHas) };
+    }
     sides.forEach(function (side) {
       var box = $('scroll-' + side);
       var banner = sheetDiff.map(function (d) { return '<div class="banner">' + esc(d.d) + '</div>'; }).join('');
-      box.innerHTML = banner + renderGrid(side === 'new' ? s['new'] : s.oldSheet, side);
+      var info = infos[side];
+      if (!info) { box.innerHTML = banner + '<div class="empty">' + (side === 'new' ? '新' : '旧') + 'にはこのシートがありません。</div>'; return; }
+      var view = shared || { rows: range(info.rows, side), cols: range(info.cols, side) };
+      box.innerHTML = banner + renderGrid(info, side, view, shared ? [infos.old, infos['new']] : [info], sides.length);
     });
+    $('gapLegend').style.display = shared ? '' : 'none';
     if (sides.length > 1) syncScroll($('scroll-old'), $('scroll-new'));
     renderList();
-    $('pos').textContent = state.items.length ? (state.index >= 0 ? (state.index + 1) + ' / ' : '') + state.items.length + ' 件' : '差分なし';
+    updatePos();
+  }
+
+  function range(n, side) { var out = []; for (var i = 1; i <= n; i++) { var e = {}; e[side] = i; out.push(e); } return out; }
+
+  // シートの中の差分の印（セル・行・列）と、描く範囲
+  function sideInfo(sheet, side) {
+    if (!sheet) return null;
+    var info = { side: side, sheet: sheet, whole: '', marks: {}, rowMarks: {}, colMarks: {}, markRows: {}, markCols: {}, tips: {}, rows: sheet.rows, cols: sheet.cols, rowHas: {}, colHas: {}, merges: [] };
+    Object.keys(sheet.c).forEach(function (k) { var x = k.split(','); info.rowHas[x[0]] = true; info.colHas[x[1]] = true; });
+    state.items.forEach(function (d, i) {
+      // 追加・削除したシートは、全体に色を付ける
+      if (d.k === 'シート' && (d.ch === '追加' || d.ch === '削除')) info.whole = d.ch === '追加' ? 'add' : 'del';
+      var ref = parseRef(side === 'new' ? d.nc : d.oc);
+      if (!ref) return;
+      info.rows = Math.max(info.rows, ref.r2);
+      info.markRows[ref.r1] = true;
+      if (d.k === '行') { for (var r = ref.r1; r <= ref.r2; r++) { info.rowMarks[r] = cls(d, side); info.markRows[r] = true; } return; }
+      info.cols = Math.max(info.cols, ref.c2);
+      if (d.k === '列') { info.colMarks[ref.c1] = d.ch === '削除' ? 'del' : 'add'; info.markCols[ref.c1] = true; return; }
+      // 範囲（書式・連番の振り直し）は、範囲のセルすべてに印を付ける
+      var k = cls(d, side), n = 0;
+      for (r = ref.r1; r <= ref.r2; r++) {
+        info.markRows[r] = true;
+        for (var c = ref.c1; c <= ref.c2 && n < 5000; c++, n++) {
+          var key = r + ',' + c, old = info.marks[key];
+          if (!old || old === 'fmt' || old === 'hist') info.marks[key] = k;
+          (info.tips[key] = info.tips[key] || []).push(i);
+          info.markCols[c] = true;
+        }
+      }
+    });
+    sheet.m.forEach(function (ref) {
+      var g = parseRef(ref);
+      if (!g) return;
+      info.merges.push(g);
+      info.rows = Math.max(info.rows, g.r2); info.cols = Math.max(info.cols, g.c2);
+    });
+    info.rows = Math.max(info.rows, 1); info.cols = Math.max(info.cols, 1);
+    return info;
+  }
+
+  // 旧と新の行（または列）をそろえて並べる。pairs は対応付けた [旧, 新] の組。
+  // 組の間に残った行は、数が同じなら順に並べ、違えば中身のある行を片側だけの行にする
+  function align(pairs, oMax, nMax, oHas, nHas) {
+    var out = [], i, r;
+    if (!pairs) {
+      for (i = 1; i <= Math.max(oMax, nMax); i++) out.push({ old: i <= oMax ? i : null, 'new': i <= nMax ? i : null });
+      return out;
+    }
+    var ps = pairs.filter(function (p) { return p[0] >= 1 && p[0] <= oMax && p[1] >= 1 && p[1] <= nMax; })
+      .sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+    var anchors = lis(ps.map(function (p) { return p[1]; })).map(function (k) { return ps[k]; });
+    anchors.push([oMax + 1, nMax + 1]);
+    var po = 0, pn = 0;
+    anchors.forEach(function (a) {
+      var O = [], N = [];
+      for (r = po + 1; r < a[0]; r++) O.push(r);
+      for (r = pn + 1; r < a[1]; r++) N.push(r);
+      if (O.length === N.length) { for (i = 0; i < O.length; i++) out.push({ old: O[i], 'new': N[i] }); }
+      else {
+        var x = 0, y = 0;
+        while (x < O.length || y < N.length) {
+          if (x < O.length && y < N.length && !oHas[O[x]] && !nHas[N[y]]) out.push({ old: O[x++], 'new': N[y++] });
+          else if (x < O.length && (oHas[O[x]] || y >= N.length)) out.push({ old: O[x++], 'new': null });
+          else out.push({ old: null, 'new': N[y++] });
+        }
+      }
+      if (a[0] <= oMax) out.push({ old: a[0], 'new': a[1] });
+      po = a[0]; pn = a[1];
+    });
+    return out;
+  }
+
+  // 最長増加部分列の添字（対応付けの組のうち、順序が入れ替わっていないもの）
+  function lis(a) {
+    var tails = [], prev = new Array(a.length);
+    for (var i = 0; i < a.length; i++) {
+      var lo = 0, hi = tails.length;
+      while (lo < hi) { var mid = (lo + hi) >> 1; if (a[tails[mid]] < a[i]) lo = mid + 1; else hi = mid; }
+      prev[i] = lo > 0 ? tails[lo - 1] : -1;
+      tails[lo] = i;
+    }
+    var out = [];
+    for (var k = tails.length ? tails[tails.length - 1] : -1; k >= 0; k = prev[k]) out.push(k);
+    return out.reverse();
   }
 
   // シートの方眼（列幅・結合セルを反映し、差分のセル・行・列に色を付ける）
-  function renderGrid(sheet, side) {
-    if (!sheet) return '<div class="empty">' + (side === 'new' ? '新' : '旧') + 'にはこのシートがありません。</div>';
-    var marks = {}, rowMarks = {}, colMarks = {}, tips = {};
-    state.items.forEach(function (d, i) {
-      var p = parseCell(side === 'new' ? d.nc : d.oc);
-      if (!p) return;
-      if (d.k === '行') { rowMarks[p.r] = cls(d, side); }
-      else if (d.k === '列') { colMarks[p.c] = d.ch === '削除' ? 'del' : 'add'; }
-      else { var key = p.r + ',' + p.c; marks[key] = cls(d, side); (tips[key] = tips[key] || []).push(i); }
-    });
-    var rows = sheet.rows, cols = sheet.cols;
-    Object.keys(marks).forEach(function (k) { var x = k.split(','); rows = Math.max(rows, +x[0]); cols = Math.max(cols, +x[1]); });
-    Object.keys(rowMarks).forEach(function (r) { rows = Math.max(rows, +r); });
-    var covered = {}, spans = {};
-    sheet.m.forEach(function (ref) {
-      var x = ref.split(':'), a = parseCell(x[0]), b = parseCell(x[1] || x[0]);
-      if (!a || !b) return;
-      spans[a.r + ',' + a.c] = { rs: b.r - a.r + 1, cs: b.c - a.c + 1 };
-      for (var r = a.r; r <= b.r; r++) for (var c = a.c; c <= b.c; c++) if (r !== a.r || c !== a.c) covered[r + ',' + c] = true;
-      rows = Math.max(rows, b.r); cols = Math.max(cols, b.c);
-    });
-    rows = Math.max(rows, 1); cols = Math.max(cols, 1);
-    var cut = rows > MAX_ROWS || cols > MAX_COLS;
-    rows = Math.min(rows, MAX_ROWS); cols = Math.min(cols, MAX_COLS);
-    var width = function (c) { var w = sheet.w[c]; return w == null ? sheet.def : w; };
-    // 列幅どおりに並べるため、表の幅を列幅の合計にする（table-layout: fixed は幅の指定が要る）
-    var total = 44;
-    for (var c = 1; c <= cols; c++) total += width(c);
-    var out = ['<table class="grid" data-side="' + side + '" style="width:' + total + 'px"><colgroup><col style="width:44px">'];
-    for (c = 1; c <= cols; c++) out.push('<col style="width:' + width(c) + 'px">');
-    out.push('</colgroup><thead><tr><th class="corner"></th>');
-    for (c = 1; c <= cols; c++) out.push('<th>' + (width(c) ? colName(c) : '') + '</th>');
-    out.push('</tr></thead><tbody>');
-    for (var r = 1; r <= rows; r++) {
-      out.push('<tr' + (rowMarks[r] ? ' class="' + rowMarks[r] + '"' : '') + '><th>' + r + '</th>');
-      for (c = 1; c <= cols; c++) {
-        var key = r + ',' + c;
-        if (covered[key]) continue;
-        var text = sheet.c[key], sp = spans[key], klass = [];
-        if (marks[key]) klass.push(marks[key], 'mark');
-        if (colMarks[c]) klass.push('colmark', colMarks[c] === 'del' ? 'del' : '');
-        // Excel と同じく、右が空なら文字をはみ出して見せる
-        if (text && !sp && sheet.c[r + ',' + (c + 1)] == null && !covered[r + ',' + (c + 1)]) klass.push('ov');
-        out.push('<td id="' + side + '-' + key + '"' + (klass.length ? ' class="' + klass.join(' ') + '"' : '') +
-          (sp ? ' rowspan="' + sp.rs + '" colspan="' + sp.cs + '"' : '') + (tips[key] ? ' data-tip="' + tips[key].join(' ') + '"' : '') + '>' + (text == null ? '' : esc(text)) + '</td>');
+  function renderGrid(info, side, view, all, paneCount) {
+    var sheet = info.sheet, rows = view.rows, cols = view.cols, notes = [];
+    if (cols.length > MAX_COLS) { cols = cols.slice(0, MAX_COLS); notes.push(MAX_COLS + ' 列'); }
+    // 変わった行の前後だけを残し、間は「… n 行 …」にまとめる
+    if (state.compact) {
+      var near = [], keep = [];
+      rows.forEach(function (e, i) {
+        var hit = (e.old == null || e['new'] == null) && all.length > 1;
+        all.forEach(function (x) { if (e[x.side] != null && x.markRows[e[x.side]]) hit = true; });
+        if (hit) for (var k = Math.max(0, i - CONTEXT); k <= Math.min(rows.length - 1, i + CONTEXT); k++) near[k] = true;
+      });
+      for (var i = 0; i < rows.length; i++) {
+        if (near[i]) { keep.push(rows[i]); continue; }
+        var n = 0;
+        while (i < rows.length && !near[i]) { n++; i++; }
+        i--;
+        keep.push({ skip: n });
       }
-      out.push('</tr>');
+      rows = keep;
     }
+    var maxRows = Math.max(200, Math.floor(MAX_CELLS / Math.max(1, cols.length) / paneCount));
+    if (rows.length > maxRows) { rows = rows.slice(0, maxRows); notes.push(maxRows + ' 行'); }
+
+    // 列幅（左右に並べるときは広いほう）。非表示の列でも、差分があれば細く見せる
+    var widths = cols.map(function (e) {
+      var w = 0, marked = false;
+      all.forEach(function (x) {
+        var c = e[x.side];
+        if (c == null) return;
+        var v = x.sheet.w[c];
+        w = Math.max(w, v == null ? x.sheet.def : v);
+        if (x.markCols[c] || x.colMarks[c]) marked = true;
+      });
+      return { w: w || (marked ? 24 : 0), hid: !w && marked };
+    });
+    var rowAt = {}, colAt = {};
+    rows.forEach(function (e, i) { if (e[side] != null) rowAt[e[side]] = i; });
+    cols.forEach(function (e, j) { if (e[side] != null) colAt[e[side]] = j; });
+
+    // 結合セル（間にそろえるための空きの行・列があれば、それも含めて結合する）
+    var spans = {}, covered = {}, alias = {};
+    info.merges.forEach(function (g) {
+      var i0 = first(rows, rowAt, side, g.r1, g.r2), j0 = first(cols, colAt, side, g.c1, g.c2);
+      if (i0 < 0 || j0 < 0) return;
+      var i1 = last(rows, side, i0, g.r2), j1 = last(cols, side, j0, g.c2);
+      var key = g.r1 + ',' + g.c1, mark = null, tip = [];
+      for (var r = g.r1; r <= g.r2 && (g.r2 - g.r1 + 1) * (g.c2 - g.c1 + 1) <= 10000; r++) {
+        for (var c = g.c1; c <= g.c2; c++) {
+          var k = r + ',' + c;
+          alias[k] = side + '-' + key;
+          if (info.marks[k] && (!mark || mark === 'fmt')) mark = info.marks[k];
+          if (info.tips[k]) tip = tip.concat(info.tips[k]);
+        }
+      }
+      spans[i0 + ',' + j0] = { rs: i1 - i0 + 1, cs: j1 - j0 + 1, key: key, mark: mark, tip: tip };
+      for (var i = i0; i <= i1; i++) for (var j = j0; j <= j1; j++) if (i !== i0 || j !== j0) covered[i + ',' + j] = true;
+    });
+    aliases[side] = alias;
+
+    var total = 44;
+    widths.forEach(function (x) { total += x.w; });
+    // 列幅どおりに並べるため、表の幅を列幅の合計にする（table-layout: fixed は幅の指定が要る）
+    var out = ['<table class="grid' + (info.whole ? ' whole-' + info.whole : '') + '" data-side="' + side + '" style="width:' + total + 'px"><colgroup><col style="width:44px">'];
+    widths.forEach(function (x) { out.push('<col style="width:' + x.w + 'px">'); });
+    out.push('</colgroup><thead><tr><th class="corner"></th>');
+    cols.forEach(function (e, j) {
+      var c = e[side];
+      out.push('<th' + (widths[j].hid ? ' class="hid" title="非表示の列"' : c == null ? ' class="gap"' : '') + '>' + (c != null && widths[j].w ? colName(c) : '') + '</th>');
+    });
+    out.push('</tr></thead><tbody>');
+    rows.forEach(function (e, i) {
+      if (e.skip) { out.push('<tr class="skip"><th></th><td colspan="' + cols.length + '"><span>… ' + e.skip + ' 行 …</span></td></tr>'); return; }
+      var r = e[side];
+      out.push('<tr' + (r == null ? ' class="gap"' : info.rowMarks[r] ? ' class="' + info.rowMarks[r] + '"' : '') + '><th>' + (r == null ? '' : r) + '</th>');
+      cols.forEach(function (ce, j) {
+        if (covered[i + ',' + j]) return;
+        var c = ce[side];
+        if (r == null || c == null) { out.push('<td class="gap"></td>'); return; }
+        var sp = spans[i + ',' + j], key = sp ? sp.key : r + ',' + c;
+        var text = sheet.c[key], mark = sp ? sp.mark : info.marks[key], tip = sp ? sp.tip : info.tips[key], klass = [];
+        if (mark) klass.push(mark, 'mark');
+        if (info.colMarks[c]) klass.push('colmark', info.colMarks[c]);
+        // Excel と同じく、右が空なら文字をはみ出して見せる
+        if (text && !sp && (j + 1 === cols.length || (!covered[i + ',' + (j + 1)] && (cols[j + 1][side] == null || sheet.c[r + ',' + cols[j + 1][side]] == null)))) klass.push('ov');
+        out.push('<td id="' + side + '-' + key + '"' + (klass.length ? ' class="' + klass.join(' ') + '"' : '') +
+          (sp ? ' rowspan="' + sp.rs + '" colspan="' + sp.cs + '"' : '') + (tip && tip.length ? ' data-tip="' + tip.join(' ') + '"' : '') + '>' + (text == null ? '' : esc(text)) + '</td>');
+      });
+      out.push('</tr>');
+    });
     out.push('</tbody></table>');
-    if (cut) out.push('<div class="empty">大きなシートのため、' + MAX_ROWS + ' 行・' + MAX_COLS + ' 列までを表示しています。</div>');
+    if (notes.length) out.push('<div class="empty">大きなシートのため、先頭の ' + notes.join('・') + 'までを表示しています。「変わった行だけ」にすると、差分のある所をすべて見られます。</div>');
     return out.join('');
+  }
+  // 結合セルの範囲 [lo, hi] のうち、表示している最初の行（列）の位置
+  function first(list, at, side, lo, hi) {
+    for (var x = lo; x <= hi; x++) if (at[x] != null) return at[x];
+    return -1;
+  }
+  // 結合セルの範囲の最後の位置（範囲の中の空きは含め、「… n 行 …」の手前で止める）
+  function last(list, side, start, hi) {
+    var end = start;
+    for (var k = start + 1; k < list.length && !list[k].skip; k++) {
+      var v = list[k][side];
+      if (v != null && v > hi) break;
+      if (v != null) end = k;
+    }
+    return end;
   }
 
   // 下: 差分の一覧（クリックで該当のセルへ）
   function renderList() {
     var rows = state.items.map(function (d, i) {
       var where = d.nc ? (d.s + '!' + d.nc) : d.oc ? ((d.os || d.s) + '!' + d.oc + '（旧）') : d.s;
+      if (d.ho == null) { d.ho = diffHtml(d.a, d.b, 'old'); d.hn = diffHtml(d.a, d.b, 'new'); }
       return '<tr class="item' + (i === state.index ? ' current' : '') + '" data-i="' + i + '"><td>' + esc(where) + '</td><td>' + esc(d.k) +
-        '</td><td><span class="chip ' + cls(d, 'new') + '">' + esc(d.ch) + '</span></td><td class="val">' + diffHtml(d.a, d.b, 'old') + '</td><td class="val">' + diffHtml(d.a, d.b, 'new') + '</td></tr>';
+        '</td><td><span class="chip ' + chip(d) + '">' + esc(d.ch) + '</span></td><td class="val">' + d.ho + '</td><td class="val">' + d.hn + '</td></tr>';
     });
     $('list').innerHTML = rows.length ? '<table><thead><tr><th>場所</th><th>種類</th><th>変更</th><th>変更前</th><th>変更後</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>'
       : '<div class="empty" style="padding:10px 12px">このシートに差分はありません（絞り込みで隠れている差分も含めて）。</div>';
@@ -297,28 +487,55 @@ var DATA = /*DIFF_DATA*/null;
     if (tr) { state.index = +tr.getAttribute('data-i'); focusItem(); }
   });
 
+  function updatePos() {
+    $('pos').textContent = state.items.length ? (state.index >= 0 ? (state.index + 1) + ' / ' : '') + state.items.length + ' 件' : '差分なし';
+  }
+
   function go(step) {
     if (!state.items.length) return;
     state.index = state.index < 0 ? (step > 0 ? 0 : state.items.length - 1) : (state.index + step + state.items.length) % state.items.length;
     focusItem();
   }
 
+  // 差分のセルの要素（結合セルの中なら、結合セルの左上）。描いていなければ null
+  var aliases = {};
+  function cellOf(d, side) {
+    var g = parseRef(side === 'new' ? d.nc : d.oc);
+    if (!g || !$('scroll-' + side)) return null;
+    var key = g.r1 + ',' + g.c1, id = aliases[side] && aliases[side][key];
+    return $(side + '-' + key) || (id ? $(id) : null);
+  }
+
   function focusItem() {
     var d = state.items[state.index];
     if (!d) return;
     // 旧にしか無い差分（削除）は、新だけの表示なら左右に並べる
-    if (state.mode === 'new' && !d.nc && d.oc) { state.mode = 'both'; Array.prototype.forEach.call($('modes').children, function (b) { b.classList.toggle('on', b.getAttribute('data-mode') === 'both'); }); }
-    show();
-    ['new', 'old'].forEach(function (side) {
-      var p = parseCell(side === 'new' ? d.nc : d.oc);
-      if (!p) return;
-      var el = $(side + '-' + p.r + ',' + p.c) || (function () { var tr = document.querySelector('table[data-side="' + side + '"] tbody tr:nth-child(' + p.r + ')'); return tr && tr.children[1]; })();
+    if (state.mode === 'new' && !d.nc && d.oc) { setMode('both'); show(); }
+    var sides = state.mode === 'both' ? ['new', 'old'] : [state.mode];
+    var has = sides.filter(function (side) { return parseRef(side === 'new' ? d.nc : d.oc); });
+    // 描いていない所の差分なら「変わった行だけ」にする
+    if (has.length && !state.compact && !has.some(function (side) { return cellOf(d, side); })) { state.compact = true; $('compact').checked = true; show(); }
+    each(document.querySelectorAll('td.focus'), function (el) { el.classList.remove('focus'); });
+    each(document.querySelectorAll('#list tr.current'), function (el) { el.classList.remove('current'); });
+    var target = null;
+    has.forEach(function (side) {
+      var el = cellOf(d, side);
       if (!el) return;
       el.classList.add('focus');
-      el.scrollIntoView({ block: 'center', inline: 'center' });
+      if (!target) target = el;
     });
-    var cur = document.querySelector('#list tr.current');
-    if (cur) cur.scrollIntoView({ block: 'nearest' });
+    // 左右に並べているときは、片方を動かせばもう片方も同じ所に動く
+    if (target) scrollToCell(target);
+    var cur = document.querySelector('#list tr.item[data-i="' + state.index + '"]');
+    if (cur) { cur.classList.add('current'); cur.scrollIntoView({ block: 'nearest' }); }
+    updatePos();
+  }
+
+  // 縦は真ん中に、横は見えていなければ左端（行番号の右）に寄せる
+  function scrollToCell(el) {
+    var box = el.closest('.scroll'), b = box.getBoundingClientRect(), r = el.getBoundingClientRect(), head = 44;
+    box.scrollTop += (r.top - b.top) - (box.clientHeight - Math.min(r.height, box.clientHeight)) / 2;
+    if (r.left < b.left + head || r.right > b.right) box.scrollLeft += r.left - b.left - head - 8;
   }
 
   function syncScroll(a, b) {
@@ -332,10 +549,12 @@ var DATA = /*DIFF_DATA*/null;
   document.addEventListener('mouseover', function (e) {
     var td = e.target.closest && e.target.closest('td[data-tip]');
     if (!td) { tip.style.display = 'none'; return; }
-    tip.innerHTML = td.getAttribute('data-tip').split(' ').map(function (i) {
+    var seen = {};
+    tip.innerHTML = td.getAttribute('data-tip').split(' ').filter(function (i) { if (seen[i]) return false; seen[i] = true; return state.items[+i]; }).map(function (i) {
       var d = state.items[+i];
-      return '<div><span class="chip ' + cls(d, 'new') + '">' + esc(d.k + ' ' + d.ch) + '</span></div>' +
-        '<div class="row"><b>旧</b><span class="v">' + diffHtml(d.a, d.b, 'old') + '</span></div><div class="row"><b>新</b><span class="v">' + diffHtml(d.a, d.b, 'new') + '</span></div>';
+      if (d.ho == null) { d.ho = diffHtml(d.a, d.b, 'old'); d.hn = diffHtml(d.a, d.b, 'new'); }
+      return '<div><span class="chip ' + chip(d) + '">' + esc(d.k + ' ' + d.ch) + '</span></div>' +
+        '<div class="row"><b>旧</b><span class="v">' + d.ho + '</span></div><div class="row"><b>新</b><span class="v">' + d.hn + '</span></div>';
     }).join('<hr>');
     tip.style.display = 'block';
   });
