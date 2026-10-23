@@ -2,36 +2,50 @@
 
 工程ごとの使い方（どの工程で、どのツールを、どの順に使うか）は [工程別ガイド](../docs/工程別ガイド.md) を見てください。
 
+担当者向け・管理者向けは、主に使う人の目安です（どのツールも誰が使ってもかまいません）。
+
+**担当者向け（設計書・テスト仕様書を作る・直す・レビューする）**
+
 | スクリプト | 内容 |
 | --- | --- |
+| [New-DesignDocument.ps1](#new-designdocumentps1) | 画面一覧などの一覧から、雛形の差し込み欄（`{{画面ID}}` など）を埋めた設計書を一括で作る。テーブル定義書のように 1 件 1 シートの設計書には、雛形のシートからシートを足す。設計書の版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする（Excel 不要） |
 | [Search-Excel.ps1](#search-excelps1) | フォルダ配下の Excel を横断して文字列を検索する（Excel 版 grep） |
 | [Replace-Excel.ps1](#replace-excelps1) | 複数の Excel の文字を一括で置換する（Excel 不要。置換する箇所を確認してから書き換える） |
 | [Test-ExcelTerms.ps1](#test-exceltermsps1) | 複数の Excel の表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を見つけ、Replace-Excel 用の置換リストを作る |
-| [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違いをまとめて確認する（プロパティの個人名など、機械で直せるものは `-Fix` で直す） |
-| [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
+| [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、桁数・必須の違いなど）を全件見つける。CRUD 図と影響調査も（Excel 不要） |
+| [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる） |
 | [Compare-SharePointVersion.ps1](#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの 2 つの版（バージョン履歴）を取り出して比べ、差分の画面を開く（版は Excel で取り出す） |
-| [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、桁数・必須の違いなど）を全件見つける。CRUD 図と影響調査も（Excel 不要） |
+| [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
+| [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
+| [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違いをまとめて確認する（プロパティの個人名など、機械で直せるものは `-Fix` で直す） |
+| [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
+| [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
+| [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系・必須・型・境界値・コード値のケースの不足を見つける（Excel 不要） |
 | [Test-Traceability.ps1](#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、設計の要素（画面・イベント・メッセージ・IF）にテストがあるかを確かめる。テストの抜けを全件、機械で見つける（Excel 不要） |
 | [Select-RegressionTests.ps1](#select-regressiontestsps1) | 設計書の旧版と新版の差分から、変更した項目・イベント・メッセージなどが出てくるテストケースを、再テストするケースとして選ぶ（改修の回帰テストの範囲決め。Excel 不要） |
-| [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
-| [New-DesignDocument.ps1](#new-designdocumentps1) | 画面一覧などの一覧から、雛形の差し込み欄（`{{画面ID}}` など）を埋めた設計書を一括で作る。テーブル定義書のように 1 件 1 シートの設計書には、雛形のシートからシートを足す。設計書の版上げ（表紙の版数・更新日、改訂履歴の行、ファイル名の版数）もする（Excel 不要） |
-| [Measure-Progress.ps1](#measure-progressps1) | WBS から子のタスクごとの遅れ（営業日）・状態と PV／EV／SPI を出し、遅延タスクと週ごとの完了数をスケジュール遅延リカバリ計画のテンプレートに書き込む（Excel 不要） |
+
+**管理者向け（見積もり・進捗・品質を数字で見る）**
+
+| スクリプト | 内容 |
+| --- | --- |
 | [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す。前の版との変更の規模や、実績の工数からの係数表づくりも（Excel 不要） |
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
-| [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
+| [Measure-Progress.ps1](#measure-progressps1) | WBS から子のタスクごとの遅れ（営業日）・状態と PV／EV／SPI を出し、遅延タスクと週ごとの完了数をスケジュール遅延リカバリ計画のテンプレートに書き込む（Excel 不要） |
 | [Measure-ReviewQuality.ps1](#measure-reviewqualityps1) | レビューの指摘管理表を集計し、設計書ごとの指摘件数・指摘密度（ページ数・規模あたり）・未完了・期限切れを出し、基準値から外れた設計書を知らせる。レビュー記録の工数も使うと、レビュー工数密度 × 指摘密度のゾーン分析もする（Excel 不要） |
 | [Measure-TestQuality.ps1](#measure-testqualityps1) | テスト仕様書と障害管理表を集計し、機能ごとのテスト密度・バグ密度とゾーン分析、テストの消化とバグの収束の推移、信頼度成長曲線（潜在バグ数の推定・収束の判定）、NG なのにバグ番号が無いなどの食い違いを出す（Excel 不要） |
-| [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系・必須・型・境界値・コード値のケースの不足を見つける（Excel 不要） |
 | [Measure-DefectRemoval.ps1](#measure-defectremovalps1) | 障害管理表とレビューの指摘から、欠陥の混入工程 × 摘出工程と、工程ごとの摘出率・後の工程への流出・原因の多い順を出す（Excel 不要） |
 | [Measure-ReviewEffectiveness.ps1](#measure-revieweffectivenessps1) | 設計書ごとに、レビューの指摘密度と、設計で入ったのにテストで見つかったバグを並べ、レビューで見逃した設計書と設計工程の摘出率を出す |
 | [Compare-ReviewFindings.ps1](#compare-reviewfindingsps1) | AI のレビュー（Invoke-DesignReview）と人のレビューの指摘を突き合わせ、一致・AI だけ・人だけと、観点ごとの一致率、観点表への反映案を出す（Excel 不要） |
 | [Measure-CodeSize.ps1](#measure-codesizeps1) | ソースコードのステップ数（コメント・空行を除いた行数）を機能（フォルダ）ごとに数え、前の版との新規・修正・削除も出す。バグ密度・テスト密度の分母（KLOC）に（Excel 不要） |
-| [New-QualityLimits.ps1](#new-qualitylimitsps1) | 過去のプロジェクトの品質の実績（指摘密度・バグ密度など）から、社内の基準値（下限・上限）の CSV を作る（Excel 不要） |
 | [New-QualityReport.ps1](#new-qualityreportps1) | レビュー・テスト・工程・網羅・設計書の整合性の各ツールをまとめて実行し、工程完了判定（品質会議）に使う品質評価のブック（指標・実績・判定 ○△×・要対応）を作る |
 | [Invoke-QualityAnalysis.ps1](#invoke-qualityanalysisps1) | 品質評価のブックの × と △ の指標について、定性分析（原因）と対策の下書きを AI（Microsoft 365 Copilot）に書かせ、ブックに書き込む（Excel 不要） |
-| [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
-| [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
+| [New-QualityLimits.ps1](#new-qualitylimitsps1) | 過去のプロジェクトの品質の実績（指摘密度・バグ密度など）から、社内の基準値（下限・上限）の CSV を作る（Excel 不要） |
+
+**導入**
+
+| スクリプト | 内容 |
+| --- | --- |
 | [Install-SendTo.ps1](#install-sendtops1) | エクスプローラーの右クリック →「送る」に各ツールを登録し、PowerShell を使わずに、ファイルやフォルダを選ぶだけで実行できるようにする（実行するのは `Invoke-SendTo.ps1`） |
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
