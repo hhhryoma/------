@@ -49,7 +49,7 @@ Test-Case 'Test-ExcelTerms: -OutCsv の置換リストを Replace-Excel -ListPat
     $null = Invoke-Terms @{ Path = $dir; Glossary = (Join-Path $dir '用語集.csv'); OutCsv = $csv }
     $rows = @(Import-Csv -LiteralPath $csv -Encoding UTF8)
     Assert-Equal 6 $rows.Count
-    Assert-Equal '置換前|置換後|種類|件数|例' (@($rows[0].PSObject.Properties | ForEach-Object { $_.Name }) -join '|')
+    Assert-Equal '置換前|置換後|正規表現|種類|件数|例' (@($rows[0].PSObject.Properties | ForEach-Object { $_.Name }) -join '|')
 
     $replaced = @(& $ReplaceTool -ListPath $csv -Path $dir -Force 6>$null 3>$null)
     Assert-Equal 6 @($replaced | Where-Object Result -eq '置換').Count
@@ -111,6 +111,51 @@ Test-Case 'Test-ExcelTerms: -IncludeWord で Word の文書の揺れも数え、
     $wordLinks = @($detail.Links | Where-Object { $_.Target -like '*基本設計書.docx' })
     Assert-Equal 1 $wordLinks.Count '揺れ（ＩＤ）の出現箇所'
     Assert-True (@($wordLinks | Where-Object { $_.Location }).Count -eq 0) 'Word はセルの場所を付けない'
+}
+
+Test-Case 'Test-ExcelTerms: -OutCsv の自動の検出の行は、見つけた語だけを置換する正規表現にし、長い表記から並べる（ほかの語や長い揺れの一部を置換しない）' {
+    $dir = New-TestDir
+    $cells = @('モニター設定', 'モニター一覧', 'モニタ画面', 'モニタリング方式', 'ユーザー', 'ユーザー', 'ユーザー', 'ﾕｰｻﾞ登録', 'ﾕｰｻﾞ一覧', 'ﾕｰｻﾞｰ管理', 'ID', 'ＩＤ番号', 'ＩＤＥ環境', 'ｉｄ')
+    New-SheetsBook (Join-Path $dir 'a.xlsx') ([ordered]@{ '機能' = @(, @('項目')) + @($cells | ForEach-Object { , @($_) }) })
+    $csv = Join-Path (New-TestDir) 'list.csv'
+    $null = Invoke-Terms @{ Path = $dir; OutCsv = $csv }
+    $rows = @(Import-Csv -LiteralPath $csv -Encoding UTF8)
+    $kana = '(?<![ァ-ヴーｦ-ﾟ]){0}(?![ァ-ヴーｦ-ﾟ])'
+    $alnum = '(?-i)(?<![A-Za-z0-9Ａ-Ｚａ-ｚ０-９]){0}(?![A-Za-z0-9Ａ-Ｚａ-ｚ０-９])'
+    Assert-Equal @(($kana -f 'ﾕｰｻﾞｰ'), ($kana -f 'ﾕｰｻﾞ'), ($kana -f 'モニタ'), ($alnum -f 'ＩＤ')) @($rows | ForEach-Object { $_.'置換前' }) '長い表記から、前後にカタカナ・英数字が続かない語だけに一致する正規表現'
+    Assert-Equal @('○', '○', '○', '○') @($rows | ForEach-Object { $_.'正規表現' })
+
+    $null = & $ReplaceTool -ListPath $csv -Path $dir -Force 6>$null 3>$null
+    $texts = @(& (Join-Path $script:ToolsDir 'Search-Excel.ps1') -Pattern '\S' -Path $dir -Target Value 6>$null | Where-Object Cell -ne 'A1' | ForEach-Object { $_.Text } | Sort-Object)
+    # 「モニタリング」「ＩＤＥ」は別の語。「ﾕｰｻﾞｰ」の中の「ﾕｰｻﾞ」は置換しない（「ユーザーｰ管理」にしない）。
+    # 大文字・小文字の違う「ｉｄ」は、揺れとして見つけていないので置換しない
+    Assert-Equal (@('モニター設定', 'モニター一覧', 'モニター画面', 'モニタリング方式', 'ユーザー', 'ユーザー', 'ユーザー', 'ユーザー登録', 'ユーザー一覧', 'ユーザー管理', 'ID', 'ID番号', 'ＩＤＥ環境', 'ｉｄ') | Sort-Object) $texts
+    Assert-Equal 0 (Invoke-Terms @{ Path = $dir }).Count '揺れがなくなる'
+}
+
+Test-Case 'Test-ExcelTerms: 全角の英数字と半角カタカナは推奨にしない。半角カタカナしか無ければ、全角にした表記のうち多い方（同じ数なら長音のある方）を推奨にする' {
+    $dir = New-TestDir
+    # 表記の順（実行ごとに変わるハッシュの順）によらないことを、いくつもの語で確かめる
+    $cells = @('ＩＤ', 'ＩＤ', 'ＩＤ', 'ID',
+        'ｻｰﾊﾞ', 'ｻｰﾊﾞ', 'ｻｰﾊﾞｰ', 'ﾌﾟﾘﾝﾀ', 'ﾌﾟﾘﾝﾀ', 'ﾌﾟﾘﾝﾀｰ', 'ｺﾝﾋﾟｭｰﾀ', 'ｺﾝﾋﾟｭｰﾀ', 'ｺﾝﾋﾟｭｰﾀｰ',
+        'ﾓﾆﾀｰ', 'ﾓﾆﾀｰ', 'ﾓﾆﾀ', 'ﾌｫﾙﾀﾞｰ', 'ﾌｫﾙﾀﾞｰ', 'ﾌｫﾙﾀﾞ', 'ﾒﾓﾘ', 'ﾒﾓﾘｰ')
+    New-SheetsBook (Join-Path $dir 'a.xlsx') ([ordered]@{ 'S' = @(, @('項目')) + @($cells | ForEach-Object { , @($_) }) })
+    $r = Invoke-Terms @{ Path = $dir }
+    Assert-Equal (@('ＩＤ→ID|全角・半角|3',
+            'ｻｰﾊﾞ→サーバ|全角・半角|2', 'ｻｰﾊﾞｰ→サーバ|長音（ー）|1', 'ﾌﾟﾘﾝﾀ→プリンタ|全角・半角|2', 'ﾌﾟﾘﾝﾀｰ→プリンタ|長音（ー）|1',
+            'ｺﾝﾋﾟｭｰﾀ→コンピュータ|全角・半角|2', 'ｺﾝﾋﾟｭｰﾀｰ→コンピュータ|長音（ー）|1', 'ﾓﾆﾀｰ→モニター|全角・半角|2', 'ﾓﾆﾀ→モニター|長音（ー）|1',
+            'ﾌｫﾙﾀﾞｰ→フォルダー|全角・半角|2', 'ﾌｫﾙﾀﾞ→フォルダー|長音（ー）|1', 'ﾒﾓﾘｰ→メモリー|全角・半角|1', 'ﾒﾓﾘ→メモリー|長音（ー）|1') | Sort-Object) (Get-VariantKeys $r)
+    # 件数と推奨が同じ行は、揺れの表記の順に並べる（実行ごとに順が変わらない）
+    Assert-Equal 'ﾒﾓﾘ|ﾒﾓﾘｰ' (@($r | Where-Object Preferred -eq 'メモリー' | ForEach-Object { $_.Variant }) -join '|')
+}
+
+Test-Case 'Test-ExcelTerms: 推奨の表記の件数は、揺れの中の箇所（揺れ「サーバー」の中の「サーバ」）を数えず、同じ正しい表記の行が複数あっても重ねて数えない' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir 'a.xlsx') ([ordered]@{ 'S' = @(@('項目'), @('サーバー'), @('サーバ'), @('サーバ'), @('サーバ'), @('ユーザー'), @('ユーザ'), @('ﾕｰｻﾞｰ')) })
+    $g = Join-Path (New-TestDir) 'g.csv'
+    [System.IO.File]::WriteAllText($g, "正しい表記,揺れ`r`nサーバ,サーバー`r`nユーザー,ユーザ`r`nユーザー,ﾕｰｻﾞｰ`r`n", (New-Object System.Text.UTF8Encoding($true)))
+    $r = Invoke-Terms @{ Path = $dir; Glossary = $g; NoAuto = $true }
+    Assert-Equal (@('サーバー→サーバ|1|3', 'ユーザ→ユーザー|1|1', 'ﾕｰｻﾞｰ→ユーザー|1|1') | Sort-Object) @($r | ForEach-Object { '{0}→{1}|{2}|{3}' -f $_.Variant, $_.Preferred, $_.Count, $_.PreferredCount } | Sort-Object)
 }
 
 Test-Case 'Test-ExcelTerms: Get-Help でヘルプが表示される' {

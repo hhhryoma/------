@@ -149,7 +149,8 @@ function Invoke-RuleReplace {
     $matches_ = @($Rule.Rx.Matches($full) | Where-Object {
         $m = $_
         $inside = $false
-        foreach ($p in $protected) { if ($m.Index -ge $p.Index -and $m.Index + $m.Length -le $p.Index + $p.Length) { $inside = $true; break } }
+        # 置換後の文字と大文字・小文字だけが違う語は、その全体に一致した箇所なら置換する（「Javascript」→「JavaScript」）
+        foreach ($p in $protected) { if ($m.Index -ge $p.Index -and $m.Index + $m.Length -le $p.Index + $p.Length -and ($m.Length -lt $p.Length -or $p.Value -ceq $Rule.To)) { $inside = $true; break } }
         $m.Length -gt 0 -and -not $inside
     })
     if ($matches_.Count -eq 0) { return $false }
