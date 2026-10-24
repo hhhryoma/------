@@ -189,6 +189,14 @@ Test-Case 'Measure-TestQuality: 障害の状態の「未完了」「未解決」
     Assert-Match $text 'バグ 5 件（未完了 3 件'
 }
 
+Test-Case 'Measure-TestQuality: 障害の状態の「取消」「取り消し」「取下げ」は数えない' {
+    $dir = New-TestDir
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'SCR201'; Header = @('項番', 'テスト項目', '実施日', '判定'); Rows = @(, @('1', '確認', '2026/11/01', 'OK')) })
+    @('No,件名,起票日,状態', '1,障害 1,2026/11/01,完了', '2,障害 2,2026/11/01,取消', '3,障害 3,2026/11/02,取り消し', '4,障害 4,2026/11/02,取下げ') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $text = Get-HostText { & $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'bugs.csv') -AsOf '2026-11-06' 3>$null | Out-Null }
+    Assert-Match $text 'バグ 1 件（未完了 0 件。取下げなどで数えなかったもの 3 件）'
+}
+
 Test-Case 'Measure-TestQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestQualityTool
     Assert-Match $h.Synopsis 'テスト'
