@@ -94,6 +94,40 @@ Test-Case 'New-TestData: 型ごとの値（短い文字・小数・日付・日�
     Assert-Match @(Get-SqlLines $out '^INSERT INTO T_ITEM ')[0] "TIMESTAMP '2026-04-01 09:00:00', TIMESTAMP '2026-04-01 09:00:00', 1, NULL" 'Oracle には時刻だけの型が無いので、基準日の日時'
 }
 
+Test-Case 'New-TestData: 整数部の無い数値（NUMBER(3,3)・NUMERIC(4,4) など）は、桁あふれしない 0.xxx の値にする' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir 'テーブル定義書.xlsx') ([ordered]@{
+            'M_TAX' = @(
+                @('論理名', '物理名', 'データ型', '桁数', '小数', 'PK', '必須'),
+                @('税区分', 'TAX_CD', 'CHAR', '2', '', '1', '○'),
+                @('税率', 'TAX_RATE', 'NUMBER', '3', '3', '', '○'),
+                @('割引率', 'DISCOUNT_RATE', 'NUMERIC(4,4)', '', '', '', ''),
+                @('換算係数', 'RATE_COEF', 'NUMBER', '2', '4', '', ''))
+        })
+    $out = Join-Path $dir 'data'
+    & $DataTool -Path $dir -OutDir $out -BaseDate '2026-04-01' -Database PostgreSQL 6>$null 3>$null | Out-Null
+    Assert-Equal @('0.001|0.0001|0.0001', '0.002|0.0002|0.0002', '0.003|0.0003|0.0003', '0.999|0.9999|0.0099', '0|0|0', '0.004||') @(Read-DataCsv $out 'M_TAX' | ForEach-Object { '{0}|{1}|{2}' -f $_.TAX_RATE, $_.DISCOUNT_RATE, $_.RATE_COEF }) '標準は番号を小数の下の桁に。最大は 0.999（小数が桁数より大きい Oracle の NUMBER(2,4) は 0.0099）'
+    Assert-Match @(Get-SqlLines $out '^INSERT INTO M_TAX ')[3] "VALUES \('99', 0\.999, 0\.9999, 0\.0099\); -- 最大$"
+}
+
+Test-Case 'New-TestData: 和暦の設定（ja-JP の JapaneseCalendar）でも、日付・日時は西暦で書く' {
+    $dir = New-TestDir
+    New-ItemTableBook (Join-Path $dir 'テーブル定義書.xlsx')
+    $out = Join-Path $dir 'data'
+    $baseDate = [datetime]'2026-04-01'
+    $wareki = New-Object System.Globalization.CultureInfo('ja-JP')
+    $wareki.DateTimeFormat.Calendar = New-Object System.Globalization.JapaneseCalendar
+    $saved = [System.Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = $wareki
+        & $DataTool -Path $dir -OutDir $out -BaseDate $baseDate -Rows 1 -NoBoundary 6>$null 3>$null | Out-Null
+    }
+    finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $saved }
+    Assert-Match @(Get-SqlLines $out '^INSERT INTO T_ITEM ')[0] "DATE '2026-04-01', TIMESTAMP '2026-04-01 09:00:00', TIMESTAMP '2026-04-01 09:00:00', 1, NULL" 'Oracle の時刻は基準日の日時'
+    $row = @(Read-DataCsv $out 'T_ITEM')[0]
+    Assert-Equal '2026-04-01|2026-04-01 09:00:00|09:00:00' ('{0}|{1}|{2}' -f $row.RELEASE_DATE, $row.UPDATED_AT, $row.START_TIME)
+}
+
 Test-Case 'New-TestData: -Table で選んだテーブルの参照先も作り、-Rows・-NoBoundary・-IncludeDelete・-OutXlsx を使える' {
     $dir = New-TestDir
     $out = Join-Path $dir 'data'
@@ -111,6 +145,36 @@ Test-Case 'New-TestData: -Table で選んだテーブルの参照先も作り、
     Assert-Equal '標準 1|000000000001|1' ('{0}|{1}|{2}' -f $detail.Rows[2]['A'], $detail.Rows[2]['B'], $detail.Rows[2]['C']) '0 で始まる値も文字のまま'
     $w = @(& $DataTool -Path $designDir -OutDir $out -Table 'NOTHING' 6>$null 3>&1 | ForEach-Object { "$_" })
     Assert-Match ($w -join ' ') '-Table に合うテーブルがありません: NOTHING'
+}
+
+Test-Case 'New-TestData: 1 シートにカラム定義の表が 2 つあれば最初の表だけを使い（警告する）、ページごとにくり返した見出しの行は読まない（カラム・コード値）' {
+    $dir = New-TestDir
+    $header = @('論理名', '物理名', 'データ型', '桁数', 'PK', '必須', '備考')
+    $codeHeader = @('コード区分ID', 'コード区分名', 'コード値', '表示名')
+    New-SheetsBook (Join-Path $dir 'テーブル定義書.xlsx') ([ordered]@{
+            'T_ITEM' = @($header,
+                @('品目ID', 'ITEM_ID', 'INTEGER', '', '1', '○', ''),
+                @('品目名', 'ITEM_NAME', 'VARCHAR', '20', '', '○', ''),
+                @('■履歴', '', '', '', '', '', ''),
+                $header,
+                @('履歴番号', 'HIST_NO', 'INTEGER', '', '1', '○', ''))
+            'T_ORDER' = @($header,
+                @('受注ID', 'ORDER_ID', 'INTEGER', '', '1', '○', ''),
+                $header,
+                @('状態', 'STATUS', 'CHAR', '1', '', '○', 'コード区分 K01 の値'))
+            'コード' = @($codeHeader,
+                @('K01', '受注状態', 'A', '受付'),
+                $codeHeader,
+                @('', '', 'B', '出荷'))
+        })
+    $out = Join-Path $dir 'data'
+    $warnings = @(& $DataTool -Path $dir -OutDir $out -Rows 2 -NoBoundary 6>$null 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
+    Assert-Equal @('テーブル定義書.xlsx T_ITEM!B5: 1 つのシートにカラム定義の表が 2 つ以上あるため、この表は使いません（テーブル T_ITEM には最初の表を使います）') $warnings
+    Assert-Equal @(
+        "INSERT INTO T_ITEM (ITEM_ID, ITEM_NAME) VALUES (1, '品目名1'); -- 標準 1",
+        "INSERT INTO T_ITEM (ITEM_ID, ITEM_NAME) VALUES (2, '品目名2'); -- 標準 2",
+        "INSERT INTO T_ORDER (ORDER_ID, STATUS) VALUES (1, 'A'); -- 標準 1",
+        "INSERT INTO T_ORDER (ORDER_ID, STATUS) VALUES (2, 'B'); -- 標準 2") (Get-SqlLines $out '^INSERT ') 'くり返した見出しの下の行は、上の表（カラム定義・コード区分 K01）の続き'
 }
 
 Test-Case 'New-TestData: Get-Help でヘルプが表示される' {

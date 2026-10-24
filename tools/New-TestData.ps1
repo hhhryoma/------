@@ -44,6 +44,8 @@ foreach ($name in @('Headers', 'OutDir', 'OutXlsx')) {
 if ($OutXlsx -and [System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw "-OutXlsx の拡張子は .xlsx にしてください: $OutXlsx" }
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
+# 日付・日時は、Windows の地域の設定（和暦など）によらず西暦で書く
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
 switch ($Encoding) {
     'UTF8' { $enc = New-Object System.Text.UTF8Encoding($false) }
     'UTF8BOM' { $enc = New-Object System.Text.UTF8Encoding($true) }
@@ -201,12 +203,14 @@ function Get-NewValue {
     }
     switch ($vk) {
         'Decimal' {
+            # 整数部の無い型（NUMBER(3,3) など）は 0.xxx にする。最大は 0.999（小数が桁数より大きい NUMBER(2,4) は 0.0099）、ほかは番号を小数の下の桁に（0.001・0.002…）
             $intDigits = 10
-            if ($len -gt 0) { $intDigits = [math]::Max(1, $len - $scale) }
+            if ($len -gt 0) { $intDigits = [math]::Max(0, $len - $scale) }
             $fraction = ''
             if ($scale -gt 0) { $fraction = '.' + ('9' * $scale) }
-            if ($Kind -eq 'Max') { return ('9' * $intDigits) + $fraction }
+            if ($Kind -eq 'Max') { if ($intDigits -eq 0) { return '0.' + ('9' * $len).PadLeft($scale, '0') }; return ('9' * $intDigits) + $fraction }
             if ($Kind -eq 'Min') { return '0' }
+            if ($intDigits -eq 0) { return '0.' + ([string]$n).PadLeft($scale, '0') }
             $v = $n
             if (-not $isPk -and ([string]($n * 100)).Length -le $intDigits) { $v = $n * 100 }
             if ($scale -gt 0 -and -not $isPk) { return '{0}.{1}' -f $v, '5'.PadRight($scale, '0') }
@@ -214,9 +218,9 @@ function Get-NewValue {
         }
         'Integer' { if ($Kind -eq 'Max') { return Get-IntegerMax $Column }; if ($Kind -eq 'Min') { return '0' }; return [string]$n }
         'Float' { if ($Kind -eq 'Max') { return '99999999.99' }; if ($Kind -eq 'Min') { return '0' }; return '{0}.5' -f $n }
-        'Date' { if ($Kind -eq 'Max') { return '9999-12-31' }; if ($Kind -eq 'Min') { return '1900-01-01' }; return $BaseDate.AddDays($n - 1).ToString('yyyy-MM-dd') }
-        'Timestamp' { if ($Kind -eq 'Max') { return '9999-12-31 23:59:59' }; if ($Kind -eq 'Min') { return '1900-01-01 00:00:00' }; return $BaseDate.AddDays($n - 1).AddHours(9).ToString('yyyy-MM-dd HH:mm:ss') }
-        'Time' { if ($Kind -eq 'Max') { return '23:59:59' }; if ($Kind -eq 'Min') { return '00:00:00' }; return $BaseDate.AddHours(9).AddMinutes($n - 1).ToString('HH:mm:ss') }
+        'Date' { if ($Kind -eq 'Max') { return '9999-12-31' }; if ($Kind -eq 'Min') { return '1900-01-01' }; return $BaseDate.AddDays($n - 1).ToString('yyyy-MM-dd', $invariant) }
+        'Timestamp' { if ($Kind -eq 'Max') { return '9999-12-31 23:59:59' }; if ($Kind -eq 'Min') { return '1900-01-01 00:00:00' }; return $BaseDate.AddDays($n - 1).AddHours(9).ToString('yyyy-MM-dd HH:mm:ss', $invariant) }
+        'Time' { if ($Kind -eq 'Max') { return '23:59:59' }; if ($Kind -eq 'Min') { return '00:00:00' }; return $BaseDate.AddHours(9).AddMinutes($n - 1).ToString('HH:mm:ss', $invariant) }
         'Boolean' { if ($Kind -eq 'Max') { return '1' }; if ($Kind -eq 'Min') { return '0' }; return [string]($n % 2) }
         'Binary' { return $null }
     }
@@ -311,7 +315,7 @@ function ConvertTo-SqlLiteral {
         'Timestamp' { if (@('Oracle', 'PostgreSQL') -contains $Database) { return "TIMESTAMP '$Value'" }; return "'$Value'" }
         'Time' {
             # Oracle には時刻だけの型が無い（型の対応では TIMESTAMP）ので、基準日の日時にする
-            if ($Database -eq 'Oracle') { return "TIMESTAMP '{0} {1}'" -f $BaseDate.ToString('yyyy-MM-dd'), $Value }
+            if ($Database -eq 'Oracle') { return "TIMESTAMP '{0} {1}'" -f $BaseDate.ToString('yyyy-MM-dd', $invariant), $Value }
             if ($Database -eq 'PostgreSQL') { return "TIME '$Value'" }
             return "'$Value'"
         }
