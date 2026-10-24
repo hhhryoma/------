@@ -61,7 +61,9 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | ツール | できること | Excel | 「送る」 |
 | --- | --- | --- | --- |
 | [New-TestSpecDraft.ps1](tools/README.md#new-testspecdraftps1) | 画面設計書の必須・桁数・型・入力チェック・コード値・イベントから、テスト仕様書の下書き（メッセージの文言付きの期待結果）を作る | 不要 ※1 | テスト仕様書の下書き |
+| [New-TestData.ps1](tools/README.md#new-testdataps1) | テーブル定義書から、テーブルごとの CSV と INSERT 文のテストデータ（主キー・外部キー・コード値と、桁数の最大・最小・NULL の行）を作る | 不要 ※1 | － |
 | [Test-TestSpec.ps1](tools/README.md#test-testspecps1) | テスト仕様書の期待結果の空欄・あいまいさ、重複したケース、異常系・必須・型・境界値・コード値のケースの不足を見つける | 不要 ※1 | － |
+| [Test-TestEvidence.ps1](tools/README.md#test-testevidenceps1) | テストのエビデンス（画面のハードコピーなど）の抜け・空・同じ画像の使い回しと、結果の書き忘れを、テスト仕様書の結果と突き合わせて見つける | 不要 ※1 | － |
 | [Test-Traceability.ps1](tools/README.md#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、画面・イベント・メッセージ・IF にテストがあるか（テストの抜け）を全件確かめる | 不要 ※1 | － |
 | [Select-RegressionTests.ps1](tools/README.md#select-regressiontestsps1) | 設計書の旧版と新版の差分から、再テストするテストケースを選ぶ（改修の回帰テストの範囲決め） | 不要 ※1 | － |
 

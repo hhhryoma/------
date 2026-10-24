@@ -61,18 +61,7 @@ foreach ($w in @('ACCESS', 'ADD', 'ALL', 'ALTER', 'AND', 'ANY', 'AS', 'ASC', 'AU
 # ---------------------------------------------------------------- 設定（見出しの候補・型の対応）
 
 
-$candidates = @{}
-foreach ($r in (Read-CsvFile $Headers @('項目', '見出し') 'テーブル定義書の見出し')) {
-    $field = ([string]$r.'項目').Trim()
-    if (-not $field) { continue }
-    $candidates[$field] = @(([string]$r.'見出し') -split '\|' | ForEach-Object { ConvertTo-Label $_ } | Where-Object { $_ })
-}
-foreach ($f in @('物理名', 'データ型')) {
-    if (-not $candidates.ContainsKey($f) -or $candidates[$f].Count -eq 0) { throw "テーブル定義書の見出しに「$f」の行がありません: $Headers" }
-}
-foreach ($f in @('テーブルID', 'テーブル名', '論理名', '桁数', '小数', '主キー', '必須', 'NULL許可', 'デフォルト', '外部キー', 'インデックス名', 'インデックスのカラム', 'ユニーク')) {
-    if (-not $candidates.ContainsKey($f)) { $candidates[$f] = @() }
-}
+$candidates = Read-TableHeaderCandidates $Headers
 
 function ConvertTo-TypeKey {
     param([string] $Text)
@@ -97,11 +86,6 @@ $books = ConvertTo-DesignBooks $hits
 
 $script:Findings = New-Object System.Collections.Generic.List[object]
 
-function New-Place {
-    param($Book, [string] $Sheet, [int] $Row, [int] $Col)
-    return [pscustomobject]@{ File = $Book.File; Path = $Book.Path; Sheet = $Sheet; Cell = ('{0}{1}' -f (ConvertTo-ColumnName $Col), $Row) }
-}
-
 function Add-Finding {
     #     テーブル定義書の気になる点。警告として表示し、-OutXlsx にも載せる
     param([string] $Message, $Place)
@@ -111,149 +95,9 @@ function Add-Finding {
     $script:Findings.Add([pscustomobject]@{ Message = $Message; Place = $Place })
 }
 
-function Find-FirstLabel {
-    #     候補のうち、行の見出しにある最初のもの
-    param($Labels, [string[]] $Names)
-    foreach ($n in $Names) { if ($Labels -contains $n) { return $n } }
-    return $null
-}
-
-function Find-SheetValue {
-    #     シートのヘッダの値（候補のうち最初に見つかった見出しの右）
-    param($Grid, [string[]] $Names)
-    foreach ($n in $Names) { $c = Find-LabelCell $Grid $n; if ($c -and $c.Value) { return $c } }
-    return $null
-}
-
-function Test-Marked {
-    #     ○・Y・1 などの印があるか
-    param([string] $Text)
-    $t = ([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant()
-    if (-not $t) { return $false }
-    return $t -match '^(○|◯|〇|●|✓|✔|Y|YES|TRUE|1|必須|NOTNULL|NOT NULL|有|あり|要|PK|UK)$'
-}
-
-function Test-Blank {
-    param([string] $Text)
-    $t = ([string]$Text).Normalize($nfkc).Trim()
-    return (-not $t) -or $t -match '^(-|－|ー|―|‐|×|なし|N/A)$'
-}
-
-function Get-Cell {
-    param($Row, $ColumnOf, [string] $Label)
-    if (-not $Label -or -not $ColumnOf.ContainsKey($Label)) { return '' }
-    return [string]$Row.Cells[$ColumnOf[$Label]]
-}
-
-$tables = New-Object System.Collections.Generic.List[object]
+$tables = Read-TableDesign -Books $books -Candidates $candidates -OnFinding { param($Message, $Place) Add-Finding $Message $Place }
 $tableById = @{}
-$bookPaths = [string[]]@($books.Keys)
-[Array]::Sort($bookPaths, [StringComparer]::Ordinal)
-foreach ($bookPath in $bookPaths) {
-    $book = $books[$bookPath]
-    foreach ($sheetName in $book.Sheets.Keys) {
-        $grid = $book.Sheets[$sheetName]
-        # カラム定義の見出し行（物理名とデータ型の見出しがそろっている行）
-        $physLabel = $null; $typeLabel = $null
-        foreach ($row in $grid.Rows) {
-            $labels = @($grid.Labels[$row].Values)
-            $p = Find-FirstLabel $labels $candidates['物理名']
-            $t = Find-FirstLabel $labels $candidates['データ型']
-            if ($p -and $t -and $p -ne $t) { $physLabel = $p; $typeLabel = $t; break }
-        }
-        if (-not $physLabel) { continue }
-        $colTable = @(Find-DesignTables $grid @($physLabel, $typeLabel) $physLabel)[0]
-        if (-not $colTable -or $colTable.Rows.Count -eq 0) { continue }
-        $cof = $colTable.ColumnOf
-        $label = @{}
-        foreach ($f in @('論理名', '桁数', '小数', '主キー', '必須', 'NULL許可', 'デフォルト', '外部キー')) { $label[$f] = Find-FirstLabel @($cof.Keys) $candidates[$f] }
-
-        $idCell = Find-SheetValue $grid $candidates['テーブルID']
-        $headerPlace = New-Place $book $sheetName $colTable.HeaderRow $cof[$physLabel]
-        if ($idCell) { $tableId = $idCell.Value; $place = New-Place $book $sheetName $idCell.Row $idCell.Col }
-        elseif ($sheetName -match '^[A-Za-z][A-Za-z0-9_$#]*$') { $tableId = $sheetName; $place = $headerPlace }
-        else { Add-Finding ('テーブル ID（{0}）が見つからないため、このシートの表は使いません' -f ($candidates['テーブルID'] -join '・')) $headerPlace; continue }
-        $tableId = $tableId.Normalize($nfkc).Trim()
-        $key = $tableId.ToUpperInvariant()
-        if ($tableById.ContainsKey($key)) {
-            $first = $tableById[$key].Place
-            Add-Finding ('テーブル {0} はほかのシートでも定義されているため、こちらは使いません（{1} {2}!{3}）' -f $tableId, $first.File, $first.Sheet, $first.Cell) $place
-            continue
-        }
-        $nameCell = Find-SheetValue $grid $candidates['テーブル名']
-        $tableName = ''
-        if ($nameCell) { $tableName = $nameCell.Value }
-
-        $cols = New-Object System.Collections.Generic.List[object]
-        $colNames = @{}
-        $pkSeq = 0
-        foreach ($dr in $colTable.Rows) {
-            $phys = (Get-Cell $dr $cof $physLabel).Normalize($nfkc).Trim()
-            $cellPlace = New-Place $book $sheetName $dr.Row $cof[$physLabel]
-            if ($colNames.ContainsKey($phys.ToUpperInvariant())) { Add-Finding ('{0} のカラム {1} が 2 回定義されています' -f $tableId, $phys) $cellPlace; continue }
-            $colNames[$phys.ToUpperInvariant()] = $true
-            # データ型（「VARCHAR(100)」のように型に桁数を書いた形も読む）
-            $typeText = (Get-Cell $dr $cof $typeLabel).Normalize($nfkc).Trim()
-            $n = ''; $s = ''
-            $m = [regex]::Match($typeText, '^(.+?)\s*\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)$')
-            if ($m.Success) { $typeText = $m.Groups[1].Value; $n = $m.Groups[2].Value; $s = $m.Groups[3].Value }
-            $lenText = (Get-Cell $dr $cof $label['桁数']).Normalize($nfkc).Trim()
-            $lm = [regex]::Match($lenText, '^(\d+)(?:\s*[,.]\s*(\d+))?$')
-            if ($lm.Success) { $n = $lm.Groups[1].Value; if ($lm.Groups[2].Success) { $s = $lm.Groups[2].Value } }
-            $scaleText = (Get-Cell $dr $cof $label['小数']).Normalize($nfkc).Trim()
-            if ($scaleText -match '^\d+$') { $s = $scaleText }
-            # 主キー（数字なら主キーの順番、印なら上から順）
-            $pkText = (Get-Cell $dr $cof $label['主キー']).Normalize($nfkc).Trim()
-            $pkOrder = $null
-            if ($pkText -match '^\d+$' -and [int]$pkText -gt 0) { $pkOrder = [int]$pkText }
-            elseif (Test-Marked $pkText) { $pkSeq++; $pkOrder = 1000 + $pkSeq }
-            $notNull = $false
-            if ($label['必須']) { $notNull = Test-Marked (Get-Cell $dr $cof $label['必須']) }
-            elseif ($label['NULL許可']) { $notNull = -not (Test-Marked (Get-Cell $dr $cof $label['NULL許可'])) }
-            if ($null -ne $pkOrder) { $notNull = $true }
-            $default = (Get-Cell $dr $cof $label['デフォルト']).Trim()
-            if (Test-Blank $default) { $default = '' }
-            $fkTable = ''; $fkColumn = ''
-            $fm = [regex]::Match((Get-Cell $dr $cof $label['外部キー']).Normalize($nfkc), '([A-Za-z_][A-Za-z0-9_$#]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_$#]*)')
-            if ($fm.Success) { $fkTable = $fm.Groups[1].Value; $fkColumn = $fm.Groups[2].Value }
-            $cols.Add([pscustomobject]@{
-                Name = $phys; Logical = (Get-Cell $dr $cof $label['論理名']).Trim(); BaseType = $typeText; Length = $n; Scale = $s
-                PkOrder = $pkOrder; NotNull = $notNull; Default = $default; FkTable = $fkTable; FkColumn = $fkColumn; Place = $cellPlace; SqlType = ''
-            })
-        }
-
-        # インデックス定義
-        $indexes = New-Object System.Collections.Generic.List[object]
-        $ixName = $null; $ixCols = $null
-        foreach ($row in $grid.Rows) {
-            $labels = @($grid.Labels[$row].Values)
-            $a = Find-FirstLabel $labels $candidates['インデックス名']
-            $b = Find-FirstLabel $labels $candidates['インデックスのカラム']
-            if ($a -and $b) { $ixName = $a; $ixCols = $b; break }
-        }
-        if ($ixName) {
-            foreach ($it in (Find-DesignTables $grid @($ixName, $ixCols) $ixName)) {
-                $uniqueLabel = Find-FirstLabel @($it.ColumnOf.Keys) $candidates['ユニーク']
-                foreach ($dr in $it.Rows) {
-                    $names = @(((Get-Cell $dr $it.ColumnOf $ixCols).Normalize($nfkc) -split '[,、\s]+') | Where-Object { $_ })
-                    # 「ORDER_DATE DESC」のような並び順は前のカラムに付ける
-                    $list = New-Object System.Collections.Generic.List[string]
-                    foreach ($nm in $names) {
-                        if ($nm -match '^(?i:ASC|DESC)$' -and $list.Count -gt 0) { $list[$list.Count - 1] = '{0} {1}' -f $list[$list.Count - 1], $nm.ToUpperInvariant() } else { $list.Add($nm) }
-                    }
-                    $indexes.Add([pscustomobject]@{
-                        Name = (Get-Cell $dr $it.ColumnOf $ixName).Normalize($nfkc).Trim(); Columns = $list.ToArray()
-                        Unique = (Test-Marked (Get-Cell $dr $it.ColumnOf $uniqueLabel)); Place = (New-Place $book $sheetName $dr.Row $it.ColumnOf[$ixName])
-                    })
-                }
-            }
-        }
-
-        $t = [pscustomobject]@{ Id = $tableId; Name = $tableName; File = $book.File; Sheet = $sheetName; Place = $place; Columns = $cols; Indexes = $indexes }
-        $tableById[$key] = $t
-        $tables.Add($t)
-    }
-}
+foreach ($t in $tables) { $tableById[$t.Id.ToUpperInvariant()] = $t }
 
 # -Table で絞り込む（ワイルドカード）
 if ($Table) {

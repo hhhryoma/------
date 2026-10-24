@@ -109,6 +109,11 @@ for ($i = 1; $i -le 60; $i++) {
     $cases.Add(@([string]$i, $function, $kind, $text, '画面を開く', $expected, $day, $day2, $result, $bug))
 }
 New-Book (Join-Path $data 'テスト/UT_受注.xlsx') 'テストケース' @('No', '機能', '区分', '確認内容', '手順', '期待結果', '予定日', '実施日', '結果', '障害番号') $cases
+# エビデンス（SCR001 の No.1〜3 の画面の代わりの画像。No.3 は No.1 と同じ画像＝使い回し）
+$pngA = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAYElEQVR4nO2XMQpAIQxDE+n9r1wH4QviomALv8kidXk0pEXp7shQS6ECsHGQDEMOj22pX+vrMM1qgcNkm7ujhN9Gsp7VAv8fvBunkKVdz2qBBRZY4GvNXR35pgfAcn+nDgTjEEBUFCIpAAAAAElFTkSuQmCC'
+$pngB = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAbUlEQVR4nO2XwQoAIQhEZxb//5ftEHQIYSlaXdK5RF0eYzoUVRURekKoAKQvJN2QvcYy7b/WcBhW6gK7SYyzpQ7fbcl8pS7w/WBrnFxC2wJv6XX4Jzv57rjABb4PfCxAVuPuB4493/QAmO7v1ACh5BRCnP+rmgAAAABJRU5ErkJggg=='
+New-Item -ItemType Directory -Force -Path (Join-Path $data 'エビデンス/SCR001') | Out-Null
+foreach ($e in @(@('1', $pngA), @('2', $pngB), @('3', $pngA))) { [System.IO.File]::WriteAllBytes((Join-Path $data ('エビデンス/SCR001/{0}.png' -f $e[0])), [Convert]::FromBase64String($e[1])) }
 $daily = @(1, 2, 2, 1, 1, 0, 1, 0, 0, 0)
 $bugs = New-Object System.Collections.Generic.List[object]
 $n = 0
@@ -194,6 +199,7 @@ Invoke-Step 'Compare-Excel（版を続けて比べる・Word）' '04c_版の差�
 Invoke-Step 'Test-DesignConsistency（設計書の整合性）' '05_整合性.xlsx' '指摘一覧のリンクで設計書の該当セルが開く。CRUD のシートが読める' { param($o) & (& $t 'Test-DesignConsistency.ps1') -Path (Join-Path $fixtures 'consistency') -OutXlsx $o }
 Invoke-Step 'Test-Traceability（網羅）' '06_網羅.xlsx' '抜け・網羅・要件のシートと、場所のリンク' { param($o) & (& $t 'Test-Traceability.ps1') -DesignPath $design -TestPath (Join-Path $data 'テスト') -Requirement (Join-Path $data '要件一覧.csv') -OutXlsx $o }
 Invoke-Step 'Select-RegressionTests（再テストするケース）' '06b_再テスト.xlsx' '選んだ理由の列と、テスト仕様書の場所のリンク（該当セルが開く）' { param($o) & (& $t 'Select-RegressionTests.ps1') -Old $design -New $designV2 -TestPath (Join-Path $data 'テスト') -OutXlsx $o }
+Invoke-Step 'New-TestData（テストデータ）' '09b_テストデータ.xlsx' 'テーブルごとのシートに標準・最大・最小・NULL の行がある。09b_テストデータ フォルダの CSV を Excel で開いても文字化けしない' { param($o) & (& $t 'New-TestData.ps1') -Path $design -OutDir (Join-Path $OutDir '09b_テストデータ') -BaseDate '2026-04-01' -OutXlsx $o }
 Invoke-Step 'Measure-DesignSize（規模）' '07_規模.xlsx' '集計・規模一覧・係数表のシート' { param($o) & (& $t 'Measure-DesignSize.ps1') -Path $design -OutXlsx $o }
 Invoke-Step 'Test-ExcelEstimate（見積書の検算）' '08_見積書の検算.xlsx' '検算結果のリンクで、見積書の該当セルが開く' { param($o) & (& $t 'Test-ExcelEstimate.ps1') -Path (Join-Path $fixtures 'estimate/見積書.xlsx') -OutXlsx $o }
 Invoke-Step 'Export-TableDdl（DDL）' '09_DDL.xlsx' 'DB との差異・定義書の指摘・テーブルのシート（09_DDL.sql も作る）' { param($o) & (& $t 'Export-TableDdl.ps1') -Path $design -OutFile (Join-Path $OutDir '09_DDL.sql') -CompareCatalog (Join-Path $fixtures 'ddl/postgresql_columns.csv') -OutXlsx $o }
@@ -204,6 +210,7 @@ Invoke-Step 'Export-ActionItems（議事録の宿題）' '10d_議事録の宿題
 Invoke-Step 'Measure-ReviewQuality（レビュー）' '11_レビュー.xlsx' 'グラフ（2 つ）が表示される（ゾーン分析・推移のシート）' { param($o) & (& $t 'Measure-ReviewQuality.ps1') -Path (Join-Path $data 'レビュー') -DesignPath $design -ReviewLog (Join-Path $data 'レビュー記録.csv') -AsOf '2026-10-20' -OutXlsx $o }
 Invoke-Step 'Measure-TestQuality（テスト）' '12_テスト.xlsx' 'グラフ（3 つ）が表示される（推移・機能別などのシート）' { param($o) & (& $t 'Measure-TestQuality.ps1') -Path (Join-Path $data 'テスト') -BugList (Join-Path $data '障害管理表.xlsx') -DesignPath $design -MinBugs 5 -AsOf '2026-10-12' -OutXlsx $o }
 Invoke-Step 'Test-TestSpec（テスト仕様書）' '13_テスト仕様書.xlsx' 'リンクでテスト仕様書の該当セルが開く（必須・型・コード値・メッセージの指摘）' { param($o) & (& $t 'Test-TestSpec.ps1') -Path (Join-Path $data 'テスト') -DesignPath $design -OutXlsx $o }
+Invoke-Step 'Test-TestEvidence（エビデンス）' '13c_エビデンス.xlsx' 'ケース別のエビデンスの場所のリンクで画像が開く。No.1 と No.3 に同じ画像の使い回しの警告がある。エビデンスの無いケースのリンクで、テスト仕様書の該当セルが開く' { param($o) & (& $t 'Test-TestEvidence.ps1') -Path (Join-Path $data 'テスト') -EvidencePath (Join-Path $data 'エビデンス') -OutXlsx $o }
 Invoke-Step 'New-TestSpecDraft（テスト仕様書の下書き）' '13b_テスト仕様書の下書き.xlsx' '一覧と画面ごと（SCR001〜SCR003）のシート。期待結果にメッセージの文言が入り、そのまま書き足せる（列幅・折り返し）' { param($o) & (& $t 'New-TestSpecDraft.ps1') $design -OutXlsx $o }
 Invoke-Step 'Measure-DefectRemoval（工程別の摘出）' '14_工程別の摘出.xlsx' '工程別のシートのパレート図が表示される' { param($o) & (& $t 'Measure-DefectRemoval.ps1') -BugList (Join-Path $data '障害管理表.xlsx') -Findings (Join-Path $data 'レビュー') -OutXlsx $o }
 Invoke-Step 'Measure-ReviewEffectiveness（レビューの効き目）' '15_レビューの効き目.xlsx' '設計書別のシートのグラフが表示される' { param($o) & (& $t 'Measure-ReviewEffectiveness.ps1') -Findings (Join-Path $data 'レビュー') -BugList (Join-Path $data '障害管理表.xlsx') -DesignPath $design -AsOf '2026-10-20' -OutXlsx $o }
