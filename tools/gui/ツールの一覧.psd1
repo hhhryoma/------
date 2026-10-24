@@ -193,6 +193,13 @@
             Required = @('Path'); Output = @('OutXlsx'); OutputName = 'テスト仕様書のチェック'; Keywords = 'テストケース レビュー'
         }
         @{
+            Id = 'Evidence'; Label = 'テストのエビデンスを確かめる'; Group = 'テスト'; Tool = 'Test-TestEvidence.ps1'
+            Summary = 'テスト仕様書の結果とエビデンス（画面のハードコピーなど）を突き合わせ、エビデンスの抜け・空・同じ画像の使い回しと、結果の書き忘れを見つけます。'
+            Main = @('Path', 'EvidencePath', 'OutXlsx')
+            Labels = @{ Path = 'テスト仕様書のファイル・フォルダ'; EvidencePath = 'エビデンスのフォルダ（空欄ならテスト仕様書と同じ場所）'; OutXlsx = '結果の保存先' }
+            Required = @('Path'); Output = @('OutXlsx'); OutputName = 'エビデンスのチェック'; Keywords = 'エビデンス 証跡 ハードコピー キャプチャ 使い回し'
+        }
+        @{
             Id = 'TestData'; Label = 'テストデータを作る'; Group = 'テスト'; Tool = 'New-TestData.ps1'
             Summary = 'テーブル定義書から、テーブルごとの CSV と INSERT 文のテストデータを作ります。主キー・外部キー・コード値を考え、桁数の最大・最小・NULL の行も作ります。'
             Main = @('Path', 'OutDir', 'Database', 'Table', 'OutXlsx')

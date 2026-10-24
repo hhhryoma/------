@@ -26,6 +26,7 @@
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [New-TestSpecDraft.ps1](#new-testspecdraftps1) | 画面設計書（画面項目定義・イベント定義）とコード定義書・メッセージ一覧から、必須・桁数の境界・型・入力チェック・コード値・イベントのテストケースの下書きを、メッセージの文言付きで作る（Excel 不要） |
 | [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系・必須・型・境界値・コード値のケースの不足を見つける（Excel 不要） |
+| [Test-TestEvidence.ps1](#test-testevidenceps1) | テストのエビデンス（画面のハードコピーなど）の抜け・空・同じ画像の使い回しと、結果の書き忘れを、テスト仕様書の結果と突き合わせて見つける（Excel 不要） |
 | [Test-Traceability.ps1](#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、設計の要素（画面・イベント・メッセージ・IF）にテストがあるかを確かめる。テストの抜けを全件、機械で見つける（Excel 不要） |
 | [Select-RegressionTests.ps1](#select-regressiontestsps1) | 設計書の旧版と新版の差分から、変更した項目・イベント・メッセージなどが出てくるテストケースを、再テストするケースとして選ぶ（改修の回帰テストの範囲決め。Excel 不要） |
 
@@ -59,7 +60,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Start-ExcelTools.ps1（画面）
 
@@ -2340,7 +2341,7 @@ SCR002,受注登録|受注登録画面,DD02_画面設計書_SCR002_受注登録
 
 ### 読み取り結果の確認
 
-品質の各ツール（Measure-ReviewQuality・Measure-TestQuality・Test-TestSpec・Measure-DefectRemoval・Compare-ReviewFindings）は、見出しの文字で表を探して読みます。
+品質の各ツール（Measure-ReviewQuality・Measure-TestQuality・Test-TestSpec・Test-TestEvidence・Measure-DefectRemoval・Compare-ReviewFindings）は、見出しの文字で表を探して読みます。
 自社のひな形で見出しの文字が違うと、任意の列（予定日・重要度など）が読めないまま指標が欠けることがあるため、読み取りの結果を出します。
 
 - 画面: 種類ごとに「読み取り（テスト仕様書）: 1 ファイル・200 行。見出しが無い項目: 工程（1/1 表）」の形で出し、表が見つからないファイルの名前も出します
@@ -2353,7 +2354,7 @@ SCR002,受注登録|受注登録画面,DD02_画面設計書_SCR002_受注登録
 
 | 表 | 見出しの行の条件 | 読む項目（見出しの候補の一部） |
 | --- | --- | --- |
-| テスト仕様書 | 「結果」と、「テストID」か「確認内容」 | 機能（機能・画面ID）・テストID（No・項番）・確認内容（期待結果）・結果（判定）・予定日・実施日・バグ番号（障害番号）・工程 |
+| テスト仕様書 | 「結果」と、「テストID」か「確認内容」 | 機能（機能・画面ID）・テストID（No・項番）・確認内容（期待結果）・結果（判定）・予定日・実施日・バグ番号（障害番号）・工程・エビデンス（証跡・ハードコピー。Test-TestEvidence が読む） |
 | 障害管理表 | 「障害内容」と、「起票日」「状態」「重要度」「障害番号」のどれか | 障害番号・機能（発生機能）・障害内容（現象・件名）・起票日（発見日）・完了日・状態・重要度・原因（原因分類）・混入工程・摘出工程 |
 
 - **結果**: OK（○・合格・PASS）・NG（×・不合格・FAIL）・保留（中断・ブロック）・対象外（-・N/A・削除）・未実施（空欄など）。対象外は数えません
@@ -2523,6 +2524,85 @@ Detail   : 「正しく」では、何を確かめれば合格かが分かりま
 | `-OutXlsx` | 指摘（該当セルへのリンク付き）・機能別（ケース数・異常系の割合）・読み取り結果を保存する |
 | `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
 | `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
+
+## Test-TestEvidence.ps1
+
+テストの**エビデンス**（画面のハードコピー・ログなど）が実施したケースのぶんそろっているかを、テスト仕様書の結果と突き合わせて確かめます。Excel は不要です。
+監査で指摘されやすいエビデンスの抜け・同じ画面の使い回し・結果の書き忘れを、提出前に見つけます。
+
+```powershell
+.\Test-TestEvidence.ps1 D:\テスト仕様書 -EvidencePath D:\エビデンス -OutXlsx D:\エビデンスのチェック.xlsx
+```
+
+```
+テストケース 11 件（実施済み 10 件）: エビデンスあり 6 件・無し 3 件・不要 1 件
+エビデンス: シート 5・目印 1・画像 3（画像 7 枚）。どのケースか分からないもの 2・決められないもの 0
+エラー 3 件 / 警告 2 件 / 情報 2 件
+内訳: エビデンスが無い 2・どのケースか分からないエビデンス 2・エビデンスが空 1・エビデンスが見つからない 1・実施していないケースのエビデンス 1
+
+File     : UT_受注一覧.xlsx
+Location : テストケース!D6
+Level    : エラー
+Item     : エビデンスが無い
+Detail   : 結果が NG ですが、エビデンスが見つかりません（シート名・ファイル名・目印をテストID にしてください）
+
+File     : UT_受注一覧.xlsx
+Location : テストケース!D8
+Level    : 警告
+Item     : 実施していないケースのエビデンス
+Detail   : 結果が空欄ですが、エビデンスがあります（UT-007.png）。結果の書き忘れではありませんか
+...
+```
+
+### エビデンスとケースの結び付け方
+
+エビデンスは、置き方に合わせて次のように探します。テストID は、全角・半角と大文字小文字、前に付けた「No.」「■」「テストID:」などと、数字の前の 0 を除いて比べます（`UT-001` と `ut-1`、`No.001` と `1` はそれぞれ同じ）。
+
+| 置き方 | 例 | 結び付けるケース |
+| --- | --- | --- |
+| シートの名前 | エビデンスのブックのシート `UT-001`・`No.1`・`UT-001_2` | シートの名前のケース（後ろの `_2`・`(2)` は 2 枚目として除く） |
+| 画像・ファイルの名前 | `UT-001.png`・`SCR001_UT-001.png`・`受注一覧_No1.png` | ファイルの名前のケース（前に機能の名前を付けたものも） |
+| ケースごとのフォルダ | `UT-001\1.png`・`UT-001\エビデンス.xlsx` | フォルダの名前のケース（中のファイル。ブックは全体） |
+| ブックの名前 | `UT-001.xlsx` | ブック全体 |
+| シートの中の目印 | 行のいちばん左のセルの `■UT-001`・`【No.1】`・`テストID: UT-001` | 目印の行から、次の目印の前の行までの画像と文字 |
+| テスト仕様書の表の中 | テストケースの行の横に貼った画像 | 画像の左上の行（か、上でいちばん近い行）のケース |
+| エビデンスの列 | `画面確認`・`エビデンス.xlsx!UT-001`・`UT-001.png` | 書いたシート・ファイル |
+
+- エビデンスとして読むのは、Excel（.xlsx / .xlsm。シートごとに画像と文字）・画像（.png .jpg など。中身）・そのほかのファイル（.xls・.pdf・.docx・.txt・.mp4 など。名前だけ）です
+- 数字だけの目印（`1` など）は、■ や No. などを付けたものだけを目印とみなします（表の行番号と見分けるため）
+- 機能ごとに同じテストID（No.1 など）を使っているときは、エビデンスのブック・フォルダ・シートの名前に機能の名前を入れてください（`受注一覧\1.png`・`受注一覧_エビデンス.xlsx` のシート `1`）。決められないものは「どのケースか決められない」で知らせます
+- エビデンスの列の「-」「なし」「不要」「対象外」は、エビデンスの要らないケースとして扱います。「あり」「○」は、名前でエビデンスを探します
+- エビデンスの中身（正しい画面か）は見ません
+
+| 区分 | 項目 | 内容 |
+| --- | --- | --- |
+| エラー | エビデンスが無い | 結果が OK・NG のケースに、エビデンスが見つからない |
+| エラー | エビデンスが見つからない | エビデンスの列に書いたシート・ファイルが無い（実施していないケースは警告） |
+| 警告 | エビデンスが空 | エビデンスに画像も文字も無い |
+| 警告 | 実施していないケースのエビデンス | 結果が空欄・保留のケースにエビデンスがある（結果の書き忘れ） |
+| 警告 | 同じ画像の使い回し | 違うケースのエビデンスに、中身の同じ画像がある（撮り直し忘れ・貼り間違い） |
+| 情報 | 多くのケースにある画像 | 5 件以上のケースのエビデンスにある画像（ロゴなど。使い回しの警告にしない） |
+| 情報 | 対象外のケースのエビデンス | 結果が対象外のケースにエビデンスがある |
+| 情報 | どのケースか分からないエビデンス | どのケースにも結び付かない、画像のあるシート・画像 |
+| 情報 | どのケースか決められない | 名前に合うケースが幾つかあり、置き場所の名前からも決められない |
+
+`-OutXlsx` のシート:
+
+| シート | 内容 |
+| --- | --- |
+| 指摘 | 指摘の一覧（テスト仕様書のエビデンスの列のセルか、エビデンスへのリンク付き） |
+| ケース別 | ケースごとの結果・エビデンスの列・エビデンス（あり・無し・不要）・画像の数・エビデンスの場所（エビデンスへのリンク付き） |
+| エビデンス別 | エビデンスごとの種類（ブック・シート・目印・表の中・画像・ファイル）・画像の数・文字のセルの数・結び付けたケース |
+| 読み取り結果 | テスト仕様書の表を、どの見出しで読んだか |
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | テスト仕様書のファイル・フォルダ（Excel・CSV） |
+| `-EvidencePath` | エビデンスのファイル・フォルダ。省略するとテスト仕様書と同じ場所（テスト仕様書のブックのほかのシートなど） |
+| `-Headers` | 見出しの候補の CSV（既定は `tools\test-quality\見出し.csv`。エビデンスの列の候補も入っている） |
+| `-OutXlsx` | 指摘・ケース別・エビデンス別・読み取り結果を保存する |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb のテスト仕様書は読まない） |
 
 ## Measure-DefectRemoval.ps1
 
