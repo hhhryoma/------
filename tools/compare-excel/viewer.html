@@ -127,6 +127,34 @@
   #tip .v { white-space: pre-wrap; word-break: break-all; }
   #tip hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
   .muted { color: var(--muted); }
+  /* 図形・画像（画像を入れたシートは画像を表示し、グループは中の図形・画像を位置どおりに置く） */
+  .shape.mov { background: rgba(221, 235, 247, .95); border-color: #2f6fb0; }
+  .shape.img { padding: 0; background: #fff; }
+  .shape.img[data-tip] { cursor: zoom-in; }
+  .shape.img img { display: block; width: 100%; height: 100%; }
+  .shape.img.chg { box-shadow: 0 0 0 3px #c9a400; } .shape.img.add { box-shadow: 0 0 0 3px #3c9a4f; } .shape.img.del { box-shadow: 0 0 0 3px #c0392b; } .shape.img.mov { box-shadow: 0 0 0 3px #2f6fb0; }
+  /* 文字の無い図形（スクリーンショットに重ねた枠など）は、下が見えるように薄く塗る */
+  .shape.empty { background: rgba(255, 255, 255, .12); }
+  .shape.empty.chg { background: rgba(255, 235, 156, .35); } .shape.empty.add { background: rgba(198, 239, 206, .35); } .shape.empty.del { background: rgba(255, 199, 206, .35); } .shape.empty.mov { background: rgba(221, 235, 247, .35); }
+  .shape.group { padding: 0; background: transparent; border: 1px dashed #9aa5b1; box-shadow: none; overflow: visible; }
+  .shape.group.chg, .shape.group.add, .shape.group.del, .shape.group.mov { border-width: 2px; border-style: solid; }
+  .shape.kid { box-shadow: none; border-radius: 2px; }
+  .list img.thumb { display: block; max-width: 160px; max-height: 64px; margin: 2px 0; border: 1px solid var(--line); cursor: zoom-in; background: #fff; }
+  .list .vis { font-size: 11px; white-space: normal; }
+  /* 画像を比べる画面 */
+  .modal { position: fixed; inset: 0; z-index: 30; background: rgba(20, 24, 28, .55); display: flex; align-items: center; justify-content: center; }
+  .modal[hidden] { display: none; }
+  .modal .dlg { background: #fff; border-radius: 8px; box-shadow: 0 10px 40px rgba(0, 0, 0, .35); width: min(96vw, 1600px); max-height: 94vh; display: flex; flex-direction: column; }
+  .modal .dlghead { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .modal .dlghead label { display: inline-flex; align-items: center; gap: 3px; }
+  .modal .dlghead button { margin-left: auto; font: inherit; border: 1px solid var(--line); background: #fff; padding: 3px 10px; border-radius: 4px; cursor: pointer; }
+  .modal .dlgbody { overflow: auto; padding: 10px 12px; display: grid; gap: 12px; align-items: start; }
+  .modal .dlgbody.side { grid-template-columns: 1fr 1fr; }
+  .modal figure { margin: 0; min-width: 0; }
+  .modal figcaption { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .modal .imgwrap { position: relative; border: 1px solid var(--line); background: #fff; }
+  .modal .imgwrap img { display: block; width: 100%; height: auto; }
+  .modal .hit { position: absolute; border: 2px solid var(--focus); background: rgba(232, 89, 12, .12); pointer-events: none; }
 </style>
 </head>
 <body>
@@ -161,6 +189,14 @@
   </main>
 </div>
 <div id="tip"></div>
+<div id="imgcmp" class="modal" hidden>
+  <div class="dlg">
+    <div class="dlghead"><b id="imgcmpTitle"></b><span id="imgcmpStatus" class="muted"></span>
+      <span id="imgcmpViews"><label><input type="radio" name="imgv" value="side" checked>並べる</label><label><input type="radio" name="imgv" value="mark">新に印</label><label><input type="radio" name="imgv" value="blink">交互に表示</label></span>
+      <button id="imgcmpClose" title="閉じる（Esc）">閉じる</button></div>
+    <div class="dlgbody" id="imgcmpBody"></div>
+  </div>
+</div>
 <script>
 var DATA = /*DIFF_DATA*/null;
 (function () {
@@ -197,13 +233,18 @@ var DATA = /*DIFF_DATA*/null;
   try { notes = JSON.parse(localStorage.getItem(storeKey) || '{}') || {}; } catch (e) { notes = {}; }
   var saveNotes = function () { try { localStorage.setItem(storeKey, JSON.stringify(notes)); } catch (e) { } };
   var noteOf = function (d) { return notes[d.key] || {}; };
+  // 差分の画面に入れた画像（中身の要約 → data: の URL）。図形・画像の差分のあるシートの画像だけ
+  var IMG = (DATA && DATA.img) || {};
+  var isLayout = function (d) { return d.k === '図形' || d.k === '画像'; };
+  var cssq = function (s) { return String(s).replace(/["\\]/g, '\\$&'); };
 
   if (!DATA) { document.body.innerHTML = '<p style="padding:24px">差分のデータがありません。Compare-Excel.ps1 -OutHtml で作ってください。</p>'; return; }
   $('oldPath').textContent = '旧: ' + DATA.old;
   $('newPath').textContent = '新: ' + DATA.new;
   var total = 0, changed = 0;
   DATA.files.forEach(function (f) { total += f.count; if (f.count > 0) changed++; });
-  $('summary').textContent = DATA.files.length + ' ファイル（差分のあるファイル ' + changed + '）・差分 ' + total + ' 件・' + DATA.created;
+  $('summary').textContent = DATA.files.length + ' ファイル（差分のあるファイル ' + changed + '）・差分 ' + total + ' 件・' + DATA.created +
+    (DATA.imgSkipped ? '・入れていない画像 ' + DATA.imgSkipped + ' 枚（形式か大きさのため）' : '');
 
   DATA.files.forEach(function (f) {
     var seen = {};
@@ -343,7 +384,10 @@ var DATA = /*DIFF_DATA*/null;
   $('nextOpen').addEventListener('click', function () { goOpen(); });
   document.addEventListener('keydown', function (e) {
     // Ctrl+P（印刷）などはブラウザーに任せる
+    if (!$('imgcmp').hidden) { if (e.key === 'Escape') closeCompare(); return; }
     if (e.ctrlKey || e.metaKey || e.altKey || /^(SELECT|TEXTAREA)$/.test(e.target.tagName) || (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox')) return;
+    // v: 見ている画像の差分の、旧と新の画像を比べる
+    if (e.key === 'v' && state.items[state.index] && state.items[state.index].k === '画像') openCompare(state.items[state.index]);
     if (e.key === 'j' || e.key === 'n') go(1);
     if (e.key === 'k' || e.key === 'p') go(-1);
     // o: 見ている差分を OK にして次へ
@@ -635,16 +679,25 @@ var DATA = /*DIFF_DATA*/null;
       var tag = d.t ? '<span class="tag">' + esc(tagLabel[d.t] || d.t) + '</span>' : '';
       var same = d.same ? '<button class="same" data-i="' + i + '" title="「' + esc(short(d.same.from)) + '」→「' + esc(short(d.same.to)) + '」と同じ変更が、ほかのシート・ファイルも含めて ' + d.same.list.length +
         ' 件あります。押すと、この差分の確認（OK・指摘と内容。未確認なら OK）を同じ変更すべてに付けます（Shift+O）">同じ変更 ' + d.same.list.length + ' 件</button>' : '';
+      // 画像の差分は、旧・新の画像の見本（押すと比べる画面）と、見た目の違い
+      var pic = d.k === '画像', vis = pic && d.ch === '変更' ? '<div class="vis muted" data-vis="' + i + '">' + esc(visText(d)) + '</div>' : '';
       return '<tr class="item' + (i === state.index ? ' current' : '') + (n.st ? ' ' + n.st : '') + '" data-i="' + i + '"><td>' + esc(where) + '</td><td>' + esc(d.k) + tag +
-        '</td><td><span class="chip ' + chip(d) + '">' + esc(d.ch) + '</span>' + same + '</td><td class="val">' + d.ho + '</td><td class="val">' + d.hn + '</td>' +
+        '</td><td><span class="chip ' + chip(d) + '">' + esc(d.ch) + '</span>' + same + '</td><td class="val">' + (pic ? thumb(d.ha, i) : '') + d.ho + '</td><td class="val">' + (pic ? thumb(d.hb, i) : '') + d.hn + vis + '</td>' +
         '<td class="rv"><select data-i="' + i + '" title="確認した差分は OK、直してほしい差分は 指摘（キーの o で OK にして次へ）"><option value="">－</option><option value="ok"' + (n.st === 'ok' ? ' selected' : '') + '>OK</option><option value="issue"' + (n.st === 'issue' ? ' selected' : '') + '>指摘</option></select></td>' +
         '<td class="note"><input type="text" data-i="' + i + '" placeholder="指摘の内容" value="' + esc(n.text || '') + '"></td></tr>';
     });
     $('list').innerHTML = rows.length ? '<table><thead><tr><th>場所</th><th>種類</th><th>変更</th><th>変更前</th><th>変更後</th><th>確認</th><th>指摘の内容</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>'
       : '<div class="empty" style="padding:10px 12px">このシートに差分はありません（絞り込みで隠れている差分も含めて）。</div>';
+    // 貼り替えた画像は、絵として違うかを調べて一覧に書く（撮り直しただけなら「見た目は同じ」）
+    state.items.forEach(function (d, i) {
+      if (d.k !== '画像' || d.ch !== '変更' || d.vis) return;
+      analyze(d, function () { var el = document.querySelector('#list [data-vis="' + i + '"]'); if (el && state.items[i] === d) el.textContent = visText(d); });
+    });
   }
+  function thumb(h, i) { return h && IMG[h] ? '<img class="thumb" data-i="' + i + '" src="' + IMG[h] + '" alt="" title="押すと旧と新の画像を比べます（v）">' : ''; }
   $('list').addEventListener('click', function (e) {
     if (e.target.classList.contains('same')) { applySame(state.items[+e.target.getAttribute('data-i')]); return; }
+    if (e.target.classList.contains('thumb')) { state.index = +e.target.getAttribute('data-i'); focusItem(); openCompare(state.items[state.index]); return; }
     var tr = e.target.closest('tr.item');
     if (tr && !/^(SELECT|INPUT|OPTION|BUTTON)$/.test(e.target.tagName)) { state.index = +tr.getAttribute('data-i'); focusItem(); }
   });
@@ -854,7 +907,8 @@ var DATA = /*DIFF_DATA*/null;
     $('pos').textContent = 'すべての差分を確認しました';
   }
 
-  // 図形・画像・グラフを、左上・右下のセル（またはピクセルの大きさ）の位置に重ねる。図形の差分は図形に色を付ける
+  // 図形・画像・グラフを、左上・右下のセル（またはピクセルの大きさ）の位置に重ねる。図形・画像の差分は図形に色を付ける。
+  // 画像を入れたシート（図形・画像の差分のあるシート）は画像を表示し、グループは中の図形・画像を位置どおりに置く
   function drawShapes(box, info, side) {
     var table = box.querySelector('table.grid'), list = info.sheet.sh || [];
     if (!table || !list.length) return;
@@ -878,17 +932,42 @@ var DATA = /*DIFF_DATA*/null;
         else { for (var r = sh.r2 - 1; r >= sh.r1 && !end; r--) end = rowEl(r); bottom = end.offsetTop + end.offsetHeight; }
         w = right - left; h = bottom - top;
       }
-      var key = sh.r1 + ',' + sh.c1, cell = colName(sh.c1) + sh.r1, mark = '', tips = [];
-      state.items.forEach(function (d, i) {
-        if (d.k === '図形' && (side === 'new' ? d.nc : d.oc) === cell) { mark = cls(d, side); tips.push(i); }
+      var key = sh.r1 + ',' + sh.c1, m = shapeMark(side, sh.n, colName(sh.c1) + sh.r1), body = shapeBody(sh), kids = '';
+      (sh.ch || []).forEach(function (c) {
+        var km = shapeMark(side, c.n, null), kb = shapeBody(c);
+        kids += '<div class="shape kid ' + esc(c.k) + kb.cls + (km.mark ? ' ' + km.mark : '') + '" data-n="' + esc(c.n) + '" title="' + esc(c.n) + '"' + (km.tips.length ? ' data-tip="' + km.tips.join(' ') + '"' : '') +
+          ' style="left:' + (c.fx * 100) + '%;top:' + (c.fy * 100) + '%;width:' + (c.fw * 100) + '%;height:' + (c.fh * 100) + '%">' + kb.html + '</div>';
       });
-      var label = sh.t || (sh.k === 'pic' ? '（画像）' : sh.k === 'graphicFrame' ? '（グラフ・表）' : '');
-      html.push('<div class="shape ' + esc(sh.k) + (mark ? ' ' + mark : '') + '" id="shape-' + side + '-' + key + '" title="' + esc(sh.n) + '"' +
-        (tips.length ? ' data-tip="' + tips.join(' ') + '"' : '') + ' style="left:' + left + 'px;top:' + top + 'px;width:' + Math.max(w, 16) + 'px;height:' + Math.max(h, 14) + 'px">' + esc(label) + '</div>');
+      html.push('<div class="shape ' + esc(sh.k) + (kids ? ' group' : body.cls) + (m.mark ? ' ' + m.mark : '') + '" id="shape-' + side + '-' + key + '" data-n="' + esc(sh.n) + '" title="' + esc(sh.n) + '"' +
+        (m.tips.length ? ' data-tip="' + m.tips.join(' ') + '"' : '') + ' style="left:' + left + 'px;top:' + top + 'px;width:' + Math.max(w, 16) + 'px;height:' + Math.max(h, 14) + 'px">' + (kids || body.html) + '</div>');
     });
     layer.innerHTML = html.join('');
     box.appendChild(layer);
   }
+  // 図形の差分の印（差分に図形の名前があれば名前で、無ければ左上のセルで対応付ける）
+  function shapeMark(side, name, cell) {
+    var mark = '', tips = [];
+    state.items.forEach(function (d, i) {
+      if (!isLayout(d)) return;
+      var nm = side === 'new' ? d.sn : d.so;
+      if (nm != null ? nm === name : cell != null && (side === 'new' ? d.nc : d.oc) === cell) { mark = cls(d, side); tips.push(i); }
+    });
+    return { mark: mark, tips: tips };
+  }
+  // 図形の中身（入れた画像があれば画像、無ければ文字）
+  function shapeBody(sh) {
+    var src = sh.img && IMG[sh.img];
+    if (src) return { cls: ' img', html: '<img src="' + src + '" alt="">' };
+    var text = sh.t || (sh.k === 'pic' ? '（画像）' : sh.k === 'graphicFrame' ? '（グラフ・表）' : '');
+    return { cls: text ? '' : ' empty', html: esc(text) };
+  }
+  // シートの上の画像を押すと、その画像の差分の旧と新を比べる
+  $('panes').addEventListener('click', function (e) {
+    var el = e.target.closest && e.target.closest('.shape[data-tip]');
+    if (!el) return;
+    var d = el.getAttribute('data-tip').split(' ').map(function (i) { return state.items[+i]; }).filter(function (x) { return x && x.k === '画像'; })[0];
+    if (d) { state.index = state.items.indexOf(d); focusItem(); openCompare(d); }
+  });
   $('showShapes').addEventListener('change', function () { show(); if (state.index >= 0) focusItem(); });
 
   // 差分のセルの要素（結合セルの中なら、結合セルの左上。図形の差分は図形）。描いていなければ null
@@ -897,7 +976,13 @@ var DATA = /*DIFF_DATA*/null;
     var g = parseRef(side === 'new' ? d.nc : d.oc);
     if (!g || !$('scroll-' + side)) return null;
     var key = g.r1 + ',' + g.c1, id = aliases[side] && aliases[side][key];
-    if (d.k === '図形' && $('shape-' + side + '-' + key)) return $('shape-' + side + '-' + key);
+    if (isLayout(d)) {
+      var nm = side === 'new' ? d.sn : d.so, el = null;
+      // 名前に CSS で書けない文字（改行など）があっても止まらないように
+      try { if (nm != null) el = $('scroll-' + side).querySelector('.shape[data-n="' + cssq(nm) + '"]'); } catch (e) { el = null; }
+      if (el) return el;
+      if ($('shape-' + side + '-' + key)) return $('shape-' + side + '-' + key);
+    }
     return $(side + '-' + key) || (id ? $(id) : null);
   }
 
@@ -980,6 +1065,131 @@ var DATA = /*DIFF_DATA*/null;
     flush();
     return out;
   }
+
+  // ---- 画像を比べる（旧と新を並べ、絵として違うところに枠を付ける。撮り直しただけで絵が同じなら「見た目は同じ」）
+  var imgResults = {}, cmp = { d: null, timer: null };
+  function analyze(d, cb) {
+    var a = d.ha && IMG[d.ha], b = d.hb && IMG[d.hb], key = d.ha + '|' + d.hb;
+    if (!a || !b) { d.vis = { state: 'none' }; if (cb) cb(); return; }
+    if (imgResults[key]) { d.vis = imgResults[key]; if (cb) cb(); return; }
+    var ims = [new Image(), new Image()], left = 2;
+    ims.forEach(function (im, k) {
+      im.onload = im.onerror = function () {
+        if (--left) return;
+        d.vis = imgResults[key] = diffImages(ims[0], ims[1]);
+        if (cb) cb();
+        if (cmp.d === d) renderCompare();
+      };
+      im.src = k ? b : a;
+    });
+  }
+  // 16 ピクセル四方のます目ごとに色の違いを調べ、違うます目のつながりごとに 1 つの枠にする
+  function diffImages(a, b) {
+    var r = { w1: a.naturalWidth, h1: a.naturalHeight, w2: b.naturalWidth, h2: b.naturalHeight, boxes: [] };
+    if (!r.w1 || !r.w2) { r.state = 'error'; return r; }
+    if (r.w1 !== r.w2 || r.h1 !== r.h2) { r.state = 'size'; return r; }
+    try {
+      var pa = pixels(a), pb = pixels(b), w = r.w1, h = r.h1, T = 16, tw = Math.ceil(w / T), th = Math.ceil(h / T), hit = new Uint8Array(tw * th);
+      for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+          var o = (y * w + x) * 4;
+          if (Math.abs(pa[o] - pb[o]) + Math.abs(pa[o + 1] - pb[o + 1]) + Math.abs(pa[o + 2] - pb[o + 2]) + Math.abs(pa[o + 3] - pb[o + 3]) > 48) hit[((y / T) | 0) * tw + ((x / T) | 0)] = 1;
+        }
+      }
+      var seen = new Uint8Array(tw * th);
+      for (var t = 0; t < hit.length; t++) {
+        if (!hit[t] || seen[t]) continue;
+        var stack = [t], x1 = tw, y1 = th, x2 = -1, y2 = -1;
+        seen[t] = 1;
+        while (stack.length) {
+          var c = stack.pop(), cx = c % tw, cy = (c / tw) | 0;
+          x1 = Math.min(x1, cx); y1 = Math.min(y1, cy); x2 = Math.max(x2, cx); y2 = Math.max(y2, cy);
+          for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
+            var nx = cx + dx, ny = cy + dy, n = ny * tw + nx;
+            if (nx >= 0 && ny >= 0 && nx < tw && ny < th && hit[n] && !seen[n]) { seen[n] = 1; stack.push(n); }
+          }
+        }
+        r.boxes.push({ x: x1 * T, y: y1 * T, w: Math.min(w, (x2 + 1) * T) - x1 * T, h: Math.min(h, (y2 + 1) * T) - y1 * T });
+      }
+      r.state = r.boxes.length ? 'diff' : 'same';
+    } catch (e) { r.state = 'error'; }
+    return r;
+  }
+  function pixels(im) {
+    var c = document.createElement('canvas');
+    c.width = im.naturalWidth; c.height = im.naturalHeight;
+    var g = c.getContext('2d');
+    g.drawImage(im, 0, 0);
+    return g.getImageData(0, 0, c.width, c.height).data;
+  }
+  function visText(d) {
+    var v = d.vis;
+    if (!v) return '';
+    if (v.state === 'same') return '見た目は同じ（撮り直しただけ）';
+    if (v.state === 'diff') return '違うところ ' + v.boxes.length + ' か所';
+    if (v.state === 'size') return '画像の大きさが違う（旧 ' + v.w1 + '×' + v.h1 + '・新 ' + v.w2 + '×' + v.h2 + '）';
+    return '';
+  }
+  function compareStatus(d) {
+    var a = d.ha && IMG[d.ha], b = d.hb && IMG[d.hb], v = d.vis;
+    if (!a && !b) return '画像を差分の画面に入れていません（形式か大きさのため）';
+    if (d.ch === '追加') return '追加した画像です';
+    if (d.ch === '削除') return '削除した画像です';
+    if (d.ch === '移動') return '画像の中身は同じです（場所・大きさの変更）';
+    if (!a || !b) return '片方の画像を差分の画面に入れていません';
+    if (!v) return '比べています…';
+    if (v.state === 'same') return '見た目は同じです。画像のデータは違いますが、絵としては同じです（同じ画面を撮り直しただけの可能性があります）';
+    if (v.state === 'diff') return '違うところ: ' + v.boxes.length + ' か所（枠で囲んだところ）';
+    if (v.state === 'size') return '画像の大きさが違うため、違うところに枠を付けられません（旧 ' + v.w1 + '×' + v.h1 + '・新 ' + v.w2 + '×' + v.h2 + '）。「交互に表示」で見比べてください';
+    return '画像を比べられませんでした';
+  }
+  function openCompare(d) {
+    if (!d || d.k !== '画像') return;
+    cmp.d = d;
+    $('imgcmpTitle').textContent = (d.s || d.os) + '!' + (d.nc || d.oc || '') + '　' + d.d;
+    $('imgcmp').hidden = false;
+    if (d.ch === '変更' && !d.vis) analyze(d);
+    renderCompare();
+  }
+  function closeCompare() { clearInterval(cmp.timer); cmp.d = null; $('imgcmp').hidden = true; $('imgcmpBody').innerHTML = ''; }
+  function renderCompare() {
+    var d = cmp.d;
+    if (!d) return;
+    clearInterval(cmp.timer);
+    var a = d.ha && IMG[d.ha], b = d.hb && IMG[d.hb], v = d.vis || {}, both = !!(a && b) && d.ha !== d.hb;
+    var view = both ? document.querySelector('input[name=imgv]:checked').value : 'side';
+    $('imgcmpViews').style.display = both ? '' : 'none';
+    $('imgcmpStatus').textContent = compareStatus(d);
+    var marks = v.state === 'diff' ? v.boxes.map(function (x) {
+      return '<div class="hit" style="left:' + (100 * x.x / v.w2) + '%;top:' + (100 * x.y / v.h2) + '%;width:' + (100 * x.w / v.w2) + '%;height:' + (100 * x.h / v.h2) + '%"></div>';
+    }).join('') : '';
+    var fig = function (src, cap, withMarks) {
+      return '<figure><figcaption>' + cap + '</figcaption>' + (src ? '<div class="imgwrap"><img src="' + src + '" alt="">' + (withMarks ? marks : '') + '</div>' : '<div class="muted">（画像を入れていません）</div>') + '</figure>';
+    };
+    var body = $('imgcmpBody');
+    if (view === 'mark') { body.className = 'dlgbody'; body.innerHTML = fig(b, '新（旧と違うところを枠で囲む）', true); return; }
+    if (view === 'blink') {
+      body.className = 'dlgbody';
+      body.innerHTML = fig(a, '旧', true);
+      var on = false;
+      cmp.timer = setInterval(function () {
+        on = !on;
+        var im = body.querySelector('.imgwrap img'), cap = body.querySelector('figcaption');
+        if (!im) return;
+        im.src = on ? b : a; cap.textContent = on ? '新' : '旧';
+      }, 700);
+      return;
+    }
+    var list = [];
+    if (a && d.ch !== '追加') list.push(fig(a, d.ch === '移動' ? '旧の場所の画像' : '旧', true));
+    if (b && d.ch !== '削除' && (d.ha !== d.hb || !a)) list.push(fig(b, '新', true));
+    if (!list.length) list.push(fig(null, '画像'));
+    body.className = 'dlgbody' + (list.length > 1 ? ' side' : '');
+    body.innerHTML = list.join('');
+  }
+  $('imgcmpClose').addEventListener('click', closeCompare);
+  $('imgcmp').addEventListener('click', function (e) { if (e.target === $('imgcmp')) closeCompare(); });
+  $('imgcmpViews').addEventListener('change', renderCompare);
 
   updateProgress();
   // 最初の差分のあるシートを開く

@@ -579,6 +579,181 @@ Test-Case 'Compare-Excel: -OutHtml は、行の高さ・非表示の行と、図
     Assert-True ([System.IO.File]::ReadAllText($out).Contains('id="showShapes"')) '図形を重ねる表示'
 }
 
+# テスト用の小さな画像（40×30 の PNG）。Retake は Old と絵は同じで、データ（圧縮の仕方）だけが違う（同じ画面を撮り直したとき）
+$script:TestPng = @{
+    Old    = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAYElEQVR4nO2XMQpAIQxDE+n9r1wH4QviomALv8kidXk0pEXp7shQS6ECsHGQDEMOj22pX+vrMM1qgcNkm7ujhN9Gsp7VAv8fvBunkKVdz2qBBRZY4GvNXR35pgfAcn+nDgTjEEBUFCIpAAAAAElFTkSuQmCC'
+    New    = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAbUlEQVR4nO2XwQoAIQhEZxb//5ftEHQIYSlaXdK5RF0eYzoUVRURekKoAKQvJN2QvcYy7b/WcBhW6gK7SYyzpQ7fbcl8pS7w/WBrnFxC2wJv6XX4Jzv57rjABb4PfCxAVuPuB4493/QAmO7v1ACh5BRCnP+rmgAAAABJRU5ErkJggg=='
+    Retake = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAgUlEQVR4Ae2WSw6AMAhEHeP9r4yams5CE7GhsHC6YkEY+vgEmNlS8dYK0VNza8IA0jJojC/hQzWHef9hGWoJp7UYm4uSnzp8dA2oxgQ+2RLqyYAZ/mmcRieEUR2WauyAFOMi1DEcHVGE2gEpxuV/qLmr+8Ubg/ItCnLu+HsaZTXeAQTjEEApC71sAAAAAElFTkSuQmCC'
+    Logo   = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAlklEQVR4nO2WSw6AIAxEqfHexpPXpZt+pgWhMXRpOvMYLARi5raijiXUDZ5ZJ95KN4nf+cqMJ7lTrfE6V+BsNU6NNlvgkFFUooIT1JBQBqepuFwAd1JBkzIXyJC4iFWZxBs8DZy78cWyrcokboNCuyZy4k42Ile3Os0GhdY/TrBxiTNcIXao2X/6vK2T31wfVaVz/HPwA6K+OS+gTz8VAAAAAElFTkSuQmCC'
+}
+
+function Add-TestDrawing {
+    #     ブックの Sheet 番目のシートに図形・画像を置く（テスト用）。Items の要素（列・行は 0 から数える）:
+    #       @{ Kind = 'pic'; Name; Png（$script:TestPng のキー）; From = @(列, 行); To = @(列, 行) }
+    #       @{ Kind = 'sp'; Name; Text（省略可）; From; To }
+    #       @{ Kind = 'grpSp'; Name; From; To; Children = @( @{ Kind; Name; Text; Png; Off = @(x, y); Ext = @(cx, cy) } ) }（中の座標は 0〜1000）
+    param([string] $Path, $Items, [int] $Sheet = 1)
+    $media = New-Object System.Collections.Generic.List[string]
+    $script:TestShapeId = 1
+    $obj = {
+        param($it, [string] $Xfrm)
+        $script:TestShapeId++
+        $id = $script:TestShapeId
+        switch ($it.Kind) {
+            'pic' {
+                $media.Add($it.Png)
+                '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdImg{2}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>{3}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>' -f $id, $it.Name, $media.Count, $Xfrm
+            }
+            'sp' {
+                $body = ''
+                if ($it.Text) { $body = '<xdr:txBody><a:bodyPr/><a:p><a:r><a:t>{0}</a:t></a:r></a:p></xdr:txBody>' -f $it.Text }
+                '<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr>{2}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>{3}</xdr:sp>' -f $id, $it.Name, $Xfrm, $body
+            }
+            'grpSp' {
+                $kids = (@($it.Children | ForEach-Object { & $obj $_ ('<a:xfrm><a:off x="{0}" y="{1}"/><a:ext cx="{2}" cy="{3}"/></a:xfrm>' -f $_.Off[0], $_.Off[1], $_.Ext[0], $_.Ext[1]) })) -join ''
+                '<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr><xdr:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/><a:chOff x="0" y="0"/><a:chExt cx="1000" cy="1000"/></a:xfrm></xdr:grpSpPr>{2}</xdr:grpSp>' -f $id, $it.Name, $kids
+            }
+        }
+    }
+    $anchors = foreach ($it in $Items) {
+        $body = & $obj $it '<a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>'
+        '<xdr:twoCellAnchor><xdr:from><xdr:col>{0}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{2}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{3}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>{4}<xdr:clientData/></xdr:twoCellAnchor>' -f $it.From[0], $it.From[1], $it.To[0], $it.To[1], $body
+    }
+    $head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    $drawing = $head + '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' + ($anchors -join '') + '</xdr:wsDr>'
+    $relsHead = $head + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    $drawingRels = $relsHead + ((@(for ($i = 1; $i -le $media.Count; $i++) { '<Relationship Id="rIdImg{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image{1}_{0}.png"/>' -f $i, $Sheet })) -join '') + '</Relationships>'
+    $sheetRels = $relsHead + ('<Relationship Id="rIdDrw1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing{0}.xml"/>' -f $Sheet) + '</Relationships>'
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $fs = [System.IO.File]::Open($Path, 'Open', 'ReadWrite')
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Update)
+        $put = { param([string] $Name, [byte[]] $Bytes) $e = $zip.GetEntry($Name); if ($e) { $e.Delete() }; $st = $zip.CreateEntry($Name).Open(); $st.Write($Bytes, 0, $Bytes.Length); $st.Dispose() }
+        $read = { param([string] $Name) $sr = New-Object System.IO.StreamReader($zip.GetEntry($Name).Open()); try { $sr.ReadToEnd() } finally { $sr.Dispose() } }
+        & $put ('xl/drawings/drawing{0}.xml' -f $Sheet) $utf8.GetBytes($drawing)
+        & $put ('xl/drawings/_rels/drawing{0}.xml.rels' -f $Sheet) $utf8.GetBytes($drawingRels)
+        for ($i = 0; $i -lt $media.Count; $i++) { & $put ('xl/media/image{0}_{1}.png' -f $Sheet, ($i + 1)) ([Convert]::FromBase64String($script:TestPng[$media[$i]])) }
+        & $put ('xl/worksheets/_rels/sheet{0}.xml.rels' -f $Sheet) $utf8.GetBytes($sheetRels)
+        $sheetXml = (& $read ('xl/worksheets/sheet{0}.xml' -f $Sheet)).Replace('</worksheet>', '<drawing r:id="rIdDrw1"/></worksheet>')
+        & $put ('xl/worksheets/sheet{0}.xml' -f $Sheet) $utf8.GetBytes($sheetXml)
+        $types = & $read '[Content_Types].xml'
+        if (-not $types.Contains('Extension="png"')) { $types = $types.Replace('<Default Extension="xml"', '<Default Extension="png" ContentType="image/png"/><Default Extension="xml"') }
+        $types = $types.Replace('</Types>', ('<Override PartName="/xl/drawings/drawing{0}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>' -f $Sheet))
+        & $put '[Content_Types].xml' $utf8.GetBytes($types)
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
+function New-DrawingBooks {
+    #     画面のシートに表と図形・画像を置いた旧・新のブック（テスト用）。Rows は @{ Old = 行の配列; New = 行の配列 }（省略時は同じ表）
+    param([string] $Dir, $OldItems, $NewItems, $Rows)
+    $old = Join-Path $Dir 'old.xlsx'; $new = Join-Path $Dir 'new.xlsx'
+    $table = @(@('No', '名称'), @('1', '受注日'), @('2', '顧客'), @('3', '支払方法'))
+    $oldRows = $table; $newRows = $table
+    if ($Rows) { $oldRows = $Rows.Old; $newRows = $Rows.New }
+    New-SheetsBook $old ([ordered]@{ '画面' = $oldRows })
+    New-SheetsBook $new ([ordered]@{ '画面' = $newRows })
+    Add-TestDrawing $old $OldItems
+    Add-TestDrawing $new $NewItems
+    return [pscustomobject]@{ Old = $old; New = $new }
+}
+
+Test-Case 'Compare-Excel: 画像の貼り替え・追加・削除と、図形の移動、文字の無い図形（枠）の追加・削除を出す' {
+    $b = New-DrawingBooks (New-TestDir) @(
+        @{ Kind = 'pic'; Name = '図 1'; Png = 'Old'; From = @(1, 4); To = @(8, 20) },
+        @{ Kind = 'sp'; Name = '楕円 5'; Text = '⑤'; From = @(2, 6); To = @(3, 7) },
+        @{ Kind = 'sp'; Name = '正方形/長方形 7'; From = @(3, 9); To = @(6, 10) },
+        @{ Kind = 'pic'; Name = 'ロゴ'; Png = 'Logo'; From = @(10, 0); To = @(11, 2) }) @(
+        @{ Kind = 'pic'; Name = '図 4'; Png = 'New'; From = @(1, 4); To = @(8, 20) },
+        @{ Kind = 'sp'; Name = '楕円 5'; Text = '⑤'; From = @(2, 12); To = @(3, 13) },
+        @{ Kind = 'sp'; Name = '正方形/長方形 9'; From = @(4, 14); To = @(7, 15) },
+        @{ Kind = 'pic'; Name = 'ロゴ'; Png = 'Logo'; From = @(10, 0); To = @(11, 2) })
+    $diffs = Invoke-Compare @{ Old = $b.Old; New = $b.New }
+    Assert-Equal @('B5|画像|変更', 'C13|図形|移動', 'D10|図形|削除', 'E15|図形|追加') @($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Cell, $_.Kind, $_.Change } | Sort-Object) 'スクリーンショットの貼り替え（名前が変わっても同じ場所なら貼り替え）。同じロゴは出さない'
+    $pic = @($diffs | Where-Object Kind -eq '画像')[0]
+    Assert-Equal '画像を変更: 図 1（40×30） → 図 4（40×30）' $pic.Detail
+    Assert-Equal '図 1|図 4' ('{0}|{1}' -f $pic.Shape.OldName, $pic.Shape.NewName)
+    Assert-True ($pic.Shape.OldImage -and $pic.Shape.NewImage -and $pic.Shape.OldImage -ne $pic.Shape.NewImage) '画像の中身の要約'
+    Assert-Equal '図形を移動: ⑤（楕円 5）（旧 C7）' @($diffs | Where-Object Change -eq '移動')[0].Detail
+    Assert-Equal '（正方形/長方形 7）' @($diffs | Where-Object Change -eq '削除')[0].Old '文字の無い図形は名前で示す'
+}
+
+Test-Case 'Compare-Excel: 行の挿入でセルと一緒に動いた図形・画像は「移動」にしない。同じ画像を別の場所に動かしたものは「移動」' {
+    $rows = @{
+        Old = @(@('No', '名称'), @('1', '受注日'), @('2', '顧客'), @('3', '支払方法'))
+        New = @(@('No', '名称'), @('1', '受注日'), @('9', '担当者'), @('2', '顧客'), @('3', '支払方法'))
+    }
+    $b = New-DrawingBooks (New-TestDir) @(
+        @{ Kind = 'pic'; Name = '図 1'; Png = 'Old'; From = @(1, 6); To = @(8, 20) },
+        @{ Kind = 'sp'; Name = '楕円 5'; Text = '⑤'; From = @(2, 8); To = @(3, 9) },
+        @{ Kind = 'pic'; Name = 'ロゴ'; Png = 'Logo'; From = @(10, 0); To = @(11, 2) }) @(
+        @{ Kind = 'pic'; Name = '図 1'; Png = 'Old'; From = @(1, 7); To = @(8, 21) },
+        @{ Kind = 'sp'; Name = '楕円 5'; Text = '⑤'; From = @(2, 9); To = @(3, 10) },
+        @{ Kind = 'pic'; Name = 'ロゴ'; Png = 'Logo'; From = @(12, 0); To = @(13, 2) }) $rows
+    $diffs = Invoke-Compare @{ Old = $b.Old; New = $b.New }
+    Assert-Equal @('A3|行|追加', 'M1|画像|移動') @($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Cell, $_.Kind, $_.Change } | Sort-Object)
+}
+
+Test-Case 'Compare-Excel: グループの中の図形の移動を出し、グループごと足した図形・画像は 1 件にまとめる' {
+    $group = { param($oval) @{ Kind = 'grpSp'; Name = 'グループ化 3'; From = @(1, 4); To = @(8, 20); Children = @(
+                @{ Kind = 'pic'; Name = '図 1'; Png = 'Old'; Off = @(0, 0); Ext = @(1000, 1000) },
+                @{ Kind = 'sp'; Name = '楕円 5'; Text = '⑤'; Off = $oval; Ext = @(80, 80) }) } }
+    $b = New-DrawingBooks (New-TestDir) @((& $group @(100, 100))) @((& $group @(500, 600)),
+        @{ Kind = 'grpSp'; Name = 'グループ化 8'; From = @(10, 4); To = @(14, 10); Children = @(
+                @{ Kind = 'pic'; Name = '図 9'; Png = 'Logo'; Off = @(0, 0); Ext = @(1000, 1000) },
+                @{ Kind = 'sp'; Name = '楕円 10'; Text = '⑥'; Off = @(10, 10); Ext = @(100, 100) }) })
+    $diffs = Invoke-Compare @{ Old = $b.Old; New = $b.New }
+    Assert-Equal @('B5|図形|移動', 'K5|図形|追加') @($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Cell, $_.Kind, $_.Change } | Sort-Object)
+    Assert-Equal '図形を移動: ⑤（楕円 5）（グループ「グループ化 3」の中）' @($diffs | Where-Object Change -eq '移動')[0].Detail
+    Assert-Equal '（グループ「グループ化 8」: 画像 1・図形 1） ⑥' @($diffs | Where-Object Change -eq '追加')[0].New
+}
+
+Test-Case 'Compare-Excel: -OutHtml は、図形・画像の差分のあるシートに画像を入れ、差分に旧・新の画像と図形の名前を入れる' {
+    $dir = New-TestDir
+    $old = Join-Path $dir 'old.xlsx'; $new = Join-Path $dir 'new.xlsx'
+    New-SheetsBook $old ([ordered]@{ '画面' = @(@('No', '名称'), @('1', '受注日')); '説明' = @(@('項目', '内容'), @('目的', '受注を登録する')) })
+    New-SheetsBook $new ([ordered]@{ '画面' = @(@('No', '名称'), @('1', '受注日')); '説明' = @(@('項目', '内容'), @('目的', '受注を登録・更新する')) })
+    $group = { param($xy) @{ Kind = 'grpSp'; Name = 'グループ化 7'; From = @(10, 3); To = @(14, 10); Children = @(
+                @{ Kind = 'pic'; Name = '図 8'; Png = 'New'; Off = @(0, 0); Ext = @(1000, 1000) }, @{ Kind = 'sp'; Name = '楕円 9'; Text = '⑥'; Off = $xy; Ext = @(100, 100) }) } }
+    Add-TestDrawing $old @(@{ Kind = 'pic'; Name = '図 1'; Png = 'Old'; From = @(1, 3); To = @(8, 20) }, @{ Kind = 'sp'; Name = '楕円 5'; Text = '⑤'; From = @(2, 5); To = @(3, 6) }, (& $group @(100, 100)))
+    Add-TestDrawing $new @(@{ Kind = 'pic'; Name = '図 1'; Png = 'Retake'; From = @(1, 3); To = @(8, 20) }, @{ Kind = 'sp'; Name = '楕円 5'; Text = '⑤'; From = @(2, 5); To = @(3, 6) }, (& $group @(500, 500)))
+    Add-TestDrawing $old @(@{ Kind = 'pic'; Name = 'ロゴ'; Png = 'Logo'; From = @(4, 0); To = @(5, 2) }) -Sheet 2
+    Add-TestDrawing $new @(@{ Kind = 'pic'; Name = 'ロゴ'; Png = 'Logo'; From = @(4, 0); To = @(5, 2) }) -Sheet 2
+    $out = Join-Path $dir 'diff.html'
+    $diffs = Invoke-Compare @{ Old = $old; New = $new; OutHtml = $out }
+    Assert-Equal @('画面!B4|画像|変更', '画面!K4|図形|移動', '説明!B2|値|変更') @($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Kind, $_.Change } | Sort-Object) '撮り直した画像は、データが違えば「変更」（同じ絵かは差分の画面で見る）'
+    $data = [regex]::Match([System.IO.File]::ReadAllText($out), 'var DATA = (\{.*?\});\r?\n').Groups[1].Value | ConvertFrom-Json
+    $d = @($data.files[0].diffs | Where-Object k -eq '画像')[0]
+    Assert-True ($d.ha -and $d.hb -and $d.ha -ne $d.hb -and $d.so -eq '図 1' -and $d.sn -eq '図 1') '差分に旧・新の画像と図形の名前'
+    Assert-Match $data.img.($d.ha) '^data:image/png;base64,iVBOR'
+    Assert-Match $data.img.($d.hb) '^data:image/png;base64,iVBOR'
+    $screen = @($data.files[0].sheets | Where-Object name -eq '画面')[0]
+    Assert-Equal $d.hb (@($screen.new.sh | Where-Object k -eq 'pic')[0].img) '図形の一覧の画像'
+    $grp = @($screen.new.sh | Where-Object k -eq 'grpSp')[0]
+    Assert-Equal '図 8|pic|0|1 / 楕円 9|sp|0.5|0.1' ((@($grp.ch | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.n, $_.k, $_.fx, $_.fw })) -join ' / ') 'グループの中の図形・画像と、グループの中での位置の割合'
+    Assert-Match $data.img.(@($grp.ch)[0].img) '^data:image/png;base64,' 'グループの中の画像も入れる'
+    Assert-Equal '楕円 9' @($data.files[0].diffs | Where-Object k -eq '図形')[0].sn
+    $logo = @(@($data.files[0].sheets | Where-Object name -eq '説明')[0].new.sh)[0]
+    Assert-True ($logo.img -and $null -eq $data.img.PSObject.Properties[$logo.img]) '図形・画像の差分の無いシートの画像は入れない'
+    Assert-Equal 0 $data.imgSkipped
+}
+
+Test-Case 'Compare-Excel: -CheckHistory は、図形・画像の変更もシートごとに改訂履歴と突き合わせる' {
+    $dir = New-TestDir
+    $old = Join-Path $dir 'old.xlsx'; $new = Join-Path $dir 'new.xlsx'
+    $sheets = { param($history) [ordered]@{ '画面レイアウト' = @(@('画面名', '受注登録'), @('画面ID', 'SCR002')); '改訂履歴' = $history } }
+    New-SheetsBook $old (& $sheets @(@('版数', '内容'), @('1.0', '新規作成')))
+    New-SheetsBook $new (& $sheets @(@('版数', '内容'), @('1.0', '新規作成'), @('1.1', '誤記の修正')))
+    Add-TestDrawing $old @(@{ Kind = 'pic'; Name = '図 1'; Png = 'Old'; From = @(1, 3); To = @(8, 20) })
+    Add-TestDrawing $new @(@{ Kind = 'pic'; Name = '図 2'; Png = 'New'; From = @(1, 3); To = @(8, 20) })
+    $diffs = Invoke-Compare @{ Old = $old; New = $new; CheckHistory = $true }
+    Assert-Equal '画面レイアウト: 画像を変更' @($diffs | Where-Object Kind -eq '改訂履歴')[0].New '改訂履歴に書かれていない画面レイアウトの変更'
+    New-SheetsBook $new (& $sheets @(@('版数', '内容'), @('1.0', '新規作成'), @('1.1', '画面レイアウトの受注明細を変更')))
+    Add-TestDrawing $new @(@{ Kind = 'pic'; Name = '図 2'; Png = 'New'; From = @(1, 3); To = @(8, 20) })
+    Assert-Equal 0 @(Invoke-Compare @{ Old = $old; New = $new; CheckHistory = $true } | Where-Object Kind -eq '改訂履歴').Count '改訂履歴にシート名があれば知らせない'
+}
+
 function New-TaggedBooks {
     #     表紙の版数・更新日、改訂履歴の追記、表記だけの変更（全角・空白）、同じ置き換え（受注 → 注文）のある旧・新のブック
     param([string] $Dir)
