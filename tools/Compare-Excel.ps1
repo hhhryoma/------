@@ -64,6 +64,7 @@ Update-TypeData -TypeName 'CompareExcel.Diff' -DefaultDisplayPropertySet File, L
 
 function Read-Book {
     #     Search-Excel.ps1 でブックの中身（値・数式・コメント・図形・シート名）を読み、シートごとに整理する。
+    #     .xlsx / .xlsm は、図形・画像（位置と画像の中身）も読む（Drawing。Read-BookDrawings）
     #     Rows のキーは行番号の文字列（[ordered] に整数で引くと位置指定になるため）
     param([string] $FilePath)
 
@@ -81,7 +82,7 @@ function Read-Book {
     $book = [ordered]@{}
     foreach ($h in $hits) {
         if (-not $book.Contains($h.Sheet)) {
-            $book[$h.Sheet] = [pscustomobject]@{ Rows = @{}; Comments = @{}; Shapes = @{}; Formats = @{} }
+            $book[$h.Sheet] = [pscustomobject]@{ Rows = @{}; Comments = @{}; Shapes = @{}; Formats = @{}; Drawing = $null }
         }
         $s = $book[$h.Sheet]
         $kind = $h.Kind
@@ -107,6 +108,15 @@ function Read-Book {
         }
     }
 
+    # 図形・画像の位置と画像の中身（.xlsx / .xlsm）。読めないブック（.xls など）は、図形の名前と文字だけを比べる
+    $drawings = Read-BookDrawings $FilePath
+    if ($drawings) {
+        foreach ($name in $book.Keys) {
+            if ($drawings.ContainsKey($name)) { $book[$name].Drawing = $drawings[$name] }
+            else { $book[$name].Drawing = New-Object System.Collections.Generic.List[object] }
+        }
+    }
+
     if ($CompareFormat) {
         $formats = $null
         try { $formats = Read-BookFormat $FilePath }
@@ -127,7 +137,7 @@ function Read-WordBook {
     finally { $pkg.Zip.Dispose() }
     $doc = $parts[0].Doc
     $nsm = New-WordNamespaceManager $doc
-    $sheet = [pscustomobject]@{ Rows = @{}; Comments = @{}; Shapes = @{}; Formats = @{} }
+    $sheet = [pscustomobject]@{ Rows = @{}; Comments = @{}; Shapes = @{}; Formats = @{}; Drawing = $null }
     $script:WordRow = 0
     $addRow = {
         param([string[]] $Cells)
@@ -183,6 +193,187 @@ function Get-WrappedLines {
         $lines += [math]::Max(1, [int][math]::Ceiling($px / [math]::Max(1, $Width)))
     }
     return $lines
+}
+
+# ---------------------------------------------------------------- 図形・画像の読み取り（.xlsx / .xlsm の描画パーツ）
+
+
+$script:ImageHash = [System.Security.Cryptography.SHA256]::Create()
+
+function Get-ImageSize {
+    #     画像の大きさ（ピクセル。PNG・JPEG・GIF・BMP）。わからなければ 0, 0
+    param([byte[]] $Bytes)
+    $n = $Bytes.Length
+    $be = { param($i) [int]([long]$Bytes[$i] * 16777216 + [long]$Bytes[$i + 1] * 65536 + [long]$Bytes[$i + 2] * 256 + [long]$Bytes[$i + 3]) }
+    if ($n -ge 24 -and $Bytes[0] -eq 0x89 -and $Bytes[1] -eq 0x50 -and $Bytes[2] -eq 0x4E -and $Bytes[3] -eq 0x47) { return @((& $be 16), (& $be 20)) }
+    if ($n -ge 10 -and $Bytes[0] -eq 0x47 -and $Bytes[1] -eq 0x49 -and $Bytes[2] -eq 0x46) { return @(([int]$Bytes[6] + [int]$Bytes[7] * 256), ([int]$Bytes[8] + [int]$Bytes[9] * 256)) }
+    if ($n -ge 26 -and $Bytes[0] -eq 0x42 -and $Bytes[1] -eq 0x4D) { return @([System.BitConverter]::ToInt32($Bytes, 18), [math]::Abs([System.BitConverter]::ToInt32($Bytes, 22))) }
+    if ($n -ge 4 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xD8) {
+        # JPEG: SOF（C0〜CF のうち C4・C8・CC を除く）の高さと幅
+        $i = 2
+        while ($i + 8 -lt $n) {
+            if ($Bytes[$i] -ne 0xFF) { $i++; continue }
+            $m = $Bytes[$i + 1]
+            if ($m -eq 0xFF) { $i++; continue }
+            if ($m -ge 0xC0 -and $m -le 0xCF -and $m -ne 0xC4 -and $m -ne 0xC8 -and $m -ne 0xCC) { return @(([int]$Bytes[$i + 7] * 256 + [int]$Bytes[$i + 8]), ([int]$Bytes[$i + 5] * 256 + [int]$Bytes[$i + 6])) }
+            if ($m -eq 0x01 -or ($m -ge 0xD0 -and $m -le 0xD9)) { $i += 2; continue }
+            $i += 2 + [int]$Bytes[$i + 2] * 256 + [int]$Bytes[$i + 3]
+        }
+    }
+    return @(0, 0)
+}
+
+function Get-DrawingXfrm {
+    #     図形の位置と大きさ（xfrm の off・ext。グループは中の図形の座標の chOff・chExt も）。無ければ $null
+    param([System.Xml.XmlElement] $Node)
+    $x = $Node.SelectSingleNode("*[local-name()='spPr' or local-name()='grpSpPr']/*[local-name()='xfrm'] | *[local-name()='xfrm']")
+    if (-not $x) { return $null }
+    $get = { param($name, $a, $b) $e = $x.SelectSingleNode("*[local-name()='$name']"); if ($e) { , @([double]$e.GetAttribute($a), [double]$e.GetAttribute($b)) } }
+    $off = & $get 'off' 'x' 'y'
+    $ext = & $get 'ext' 'cx' 'cy'
+    if (-not $off -or -not $ext) { return $null }
+    $chOff = & $get 'chOff' 'x' 'y'
+    $chExt = & $get 'chExt' 'cx' 'cy'
+    if (-not $chOff) { $chOff = $off }
+    if (-not $chExt) { $chExt = $ext }
+    return [pscustomobject]@{ X = $off[0]; Y = $off[1]; W = $ext[0]; H = $ext[1]; CX = $chOff[0]; CY = $chOff[1]; CW = $chExt[0]; CH = $chExt[1] }
+}
+
+function Add-DrawingItem {
+    #     図形を 1 つ一覧に足す（グループなら中のものも）。Top はいちばん外のグループ（Name と、グループの座標での X Y W H。
+    #     シートに直接置いたものは $null）、Transform はグループの中の図形の座標を、いちばん外のグループの座標にする倍率と移動（SX TX SY TY）
+    param($Items, [System.Xml.XmlElement] $Node, $Anchor, [string] $Cell, [string] $ParentPath, $Top, $Transform, $Package, $Rels, [hashtable] $Images)
+    $nv = $Node.SelectSingleNode("*[starts-with(local-name(), 'nv')]/*[local-name()='cNvPr']")
+    $name = ''
+    if ($nv) { $name = $nv.GetAttribute('name') }
+    $text = ''
+    if ($Node.LocalName -eq 'sp') {
+        $text = (@($Node.SelectNodes("*[local-name()='txBody']/*[local-name()='p']") | ForEach-Object { -join @($_.SelectNodes(".//*[local-name()='t']") | ForEach-Object { $_.InnerText }) }) -join "`n").TrimEnd("`n")
+    }
+    $path = $name
+    if ($ParentPath) { $path = $ParentPath + '/' + $name }
+    $item = [pscustomobject]@{
+        Name = $name; Kind = $Node.LocalName; Text = $text; Path = $path; Key = ''; Group = ''; Cell = $Cell; Anchor = $Anchor; Box = $null
+        Hash = ''; Media = ''; Width = 0; Height = 0
+    }
+    $xf = Get-DrawingXfrm $Node
+    if ($Top) {
+        $item.Group = $Top.Name
+        if ($xf -and $Transform -and $Top.W -gt 0 -and $Top.H -gt 0) {
+            $item.Box = [pscustomobject]@{
+                X = ($Transform.TX + $Transform.SX * $xf.X - $Top.X) / $Top.W; Y = ($Transform.TY + $Transform.SY * $xf.Y - $Top.Y) / $Top.H
+                W = $Transform.SX * $xf.W / $Top.W; H = $Transform.SY * $xf.H / $Top.H
+            }
+        }
+    }
+    if ($Node.LocalName -eq 'pic') {
+        # 画像の中身は、パーツごとに 1 回だけ読む（同じ画像を何か所にも貼ったとき）
+        $blip = $Node.SelectSingleNode("*[local-name()='blipFill']/*[local-name()='blip']")
+        $rid = $null
+        if ($blip) { foreach ($at in $blip.Attributes) { if ($at.LocalName -eq 'embed' -and $at.NamespaceURI -like '*relationships') { $rid = $at.Value } } }
+        $target = $null
+        if ($rid) { $target = @($Rels | Where-Object { $_.Id -eq $rid })[0] }
+        if ($target) {
+            if (-not $Images.ContainsKey($target.Target)) {
+                $info = [pscustomobject]@{ Hash = ''; Width = 0; Height = 0 }
+                $entry = Get-PackageEntry -Package $Package -PartName $target.Target
+                if ($entry) {
+                    $ms = New-Object System.IO.MemoryStream
+                    $st = $entry.Open()
+                    try { $st.CopyTo($ms) } finally { $st.Dispose() }
+                    $bytes = $ms.ToArray()
+                    $info.Hash = ([System.BitConverter]::ToString($script:ImageHash.ComputeHash($bytes))).Replace('-', '').Substring(0, 16).ToLowerInvariant()
+                    $size = Get-ImageSize $bytes
+                    $info.Width = $size[0]; $info.Height = $size[1]
+                }
+                $Images[$target.Target] = $info
+            }
+            $info = $Images[$target.Target]
+            $item.Media = $target.Target; $item.Hash = $info.Hash; $item.Width = $info.Width; $item.Height = $info.Height
+        }
+    }
+    $Items.Add($item)
+    if ($Node.LocalName -ne 'grpSp') { return }
+    # グループの中: 中の図形の座標（chOff・chExt）を、いちばん外のグループの座標にする
+    $t = $null; $top2 = $Top
+    if ($xf) {
+        $sx = 1.0; if ($xf.CW -ne 0) { $sx = $xf.W / $xf.CW }
+        $sy = 1.0; if ($xf.CH -ne 0) { $sy = $xf.H / $xf.CH }
+        if ($Top) {
+            if ($Transform) { $t = [pscustomobject]@{ SX = $Transform.SX * $sx; TX = $Transform.TX + $Transform.SX * ($xf.X - $xf.CX * $sx); SY = $Transform.SY * $sy; TY = $Transform.TY + $Transform.SY * ($xf.Y - $xf.CY * $sy) } }
+        }
+        else {
+            $t = [pscustomobject]@{ SX = $sx; TX = $xf.X - $xf.CX * $sx; SY = $sy; TY = $xf.Y - $xf.CY * $sy }
+            $top2 = [pscustomobject]@{ Name = $name; X = $xf.X; Y = $xf.Y; W = $xf.W; H = $xf.H }
+        }
+    }
+    elseif (-not $Top) { $top2 = [pscustomobject]@{ Name = $name; X = 0; Y = 0; W = 0; H = 0 } }
+    foreach ($child in $Node.ChildNodes) {
+        if ($child -isnot [System.Xml.XmlElement]) { continue }
+        # 互換用の書き方（mc:AlternateContent）は、Choice の中の図形を使う
+        if ($child.LocalName -eq 'AlternateContent') { $child = $child.SelectSingleNode("*[local-name()='Choice']/*[local-name()='sp' or local-name()='pic' or local-name()='grpSp' or local-name()='graphicFrame' or local-name()='cxnSp']") }
+        if (-not $child -or @('sp', 'pic', 'grpSp', 'graphicFrame', 'cxnSp') -notcontains $child.LocalName) { continue }
+        Add-DrawingItem -Items $Items -Node $child -Anchor $Anchor -Cell $Cell -ParentPath $path -Top $top2 -Transform $t -Package $Package -Rels $Rels -Images $Images
+    }
+}
+
+function Read-SheetDrawingItems {
+    #     シートの図形・画像（描画パーツ）を、文書の順に読む（グループの中のものも。互換用の代替表示（mc:Fallback）は除く）。
+    #       Name・Kind（sp 図形 / pic 画像 / grpSp グループ / graphicFrame グラフ / cxnSp 線）・Text
+    #       Path（グループの中なら「グループ名/名前」）・Key（Path#同じ Path の何番目か）・Group（グループの中なら、いちばん外のグループの名前）
+    #       Cell（シートに置いた図形の左上のセル）・Anchor（R1 C1 OX OY と、R2 C2 EX EY（セルに合わせる）または W H。ピクセル）
+    #       Box（グループの中のもの。いちばん外のグループの中での X Y W H の割合）
+    #       画像: Hash（中身の要約）・Media（パーツ名）・Width Height（画像の大きさ。わからなければ 0）
+    #     Images は画像のパーツ名 → 中身の要約と大きさ（同じブックの中で使い回す）
+    param($Package, [string] $SheetPart, [hashtable] $Images)
+    $items = New-Object System.Collections.Generic.List[object]
+    $px = { param($node, $name) $n = $node.SelectSingleNode("*[local-name()='$name']"); if ($n) { [int][math]::Round([double]$n.InnerText / 9525) } else { 0 } }
+    $num = { param($node, $name) $n = $node.SelectSingleNode("*[local-name()='$name']"); if ($n) { [int]$n.InnerText } else { 0 } }
+    # Get-PartRelationships は一覧を 1 つのまとまりで返すので、いったん変数に入れてから絞り込む
+    $rels = Get-PartRelationships -Package $Package -PartName $SheetPart
+    foreach ($rel in @($rels | Where-Object { $_.Kind -eq 'drawing' })) {
+        $doc = Read-PartXml -Package $Package -PartName $rel.Target
+        if (-not $doc) { continue }
+        $drawingRels = Get-PartRelationships -Package $Package -PartName $rel.Target
+        foreach ($a in $doc.SelectNodes("//*[(local-name()='twoCellAnchor' or local-name()='oneCellAnchor') and not(ancestor::*[local-name()='Fallback'])]")) {
+            $obj = $a.SelectSingleNode("*[local-name()='sp' or local-name()='pic' or local-name()='graphicFrame' or local-name()='grpSp' or local-name()='cxnSp']")
+            $from = $a.SelectSingleNode("*[local-name()='from']")
+            if (-not $obj -or -not $from) { continue }
+            $anchor = [ordered]@{ R1 = (& $num $from 'row') + 1; C1 = (& $num $from 'col') + 1; OX = (& $px $from 'colOff'); OY = (& $px $from 'rowOff') }
+            $to = $a.SelectSingleNode("*[local-name()='to']")
+            $ext = $a.SelectSingleNode("*[local-name()='ext']")
+            if ($to) { $anchor.R2 = (& $num $to 'row') + 1; $anchor.C2 = (& $num $to 'col') + 1; $anchor.EX = (& $px $to 'colOff'); $anchor.EY = (& $px $to 'rowOff') }
+            elseif ($ext) { $anchor.W = [int][math]::Round([double]$ext.GetAttribute('cx') / 9525); $anchor.H = [int][math]::Round([double]$ext.GetAttribute('cy') / 9525) }
+            else { continue }
+            $anchor = [pscustomobject]$anchor
+            $cell = (ConvertTo-ColumnName $anchor.C1) + $anchor.R1
+            Add-DrawingItem -Items $items -Node $obj -Anchor $anchor -Cell $cell -ParentPath '' -Top $null -Transform $null -Package $Package -Rels $drawingRels -Images $Images
+        }
+    }
+    $seen = @{}
+    foreach ($it in $items) { $seen[$it.Path] = 1 + [int]$seen[$it.Path]; $it.Key = '{0}#{1}' -f $it.Path, $seen[$it.Path] }
+    return , $items
+}
+
+function Read-BookDrawings {
+    #     .xlsx / .xlsm のシート名 → 図形・画像の一覧（Read-SheetDrawingItems）。描画パーツを読めないブック（.xls など）は $null
+    param([string] $FilePath)
+    if (@('.xlsx', '.xlsm', '.xltx', '.xltm') -notcontains [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()) { return $null }
+    $result = @{}
+    try {
+        $pkg = Open-ZipPackage $FilePath
+        try {
+            $parts = Get-WorkbookSheetParts $pkg
+            $images = @{}
+            foreach ($name in $parts.Sheets.Keys) { $result[$name] = Read-SheetDrawingItems $pkg $parts.Sheets[$name] $images }
+        }
+        finally { $pkg.Zip.Dispose() }
+    }
+    catch {
+        Write-Verbose ("{0}: 図形・画像を読めませんでした（図形の文字だけを比べます）: {1}" -f [System.IO.Path]::GetFileName($FilePath), $_.Exception.Message)
+        return $null
+    }
+    return $result
 }
 
 # ---------------------------------------------------------------- 書式の読み取り（-CompareFormat）
@@ -683,8 +874,9 @@ $script:Diffs = New-Object System.Collections.Generic.List[object]
 $script:IgnoredCounts = @{ '表記' = 0; '版情報' = 0 }
 
 function Add-Diff {
-    #     DetailText を指定すると、Detail をその文字にする（書式の差分など）
-    param([string] $Sheet, [string] $NewCell, [string] $OldCell, [string] $Kind, [string] $Change, [string] $OldText, [string] $NewText, [string] $DetailText)
+    #     DetailText を指定すると、Detail をその文字にする（書式の差分など）。
+    #     Shape は図形・画像の差分の、旧・新の名前と画像の中身の要約（OldName・NewName・OldImage・NewImage。差分の画面で使う）
+    param([string] $Sheet, [string] $NewCell, [string] $OldCell, [string] $Kind, [string] $Change, [string] $OldText, [string] $NewText, [string] $DetailText, [hashtable] $Shape)
 
     $cell = $NewCell
     if (-not $cell) { $cell = $OldCell }
@@ -733,6 +925,7 @@ function Add-Diff {
         NewCell     = $NewCell
         OldCell     = $OldCell
         Tag         = ''
+        Shape       = $Shape
     }
     $d.PSObject.TypeNames.Insert(0, 'CompareExcel.Diff')
     $script:Diffs.Add($d)
@@ -1211,21 +1404,229 @@ function Compare-Sheet {
     }
     foreach ($k in $oldComments.Keys) { Add-Diff $Sheet $null $oldComments[$k][0] 'コメント' '削除' $oldComments[$k][1] $null }
 
-    # ---- 図形: 名前で対応付ける
-    foreach ($name in $NewSheet.Shapes.Keys) {
-        $ns = $NewSheet.Shapes[$name]
-        if ($OldSheet.Shapes.ContainsKey($name)) {
-            $os = $OldSheet.Shapes[$name]
-            if ($os.Text -cne $ns.Text) { Add-Diff $Sheet $ns.Cell $os.Cell '図形' '変更' $os.Text $ns.Text }
-        }
-        else { Add-Diff $Sheet $ns.Cell $null '図形' '追加' $null $ns.Text }
+    # ---- 図形・画像: .xlsx / .xlsm は描画パーツから、位置・大きさと画像の中身も比べる（行・列の対応付けで、セルと一緒に動いただけのものは除く）。
+    #      描画パーツを読めないブック（.xls など）は、図形を名前で対応付けて文字を比べる
+    if ($null -ne $OldSheet.Drawing -and $null -ne $NewSheet.Drawing) {
+        $movedRows = @{}
+        foreach ($mv in $moved) { $movedRows['{0},{1}' -f $mv[0], $mv[1]] = $true }
+        $drawRows = New-Object System.Collections.Generic.List[object]
+        foreach ($p in $pairs) { if (-not $movedRows.ContainsKey(('{0},{1}' -f $p[0], $p[1]))) { $drawRows.Add([pscustomobject]@{ O = [int]$p[0]; N = [int]$p[1] }) } }
+        $drawCols = New-Object System.Collections.Generic.List[object]
+        if ($cm) { foreach ($k in $cm.NewToOld.Keys) { $drawCols.Add([pscustomobject]@{ O = (Get-ColumnIndex $cm.NewToOld[$k]); N = (Get-ColumnIndex $k) }) } }
+        Compare-SheetDrawing -Sheet $Sheet -OldItems $OldSheet.Drawing -NewItems $NewSheet.Drawing -RowPairs $drawRows -ColPairs $drawCols
     }
-    foreach ($name in $OldSheet.Shapes.Keys) {
-        if (-not $NewSheet.Shapes.ContainsKey($name)) { Add-Diff $Sheet $null $OldSheet.Shapes[$name].Cell '図形' '削除' $OldSheet.Shapes[$name].Text $null }
+    else {
+        foreach ($name in $NewSheet.Shapes.Keys) {
+            $ns = $NewSheet.Shapes[$name]
+            if ($OldSheet.Shapes.ContainsKey($name)) {
+                $os = $OldSheet.Shapes[$name]
+                if ($os.Text -cne $ns.Text) { Add-Diff $Sheet $ns.Cell $os.Cell '図形' '変更' $os.Text $ns.Text }
+            }
+            else { Add-Diff $Sheet $ns.Cell $null '図形' '追加' $null $ns.Text }
+        }
+        foreach ($name in $OldSheet.Shapes.Keys) {
+            if (-not $NewSheet.Shapes.ContainsKey($name)) { Add-Diff $Sheet $null $OldSheet.Shapes[$name].Cell '図形' '削除' $OldSheet.Shapes[$name].Text $null }
+        }
     }
     Merge-Renumbering -From $firstDiff
     Sort-SheetDiff -From $firstDiff
     $script:OldSheetName = $null
+}
+
+function Test-ShiftExplained {
+    #     旧の Old 番目（行・列）が新で New 番目になったのが、行・列の挿入・削除でセルと一緒に動いただけか。
+    #     Pairs は対応付けた旧と新の番号の組（O・N。O の順）。その番号の組があればその組と、無ければすぐ上・すぐ下（左右）の組と同じだけずれたか。組が無ければ番号が同じか
+    param($Pairs, [int] $Old, [int] $New)
+    # すぐ上・すぐ下の組を二分探索で探す（大きな表のシートで図形が多くても遅くならないように）
+    $below = $null; $above = $null
+    $lo = 0; $hi = $Pairs.Count - 1
+    while ($lo -le $hi) {
+        $mid = [int][math]::Floor(($lo + $hi) / 2)
+        $p = $Pairs[$mid]
+        if ($p.O -eq $Old) { return ($p.N -eq $New) }
+        if ($p.O -lt $Old) { $below = $p; $lo = $mid + 1 } else { $above = $p; $hi = $mid - 1 }
+    }
+    if (-not $below -and -not $above) { return ($Old -eq $New) }
+    foreach ($p in @($below, $above)) { if ($p -and ($p.N - $p.O) -eq ($New - $Old)) { return $true } }
+    return $false
+}
+
+function Get-DrawingMove {
+    #     対応付けた図形・画像の位置・大きさの変化。戻り値: ''（変わらない）・'位置'・'大きさ'。
+    #     シートに置いたものはセルの位置（行・列の挿入・削除でセルと一緒に動いただけなら変わらない）、グループの中のものはグループの中での位置で比べる
+    param($Old, $New, $Rows, $Cols)
+    $tol = 2
+    if ($Old.Group -or $New.Group) {
+        if ($Old.Group -ne $New.Group -or -not $Old.Box -or -not $New.Box) { return '' }
+        $t = 0.005
+        if ([math]::Abs($Old.Box.X - $New.Box.X) -gt $t -or [math]::Abs($Old.Box.Y - $New.Box.Y) -gt $t) { return '位置' }
+        if ([math]::Abs($Old.Box.W - $New.Box.W) -gt $t -or [math]::Abs($Old.Box.H - $New.Box.H) -gt $t) { return '大きさ' }
+        return ''
+    }
+    $a = $Old.Anchor; $b = $New.Anchor
+    if (-not ((Test-ShiftExplained $Rows $a.R1 $b.R1) -and (Test-ShiftExplained $Cols $a.C1 $b.C1) -and [math]::Abs($a.OX - $b.OX) -le $tol -and [math]::Abs($a.OY - $b.OY) -le $tol)) { return '位置' }
+    $twoA = $null -ne $a.PSObject.Properties['R2']
+    $twoB = $null -ne $b.PSObject.Properties['R2']
+    if ($twoA -and $twoB) {
+        if (-not ((Test-ShiftExplained $Rows $a.R2 $b.R2) -and (Test-ShiftExplained $Cols $a.C2 $b.C2) -and [math]::Abs($a.EX - $b.EX) -le $tol -and [math]::Abs($a.EY - $b.EY) -le $tol)) { return '大きさ' }
+    }
+    elseif (-not $twoA -and -not $twoB) {
+        if ([math]::Abs($a.W - $b.W) -gt $tol -or [math]::Abs($a.H - $b.H) -gt $tol) { return '大きさ' }
+    }
+    return ''
+}
+
+function Test-DrawingOverlap {
+    #     2 つの図形・画像の場所が重なるか（貼り替えた画像の対応付け用。グループの中のものは、グループの中での位置で）
+    param($A, $B)
+    if ($A.Group -or $B.Group) {
+        if ($A.Group -ne $B.Group -or -not $A.Box -or -not $B.Box) { return $false }
+        return ($A.Box.X -lt $B.Box.X + $B.Box.W) -and ($B.Box.X -lt $A.Box.X + $A.Box.W) -and ($A.Box.Y -lt $B.Box.Y + $B.Box.H) -and ($B.Box.Y -lt $A.Box.Y + $A.Box.H)
+    }
+    $range = { param($x) if ($null -ne $x.PSObject.Properties['R2']) { , @($x.R1, $x.C1, $x.R2, $x.C2) } else { , @($x.R1, $x.C1, $x.R1, $x.C1) } }
+    $ra = & $range $A.Anchor
+    $rb = & $range $B.Anchor
+    return ($ra[0] -le $rb[2]) -and ($rb[0] -le $ra[2]) -and ($ra[1] -le $rb[3]) -and ($rb[1] -le $ra[3])
+}
+
+function Get-DrawingLabel {
+    #     差分に出す図形・画像の名前（文字のある図形は文字と名前、画像は名前と大きさ。グループの中なら、そのグループも）
+    param($Item)
+    $label = $Item.Name
+    if ($Item.Text) { $label = '{0}（{1}）' -f (Get-Short ($Item.Text -replace '\s*\n\s*', ' ') 30), $Item.Name }
+    elseif ($Item.Kind -eq 'pic' -and $Item.Width -gt 0) { $label = '{0}（{1}×{2}）' -f $Item.Name, $Item.Width, $Item.Height }
+    if ($Item.Group) { $label += '（グループ「{0}」の中）' -f $Item.Group }
+    return $label
+}
+
+function Get-DrawingPairs {
+    #     旧と新の図形・画像を対応付ける。Keys の順に、同じ値（空は使わない。大文字・小文字は区別する）を返すものどうしを文書の順に組にし、
+    #     最後に、残りどうしで Test が真になるものを組にする。戻り値: Pairs（旧・新の組）・Old・New（対応の無いもの）
+    param($OldList, $NewList, [scriptblock[]] $Keys, [scriptblock] $Test)
+    $usedO = @{}; $usedN = @{}
+    $pairs = New-Object System.Collections.Generic.List[object]
+    foreach ($key in $Keys) {
+        $byKey = [System.Collections.Generic.Dictionary[string, object]]::new()
+        for ($j = 0; $j -lt $NewList.Count; $j++) {
+            if ($usedN.ContainsKey($j)) { continue }
+            $k = [string](& $key $NewList[$j])
+            if (-not $k) { continue }
+            if (-not $byKey.ContainsKey($k)) { $byKey[$k] = New-Object System.Collections.Generic.Queue[int] }
+            $byKey[$k].Enqueue($j)
+        }
+        for ($i = 0; $i -lt $OldList.Count; $i++) {
+            if ($usedO.ContainsKey($i)) { continue }
+            $k = [string](& $key $OldList[$i])
+            if (-not $k -or -not $byKey.ContainsKey($k) -or $byKey[$k].Count -eq 0) { continue }
+            $j = $byKey[$k].Dequeue()
+            $pairs.Add(@($OldList[$i], $NewList[$j])); $usedO[$i] = $true; $usedN[$j] = $true
+        }
+    }
+    if ($Test) {
+        for ($j = 0; $j -lt $NewList.Count; $j++) {
+            if ($usedN.ContainsKey($j)) { continue }
+            for ($i = 0; $i -lt $OldList.Count; $i++) {
+                if ($usedO.ContainsKey($i)) { continue }
+                if (& $Test $OldList[$i] $NewList[$j]) { $pairs.Add(@($OldList[$i], $NewList[$j])); $usedO[$i] = $true; $usedN[$j] = $true; break }
+            }
+        }
+    }
+    $restO = @(for ($i = 0; $i -lt $OldList.Count; $i++) { if (-not $usedO.ContainsKey($i)) { $OldList[$i] } })
+    $restN = @(for ($j = 0; $j -lt $NewList.Count; $j++) { if (-not $usedN.ContainsKey($j)) { $NewList[$j] } })
+    return [pscustomobject]@{ Pairs = $pairs; Old = $restO; New = $restN }
+}
+
+function Compare-SheetDrawing {
+    #     図形・画像を比べる（.xlsx / .xlsm）。
+    #       画像: 名前と中身が同じもの → 中身が同じもの → 名前が同じもの → 重なる場所のもの（残りが 1 つずつならそれ）の順に対応付け、中身・位置・大きさの変化を出す
+    #       図形: 名前が同じもの → 文字が同じもの の順に対応付け、文字・位置・大きさの変化と、追加・削除を出す（文字の無い枠や矢印も）
+    #     グループごと足した・消したものはグループで 1 件にする。行・列の挿入・削除でセルと一緒に動いただけの違いは移動にしない
+    #     （RowPairs・ColPairs: 対応付けた旧と新の行・列の番号の組（O・N））
+    param([string] $Sheet, $OldItems, $NewItems, $RowPairs, $ColPairs)
+    $rows = @($RowPairs | Sort-Object O)
+    $cols = @($ColPairs | Sort-Object O)
+    $shapeOf = { param($o, $n) @{ OldName = $(if ($o) { $o.Name } else { $null }); NewName = $(if ($n) { $n.Name } else { $null }); OldImage = $(if ($o) { $o.Hash } else { $null }); NewImage = $(if ($n) { $n.Hash } else { $null }) } }
+
+    # ---- 対応付け（画像と、そのほかの図形に分けて）
+    $pics = Get-DrawingPairs @($OldItems | Where-Object Kind -eq 'pic') @($NewItems | Where-Object Kind -eq 'pic') @(
+        { param($x) '{0}|{1}' -f $x.Key, $x.Hash },
+        { param($x) $x.Hash },
+        { param($x) $x.Key }) { param($o, $n) Test-DrawingOverlap $o $n }
+    if ($pics.Old.Count -eq 1 -and $pics.New.Count -eq 1 -and $pics.Old[0].Group -eq $pics.New[0].Group) {
+        # 残りが 1 つずつなら、貼り替えたものとみなす（画面のスクリーンショットを撮り直して貼ったときなど）
+        $pics.Pairs.Add(@($pics.Old[0], $pics.New[0])); $pics.Old = @(); $pics.New = @()
+    }
+    $shapes = Get-DrawingPairs @($OldItems | Where-Object Kind -ne 'pic') @($NewItems | Where-Object Kind -ne 'pic') @(
+        { param($x) '{0}|{1}' -f $x.Key, $x.Kind },
+        { param($x) if ($x.Text) { '{0}|{1}|{2}' -f $x.Text, $x.Kind, $x.Group } })
+
+    # グループごと足した・消したものは、中の図形・画像を出さない
+    $addedGroups = @($shapes.New | Where-Object { $_.Kind -eq 'grpSp' } | ForEach-Object { $_.Path + '/' })
+    $removedGroups = @($shapes.Old | Where-Object { $_.Kind -eq 'grpSp' } | ForEach-Object { $_.Path + '/' })
+    $inside = { param($item, $groups) foreach ($g in $groups) { if ($item.Path.StartsWith($g)) { return $true } }; return $false }
+    $groupText = {
+        param($group, $items)
+        $kids = @($items | Where-Object { $_.Path.StartsWith($group.Path + '/') -and $_.Kind -ne 'grpSp' })
+        $n = @($kids | Where-Object Kind -eq 'pic').Count
+        $parts = @()
+        if ($n -gt 0) { $parts += '画像 {0}' -f $n }
+        if ($kids.Count - $n -gt 0) { $parts += '図形 {0}' -f ($kids.Count - $n) }
+        $texts = @($kids | Where-Object Text | ForEach-Object { $_.Text -replace '\s*\n\s*', ' ' })
+        $s = '（グループ「{0}」: {1}）' -f $group.Name, ($parts -join '・')
+        if ($texts.Count -gt 0) { $s += ' ' + ($texts -join ' / ') }
+        return $s
+    }
+
+    # ---- 画像
+    foreach ($p in $pics.Pairs) {
+        $o = $p[0]; $n = $p[1]
+        $move = Get-DrawingMove $o $n $rows $cols
+        if ($o.Hash -ne $n.Hash) {
+            $what = Get-DrawingLabel $n
+            if ($o.Name -ne $n.Name) { $what = '{0} → {1}' -f (Get-DrawingLabel $o), $what }
+            if ($move) { $what += '（{0}も変更）' -f $move }
+            Add-Diff $Sheet $n.Cell $o.Cell '画像' '変更' (Get-DrawingLabel $o) (Get-DrawingLabel $n) -DetailText ('画像を変更: ' + $what) -Shape (& $shapeOf $o $n)
+        }
+        elseif ($move) {
+            $verb = '画像を移動'
+            if ($move -eq '大きさ') { $verb = '画像の大きさを変更' }
+            Add-Diff $Sheet $n.Cell $o.Cell '画像' '移動' (Get-DrawingLabel $o) (Get-DrawingLabel $n) -DetailText ('{0}: {1}' -f $verb, (Get-DrawingLabel $n)) -Shape (& $shapeOf $o $n)
+        }
+    }
+    foreach ($n in $pics.New) {
+        if (& $inside $n $addedGroups) { continue }
+        Add-Diff $Sheet $n.Cell $null '画像' '追加' $null (Get-DrawingLabel $n) -DetailText ('画像を追加: ' + (Get-DrawingLabel $n)) -Shape (& $shapeOf $null $n)
+    }
+    foreach ($o in $pics.Old) {
+        if (& $inside $o $removedGroups) { continue }
+        Add-Diff $Sheet $null $o.Cell '画像' '削除' (Get-DrawingLabel $o) $null -DetailText ('画像を削除: ' + (Get-DrawingLabel $o)) -Shape (& $shapeOf $o $null)
+    }
+
+    # ---- 図形（文字の変化は、これまでどおり文字で出す）
+    foreach ($p in $shapes.Pairs) {
+        $o = $p[0]; $n = $p[1]
+        if ($o.Kind -ne 'grpSp' -and $o.Text -cne $n.Text) { Add-Diff $Sheet $n.Cell $o.Cell '図形' '変更' $o.Text $n.Text -Shape (& $shapeOf $o $n) }
+        $move = Get-DrawingMove $o $n $rows $cols
+        if ($move) {
+            $verb = '図形を移動'
+            if ($move -eq '大きさ') { $verb = '図形の大きさを変更' }
+            Add-Diff $Sheet $n.Cell $o.Cell '図形' '移動' (Get-DrawingLabel $o) (Get-DrawingLabel $n) -DetailText ('{0}: {1}' -f $verb, (Get-DrawingLabel $n)) -Shape (& $shapeOf $o $n)
+        }
+    }
+    foreach ($n in $shapes.New) {
+        if (& $inside $n $addedGroups) { continue }
+        $text = $n.Text
+        if ($n.Kind -eq 'grpSp') { $text = & $groupText $n $NewItems }
+        elseif (-not $text) { $text = '（{0}）' -f (Get-DrawingLabel $n) }
+        Add-Diff $Sheet $n.Cell $null '図形' '追加' $null $text -Shape (& $shapeOf $null $n)
+    }
+    foreach ($o in $shapes.Old) {
+        if (& $inside $o $removedGroups) { continue }
+        $text = $o.Text
+        if ($o.Kind -eq 'grpSp') { $text = & $groupText $o $OldItems }
+        elseif (-not $text) { $text = '（{0}）' -f (Get-DrawingLabel $o) }
+        Add-Diff $Sheet $null $o.Cell '図形' '削除' $text $null -Shape (& $shapeOf $o $null)
+    }
 }
 
 function Compare-SheetFormat {
@@ -1562,7 +1963,7 @@ function Test-BookkeepingCell {
 }
 
 function Get-ChangeGroups {
-    #     改訂履歴のシート以外の変更（値・数式・行・列・シート）を、行（列・シートの変更はそれぞれ 1 件）ごとにまとめ、
+    #     改訂履歴のシート以外の変更（値・数式・行・列・シートと、図形・画像）を、行（列・シートの変更はそれぞれ 1 件、図形・画像はシートごとに 1 件）ごとにまとめ、
     #     行を表す語（改訂履歴と突き合わせる語）と、改訂履歴に書く文をつくる。版数・更新日などの欄の変更は除く。
     #     返り値: [ordered] キー → @{ Sheet; OldSheet; NewCell; OldCell; Terms; Label; Texts }
     param($OldBook, $NewBook, $Diffs)
@@ -1570,7 +1971,7 @@ function Get-ChangeGroups {
     $hist = @($NewBook.Keys | Where-Object { $_ -match $HistorySheet })[0]
     $groups = [ordered]@{}
     foreach ($d in $Diffs) {
-        if ($d.Sheet -eq $hist -or @('値', '数式', '行', '列', 'シート') -notcontains $d.Kind) { continue }
+        if ($d.Sheet -eq $hist -or @('値', '数式', '行', '列', 'シート', '画像', '図形') -notcontains $d.Kind) { continue }
         $useOld = $d.Change -eq '削除' -and $d.Kind -ne '値' -and $d.Kind -ne '数式'
         $sheetName = $d.Sheet
         $book = $NewBook
@@ -1587,6 +1988,13 @@ function Get-ChangeGroups {
                 if ($d.Change -eq '名前変更') { $terms += $d.Old; $text = 'シート名を {0} → {1} に変更' -f $d.Old, $d.New }
                 else { $text = 'シートを{0}' -f $d.Change }
                 $label = ''
+            }
+            { $_ -eq '画像' -or $_ -eq '図形' } {
+                # 画面レイアウトのスクリーンショットの貼り替えなど。シート名を、改訂履歴と突き合わせる語にする
+                $key = 'D|{0}|{1}' -f $useOld, $sheetName
+                $terms = @($sheetName | Where-Object { Test-HistoryTerm $_ })
+                $label = ''
+                $text = '{0}を{1}' -f $d.Kind, $d.Change
             }
             '列' {
                 $key = 'C|{0}|{1}|{2}' -f $useOld, $sheetName, $col
@@ -1684,36 +2092,25 @@ $script:HtmlBooks = @{}
 $script:HtmlAlign = @{}   # ファイル名 + [char]0 + 新のシート名 → 対応付けた旧と新の行・列の組
 
 function Read-SheetShapes {
-    #     シートの図形・画像・グラフの位置（左上のセルと、右下のセルまたは大きさ。ピクセル）と文字。線（コネクター）は除く
-    param($Package, [string] $SheetPart)
+    #     シートの図形・画像・グラフの位置（左上のセルと、右下のセルまたは大きさ。ピクセル）と文字。線（コネクター）は除く。
+    #     画像は中身の要約（Img）とパーツ名（Media）、グループは中の図形・画像（Children: Name・Kind・Text・Img・Media・Box（グループの中での位置の割合））も
+    param($Package, [string] $SheetPart, [hashtable] $Images = @{})
     $shapes = New-Object System.Collections.Generic.List[object]
-    $px = { param($node, $name) $n = $node.SelectSingleNode("*[local-name()='$name']"); if ($n) { [int][math]::Round([double]$n.InnerText / 9525) } else { 0 } }
-    $num = { param($node, $name) $n = $node.SelectSingleNode("*[local-name()='$name']"); if ($n) { [int]$n.InnerText } else { 0 } }
-    # Get-PartRelationships は一覧を 1 つのまとまりで返すので、いったん変数に入れてから絞り込む
-    $rels = Get-PartRelationships -Package $Package -PartName $SheetPart
-    foreach ($rel in @($rels | Where-Object { $_.Kind -eq 'drawing' })) {
-        $doc = Read-PartXml -Package $Package -PartName $rel.Target
-        if (-not $doc) { continue }
-        # 互換用の代替表示（mc:Fallback）は同じ図形の重複なので除く
-        foreach ($a in $doc.SelectNodes("//*[(local-name()='twoCellAnchor' or local-name()='oneCellAnchor') and not(ancestor::*[local-name()='Fallback'])]")) {
-            $obj = $a.SelectSingleNode("*[local-name()='sp' or local-name()='pic' or local-name()='graphicFrame' or local-name()='grpSp']")
-            $from = $a.SelectSingleNode("*[local-name()='from']")
-            if (-not $obj -or -not $from) { continue }
-            $nv = $obj.SelectSingleNode(".//*[local-name()='cNvPr']")
-            $paragraphs = @($obj.SelectNodes(".//*[local-name()='txBody']/*[local-name()='p']") | ForEach-Object {
-                    -join @($_.SelectNodes(".//*[local-name()='t']") | ForEach-Object { $_.InnerText })
-                })
-            $shape = [ordered]@{
-                Name = $(if ($nv) { $nv.GetAttribute('name') } else { '' }); Kind = $obj.LocalName; Text = ($paragraphs -join "`n").TrimEnd("`n")
-                R1 = (& $num $from 'row') + 1; C1 = (& $num $from 'col') + 1; OX = (& $px $from 'colOff'); OY = (& $px $from 'rowOff')
-            }
-            $to = $a.SelectSingleNode("*[local-name()='to']")
-            $ext = $a.SelectSingleNode("*[local-name()='ext']")
-            if ($to) { $shape.R2 = (& $num $to 'row') + 1; $shape.C2 = (& $num $to 'col') + 1; $shape.EX = (& $px $to 'colOff'); $shape.EY = (& $px $to 'rowOff') }
-            elseif ($ext) { $shape.W = [int][math]::Round([double]$ext.GetAttribute('cx') / 9525); $shape.H = [int][math]::Round([double]$ext.GetAttribute('cy') / 9525) }
-            else { continue }
-            $shapes.Add([pscustomobject]$shape)
+    $items = Read-SheetDrawingItems $Package $SheetPart $Images
+    foreach ($it in $items) {
+        if ($it.Group -or $it.Kind -eq 'cxnSp') { continue }
+        $shape = [ordered]@{ Name = $it.Name; Kind = $it.Kind; Text = $it.Text }
+        foreach ($p in $it.Anchor.PSObject.Properties) { $shape[$p.Name] = $p.Value }
+        $shape.Img = $it.Hash
+        $shape.Media = $it.Media
+        $shape.Children = @()
+        if ($it.Kind -eq 'grpSp') {
+            $kids = @($items | Where-Object { $_.Path.StartsWith($it.Path + '/') -and $_.Box -and $_.Kind -ne 'grpSp' -and $_.Kind -ne 'cxnSp' })
+            $shape.Children = @($kids | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Kind = $_.Kind; Text = $_.Text; Img = $_.Hash; Media = $_.Media; Box = $_.Box } })
+            # 中の位置がわからないときは、中の文字をグループの文字にする
+            if ($kids.Count -eq 0) { $shape.Text = (@($items | Where-Object { $_.Path.StartsWith($it.Path + '/') -and $_.Text } | ForEach-Object { $_.Text })) -join "`n" }
         }
+        $shapes.Add([pscustomobject]$shape)
     }
     return , $shapes
 }
@@ -1727,6 +2124,7 @@ function Read-SheetLayout {
         $pkg = Open-ZipPackage $FilePath
         try {
             $parts = Get-WorkbookSheetParts $pkg
+            $images = @{}
             foreach ($name in $parts.Sheets.Keys) {
                 $doc = Read-PartXml -Package $pkg -PartName $parts.Sheets[$name]
                 if (-not $doc) { continue }
@@ -1761,7 +2159,7 @@ function Read-SheetLayout {
                         if ($h -ne $rowPx) { $heights[$r] = $h }
                     }
                 }
-                $shapes = Read-SheetShapes $pkg $parts.Sheets[$name]
+                $shapes = Read-SheetShapes $pkg $parts.Sheets[$name] $images
                 $layout[$name] = [pscustomobject]@{ Default = [int][math]::Round($default * 7 + 5); Widths = $widths; Merges = $merges; RowDefault = $rowPx; Heights = $heights; Shapes = $shapes }
             }
         }
@@ -1837,10 +2235,68 @@ function Add-SheetJson {
             foreach ($p in @('R1', 'C1', 'OX', 'OY', 'R2', 'C2', 'EX', 'EY', 'W', 'H')) {
                 if ($sh.PSObject.Properties[$p]) { [void]$Builder.Append((',"{0}":{1}' -f $p.ToLowerInvariant(), [int]$sh.$p)) }
             }
+            # 画像の中身の要約（差分の画面に画像を入れたシートは、その画像を表示する）と、グループの中の図形・画像（グループの中での位置の割合）
+            if ($sh.PSObject.Properties['Img'] -and $sh.Img) { [void]$Builder.Append(',"img":'); Add-JsonText $Builder $sh.Img }
+            if ($sh.PSObject.Properties['Children'] -and @($sh.Children).Count -gt 0) {
+                $inv = [System.Globalization.CultureInfo]::InvariantCulture
+                [void]$Builder.Append(',"ch":[')
+                [void]$Builder.Append((@($sh.Children | ForEach-Object {
+                                $kid = New-Object System.Text.StringBuilder
+                                [void]$kid.Append('{"n":'); Add-JsonText $kid $_.Name
+                                [void]$kid.Append(',"k":'); Add-JsonText $kid $_.Kind
+                                [void]$kid.Append(',"t":'); Add-JsonText $kid $_.Text
+                                if ($_.Img) { [void]$kid.Append(',"img":'); Add-JsonText $kid $_.Img }
+                                foreach ($p in @(@('fx', $_.Box.X), @('fy', $_.Box.Y), @('fw', $_.Box.W), @('fh', $_.Box.H))) { [void]$kid.Append((',"{0}":' -f $p[0])).Append(([double]$p[1]).ToString('0.####', $inv)) }
+                                [void]$kid.Append('}')
+                                $kid.ToString()
+                            }) -join ','))
+                [void]$Builder.Append(']')
+            }
             [void]$Builder.Append('}')
         }
     }
     [void]$Builder.Append(']}')
+}
+
+function Add-ImageNeeds {
+    #     差分の画面に入れる画像（ブックのパス・パーツ名・中身の要約）を足す（シートの図形とグループの中の画像）
+    param($Needs, [string] $Path, $Shapes)
+    # New-Object で作った一覧に @() を使うと PowerShell 7.4 で例外になるため、foreach で回す
+    foreach ($sh in $Shapes) {
+        if ($sh.Img -and $sh.Media) { $Needs.Add([pscustomobject]@{ Path = $Path; Media = $sh.Media; Hash = $sh.Img }) }
+        foreach ($x in $sh.Children) { if ($x.Img -and $x.Media) { $Needs.Add([pscustomobject]@{ Path = $Path; Media = $x.Media; Hash = $x.Img }) } }
+    }
+}
+
+function Add-ImageJson {
+    #     差分の画面に入れる画像（中身の要約 → data: の URL）を JSON のオブジェクトの中身として足す。同じ画像は 1 つだけ入れ、
+    #     合わせて MaxBytes を超える分と、ブラウザーで表示できない形式（EMF など）は入れない。戻り値: 入れなかった画像の数
+    param([System.Text.StringBuilder] $Builder, $Needs, [long] $MaxBytes = 40MB)
+    $types = @{ '.png' = 'image/png'; '.jpg' = 'image/jpeg'; '.jpeg' = 'image/jpeg'; '.gif' = 'image/gif'; '.bmp' = 'image/bmp'; '.svg' = 'image/svg+xml'; '.webp' = 'image/webp' }
+    $done = @{}; $total = 0L; $skipped = 0; $first = $true
+    foreach ($group in @($Needs | Group-Object Path)) {
+        $pkg = $null
+        try { $pkg = Open-ZipPackage $group.Name }
+        catch { $skipped += @($group.Group | Where-Object { -not $done.ContainsKey($_.Hash) } | ForEach-Object Hash | Sort-Object -Unique).Count; continue }
+        try {
+            foreach ($need in $group.Group) {
+                if ($done.ContainsKey($need.Hash)) { continue }
+                $done[$need.Hash] = $true
+                $type = $types[[System.IO.Path]::GetExtension($need.Media).ToLowerInvariant()]
+                $entry = Get-PackageEntry -Package $pkg -PartName $need.Media
+                if (-not $type -or -not $entry -or $total + $entry.Length -gt $MaxBytes) { $skipped++; continue }
+                $ms = New-Object System.IO.MemoryStream
+                $st = $entry.Open()
+                try { $st.CopyTo($ms) } finally { $st.Dispose() }
+                $total += $entry.Length
+                if (-not $first) { [void]$Builder.Append(',') }
+                $first = $false
+                [void]$Builder.Append('"').Append($need.Hash).Append('":"data:').Append($type).Append(';base64,').Append([Convert]::ToBase64String($ms.ToArray())).Append('"')
+            }
+        }
+        finally { $pkg.Zip.Dispose() }
+    }
+    return $skipped
 }
 
 function Export-DiffHtml {
@@ -1853,6 +2309,7 @@ function Export-DiffHtml {
     [void]$sb.Append(',"new":'); Add-JsonText $sb $newItem.FullName
     [void]$sb.Append(',"created":'); Add-JsonText $sb (Get-Date -Format 'yyyy/MM/dd HH:mm')
     [void]$sb.Append(',"files":[')
+    $imageNeeds = New-Object System.Collections.Generic.List[object]
     $diffsByFile = @{}
     foreach ($d in $script:Diffs) {
         if (-not $diffsByFile.ContainsKey($d.File)) { $diffsByFile[$d.File] = New-Object System.Collections.Generic.List[object] }
@@ -1882,6 +2339,12 @@ function Export-DiffHtml {
             [void]$sb.Append(',"b":'); Add-JsonText $sb $d.New
             [void]$sb.Append(',"d":'); Add-JsonText $sb $d.Detail
             if ($d.Tag) { [void]$sb.Append(',"t":'); Add-JsonText $sb $d.Tag }
+            # 図形・画像の差分は、旧・新の図形の名前と画像の中身の要約（差分の画面で図形に印を付け、画像を比べる）
+            if ($d.PSObject.Properties['Shape'] -and $d.Shape) {
+                foreach ($f in @(@('sn', 'NewName'), @('so', 'OldName'), @('hb', 'NewImage'), @('ha', 'OldImage'))) {
+                    if ($d.Shape[$f[1]]) { [void]$sb.Append((',"{0}":' -f $f[0])); Add-JsonText $sb $d.Shape[$f[1]] }
+                }
+            }
             [void]$sb.Append('}')
         }
         [void]$sb.Append('],"sheets":[')
@@ -1901,6 +2364,17 @@ function Export-DiffHtml {
             $usedOld = @{}
             foreach ($x in $sheets) { if ($x.Old) { $usedOld[$x.Old] = $true } }
             foreach ($name in $books.Old.Keys) { if (-not $usedOld.ContainsKey($name)) { $sheets.Add([pscustomobject]@{ New = $null; Old = $name }) } }
+            # 図形・画像の差分のあるシートは、画像も入れる（ほかのシートの画像は場所だけを示す。HTML を大きくしないため）
+            $layoutNew = @{}; $layoutOld = @{}
+            foreach ($d in $fileDiffs) {
+                if ($d.Kind -ne '画像' -and $d.Kind -ne '図形') { continue }
+                if ($d.Sheet) { $layoutNew[$d.Sheet] = $true }
+                if ($d.OldSheet) { $layoutOld[$d.OldSheet] = $true }
+            }
+            foreach ($x in $sheets) {
+                if ($x.New -and $layoutNew.ContainsKey($x.New) -and $newLayout[$x.New]) { Add-ImageNeeds $imageNeeds $s.New $newLayout[$x.New].Shapes }
+                if ($x.Old -and $layoutOld.ContainsKey($x.Old) -and $oldLayout[$x.Old]) { Add-ImageNeeds $imageNeeds $s.Old $oldLayout[$x.Old].Shapes }
+            }
             $firstSheet = $true
             foreach ($x in $sheets) {
                 if (-not $firstSheet) { [void]$sb.Append(',') }
@@ -1920,7 +2394,9 @@ function Export-DiffHtml {
         }
         [void]$sb.Append(']}')
     }
-    [void]$sb.Append(']}')
+    [void]$sb.Append('],"img":{')
+    $skipped = Add-ImageJson $sb $imageNeeds
+    [void]$sb.Append(('}},"imgSkipped":{0}}}' -f $skipped))
     $html = [System.IO.File]::ReadAllText($template, (New-Object System.Text.UTF8Encoding($false)))
     # データを入れるのは script の中の 1 か所だけ（説明の文などにある同じ文字は置き換えない）
     $marker = 'var DATA = /*DIFF_DATA*/null;'
@@ -2655,7 +3131,9 @@ if ($OutHistory) {
 #     2 つの Excel ファイル（またはフォルダ）を比べ、セル単位の差分を一覧にします（Excel 不要）。Word（.docx）も段落・表の行で比べます。
 #
 # .DESCRIPTION
-#     値・数式・コメント・図形の文字・シートの追加削除を比べます。
+#     値・数式・コメント・図形・画像・シートの追加削除を比べます。
+#     図形・画像（.xlsx / .xlsm）は、文字の変更と追加・削除に加えて、位置・大きさの変化（行・列の挿入でセルと一緒に動いただけのものは除く）と、
+#     画像の中身の変化（画面のスクリーンショットの貼り替えなど）も出します。画像は中身（データ）で比べるので、同じ画面を撮り直しただけでも「変更」になります。
 #     行や列を挿入・削除した場合でも、それより下（右）のセルがすべて「変更」にならないよう、
 #     同じ内容の行・列どうしを対応付けてから比べます（-NoRowAlign で無効にできます）。
 #     内容が同じまま場所が変わった行は「移動」、中身がよく似たシートの名前が変わった場合は「名前変更」として出力します。
@@ -2707,6 +3185,7 @@ if ($OutHistory) {
 #     変更した行を表す語（左から 2 つ。例: 論理名と物理名）が改訂履歴に無い変更を、行ごとに「改訂履歴 / 記載なし」として、
 #     「T_ORDER 合計金額（TOTAL_AMOUNT）: 桁数を 9 → 11 に変更」のような下書きとともに出力します（全角・半角は区別しません）。
 #     改訂履歴に追記が無い場合や、改訂履歴のシートが無い場合も知らせます。
+#     図形・画像の変更は、シートごとに 1 件にまとめ、シート名が改訂履歴に書かれているかで確かめます。
 #
 # .PARAMETER HistorySheet
 #     -CheckHistory・-OutHistory で使う、改訂履歴のシート名の正規表現。既定は「改訂履歴|変更履歴|改版履歴|更新履歴|改訂記録」。
@@ -2740,6 +3219,7 @@ if ($OutHistory) {
 #     列幅・結合セルを Excel に近い形で表示し、変更・追加・削除・移動したセルや行に色を付けます。
 #     マウスを重ねたセルの変更前・変更後（変わった文字に色）、新・旧・左右に並べる表示の切り替え、差分の一覧からのジャンプ、前後の差分への移動ができます。
 #     左右に並べると、対応する行・列をそろえて表示します。「変わった行だけ」で、差分のある行の前後だけを表示できます。
+#     図形・画像の差分のあるシートは画像も入れ、旧と新の画像を並べて、絵として違うところを枠で囲んで見られます（撮り直しただけなら「見た目は同じ」）。
 #
 # .PARAMETER OutMarkedDir
 #     差分のあった新のブック（.xlsx / .xlsm）の写しを、このフォルダーに同じ名前（フォルダーどうしなら同じ相対パス）で保存し、
