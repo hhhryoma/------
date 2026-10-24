@@ -68,6 +68,12 @@ function ConvertTo-VersionText {
     return (@($m.Groups[1].Value.Split('.') | ForEach-Object { [string][int64]$_ }) -join '.')
 }
 
+function ConvertTo-VersionKey {
+    #     版数を比べる形（ConvertTo-VersionText の後ろの「.0」を除く。数値のセルの 1.0 は「1」と読めるので、1 と 1.0 を同じにする）
+    param([string] $Version)
+    return [regex]::Replace($Version, '(\.0)+$', '')
+}
+
 function ConvertTo-DateText {
     #     日付の文字を「2026/10/01」の形にする（読めなければそのまま）
     param([string] $Text)
@@ -147,6 +153,20 @@ function Get-GridRows {
     return , $rows
 }
 
+function Get-GridTableRows {
+    #     シートの行ごとのセルの文字（列の位置のまま。空のセルは空の文字。改訂履歴の表のように、列の見出しで値を読むとき）
+    param($Grid)
+    $rows = New-Object System.Collections.Generic.List[object]
+    if (-not $Grid) { return , $rows }
+    $first = [int]::MaxValue; $last = 0
+    foreach ($r in $Grid.Rows) { foreach ($c in $Grid.Cols[$r]) { if ($c -lt $first) { $first = $c }; if ($c -gt $last) { $last = $c } } }
+    foreach ($r in $Grid.Rows) {
+        $cells = $Grid.Cells[$r]
+        $rows.Add(@(for ($c = $first; $c -le $last; $c++) { if ($cells.ContainsKey($c)) { [string]$cells[$c] } else { '' } }))
+    }
+    return , $rows
+}
+
 function Read-CoreProperties {
     #     ファイルのプロパティ（docProps/core.xml）のタイトル・作成者・更新日時。読めなければ空
     param([string] $FilePath)
@@ -199,11 +219,14 @@ function Read-WordDocument {
 }
 
 function Get-PdfPages {
-    #     PDF のページ数（ページのオブジェクトの数。数えられなければ空）
+    #     PDF のページ数（ページのオブジェクトの数。数えられなければ空）。
+    #     追記で保存した PDF は同じ番号のオブジェクトが何度も出てくるので、番号ごとに最後のものを見る
     param([string] $FilePath)
     try {
         $text = [System.Text.Encoding]::GetEncoding(28591).GetString([System.IO.File]::ReadAllBytes($FilePath))
-        $n = [regex]::Matches($text, '/Type\s*/Page(?![s\w])').Count
+        $isPage = @{}
+        foreach ($m in [regex]::Matches($text, '(?s)(\d+)\s+\d+\s+obj\b(.*?)endobj')) { $isPage[$m.Groups[1].Value] = ($m.Groups[2].Value -match '/Type\s*/Page(?![s\w])') }
+        $n = @($isPage.Values | Where-Object { $_ }).Count
         if ($n -gt 0) { return $n }
     }
     catch { }
@@ -259,12 +282,14 @@ foreach ($entry in $fileArray) {
     if (-not $folder) { $folder = '' }
     $doc = [pscustomobject]@{
         Folder = $folder; File = $f.Name; Path = $f.FullName; Relative = $entry.Relative; Kind = $kind; Size = [math]::Ceiling($f.Length / 1024); Modified = $f.LastWriteTime
-        Key = (Get-VersionlessName $entry.Relative); Order = (Get-NameVersion $entry.Relative); NameVersion = ''
+        Key = (Get-VersionlessName $entry.Relative); Order = (Get-NameVersion $f.Name); NameVersion = ''
         DocNo = ''; Title = ''; Version = ''; Created = ''; Updated = ''; Author = ''; System = ''; History = $null; Pages = ''
         Notes = (New-Object System.Collections.Generic.List[string]); Latest = $true; LatestFile = ''; Planned = ''; Note = ''
     }
-    $nm = [regex]::Match([System.IO.Path]::GetFileNameWithoutExtension($f.Name).Normalize($nfkc), '(?i)(?:(?<![a-z])v(?:er)?\.?\s*|第\s*)(\d+(?:\.\d+)*)')
-    if ($nm.Success) { $doc.NameVersion = ConvertTo-VersionText $nm.Groups[1].Value }
+    # 版数はファイル名、無ければフォルダ名（v1.0\設計書.xlsx など）
+    if ($null -eq $doc.Order) { $doc.Order = Get-NameVersion $entry.Relative }
+    $nm = [regex]::Match([System.IO.Path]::GetFileNameWithoutExtension($f.Name).Normalize($nfkc), '(?i)(?<![a-z])v(?:er)?\.?\s*(\d+(?:\.\d+)*)|第\s*(\d+(?:\.\d+)*)\s*版')
+    if ($nm.Success) { $doc.NameVersion = ConvertTo-VersionText ($nm.Groups[1].Value + $nm.Groups[2].Value) }
     $cover = @{}
     try {
         if ($kind -eq 'Excel') {
@@ -275,7 +300,7 @@ foreach ($entry in $fileArray) {
                 if (-not $coverName) { $coverName = @($sheetNames | Where-Object { $_ -notmatch $HistorySheet })[0] }
                 if ($coverName) { $cover = Read-CoverFields (Get-GridRows $book.Sheets[$coverName]) }
                 $historyName = @($sheetNames | Where-Object { $_ -match $HistorySheet })[0]
-                if ($historyName) { $doc.History = Read-HistoryEntry (Get-GridRows $book.Sheets[$historyName]) }
+                if ($historyName) { $doc.History = Read-HistoryEntry (Get-GridTableRows $book.Sheets[$historyName]) }
             }
         }
         elseif ($kind -eq 'Word' -and $ext -ne '.doc') {
@@ -294,14 +319,14 @@ foreach ($entry in $fileArray) {
     }
     if ($doc.Created) { $doc.Created = ConvertTo-DateText $doc.Created }
     if ($doc.Updated) { $doc.Updated = ConvertTo-DateText $doc.Updated }
-    if (-not $doc.Title) { $doc.Title = [regex]::Replace([System.IO.Path]::GetFileNameWithoutExtension($f.Name), '[_\-\s]*(?:(?<![A-Za-z])[vV](?:[eE][rR])?\.?\s*|第\s*)\d+(?:\.\d+)*版?$', '') }
+    if (-not $doc.Title) { $doc.Title = [regex]::Replace([System.IO.Path]::GetFileNameWithoutExtension($f.Name), '[_\-\s]*(?:(?<![A-Za-z])[vV](?:[eE][rR])?\.?\s*\d+(?:\.\d+)*版?|第\s*\d+(?:\.\d+)*\s*版)$', '') }
 
     # 版数・更新日の食い違い（ファイル名・表紙・改訂履歴）
     $versions = [ordered]@{}
     if ($doc.NameVersion) { $versions['ファイル名'] = $doc.NameVersion }
     if ($doc.Version) { $v = ConvertTo-VersionText $doc.Version; if ($v) { $versions['表紙'] = $v } }
     if ($doc.History) { $versions['改訂履歴'] = $doc.History.Version }
-    if (@($versions.Values | Select-Object -Unique).Count -gt 1) {
+    if (@($versions.Values | ForEach-Object { ConvertTo-VersionKey $_ } | Select-Object -Unique).Count -gt 1) {
         $doc.Notes.Add(('版数が違う（{0}）' -f ((@($versions.Keys | ForEach-Object { '{0} {1}' -f $_, $versions[$_] })) -join '・')))
     }
     if ($doc.Updated -and $doc.History -and $doc.History.Date -and $doc.Updated -ne $doc.History.Date) {

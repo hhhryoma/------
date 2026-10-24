@@ -74,16 +74,19 @@ if ($screenFlow) {
             }
         }
     }
+    # 画面設計書のヘッダの画面 ID も、画面一覧と同じく全角・半角をそろえる
     foreach ($x in @($design.Items.ToArray()) + @($design.Events.ToArray())) {
-        if ($x.Screen -and -not $screens.Contains($x.Screen.ToUpperInvariant())) { $screens[$x.Screen.ToUpperInvariant()] = [pscustomobject]@{ Id = $x.Screen; Name = ([string]$x.ScreenName).Trim(); Missing = $false } }
+        $sid = ([string]$x.Screen).Normalize($nfkc).Trim()
+        if ($sid -and -not $screens.Contains($sid.ToUpperInvariant())) { $screens[$sid.ToUpperInvariant()] = [pscustomobject]@{ Id = $sid; Name = ([string]$x.ScreenName).Trim(); Missing = $false } }
     }
     # 画面名 → 画面 ID（遷移先に画面名だけを書いたとき）
     $byName = @{}
     foreach ($s in $screens.Values) { if ($s.Name) { $byName[(ConvertTo-Label $s.Name)] = $s } }
     foreach ($ev in $design.Events) {
         $next = ([string]$ev.Next).Normalize($nfkc).Trim()
-        if (-not $next -or $next -match '^[-－ー―]$' -or -not $ev.Screen) { continue }
-        $from = $screens[$ev.Screen.ToUpperInvariant()]
+        # 遷移しないことを表す書き方（-・なし・N/A など）
+        if (-not $next -or $next -match '^(?i)(-|－|ー|―|‐|−|×|なし|無し|N/A)$' -or -not $ev.Screen) { continue }
+        $from = $screens[([string]$ev.Screen).Normalize($nfkc).Trim().ToUpperInvariant()]
         $targets = New-Object System.Collections.Generic.List[object]
         foreach ($m in [regex]::Matches($next, '(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9_\-]*\d[A-Za-z0-9_\-]*')) {
             $id = $m.Value.ToUpperInvariant()
@@ -161,14 +164,36 @@ function Get-Layers {
 }
 
 function Get-DepthLayers {
-    #     ER 図の階層: 参照されるテーブル（親）を左に、参照するテーブル（子）を右に置く（親のいちばん深い階層 + 1。循環はノードの数で打ち切る）
+    #     ER 図の階層: 参照されるテーブル（親）を左に、参照するテーブル（子）を右に置く（親のいちばん深い階層 + 1）。
+    #     互いに参照するテーブル（循環）は、深さ優先でたどって戻る矢印を除いてから階層を決める
     param([string[]] $Nodes, $Links)
+    $out = @{}; $in = @{}
+    foreach ($n in $Nodes) { $out[$n] = New-Object System.Collections.Generic.List[string]; $in[$n] = 0 }
+    foreach ($l in $Links) { if ($l[0] -ne $l[1] -and -not $out[$l[0]].Contains($l[1])) { $out[$l[0]].Add($l[1]); $in[$l[1]]++ } }
+    $state = @{}
+    $kept = New-Object System.Collections.Generic.List[object]
+    $roots = @(@($Nodes | Where-Object { $in[$_] -eq 0 }) + @($Nodes))
+    foreach ($root in $roots) {
+        if ($state.ContainsKey($root)) { continue }
+        # 1: たどっている途中・2: たどり終わった
+        $state[$root] = 1
+        $stack = New-Object System.Collections.Generic.Stack[object]
+        $stack.Push(@($root, 0))
+        while ($stack.Count -gt 0) {
+            $top = $stack.Pop()
+            $n = $top[0]; $i = $top[1]
+            if ($i -ge $out[$n].Count) { $state[$n] = 2; continue }
+            $stack.Push(@($n, ($i + 1)))
+            $m = $out[$n][$i]
+            if (-not $state.ContainsKey($m)) { $kept.Add(@($n, $m)); $state[$m] = 1; $stack.Push(@($m, 0)) }
+            elseif ($state[$m] -eq 2) { $kept.Add(@($n, $m)) }
+        }
+    }
     $level = @{}
     foreach ($n in $Nodes) { $level[$n] = 0 }
     for ($i = 0; $i -lt $Nodes.Count; $i++) {
         $changed = $false
-        foreach ($l in $Links) {
-            if ($l[0] -eq $l[1]) { continue }
+        foreach ($l in $kept) {
             if ($level[$l[1]] -lt $level[$l[0]] + 1) { $level[$l[1]] = $level[$l[0]] + 1; $changed = $true }
         }
         if (-not $changed) { break }
@@ -185,7 +210,8 @@ function Get-DepthLayers {
 
 function New-DiagramShapes {
     #     ノードと矢印を、階層ごとの列に並べた図形にする（Export-Workbook の Shapes）。
-    #     Nodes: @{ Key; Text; Body; Fill; Line; Dash } の一覧。Pairs: @{ A; B; AtoB = @(ラベル...); BtoA = @(ラベル...) } の一覧（A・B は Key）
+    #     Nodes: @{ Key; Text; Body; Fill; Line; Dash } の一覧。
+    #     Pairs: @{ A; B; AtoB = @(ラベル...); BtoA = @(ラベル...); Forward（A → B がある）; Backward（B → A がある） } の一覧（A・B は Key）
     #     縦の位置: いちばん左の列は上から順に積み、ほかの列は、左の列でつながる四角の中ほどの高さの平均にそろえる（重なれば下へずらす）
     param($Nodes, $Place, $Pairs, [int] $Width, [int] $GapX, [int] $GapY, [int] $Top = 3)
     $shapes = New-Object System.Collections.Generic.List[object]
@@ -224,12 +250,19 @@ function New-DiagramShapes {
     }
     foreach ($pair in $Pairs) {
         $a = $box[$pair.A]; $b = $box[$pair.B]
-        if (-not $a -or -not $b -or $pair.A -eq $pair.B) { continue }
+        if (-not $a -or -not $b) { continue }
+        if ($pair.A -eq $pair.B) {
+            # 同じ画面への遷移（同じテーブルへの外部キー）は、四角のすぐ下に「↻ ラベル」と書く
+            $self = ('↻ ' + ($pair.AtoB -join '・')).TrimEnd()
+            $shapes.Add(@{ Type = 'Text'; Id = $id; Name = ('{0} のラベル' -f $a.Name); Col = $a.Col; Row = $a.Row + $a.Height; Width = $a.Width; Height = 2; Text = @($self); Align = 'l' })
+            $id++
+            continue
+        }
         # 左右に並ぶなら右端の中ほどから左端の中ほどへ、同じ列なら下端から上端へ
         $vertical = $a.Level -eq $b.Level
         $forward = $a.Level -lt $b.Level -or ($vertical -and $a.Row -lt $b.Row)
-        $first = $a; $second = $b; $firstLabels = @($pair.AtoB); $secondLabels = @($pair.BtoA)
-        if (-not $forward) { $first = $b; $second = $a; $firstLabels = @($pair.BtoA); $secondLabels = @($pair.AtoB) }
+        $first = $a; $second = $b; $firstLabels = @($pair.AtoB); $secondLabels = @($pair.BtoA); $firstOn = $pair.Forward; $secondOn = $pair.Backward
+        if (-not $forward) { $first = $b; $second = $a; $firstLabels = @($pair.BtoA); $secondLabels = @($pair.AtoB); $firstOn = $pair.Backward; $secondOn = $pair.Forward }
         if ($vertical) {
             $from = @(($first.Col + $first.Width / 2), ($first.Row + $first.Height)); $to = @(($second.Col + $second.Width / 2), $second.Row)
             $sites = @(2, 0); $marks = @('↓', '↑')
@@ -238,15 +271,15 @@ function New-DiagramShapes {
             $from = @(($first.Col + $first.Width), ($first.Row + $first.Height / 2)); $to = @($second.Col, ($second.Row + $second.Height / 2))
             $sites = @(3, 1); $marks = @('→', '←')
         }
-        # 矢じりは向かう先に。両向きなら両端に
-        $arrow = @{ Type = 'Arrow'; Id = $id; Name = ('{0}-{1}' -f $first.Name, $second.Name); From = $from; To = $to; StartShape = $first.Id; StartSite = $sites[0]; EndShape = $second.Id; EndSite = $sites[1]; Head = ($secondLabels.Count -gt 0) }
-        if ($firstLabels.Count -eq 0) { $arrow = @{ Type = 'Arrow'; Id = $id; Name = ('{0}-{1}' -f $second.Name, $first.Name); From = $to; To = $from; StartShape = $second.Id; StartSite = $sites[1]; EndShape = $first.Id; EndSite = $sites[0]; Head = $false } }
+        # 矢じりは向かう先に。両向きなら両端に（ラベルの無い遷移も向きは数える）
+        $arrow = @{ Type = 'Arrow'; Id = $id; Name = ('{0}-{1}' -f $first.Name, $second.Name); From = $from; To = $to; StartShape = $first.Id; StartSite = $sites[0]; EndShape = $second.Id; EndSite = $sites[1]; Head = [bool]$secondOn }
+        if (-not $firstOn) { $arrow = @{ Type = 'Arrow'; Id = $id; Name = ('{0}-{1}' -f $second.Name, $first.Name); From = $to; To = $from; StartShape = $second.Id; StartSite = $sites[1]; EndShape = $first.Id; EndSite = $sites[0]; Head = $false } }
         $shapes.Add($arrow)
         $id++
         $text = New-Object System.Collections.Generic.List[string]
-        if ($firstLabels.Count -gt 0 -and $secondLabels.Count -gt 0) {
-            $text.Add(('{0} {1}' -f $marks[0], ($firstLabels -join '・')))
-            $text.Add(('{0} {1}' -f $marks[1], ($secondLabels -join '・')))
+        if ($firstOn -and $secondOn) {
+            if ($firstLabels.Count -gt 0) { $text.Add(('{0} {1}' -f $marks[0], ($firstLabels -join '・'))) }
+            if ($secondLabels.Count -gt 0) { $text.Add(('{0} {1}' -f $marks[1], ($secondLabels -join '・'))) }
         }
         else { $text.Add((@($firstLabels) + @($secondLabels) | Where-Object { $_ }) -join '・') }
         if (-not ($text -join '')) { continue }
@@ -286,10 +319,10 @@ function Get-Pairs {
         $from = $l[0]; $to = $l[1]
         $key = @($from, $to) | Sort-Object
         $k = $key -join '|'
-        if (-not $pairs.Contains($k)) { $pairs[$k] = @{ A = $from; B = $to; AtoB = (New-Object System.Collections.Generic.List[string]); BtoA = (New-Object System.Collections.Generic.List[string]) } }
+        if (-not $pairs.Contains($k)) { $pairs[$k] = @{ A = $from; B = $to; AtoB = (New-Object System.Collections.Generic.List[string]); BtoA = (New-Object System.Collections.Generic.List[string]); Forward = $false; Backward = $false } }
         $p = $pairs[$k]
         $list = $p.AtoB
-        if ($p.A -ne $from) { $list = $p.BtoA }
+        if ($p.A -eq $from) { $p.Forward = $true } else { $p.Backward = $true; $list = $p.BtoA }
         if ($l[2] -and -not $list.Contains($l[2])) { $list.Add($l[2]) }
     }
     return @($pairs.Values)
@@ -301,6 +334,22 @@ function Get-Pairs {
 function ConvertTo-MermaidId {
     param([string] $Text)
     return ($Text -replace '[^A-Za-z0-9_]', '_')
+}
+
+function New-MermaidIds {
+    #     画面・テーブルの Mermaid の ID（大文字の ID → 記号を _ にした ID）。英字で始まらないもの（日本語のテーブル名など）と、
+    #     ほかと同じになったものは n1・n2…にする（図には元の ID を書く）
+    param([string[]] $Ids)
+    $map = @{}
+    $used = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $n = 0
+    foreach ($id in $Ids) {
+        $m = ConvertTo-MermaidId $id
+        if ($m -notmatch '^[A-Za-z]' -or $used.Contains($m)) { do { $n++; $m = 'n{0}' -f $n } while ($used.Contains($m)) }
+        [void]$used.Add($m)
+        $map[$id.ToUpperInvariant()] = $m
+    }
+    return $map
 }
 
 function ConvertTo-MermaidText {
@@ -327,16 +376,22 @@ if ($screenFlow) {
     $markdown.Add('')
     $markdown.Add('```mermaid')
     $markdown.Add('flowchart LR')
+    $mid = New-MermaidIds @($screens.Values | ForEach-Object { $_.Id })
     foreach ($s in $screens.Values) {
         $text = $s.Id
         if ($s.Name) { $text = '{0}<br/>{1}' -f $s.Id, $s.Name }
-        $markdown.Add(('    {0}["{1}"]' -f (ConvertTo-MermaidId $s.Id), (ConvertTo-MermaidText $text)))
+        $markdown.Add(('    {0}["{1}"]' -f $mid[$s.Id.ToUpperInvariant()], (ConvertTo-MermaidText $text)))
     }
-    foreach ($e in $screenEdges) { $markdown.Add(('    {0} -->|"{1}"| {2}' -f (ConvertTo-MermaidId $e.From), (ConvertTo-MermaidText $e.Label), (ConvertTo-MermaidId $e.To))) }
+    foreach ($e in $screenEdges) {
+        # 名前の無いイベントはラベル無しの矢印（-->|""| は Mermaid が読めない）
+        $arrow = '-->'
+        if ($e.Label) { $arrow = '-->|"{0}"|' -f (ConvertTo-MermaidText $e.Label) }
+        $markdown.Add(('    {0} {1} {2}' -f $mid[$e.From.ToUpperInvariant()], $arrow, $mid[$e.To.ToUpperInvariant()]))
+    }
     $missing = @($screens.Values | Where-Object Missing)
     if ($missing.Count -gt 0) {
         $markdown.Add('    classDef missing stroke-dasharray: 5 5,stroke:#c00000')
-        $markdown.Add(('    class {0} missing' -f (@($missing | ForEach-Object { ConvertTo-MermaidId $_.Id }) -join ',')))
+        $markdown.Add(('    class {0} missing' -f (@($missing | ForEach-Object { $mid[$_.Id.ToUpperInvariant()] }) -join ',')))
     }
     $markdown.Add('```')
     $markdown.Add('')
@@ -370,17 +425,22 @@ if ($Kind -contains 'ER') {
     $markdown.Add('')
     $markdown.Add('```mermaid')
     $markdown.Add('erDiagram')
-    foreach ($e in $fkEdges) { $markdown.Add(('    {0} ||--o{{ {1} : "{2}"' -f (ConvertTo-MermaidId $e.To), (ConvertTo-MermaidId $e.From), (ConvertTo-MermaidText $e.Label))) }
+    $mid = New-MermaidIds @($tableMap.Values | ForEach-Object { $_.Id })
+    foreach ($e in $fkEdges) { $markdown.Add(('    {0} ||--o{{ {1} : "{2}"' -f $mid[$e.To.ToUpperInvariant()], $mid[$e.From.ToUpperInvariant()], (ConvertTo-MermaidText $e.Label))) }
     foreach ($t in $tableMap.Values) {
+        # ID を変えたテーブル（日本語の名前など）は、別名（n1["顧客"]）で元の ID を書く
+        $id = $mid[$t.Id.ToUpperInvariant()]
+        $head = $id
+        if ($id -cne $t.Id) { $head = '{0}["{1}"]' -f $id, (ConvertTo-MermaidText $t.Id) }
         $cols = @()
         if ($Columns -ne 'None') {
             $cols = @($t.Columns | Where-Object { $Columns -eq 'All' -or $null -ne $_.PkOrder -or $_.FkTable })
         }
         if ($cols.Count -eq 0) {
-            if (-not $related.ContainsKey($t.Id.ToUpperInvariant())) { $markdown.Add(('    {0} {{' -f (ConvertTo-MermaidId $t.Id))); $markdown.Add('    }') }
+            if (-not $related.ContainsKey($t.Id.ToUpperInvariant()) -or $head -cne $id) { $markdown.Add(('    {0} {{' -f $head)); $markdown.Add('    }') }
             continue
         }
-        $markdown.Add(('    {0} {{' -f (ConvertTo-MermaidId $t.Id)))
+        $markdown.Add(('    {0} {{' -f $head))
         foreach ($c in $cols) {
             $keysText = @(); if ($null -ne $c.PkOrder) { $keysText += 'PK' }; if ($c.FkTable) { $keysText += 'FK' }
             $type = ([string]$c.BaseType -replace '[^A-Za-z0-9_]', '')
