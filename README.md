@@ -80,6 +80,7 @@ PL・PM・品質管理の担当が、見積もり・進捗・品質を数字で�
 | --- | --- | --- | --- |
 | [Measure-DesignSize.ps1](tools/README.md#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す。前の版との変更の規模（追加見積もりの根拠）と、実績の工数から係数表も作れる | 不要 ※1 | 規模の見積もり |
 | [Test-ExcelEstimate.ps1](tools/README.md#test-excelestimateps1) | 見積書の検算（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算の日数や単価の食い違い） | 不要 | 見積書の検算 |
+| [New-WbsDraft.ps1](tools/README.md#new-wbsdraftps1) | 規模の見積もりの工数を工程に配分し、担当者と予定日を決めた WBS の下書きを作る（Measure-Progress などがそのまま読める） | 不要 ※1 | － |
 | [Measure-Progress.ps1](tools/README.md#measure-progressps1) | WBS から遅延タスク（営業日）と PV／EV／SPI を出し、スケジュール遅延リカバリ計画のテンプレートに書き込む | 不要 ※1 | － |
 | [Measure-Effort.ps1](tools/README.md#measure-effortps1) | 日報・工数実績表の工数を、タスク・担当者・週ごとに集計し、WBS の予定工数と比べて予定超過・超過の見込みのタスクと CPI を出す（WBS に無い作業も） | 不要 ※1 | － |
 | [Export-ActionItems.ps1](tools/README.md#export-actionitemsps1) | 議事録（Word・Excel・テキスト）から宿題（担当・期限付き）と決定事項を抜き出し、課題管理表の形の一覧にする（週次報告で期限切れを追える） | 不要 ※1 | 議事録の宿題 |
