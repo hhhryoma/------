@@ -35,6 +35,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Test-ExcelTerms.ps1](tools/README.md#test-exceltermsps1) | 表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を用語集と自動の検出で見つけ、置換リストを作る。Word の文書も調べられる | 不要 ※1 | 表記ゆれ |
 | [Test-DesignConsistency.ps1](tools/README.md#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、画面遷移の食い違い、桁数・必須の違い）。CRUD 図と影響調査（使っている場所の一覧）も作る | 不要 ※1 | 設計書の整合性チェック |
 | [Test-ScreenNumbers.ps1](tools/README.md#test-screennumbersps1) | 画面レイアウトのスクリーンショットに重ねた丸数字（①・No.5 など）を画面項目定義の No と突き合わせ、無い番号・重なった番号を見つける。前の版と比べて、項目を足して No がずれたのに直していない丸数字も見つける | 不要 ※1 | － |
+| [Test-Screenshots.ps1](tools/README.md#test-screenshotsps1) | 設計書に貼った画面のスクリーンショットが、元のワイヤーフレーム（Excel）より古くなっていないかを確かめる（貼り替えたあとに記録し、元の印刷範囲の中が変わると知らせる。設計書は変更しない） | 不要 | － |
 | [Export-TableDdl.ps1](tools/README.md#export-tableddlps1) | テーブル定義書から DDL（Oracle・PostgreSQL・SQL Server・MySQL）を作り、DB の列の一覧との食い違い（型・桁数・NULL）も確かめる | 不要 ※1 | － |
 
 #### 変わったところを見る

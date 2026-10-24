@@ -14,6 +14,7 @@
 | [Test-ExcelTerms.ps1](#test-exceltermsps1) | 複数の Excel の表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を見つけ、Replace-Excel 用の置換リストを作る |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、桁数・必須の違いなど）を全件見つける。CRUD 図と影響調査も（Excel 不要） |
 | [Test-ScreenNumbers.ps1](#test-screennumbersps1) | 画面レイアウトのスクリーンショットに重ねた丸数字（①・No.5 など）を、画面項目定義の No と突き合わせる。無い番号・重なった番号と、前の版と比べて No がずれたのに直していない丸数字を見つける（Excel 不要） |
+| [Test-Screenshots.ps1](#test-screenshotsps1) | 設計書に貼った画面のスクリーンショットが、元のワイヤーフレーム（Excel）より古くなっていないかを確かめる。貼り替えたあとに記録し、元の印刷範囲の中が変わると「元が更新された」と知らせる（Excel 不要。設計書は変更しない） |
 | [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる。Word（.docx）の設計書も段落・表の行で比べる） |
 | [Compare-SharePointVersion.ps1](#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの 2 つの版（バージョン履歴）を取り出して比べ、差分の画面を開く（版は Excel で取り出す） |
@@ -57,7 +58,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Start-ExcelTools.ps1（画面）
 
@@ -1074,6 +1075,71 @@ DD02_画面設計書_SCR002_受注登録_v1.1.xlsx 画面レイアウト!C17 エ
 | `-Path` | 画面設計書のフォルダ・ファイル（複数可）。画面項目定義が別のブックにあれば、それも含める |
 | `-Baseline` | 前の版の画面設計書のフォルダ・ファイル（複数可）。同じ場所に重ねた番号が指す項目の変化を見る |
 | `-OutXlsx` | 指摘一覧と、番号の一覧（重ねた番号ごとに、場所・指す項目名・前の版の項目名・結果）を保存する。場所をクリックすると該当セルが開く |
+
+## Test-Screenshots.ps1
+
+設計書の画面レイアウトに貼ったスクリーンショットが、**元のワイヤーフレーム（Excel）より古くなっていないか**を確かめます。
+スクリーンショットを貼り替えたあとに「記録」しておき、あとで元のシートが変わると「元が更新された」と知らせます。Excel は不要で、**設計書は変更しません**（記録は元のワイヤーフレームのフォルダの CSV に書きます）。
+
+```powershell
+.\Test-Screenshots.ps1 D:\設計書\画面設計書 -Wireframe D:\ワイヤーフレーム -Record   # 貼り替えたあとに記録する（初めては、いまの画面をすべて記録する）
+.\Test-Screenshots.ps1 D:\設計書\画面設計書 -Wireframe D:\ワイヤーフレーム           # 古くなったスクリーンショットを確かめる
+.\Test-Screenshots.ps1 D:\設計書\画面設計書 -Wireframe D:\ワイヤーフレーム -Record -Screen '受注登録'   # 貼り替えの要らない変更（注記だけなど）を記録し直す
+```
+
+```
+Screen   Status         Location                                                  Detail
+------   ------         --------                                                  ------
+受注一覧 最新           DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx 受注一覧!B3
+受注登録 元が更新された DD02_画面設計書_SCR002_受注登録_v1.0.xlsx 画面レイアウト!B3 元のワイヤーフレームが、記録（2026/10/20 10:30）のあとで変わりました。スクリーンショットを撮り直して貼り替え、記録してください
+受注詳細 元のシートなし DD02_画面設計書_SCR003_受注詳細_v1.0.xlsx 画面レイアウト!B3 元のワイヤーフレームに、この画面のシートが見つかりません（元のシート名を画面名にしてください）
+
+スクリーンショットのある画面 3: 元が更新された 1・元のシートなし 1・最新 1
+設計書に無い元のシート 1: 表紙
+```
+
+### 画面ごとの状態
+
+| 状態 | 内容 |
+| --- | --- |
+| 最新 | 記録のあと、元もスクリーンショットも変わっていない |
+| 元が更新された | 元のワイヤーフレームのシートが、記録のあとで変わった。撮り直して貼り替え、記録する |
+| 貼り替えた | スクリーンショットを、記録のあとで貼り替えた。元と合っていれば記録する。画像の上に重ねた図形（丸数字・枠など）があれば、位置を確かめるよう知らせる |
+| 記録なし | まだ記録していない |
+| 元のシートなし | 元のワイヤーフレームに、この画面のシートが無い |
+| 元のシートが複数 | 元のワイヤーフレームに、この画面のシートが 2 つ以上ある |
+
+### 比べ方
+
+- **元のシートは、印刷範囲の中だけを比べます**（セルの値と書式・結合・列の幅・行の高さ・図形と画像の位置・大きさ・文字・書式）。範囲の外のメモを直したり、開いて保存し直したりしただけでは「元が更新された」になりません。印刷範囲の無いシートはシート全体で比べ、結果の「元のシート」の一覧に「（印刷範囲なし）」と出します。撮る範囲を印刷範囲にしておいてください
+- スクリーンショットの中身（絵）は比べません。記録したときの画像と同じかどうかだけを見ます
+- スクリーンショットは 1 シートに 1 枚（いくつもあれば、いちばん大きい画像）とみなします。ロゴなどの小さい画像は数えません
+
+### 画面の対応付け
+
+設計書のスクリーンショットのあるシートの、次の名前を、元のワイヤーフレームのシート名（画面名）と比べます。
+
+1. シート名
+2. 「画面名」の欄（見出しの右のセル。シートに無ければ、ブックの中で 1 つだけの値）
+3. ファイル名（版数を除いた名前に、元のシート名が含まれるもの）
+
+シート名は 31 文字までなので、長い画面名は前の部分で比べます。記録は、版数を除いた設計書のファイル名とシート名で探すので、版を上げてファイル名が変わっても使えます。
+
+### 記録する（`-Record`）
+
+- 記録するのは、**記録の無い画面**と、**記録のあとで貼り替えた画面**です
+- 元だけが変わった画面は、貼り替えるまで記録しません（古いスクリーンショットのまま記録して、知らせが消えないように）。貼り替えの要らない変更（範囲の中の注記だけなど）は、`-Screen` で画面を選ぶと記録できます
+- 記録は `-Wireframe` の最初のフォルダの「スクリーンショットの記録.csv」に書きます（`-RecordFile` で変えられます）。`-WhatIf` で、書かずに確かめられます
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | スクリーンショットを貼った設計書のフォルダ・ファイル（複数可） |
+| `-Wireframe` | 元のワイヤーフレームのフォルダ・ファイル（複数可）。シート名を画面名にする |
+| `-Record` | 貼り替えた画面を記録する |
+| `-Screen` | `-Record` で記録する画面（複数可・ワイルドカード可）。状態によらず記録する |
+| `-OutXlsx` | 画面ごとの状態（設計書のスクリーンショットへのリンク付き）と、元のシートの一覧（印刷範囲・設計書で使っているか）を保存する |
 
 ## Test-Traceability.ps1
 

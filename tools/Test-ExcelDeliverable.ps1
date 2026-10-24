@@ -253,19 +253,6 @@ function Add-ValueCell {
     }
 }
 
-function Get-PrintAreas {
-    #     名前の定義 _xlnm.Print_Area（'シート'!$A$1:$H$40,'シート'!$J$1:$K$5）を、行・列の範囲の一覧にする
-    param([string] $Text)
-    $areas = New-Object System.Collections.Generic.List[object]
-    foreach ($m in [regex]::Matches($Text, '\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?(?=,|$)')) {
-        $c0 = Get-ColumnIndex $m.Groups[1].Value; $r0 = [int]$m.Groups[2].Value
-        $c1 = $c0; $r1 = $r0
-        if ($m.Groups[3].Success) { $c1 = Get-ColumnIndex $m.Groups[3].Value; $r1 = [int]$m.Groups[4].Value }
-        $areas.Add([pscustomobject]@{ R0 = $r0; R1 = $r1; C0 = $c0; C1 = $c1 })
-    }
-    return , $areas
-}
-
 function Test-PrintSetup {
     #     印刷の設定をチェックする（表示されているワークシートで、値のあるセルがあるものだけ）
     param($Sheets, [int] $Mdw)
