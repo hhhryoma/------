@@ -176,6 +176,13 @@
             Labels = @{ Path = 'Excel のフォルダ'; OutputRoot = 'PDF の保存先のフォルダ（空欄なら元と同じ場所）'; PerSheet = 'シートごとに PDF にする'; FitToWidth = '横 1 ページに収める' }
             Open = @('OutputRoot', 'Path'); Keywords = 'PDF 印刷'
         }
+        @{
+            Id = 'Register'; Label = '成果物一覧を作る'; Group = 'レビュー・提出'; Tool = 'New-DocumentRegister.ps1'
+            Summary = 'フォルダの成果物の表紙と改訂履歴から、文書番号・文書名・版数・更新日・最新の改訂の一覧を作ります。古い版・版数の食い違いと、成果物の予定を入れると未提出も見つけます。'
+            Main = @('Path', 'Planned', 'OutXlsx')
+            Labels = @{ Path = '成果物のフォルダ'; Planned = '成果物の予定（Excel・CSV。突き合わせるとき）'; OutXlsx = '成果物一覧の保存先' }
+            Required = @('Path'); Output = @('OutXlsx'); OutputName = '成果物一覧'; Keywords = '納品物 納品 成果物 一覧 台帳 版数 未提出'
+        }
 
         # ---------------------------------------------------------------- テスト
         @{
