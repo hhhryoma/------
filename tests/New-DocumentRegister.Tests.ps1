@@ -97,6 +97,41 @@ Test-Case 'New-DocumentRegister: -Planned の成果物の予定と、文書番�
     Assert-Match ([System.IO.File]::ReadAllText($csv)) '^﻿?No,フォルダ,ファイル,種類,文書番号,文書名,版数,作成日,更新日,作成者,最新の改訂,ページ,サイズ（KB）,ファイルの更新日時,確認'
 }
 
+Test-Case 'New-DocumentRegister: 「第N回」は版数にせず、ファイル名の版数で最新を決め、数値の版数・空欄のある改訂履歴・和暦の日付・追記した PDF を読み違えない' {
+    $dir = New-TestDir
+    $docsDir = Join-Path $dir '納品物'
+    New-WordDoc (Join-Path $docsDir '定例会議事録_第1回.docx') @(, @(@('文書名', '定例会議事録（第1回）'), @('版数', '1.0')))
+    New-WordDoc (Join-Path $docsDir '定例会議事録_第2回.docx') @(, @(@('文書名', '定例会議事録（第2回）'), @('版数', '1.0')))
+    # 版数のフォルダの中の、古い版のほうが後で保存されたもの
+    New-CoverBook (Join-Path $docsDir 'Ver2.0/基本設計書_v2.1.xlsx') @(@('基本設計書', ''), @('版数', '2.1')) $null
+    New-CoverBook (Join-Path $docsDir 'Ver2.0/基本設計書_v2.0.xlsx') @(@('基本設計書', ''), @('版数', '2.0')) $null
+    (Get-Item -LiteralPath (Join-Path $docsDir 'Ver2.0/基本設計書_v2.1.xlsx')).LastWriteTime = Get-Date '2026-10-01'
+    (Get-Item -LiteralPath (Join-Path $docsDir 'Ver2.0/基本設計書_v2.0.xlsx')).LastWriteTime = Get-Date '2026-10-10'
+    # 版数を数値のセルに書いたもの（1.0 は「1」と読める）
+    New-CoverBook (Join-Path $docsDir '外部設計書_v1.0.xlsx') @(@('外部設計書', ''), @('版数', [double]1)) @(, @([double]1, '2026/10/01', '新規作成', '佐藤'))
+    # 改訂履歴の日付が空欄
+    New-CoverBook (Join-Path $docsDir '画面設計書_v1.1.xlsx') @(@('画面設計書', ''), @('版数', '1.1')) @(@('1.0', '2026/10/01', '新規作成', '佐藤'), @('1.1', '', '画面の追加', '山田'))
+    # 表紙の更新日が和暦
+    New-CoverBook (Join-Path $docsDir '運用設計書_v1.0.xlsx') @(@('運用設計書', ''), @('版数', '1.0'), @('最終更新日', '令和8年10月15日')) @(, @('1.0', '2026/10/15', '新規作成', '佐藤'))
+    # 2 ページの PDF に、追記でスタンプを足したもの（3 番のページのオブジェクトがもう一度出てくる）
+    $pdf = "%PDF-1.4`n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj`n2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >> endobj`n3 0 obj << /Type /Page /Parent 2 0 R >> endobj`n4 0 obj << /Type /Page /Parent 2 0 R >> endobj`ntrailer << /Root 1 0 R >>`n%%EOF`n3 0 obj << /Type /Page /Parent 2 0 R /Annots [5 0 R] >> endobj`n5 0 obj << /Type /Annot /Subtype /Stamp >> endobj`ntrailer << /Root 1 0 R /Prev 0 >>`n%%EOF`n"
+    [System.IO.File]::WriteAllText((Join-Path $docsDir '報告書.pdf'), $pdf, (New-Object System.Text.UTF8Encoding($false)))
+
+    $docs = @(& $RegisterTool -Path $docsDir 6>$null)
+    Assert-Equal @('Ver2.0/基本設計書_v2.1.xlsx', '報告書.pdf', '外部設計書_v1.0.xlsx', '定例会議事録_第1回.docx', '定例会議事録_第2回.docx', '画面設計書_v1.1.xlsx', '運用設計書_v1.0.xlsx') @($docs | ForEach-Object { $_.Relative.Replace('\', '/') }) '第1回・第2回は別の文書。版数のフォルダの中でも、ファイル名の版数で最新（v2.1）を決める'
+    Assert-Equal @() @($docs | Where-Object { $_.Note } | ForEach-Object { '{0}: {1}' -f $_.File, $_.Note }) '数値の版数（1 と 1.0）・和暦の更新日・「第1回」を食い違いにしない'
+    $screen = @($docs | Where-Object { $_.File -eq '画面設計書_v1.1.xlsx' })[0]
+    Assert-Equal '1.1||画面の追加|山田' ('{0}|{1}|{2}|{3}' -f $screen.History.Version, $screen.History.Date, $screen.History.Content, $screen.History.Author) '改訂履歴の日付が空欄でも列がずれない'
+    Assert-Equal '2026/10/15' @($docs | Where-Object { $_.File -eq '運用設計書_v1.0.xlsx' })[0].Updated '和暦の更新日'
+    Assert-Equal 2 @($docs | Where-Object { $_.File -eq '報告書.pdf' })[0].Pages '追記して保存した PDF のページ数'
+
+    $planned = Join-Path $dir '成果物の予定.csv'
+    @('成果物名,予定日', '定例会議事録_第1回,2026/10/01', '定例会議事録_第3回,2026/10/15') | Set-Content -LiteralPath $planned -Encoding UTF8
+    $text = Get-HostText { & $RegisterTool -Path $docsDir -Planned $planned -AsOf '2026-10-24' | Out-Null }
+    Assert-Match $text '予定 2 件: 提出済み 1・未提出 1（予定日を過ぎたもの 1）'
+    Assert-Match $text '未提出（予定日を過ぎています）: 定例会議事録_第3回'
+}
+
 Test-Case 'New-DocumentRegister: 詳細設計サンプルの表紙（見出しの無い文書名・後ろの（ ））と改訂履歴を読む' {
     $docs = @(& $RegisterTool -Path (Join-Path $script:RepoRoot 'docs/design-sample') -NoRecurse 6>$null | Where-Object { $_.Kind -eq 'Excel' })
     Assert-Equal 8 $docs.Count
