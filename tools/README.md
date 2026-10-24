@@ -30,6 +30,7 @@
 | [Test-TestEvidence.ps1](#test-testevidenceps1) | テストのエビデンス（画面のハードコピーなど）の抜け・空・同じ画像の使い回しと、結果の書き忘れを、テスト仕様書の結果と突き合わせて見つける（Excel 不要） |
 | [Test-Traceability.ps1](#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、設計の要素（画面・イベント・メッセージ・IF）にテストがあるかを確かめる。テストの抜けを全件、機械で見つける（Excel 不要） |
 | [Select-RegressionTests.ps1](#select-regressiontestsps1) | 設計書の旧版と新版の差分から、変更した項目・イベント・メッセージなどが出てくるテストケースを、再テストするケースとして選ぶ（改修の回帰テストの範囲決め。Excel 不要） |
+| [Find-SimilarDefects.ps1](#find-similardefectsps1) | 障害の箇所と同じ作り（型・入力チェック・処理・カラムの型など）の箇所を設計書から集め、横展開の候補の一覧を作る。候補の絞り込みは Copilot に頼める（Excel 不要） |
 
 **管理者向け（見積もり・進捗・品質を数字で見る）**
 
@@ -61,7 +62,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Find-SimilarDefects.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Start-ExcelTools.ps1（画面）
 
@@ -1298,6 +1299,100 @@ Priority Function Id Reason
 | `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
 | `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
+## Find-SimilarDefects.ps1
+
+障害の箇所と**同じ作り**（型・入力チェック・処理・カラムの型など）の箇所を設計書から集め、**横展開の候補**の一覧を作ります。Excel は不要です。
+「同じ不具合がほかの画面にもないか」を、人の記憶や全文検索に頼らず、設計書の書き方から洗い出します。候補の絞り込みは Copilot に頼めます。
+
+```powershell
+.\Find-SimilarDefects.ps1 D:\テスト\障害管理表.xlsx D:\設計書 -OutXlsx D:\横展開.xlsx -OutPrompt D:\横展開の依頼.txt
+# 依頼を Copilot に貼り付けて送り、回答を D:\横展開の回答.txt に保存してから
+.\Find-SimilarDefects.ps1 D:\テスト\障害管理表.xlsx D:\設計書 -Answer D:\横展開の回答.txt -OutXlsx D:\横展開.xlsx
+```
+
+```
+No Bug  Kind     Target                    Common                                                                   Score
+-- ---  ----     ------                    ------                                                                   -----
+ 1 B001 項目     SCR001 受注日（From）     型 日付・入力チェック 日付形式・桁数 10・備考が同じ（yyyy/MM/dd）            6
+ 2 B001 項目     SCR001 受注日（To）       型 日付・入力チェック 日付形式・桁数 10・備考が同じ（yyyy/MM/dd）            6
+ 3 B001 項目     SCR002 希望納品日         型 日付・入力チェック 日付形式・桁数 10・備考が同じ（yyyy/MM/dd）            6
+ 4 B001 項目     SCR003 希望納品日         型 日付・入力チェック 日付形式・桁数 10                                      5
+ 5 B002 イベント SCR003 キャンセル（EV03） メッセージ E0006・メッセージ I0002・処理 画面表示時・処理 再表示・原因の言葉 バージョン   8
+...
+
+障害 5 件のうち、横展開を探した障害 3 件（横展開が不要・済みのもの、障害ではないもの 2 件を除く）
+  候補あり 2 件（候補 7 か所。項目 4・イベント 3）
+  障害の箇所が設計書に見つからない障害 1 件: B003（障害内容・原因に、画面の項目名・イベント名・カラム名・メッセージ ID を書いてください）
+```
+
+B001 は「SCR002 の受注日に 2028/02/29 を入れると E0004 になる（原因: 日付形式のチェックでうるう年を考慮していなかった）」、B002 は「受注詳細の更新で、ほかの人の更新を上書きする（原因: バージョン番号の比較漏れ）」の例です。
+
+### 障害の箇所の見つけ方
+
+障害管理表の障害内容・原因（原因詳細）・対策の文に名前が出てくるものを、**障害の箇所**にします。
+
+| 障害の箇所 | 見つけ方 |
+| --- | --- |
+| 画面の項目 | 項目名。障害の画面（機能の欄か、文に出てくる画面 ID・画面名）の項目から探す。入力と表示の両方にあれば入力の項目 |
+| イベント | イベント名。障害の画面のイベントから探す（画面が分からなければ、1 つの画面にしかない 4 文字以上の名前だけ） |
+| カラム | 物理名（`TOTAL_AMOUNT`・`T_ORDER.TOTAL_AMOUNT`） |
+| メッセージ | メッセージ ID のうち、上の箇所の入力チェック・処理に無いもの（「E0008 が出ない」など） |
+
+- 名前は長いものから探します（「受注日（From）」の中の「受注日」は数えない）。画面名（「受注一覧画面」）は項目名として探しません
+
+### 同じ作りとみなすもの
+
+| 障害の箇所 | 候補 | 共通点と点数 |
+| --- | --- | --- |
+| 項目 | 名前か型が同じ項目（型の無い項目は、入力チェックかコードが同じもの）。入力の項目の障害には入力のある項目、表示だけの項目の障害には表示する項目 | 同じ名前・型・入力チェック（2 種類まで）・コード: 2 点、桁数・必須・備考: 1 点 |
+| イベント | 同じイベント名・同じメッセージ・処理に同じ言葉があるイベント | 同じイベント名 3 点、似たイベント名 1 点、メッセージ（2 つまで）2 点、処理の言葉（3 つまで）1 点 |
+| カラム | 名前か型が同じカラム | 同じ名前・型・外部キー: 2 点、桁数・NOT NULL・論理名の終わり（金額・日・コードなど）: 1 点 |
+| メッセージ | そのメッセージを使う項目・イベント | 3 点 |
+
+- 原因・対策に書いた言葉（「バージョン」など）が、候補の入力チェック・備考・処理にあれば 2 点を足します（2 つまで）
+- 3 点以上のものを候補にし、点数の高い順（同じ点数なら設計書の順）に、障害ごとに `-MaxCandidates`（既定 20）か所まで出します
+- 多くの要素に出てくる言葉と 2 文字の言葉（「受注」「更新」など）は、処理・備考の言葉として比べません
+
+### Copilot に絞り込ませる
+
+1. `-OutPrompt` で依頼のテキストを作り、Copilot に貼り付けて送ります。依頼には、障害の内容・原因・障害の箇所と、候補の設計の内容・共通点が入ります
+2. Copilot の回答（`| No | 判定 | 理由 |` の表。Copilot の表をコピーしたタブ区切りでもよい）を、テキストに保存します
+3. `-Answer` に渡して再実行すると、AI の判定（要確認・不要）と理由が、一覧と `-OutXlsx` に入ります。候補は No で突き合わせるので、依頼を作ったときと同じ障害管理表・設計書・引数で実行してください
+
+### 障害管理表
+
+「障害番号」と、「障害内容」か「原因詳細」の見出しがある表（Excel・CSV）を読みます。見出しの候補は `tools\test-quality\見出し.csv` です。
+
+- 機能（画面 ID・画面名）・原因・原因詳細・対策・横展開・状態も読みます
+- 横展開の列が「不要」「済」「対象外」などの障害と、状態が「取下げ」「重複」などの障害は探しません。`-Id` で指定した障害は探します
+
+`-OutXlsx` のシート:
+
+| シート | 内容 |
+| --- | --- |
+| 横展開の候補 | 候補ごとの障害の箇所・候補の箇所（設計書の行へのリンク付き）・設計の内容・共通点・点数・AI の判定と理由・確認結果（人が書く欄） |
+| 障害 | 障害ごとの障害の箇所・候補の数・メモ（障害の箇所が見つからないなど。障害管理表の行へのリンク付き） |
+| 読み取り結果 | 障害管理表の表を、どの見出しで読んだか |
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-BugList` | 障害管理表のファイル・フォルダ（Excel・CSV。複数可） |
+| `-DesignPath` | 設計書のフォルダ・ファイル（画面設計書・テーブル定義書・メッセージ一覧。複数可） |
+| `-Id` | 横展開を探す障害の障害番号（複数可・ワイルドカード可）。省略すると、横展開が不要・済みのもの以外のすべて |
+| `-MaxCandidates` | 障害ごとの候補の数の上限（既定 20） |
+| `-OutXlsx` | 横展開の候補・障害・読み取り結果を保存する |
+| `-OutPrompt` | Copilot に絞り込ませる依頼のテキストを保存する |
+| `-Answer` | Copilot の回答を保存したテキスト。AI の判定と理由を入れる |
+| `-Headers` | 障害管理表の見出しの候補の CSV（既定は `tools\test-quality\見出し.csv`） |
+| `-TableHeaders` | テーブル定義書の見出しの候補の CSV（既定は `tools\ddl\テーブル定義書の見出し.csv`） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
+
+### 注意
+
+- 候補は、設計書の書き方が同じ箇所を機械的に集めたものです。同じ不具合があるかは、ソースやテストで確かめてください（「確認結果」の列）
+- 障害内容・原因に、画面の項目名・イベント名・カラム名・メッセージ ID を書くと、障害の箇所を見つけやすくなります
+
 ## Export-TableDdl.ps1
 
 テーブル定義書（Excel）から **DDL**（CREATE TABLE・コメント・インデックス・外部キー）を作ります。Oracle・PostgreSQL・SQL Server・MySQL に対応し、作る前に定義書の気になる点（予約語・桁数の抜け・外部キーの型の違いなど）を警告します。
@@ -2356,7 +2451,7 @@ SCR002,受注登録|受注登録画面,DD02_画面設計書_SCR002_受注登録
 | 表 | 見出しの行の条件 | 読む項目（見出しの候補の一部） |
 | --- | --- | --- |
 | テスト仕様書 | 「結果」と、「テストID」か「確認内容」 | 機能（機能・画面ID）・テストID（No・項番）・確認内容（期待結果）・結果（判定）・予定日・実施日・バグ番号（障害番号）・工程・エビデンス（証跡・ハードコピー。Test-TestEvidence が読む） |
-| 障害管理表 | 「障害内容」と、「起票日」「状態」「重要度」「障害番号」のどれか | 障害番号・機能（発生機能）・障害内容（現象・件名）・起票日（発見日）・完了日・状態・重要度・原因（原因分類）・混入工程・摘出工程 |
+| 障害管理表 | 「障害内容」と、「起票日」「状態」「重要度」「障害番号」のどれか | 障害番号・機能（発生機能）・障害内容（現象・件名）・起票日（発見日）・完了日・状態・重要度・原因（原因分類）・混入工程・摘出工程・原因詳細（原因内容）・対策（修正内容）・横展開（横展開要否。原因詳細から横展開は Find-SimilarDefects が読む） |
 
 - **結果**: OK（○・合格・PASS）・NG（×・不合格・FAIL）・保留（中断・ブロック）・対象外（-・N/A・削除）・未実施（空欄など）。対象外は数えません
 - **機能**: 機能の列（空欄なら上の行の値。グループの最初の行だけに書いた表も読めます）。無ければ、表のあるシートが複数のブックはシート名、それ以外はファイル名
