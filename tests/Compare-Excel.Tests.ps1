@@ -212,6 +212,19 @@ Test-Case 'Compare-Excel: 行の挿入で振り直された No 列は「連番�
     Assert-Equal 'Data!A6:A11' $renum.OldLocation '旧の場所は旧の範囲'
 }
 
+Test-Case 'Compare-Excel: 改訂履歴のシートの No の振り直しも比べ、版情報に分類する（比較できないことにしない）' {
+    $dir = New-TestDir
+    $header = @('No', '日付', '内容')
+    $old = @(, $header) + @(1..4 | ForEach-Object { , @("$_", "2026/09/0$_", "変更$_") })
+    # 2 行目に追記し、以降の No を 1 ずつ振り直す
+    $new = @(, $header) + @(, @('1', '2026/09/01', '変更1')) + @(, @('2', '2026/09/01', '追記')) + @(2..4 | ForEach-Object { , @("$($_ + 1)", "2026/09/0$_", "変更$_") })
+    New-SheetsBook (Join-Path $dir 'old.xlsx') ([ordered]@{ '本文' = @(@('項目'), @('A')); '改訂履歴' = $old })
+    New-SheetsBook (Join-Path $dir 'new.xlsx') ([ordered]@{ '本文' = @(@('項目'), @('B')); '改訂履歴' = $new })
+    $diffs = @(& $CompareExcel -Old (Join-Path $dir 'old.xlsx') -New (Join-Path $dir 'new.xlsx') 6>$null -WarningVariable script:renumWarnings -WarningAction SilentlyContinue)
+    Assert-Equal 0 @($script:renumWarnings).Count ('警告: ' + (@($script:renumWarnings) -join ' | '))
+    Assert-Equal @('本文!A2|値|', '改訂履歴!A3|行|版情報', '改訂履歴!A4:A6|連番|版情報') @($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Kind, $_.Tag })
+}
+
 Test-Case 'Compare-Excel: 長い文字列の変更は、変わった部分だけを [-削除-]{+追加+} で示す' {
     $dir = New-TestDir
     New-TableBook -Path (Join-Path $dir 'old.xlsx') -Header @('No', '説明') -Rows @(
