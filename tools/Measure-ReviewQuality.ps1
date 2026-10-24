@@ -120,7 +120,7 @@ function Add-Finding {
     $required = ([string]$Values['対応要否']).Trim()
     if ($status -match $excludedPattern) { $script:excluded++; return }
     $closedOn = ConvertTo-Date $Values['完了日']
-    $closed = ($status -match $closedPattern) -or ($required -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)
+    $closed = (Test-ClosedStatus $status $closedPattern) -or ($required -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)
     $due = ConvertTo-Date $Values['期限']
     $doc = ([string]$Values['設計書']).Trim()
     if (-not $doc) { $doc = '（設計書なし）' }

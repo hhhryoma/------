@@ -201,7 +201,7 @@ if ($Findings) {
         if ($status -match $excludedPattern) { continue }
         $hasFindings = $true
         $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
-        $closed = ($status -match $closedPattern) -or (([string]$v['対応要否']).Trim() -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)
+        $closed = (Test-ClosedStatus $status $closedPattern) -or (([string]$v['対応要否']).Trim() -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)
         Add-Issue '指摘' $rec '' ([string]$v['設計書']).Trim() ([string]$v['指摘内容']).Trim() ([string]$v['重要度']).Trim() ([string]$v['対応者']).Trim() $status `
             (ConvertTo-DateValue $v['起票日'] $AsOf) (ConvertTo-DateValue $v['期限'] $AsOf) $closedOn ([bool]$closed)
     }
@@ -223,7 +223,7 @@ if ($BugList) {
         if ($status -match $excludedPattern) { continue }
         $hasBugs = $true
         $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
-        $closed = ($status -match $closedPattern) -or ((-not $status) -and $closedOn)
+        $closed = (Test-ClosedStatus $status $closedPattern) -or ((-not $status) -and $closedOn)
         Add-Issue '障害' $rec (@(ConvertTo-BugIds $v['障害ID'])[0]) ([string]$v['機能']).Trim() ([string]$v['障害内容']).Trim() ([string]$v['重要度']).Trim() ([string]$v['担当']).Trim() $status `
             (ConvertTo-DateValue $v['起票日'] $AsOf) (ConvertTo-DateValue $v['期限'] $AsOf) $closedOn ([bool]$closed)
     }
@@ -248,7 +248,7 @@ if ($IssueList) {
         if ($status -match $excludedPattern) { continue }
         $hasIssues = $true
         $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
-        $closed = ($status -match $closedPattern) -or ((-not $status) -and $closedOn)
+        $closed = (Test-ClosedStatus $status $closedPattern) -or ((-not $status) -and $closedOn)
         Add-Issue '課題' $rec ([string]$v['課題ID']).Trim() ([string]$v['区分']).Trim() $content ([string]$v['重要度']).Trim() ([string]$v['担当']).Trim() $status `
             (ConvertTo-DateValue $v['起票日'] $AsOf) (ConvertTo-DateValue $v['期限'] $AsOf) $closedOn ([bool]$closed)
     }

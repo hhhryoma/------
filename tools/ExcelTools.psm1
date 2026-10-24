@@ -1955,6 +1955,18 @@ function ConvertTo-DateValue {
     return $null
 }
 
+# 状態の文字のうち、終わっていないことを表すもの（「未完了」「未済」「未解決」「完了待ち」「完了予定」「not done」「reopen」「差し戻し」など）。
+# 「完了」「済」などを含んでいても、終わったものにしない
+$script:OpenStatusPattern = '未(完了|済|クローズ|解決|対応)|(完了|クローズ|解決)(待ち|予定)|(?i:not\s*(done|closed?)|un(done|closed)|re-?open)|再オープン|差し?戻'
+
+function Test-ClosedStatus {
+    #     状態の文字（対応状況など）が、終わったもの（ClosedPattern に合い、「未完了」「完了待ち」などの打ち消しでない）か
+    param([string] $Status, [string] $ClosedPattern)
+    $s = ([string]$Status).Trim()
+    if (-not $s -or $s -notmatch $ClosedPattern) { return $false }
+    return $s -notmatch $script:OpenStatusPattern
+}
+
 function Get-TestResultKind {
     #     テストの結果を OK・NG・保留・対象外・未実施にする（読めない値は未実施）
     param([string] $Text)

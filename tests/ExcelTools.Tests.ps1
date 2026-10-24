@@ -28,6 +28,12 @@ Test-Case 'ExcelTools: Get-TestResultKind は、チェックの印（✓・☑�
     Assert-Equal @('未実施', '未実施', '未実施') @(@('未完了', '未済', 'XX') | ForEach-Object { Get-TestResultKind $_ }) '「未」で始まるもの・X だけでないもの'
 }
 
+Test-Case 'ExcelTools: Test-ClosedStatus は、完了・済を含んでも「未完了」「未済」「未解決」「完了予定」「完了待ち」「差し戻し」「not done」は終わったものにしない' {
+    $pattern = '完了|済|クローズ|close|done|解決|対応不要'
+    Assert-Equal @($true, $true, $true, $true, $true, $true) @(@('完了', '済', '対応済み', '解決', 'Closed', 'done') | ForEach-Object { Test-ClosedStatus $_ $pattern }) '終わったもの'
+    Assert-Equal @($false, $false, $false, $false, $false, $false, $false, $false, $false, $false) @(@('未完了', '未済', '未解決', '完了予定', '完了待ち', '対応済（差し戻し）', 'Not done', 'reopen', '対応中', '') | ForEach-Object { Test-ClosedStatus $_ $pattern }) '終わっていないもの'
+}
+
 Test-Case 'ExcelTools: Export-Workbook は日付（datetime）を日付のセルとして書き、Search-Excel では yyyy/MM/dd で読める' {
     $path = Join-Path (New-TestDir) '日付.xlsx'
     Export-Workbook -FilePath $path -Sheets @(@{ Name = '予定'; Columns = @(@{ Header = '開始'; Width = 12 }, @{ Header = '工数'; Width = 6 }, @{ Header = 'メモ'; Width = 10 }); Rows = @(@{ Values = @([datetime]'2026-11-02', 1.5, '2026/11/03') }) })
