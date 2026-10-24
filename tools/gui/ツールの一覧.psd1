@@ -164,10 +164,10 @@
         }
         @{
             Id = 'Review'; Label = 'AI（Copilot）にレビューさせる'; Group = 'レビュー・提出'; Tool = 'Invoke-DesignReview.ps1'
-            Summary = '設計書を観点表に沿って Microsoft 365 Copilot にレビューさせ、指摘一覧にまとめます。PowerShell の画面が開くので、案内に沿って Copilot とやり取りしてください。'
-            Main = @('Path', 'Checklist', 'OutDir')
-            Labels = @{ Path = 'レビューする設計書'; Checklist = '観点表（空欄なら詳細設計の観点）'; OutDir = '結果の保存先のフォルダ' }
-            Required = @('Path', 'OutDir'); Open = @('OutDir'); Console = $true; Keywords = 'AI Copilot レビュー'
+            Summary = '設計書（Excel・Word）を観点表に沿って Microsoft 365 Copilot にレビューさせ、指摘一覧にまとめます。前の版を入れると変わった部分だけを、前のレビュー結果を入れると指摘が直ったかを確かめます。PowerShell の画面が開くので、案内に沿って Copilot とやり取りしてください。'
+            Main = @('Path', 'Checklist', 'OutDir', 'Baseline', 'Recheck')
+            Labels = @{ Path = 'レビューする設計書'; Checklist = '観点表（空欄なら詳細設計の観点）'; OutDir = '結果の保存先のフォルダ'; Baseline = '前の版の設計書（変わった部分だけをレビューするとき）'; Recheck = '前のレビュー結果（指摘が直ったかを確かめるとき。保存先は別のフォルダに）' }
+            Required = @('Path', 'OutDir'); Open = @('OutDir'); Console = $true; Keywords = 'AI Copilot レビュー 前の版 再確認 Word'
         }
         @{
             Id = 'Pdf'; Label = 'PDF にする'; Group = 'レビュー・提出'; Tool = 'Export-ExcelToPdf.ps1'

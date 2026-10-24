@@ -58,6 +58,7 @@ Test-Case 'Start-ExcelTools: 入力欄の種類・名前・必須は、ツール
     Assert-Equal 'Number' @(Get-GuiFields (Get-TestEntry 'Effort') | Where-Object Name -eq 'HoursPerDay')[0].Kind
     Assert-Equal 'Path' @(Get-GuiFields (Get-TestEntry 'Quality') | Where-Object Name -eq 'Config')[0].Kind '括弧の中の「。」で文を切らない（設定ファイルか、それを置いたフォルダ）'
     Assert-Equal 'SaveFile' @(Get-GuiFields (Get-TestEntry 'Pdf') | Where-Object Name -eq 'LogPath')[0].Kind '「保存します」の CSV は保存先'
+    Assert-Equal @('Path:Path[]*', 'Checklist:File', 'OutDir:SaveFolder*', 'Baseline:Path', 'Recheck:Path') (Get-FieldKeys @(Get-GuiFields (Get-TestEntry 'Review') | Where-Object Main)) 'AI レビューは前の版・前のレビュー結果（ファイルかフォルダ）も最初から出す'
     Assert-Equal '改訂履歴のシート名の正規表現' @(Get-GuiFields (Get-TestEntry 'Compare') | Where-Object Name -eq 'HistorySheet')[0].Label 'ヘルプからの名前（長いときは最後の「、」のあと）'
 }
 
