@@ -18,6 +18,8 @@ param(
 
     [string] $Glossary,
 
+    [string] $Baseline,
+
     [ValidateSet('Rows', 'Markdown')]
     [string] $TextFormat = 'Rows',
 
@@ -49,6 +51,8 @@ if ($Glossary) {
     $Glossary = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Glossary)
     if (-not (Test-Path -LiteralPath $Glossary)) { throw "用語集が見つかりません: $Glossary" }
 }
+if ($Baseline -and ($ImportOnly -or $CheckOnly)) { throw '-Baseline は、依頼を作るとき（-ImportOnly・-CheckOnly 以外）に指定してください。' }
+if ($Baseline -and @(Get-PathItem $Baseline).Count -eq 0) { throw "前の版の設計書が見つかりません: $Baseline" }
 $promptDir = Join-Path $OutDir 'prompts'
 $answerDir = Join-Path $OutDir 'answers'
 $manifestPath = Join-Path $OutDir 'requests.json'
@@ -192,6 +196,136 @@ function ConvertTo-DesignMarkdown {
         }
         while ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
         $result[$name] = ($lines -join "`n") + "`n`n"
+    }
+    return $result
+}
+
+function Find-BaselineFiles {
+    #     前の版（-Baseline）の設計書を、版数を除いたファイル名（Get-VersionlessName）で今の設計書と対応付ける。
+    #     戻り値: 今の設計書のパス → 前の版のパス
+    param($Files)
+    $old = @{}
+    foreach ($item in @(Get-PathItem $Baseline)) {
+        $found = @($item)
+        if ($item.PSIsContainer) { $found = @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue) }
+        foreach ($o in $found) {
+            if (@('.xlsx', '.xlsm', '.xls') -notcontains $o.Extension.ToLowerInvariant() -or $o.Name.StartsWith('~$')) { continue }
+            $k = Get-VersionlessName $o.Name
+            if (-not $old.ContainsKey($k)) { $old[$k] = $o.FullName }
+        }
+    }
+    $pairs = @{}
+    foreach ($f in $Files) {
+        $k = Get-VersionlessName $f.Name
+        if ($old.ContainsKey($k) -and $old[$k] -ne $f.Path) { $pairs[$f.Path] = $old[$k] }
+    }
+    return $pairs
+}
+
+function ConvertTo-DiffText {
+    #     -Baseline: 設計書のうち、前の版から変わった行（★）と、その節の見出し（「■」の行と次の行）だけを、行の形のテキストにする。
+    #     変わったセルには前の版の値（旧: …）を添え、消えた行は「★削除（旧 n 行目）」で示す。新しいシートと、列を足した・消したシートは全部を入れる。
+    #     Diffs は Compare-Excel.ps1 の結果。返り値: シート名 → テキスト の順序付き辞書（変わっていないシートは入れない）
+    param($Cells, $Diffs)
+    $rowOf = { param([string] $Cell) $m = [regex]::Match([string]$Cell, '^[A-Z]+(\d+)$'); if ($m.Success) { [int]$m.Groups[1].Value } else { 0 } }
+    $changed = @{}; $old = @{}; $notes = @{}; $whole = @{}
+    $note = {
+        param([string] $Sheet, [string] $Text)
+        if (-not $notes.ContainsKey($Sheet)) { $notes[$Sheet] = New-Object System.Collections.Generic.List[string] }
+        $notes[$Sheet].Add($Text)
+    }
+    $removedSheets = New-Object System.Collections.Generic.List[string]
+    foreach ($d in $Diffs) {
+        $sheet = [string]$d.Sheet
+        if (-not $changed.ContainsKey($sheet)) { $changed[$sheet] = @{}; $old[$sheet] = @{} }
+        if (@('値', '数式') -contains $d.Kind) {
+            $r = & $rowOf $d.NewCell
+            if ($r -le 0) { continue }
+            $changed[$sheet][$r] = $true
+            if ($d.Change -ne '追加') { $old[$sheet][[string]$d.NewCell] = [string]$d.Old }
+        }
+        elseif ($d.Kind -eq '行') {
+            if ($d.Change -eq '削除') { & $note $sheet ('★削除（旧 {0} 行目）| {1}' -f (& $rowOf $d.OldCell), $d.Old) }
+            elseif ((& $rowOf $d.NewCell) -gt 0) { $changed[$sheet][(& $rowOf $d.NewCell)] = $true }
+        }
+        elseif (@('コメント', '図形') -contains $d.Kind) {
+            if ($d.Change -eq '削除') { & $note $sheet ('★{0}を削除（旧 {1}）: {2}' -f $d.Kind, $d.OldCell, $d.Old) }
+            elseif ($d.Change -eq '変更') { & $note $sheet ('★{0}（{1}付近）: {2}（旧: {3}）' -f $d.Kind, $d.NewCell, $d.New, $d.Old) }
+            elseif ($d.Change -eq '追加') { & $note $sheet ('★{0}（{1}付近）: {2}' -f $d.Kind, $d.NewCell, $d.New) }
+        }
+        elseif ($d.Kind -eq '連番') { & $note $sheet ('★{0}' -f $d.Detail) }
+        elseif ($d.Kind -eq '列' -or ($d.Kind -eq 'シート' -and $d.Change -eq '追加')) { $whole[$sheet] = $true }
+        elseif ($d.Kind -eq 'シート' -and $d.Change -eq '名前変更') { & $note $sheet ('★シート名を「{0}」から変更' -f $d.Old) }
+        elseif ($d.Kind -eq 'シート' -and $d.Change -eq '削除') { $removedSheets.Add($sheet) }
+    }
+    # シートごとのセル（値）と、シートの並び
+    $sheets = [ordered]@{}
+    foreach ($c in $Cells) {
+        if (-not $sheets.Contains($c.Sheet)) { $sheets[$c.Sheet] = New-Object System.Collections.Generic.List[object] }
+        $sheets[$c.Sheet].Add($c)
+    }
+    $result = [ordered]@{}
+    if ($removedSheets.Count -gt 0) { $result['（削除したシート）'] = "### 前の版から削除したシート`n" + (($removedSheets | ForEach-Object { "★$_" }) -join "`n") + "`n" }
+    foreach ($name in $sheets.Keys) {
+        if ($whole.ContainsKey($name)) {
+            $t = ConvertTo-DesignText -Cells $sheets[$name]
+            foreach ($k in $t.Keys) { $result[$k] = $t[$k].Replace("### シート: $k`n", "### シート: $k（前の版から大きく変わったため、全体）`n") }
+            continue
+        }
+        $rows = @{}
+        if ($changed.ContainsKey($name)) { $rows = $changed[$name] }
+        if ($rows.Count -eq 0 -and -not $notes.ContainsKey($name)) { continue }
+        # 行 → 列の順のセル
+        $byRow = @{}
+        foreach ($c in $sheets[$name]) {
+            if ($c.Kind -ne '値') { continue }
+            $m = [regex]::Match([string]$c.Cell, '^([A-Z]+)(\d+)$')
+            if (-not $m.Success) { continue }
+            $r = [int]$m.Groups[2].Value
+            if (-not $byRow.ContainsKey($r)) { $byRow[$r] = New-Object System.Collections.Generic.List[object] }
+            $byRow[$r].Add([pscustomobject]@{ Col = $m.Groups[1].Value; Text = $c.Text })
+        }
+        # 変わった行の節の見出し: 上にある「■」の行と、その次の行（表の見出し）
+        $sections = @($byRow.Keys | Where-Object { $byRow[$_][0].Text.TrimStart().StartsWith('■') } | Sort-Object)
+        $all = @($byRow.Keys | Sort-Object)
+        $show = @{}
+        foreach ($r in $rows.Keys) {
+            $show[$r] = $true
+            $sec = @($sections | Where-Object { $_ -le $r } | Select-Object -Last 1)
+            if ($sec.Count -gt 0) {
+                $show[$sec[0]] = $true
+                $next = @($all | Where-Object { $_ -gt $sec[0] } | Select-Object -First 1)
+                if ($next.Count -gt 0) { $show[$next[0]] = $true }
+            }
+        }
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.Append("### シート: $name（前の版から変わった行だけ）").Append("`n")
+        foreach ($r in @($show.Keys | Sort-Object)) {
+            # 列の順に、セルの値（変わったセルは前の版の値も）と、値を消したセル
+            $parts = New-Object System.Collections.Generic.List[object]
+            $seen = @{}
+            if ($byRow.ContainsKey($r)) {
+                foreach ($c in $byRow[$r]) {
+                    $cell = '{0}{1}' -f $c.Col, $r
+                    $seen[$cell] = $true
+                    $t = '{0}:{1}' -f $c.Col, $c.Text
+                    if ($rows.ContainsKey($r) -and $old[$name].ContainsKey($cell)) { $t += '（旧: {0}）' -f $old[$name][$cell] }
+                    $parts.Add([pscustomobject]@{ Col = (Get-ColumnIndex $c.Col); Text = $t })
+                }
+            }
+            if ($rows.ContainsKey($r)) {
+                foreach ($cell in @($old[$name].Keys | Where-Object { (& $rowOf $_) -eq $r -and -not $seen.ContainsKey($_) })) {
+                    $col = $cell -replace '\d', ''
+                    $parts.Add([pscustomobject]@{ Col = (Get-ColumnIndex $col); Text = ('{0}:（削除。旧: {1}）' -f $col, $old[$name][$cell]) })
+                }
+            }
+            $parts = @($parts | Sort-Object Col | ForEach-Object { $_.Text })
+            $mark = ''
+            if ($rows.ContainsKey($r)) { $mark = '★' }
+            [void]$sb.Append(('{0}{1}| {2}' -f $mark, $r, ($parts -join ' | '))).Append("`n")
+        }
+        if ($notes.ContainsKey($name)) { foreach ($n in $notes[$name]) { [void]$sb.Append($n).Append("`n") } }
+        $result[$name] = $sb.ToString()
     }
     return $result
 }
@@ -1080,7 +1214,15 @@ function New-ReviewRequests {
     foreach ($f in $files) {
         $targetPoints = @($points | Where-Object { $_.ByAi -and (Test-NameLike $f.Name $_.Targets) })
         if ($targetPoints.Count -eq 0) { continue }
-        $sheetTexts = & $getText $f
+        # -Baseline: 前の版から変わっていない設計書は依頼しない。変わった設計書は、変わった部分だけを渡す
+        if ($f.Diff -eq '変更なし') { continue }
+        $diffNote = ''
+        if ($f.Diff -eq '変更あり') {
+            $null = & $getText $f
+            $sheetTexts = $f.DiffText
+            $diffNote = '（前の版から変わった部分だけです。★の付いた行・図形・コメントだけを判定し、★の無い行は判定の参考にしてください。（旧: …）は前の版の値です。省いた部分にあるかもしれないことは指摘せず、判断できなければ要確認にしてください）'
+        }
+        else { $sheetTexts = & $getText $f }
         $docLength = 0
         foreach ($t in $sheetTexts.Values) { $docLength += $t.Length }
 
@@ -1103,7 +1245,7 @@ function New-ReviewRequests {
         $allRefs = @($targetPoints | ForEach-Object { $_.Refs } | Sort-Object -Unique)
         $allRefText = ''
         if ($allRefs.Count -gt 0) { $allRefText = & $getRefText $allRefs }
-        $allFixed = (New-PromptText -Points $targetPoints -FileName $f.Name -Body '' -PartNote '' -RefText $allRefText).Length
+        $allFixed = (New-PromptText -Points $targetPoints -FileName $f.Name -Body '' -PartNote $diffNote -RefText $allRefText).Length
         if ($allFixed + $docLength -le $MaxChars) {
             $groups['*'] = [pscustomobject]@{ Points = $targetPoints; RefText = $allRefText }
         }
@@ -1123,7 +1265,7 @@ function New-ReviewRequests {
             $gp = $groups[$key].Points
             $refText = $groups[$key].RefText
 
-            $fixedLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote '（9/9 の一部。他の部分は別途確認するため、この部分だけで判定してください）' -RefText $refText).Length
+            $fixedLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote ($diffNote + '（9/9 の一部。他の部分は別途確認するため、この部分だけで判定してください）') -RefText $refText).Length
             $budget = $MaxChars - $fixedLen
             if ($budget -lt 1000) {
                 Write-Warning ("{0}: 観点と参照資料だけで {1} 文字あり、-MaxChars {2} に収まりません。-MaxChars を増やすか、参照設計書を絞ってください（観点 {3}）" -f $f.Relative, $fixedLen, $MaxChars, (($gp | ForEach-Object { $_.Id }) -join ', '))
@@ -1131,13 +1273,13 @@ function New-ReviewRequests {
             }
 
             # 1 回に収まるなら分けない（分けたときの「n/m の一部」の注記の分を見込んで、収まるのに分けてしまわないよう）
-            $wholeLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote '' -RefText $refText).Length + $docLength
+            $wholeLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote $diffNote -RefText $refText).Length + $docLength
             if ($wholeLen -le $MaxChars) { $chunks = Split-SheetTexts -SheetTexts $sheetTexts -Budget ([int]::MaxValue) }
             else { $chunks = Split-SheetTexts -SheetTexts $sheetTexts -Budget $budget }
             for ($i = 0; $i -lt $chunks.Count; $i++) {
-                $partNote = ''
+                $partNote = $diffNote
                 if ($chunks.Count -gt 1) {
-                    $partNote = '（{0}/{1} の一部。他の部分は別途確認するため、この部分だけで判定してください）' -f ($i + 1), $chunks.Count
+                    $partNote += '（{0}/{1} の一部。他の部分は別途確認するため、この部分だけで判定してください）' -f ($i + 1), $chunks.Count
                 }
                 $no++
                 $prompt = New-PromptText -Points $gp -FileName $f.Name -Body $chunks[$i] -PartNote $partNote -RefText $refText
@@ -1186,7 +1328,7 @@ if ($ImportOnly) {
         # 依頼を作ったときの設計書（古い依頼の一覧には無いので、依頼のある設計書）
         $designFiles = New-Object System.Collections.Generic.List[object]
         if ($manifest.PSObject.Properties['Files']) {
-            foreach ($f in @($manifest.Files)) { $designFiles.Add([pscustomobject]@{ Path = $f.Path; Name = $f.Name; Relative = $f.Relative }) }
+            foreach ($f in @($manifest.Files)) { $designFiles.Add([pscustomobject]@{ Path = $f.Path; Name = $f.Name; Relative = $f.Relative; Diff = [string]$f.Diff; Baseline = [string]$f.Baseline }) }
         }
         else {
             foreach ($r in $requests) {
@@ -1197,6 +1339,32 @@ if ($ImportOnly) {
 }
 else {
     $quoteFormat = $true
+    if ($Baseline) {
+        Write-Host '前の版と比べています...'
+        $pairs = Find-BaselineFiles $designFiles
+        $compareScript = Join-Path $PSScriptRoot 'Compare-Excel.ps1'
+        foreach ($f in $designFiles) {
+            $diffState = '新規'; $diffText = $null; $oldPath = ''
+            if ($pairs.ContainsKey($f.Path)) {
+                $oldPath = $pairs[$f.Path]
+                # 版数・更新日・改訂履歴だけの変更は、レビューしない
+                $diffs = @(& $compareScript -Old $oldPath -New $f.Path -Ignore 版情報 6>$null 3>$null | Where-Object { @('書式', '画像', 'ファイル', '改訂履歴') -notcontains $_.Kind })
+                $diffState = '変更なし'
+                if ($diffs.Count -gt 0) {
+                    $diffText = ConvertTo-DiffText -Cells (Get-ExcelCells -FilePath $f.Path) -Diffs $diffs
+                    if ($diffText.Count -gt 0) { $diffState = '変更あり' }
+                }
+            }
+            $f | Add-Member -NotePropertyName Diff -NotePropertyValue $diffState -Force
+            $f | Add-Member -NotePropertyName DiffText -NotePropertyValue $diffText -Force
+            $f | Add-Member -NotePropertyName Baseline -NotePropertyValue $oldPath -Force
+        }
+        # Group-Object の並びは PowerShell の版で違うので、決まった順に並べる
+        $stateOrder = @('変更あり', '変更なし', '新規')
+        $byState = @($designFiles | Group-Object Diff | Sort-Object { $i = [array]::IndexOf($stateOrder, $_.Name); if ($i -lt 0) { $stateOrder.Count } else { $i } }, Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
+        Write-Host ("  前の版と比べた設計書: {0}（変更なしの設計書は AI に依頼しません）" -f ($byState -join '・'))
+        if ($TextFormat -eq 'Markdown') { Write-Warning '前の版から変わった部分は、行の形（-TextFormat Rows）で渡します（Markdown は、新しい設計書と参照資料に使います）' }
+    }
     Write-Host '依頼を作成しています...'
     $requests = (New-ReviewRequests -Points $points -Files $designFiles).ToArray()
 
@@ -1221,8 +1389,8 @@ else {
         MaxChars = $MaxChars
         Requests = @($requests | Select-Object Id, File, Relative, Part, PointIds, Sheets, Chars, Hash)
         AnswerFormat = $answerFormat
-        # -ImportOnly でツールの確認をする設計書
-        Files    = @($designFiles | Select-Object Path, Name, Relative)
+        # -ImportOnly でツールの確認をする設計書（-Baseline のときは前の版と比べた結果も）
+        Files    = @($designFiles | Select-Object Path, Name, Relative, @{ n = 'Diff'; e = { [string]$_.Diff } }, @{ n = 'Baseline'; e = { [string]$_.Baseline } })
     }
     [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5), $utf8Bom)
 
@@ -1373,6 +1541,7 @@ if ($toolResult) {
     }
     foreach ($f in $toolFiles) {
         foreach ($p in $toolPoints) {
+            # （変更なしの設計書でも、ツールでは確かめる）
             if (-not (Test-NameLike $f.Name $p.Targets)) { continue }
             $cv = & $newCoverage $f.Path $f.Relative $p.Id
             $cv.Requests.Add('ツール')
@@ -1433,6 +1602,14 @@ foreach ($f in $sorted) {
     $findingRows.Add($row)
 }
 
+# -Baseline で前の版から変わっていない設計書の、AI に依頼する観点（依頼していない）
+foreach ($f in @($designFiles | Where-Object { $_ -and $_.PSObject.Properties['Diff'] -and $_.Diff -eq '変更なし' })) {
+    foreach ($p in @($points | Where-Object { $_.ByAi -and (Test-NameLike $f.Name $_.Targets) })) {
+        $cv = & $newCoverage $f.Path $f.Relative $p.Id
+        $cv.Requests.Add('変更なし')
+    }
+}
+
 # 設計書の順、観点表の順に並べる
 $fileOrder = @{}
 foreach ($f in $designFiles) { if ($f -and -not $fileOrder.ContainsKey($f.Path)) { $fileOrder[$f.Path] = $fileOrder.Count } }
@@ -1447,6 +1624,7 @@ foreach ($cv in @($coverage.Values | Sort-Object @{ e = { $fileOrder[$_.File] } 
     if ($ng -gt 0) { $verdict = 'NG' }
     elseif ($cv.Verdicts -contains '要確認') { $verdict = '要確認' }
     elseif ($cv.Missing) { $verdict = '未回答' }
+    elseif ($cv.Verdicts.Count -eq 0 -and $cv.Requests -contains '変更なし') { $verdict = '変更なし' }
     else { $verdict = 'OK' }
     # 分割した依頼の一部だけ未回答なら、OK と言い切らない
     if ($cv.Missing -and $verdict -eq 'OK') { $verdict = '未回答' }
@@ -1567,6 +1745,12 @@ Write-Host "レビュー結果: $reportPath"
 #
 # .PARAMETER Glossary
 #     表記ゆれ（ツールの確認）で使う用語集の CSV（正しい表記・揺れ）。Test-ExcelTerms.ps1 の -Glossary と同じです。
+#
+# .PARAMETER Baseline
+#     前の版の設計書のフォルダ（またはファイル）。版数を除いたファイル名で今の設計書と対応付け（Compare-Excel.ps1 で比べ）、
+#     AI には前の版から変わった行（★。前の版の値を「旧: …」で添える）と、その節の見出しの行だけを渡します。
+#     変わっていない設計書は AI に依頼しません（観点消化状況は「変更なし」）。版数・更新日・改訂履歴だけの変更は除きます。
+#     ツールの確認は、変わっていない設計書も含めて行います。
 #
 # .PARAMETER TextFormat
 #     設計書を AI に渡すときのテキストの形。Rows（既定）は「行番号| 列:値 | 列:値」の行の形、Markdown は
