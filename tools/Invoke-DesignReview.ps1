@@ -1678,7 +1678,9 @@ else {
     $manifest = [pscustomobject]@{
         Created  = (Get-Date).ToString('yyyy/MM/dd HH:mm:ss')
         MaxChars = $MaxChars
-        Requests = @($requests | Select-Object Id, File, Relative, Part, PointIds, Sheets, Chars, Hash, @{ n = 'Kind'; e = { [string]$_.Kind } }, @{ n = 'FindingNos'; e = { @($_.FindingNos) } })
+        # 配列（PointIds・FindingNos）は計算したプロパティにしない（Windows PowerShell 5.1 の ConvertTo-Json は、それを {"value": [...], "Count": n} にしてしまう）。
+        # Kind・FindingNos は再確認の依頼だけにあり、ほかの依頼では空になる
+        Requests = @($requests | Select-Object Id, File, Relative, Part, PointIds, Sheets, Chars, Hash, Kind, FindingNos)
         AnswerFormat = $answerFormat
         # -Recheck: 前のレビューの指摘（-ImportOnly で再確認の結果を作るため）
         Recheck  = $(if ($Recheck) { [pscustomobject]@{ Path = $Recheck; Findings = @($recheckFindings | Select-Object No, Source, Rule, PointId, Point, Document, Location, Finding, Target) } } else { $null })

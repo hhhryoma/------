@@ -463,6 +463,7 @@ Test-Case 'Invoke-DesignReview: -Recheck で、前のレビューの NG・要確
     Assert-Match $text '前のレビューの指摘: 5 件（AI 2 件・ツール 3 件。今の設計書が見つからない指摘 0 件）' '対応要否が不要の指摘は除く'
     $m = Get-Manifest $second
     Assert-Equal 1 @($m.Requests).Count 'AI の指摘のある設計書だけ'
+    Assert-Equal '再確認|1,2' ('{0}|{1}' -f $m.Requests[0].Kind, (@($m.Requests[0].FindingNos) -join ',')) '依頼の一覧の指摘No は配列のまま書く（Windows PowerShell 5.1 の ConvertTo-Json でも）'
     $p = [System.IO.File]::ReadAllText((Join-Path $second 'prompts/R001.txt'))
     Assert-Match $p '【前回の指摘】\n指摘No \| 観点 \| 場所（前の版） \| 指摘内容\n1 \| 入力項目の定義に漏れがない \| 画面項目定義!M11 \| 受注ステータスの型が未定義\n2 \| 処理手順と異常時の動きが書かれている \| イベント定義!P8 \| クリア時の動きが不明\n'
     Assert-Match $p '\n### シート: 画面項目定義\n' '指摘のあったシート'
