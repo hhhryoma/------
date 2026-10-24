@@ -193,6 +193,13 @@
             Required = @('Path'); Output = @('OutXlsx'); OutputName = 'テスト仕様書のチェック'; Keywords = 'テストケース レビュー'
         }
         @{
+            Id = 'Evidence'; Label = 'テストのエビデンスを確かめる'; Group = 'テスト'; Tool = 'Test-TestEvidence.ps1'
+            Summary = 'テスト仕様書の結果とエビデンス（画面のハードコピーなど）を突き合わせ、エビデンスの抜け・空・同じ画像の使い回しと、結果の書き忘れを見つけます。'
+            Main = @('Path', 'EvidencePath', 'OutXlsx')
+            Labels = @{ Path = 'テスト仕様書のファイル・フォルダ'; EvidencePath = 'エビデンスのフォルダ（空欄ならテスト仕様書と同じ場所）'; OutXlsx = '結果の保存先' }
+            Required = @('Path'); Output = @('OutXlsx'); OutputName = 'エビデンスのチェック'; Keywords = 'エビデンス 証跡 ハードコピー キャプチャ 使い回し'
+        }
+        @{
             Id = 'Trace'; Label = '要件・設計・テストのつながりを見る'; Group = 'テスト'; Tool = 'Test-Traceability.ps1'
             Summary = '要件一覧 → 設計書 → テスト仕様書のつながりと、画面・イベント・メッセージ・IF にテストがあるか（テストの抜け）を確かめます。'
             Main = @('DesignPath', 'TestPath', 'Requirement', 'OutXlsx')
