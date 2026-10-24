@@ -170,6 +170,11 @@ New-WordDocx (Join-Path $versions '基本設計書_v1.2.docx') @($wordV11 | ForE
 Copy-Item -LiteralPath (Join-Path $design "$scr2.xlsx") -Destination (Join-Path $versions "${scr2}_v1.0.xlsx")
 Copy-Item -LiteralPath (Join-Path $designV2 "$scr2.xlsx") -Destination (Join-Path $versions "${scr2}_v1.1.xlsx")
 
+# ソース（設計書の ID と突き合わせる。E0099 はメッセージ一覧に無い ID）
+$source = Join-Path $data 'ソース'
+New-Item -ItemType Directory -Force -Path $source | Out-Null
+@('public class OrderList {', '    void search() { error("E0001"); error("E0099"); }', '    String sql = "SELECT * FROM T_ORDER";', '}') | Set-Content -LiteralPath (Join-Path $source 'OrderList.java') -Encoding UTF8
+
 # ---------------------------------------------------------------- ツールを順に実行する
 
 
@@ -203,6 +208,7 @@ Invoke-Step 'Compare-Excel（版を続けて比べる・Word）' '04c_版の差�
 Invoke-Step 'Test-DesignConsistency（設計書の整合性）' '05_整合性.xlsx' '指摘一覧のリンクで設計書の該当セルが開く。CRUD のシートが読める' { param($o) & (& $t 'Test-DesignConsistency.ps1') -Path (Join-Path $fixtures 'consistency') -OutXlsx $o }
 Invoke-Step 'Test-Traceability（網羅）' '06_網羅.xlsx' '抜け・網羅・要件のシートと、場所のリンク' { param($o) & (& $t 'Test-Traceability.ps1') -DesignPath $design -TestPath (Join-Path $data 'テスト') -Requirement (Join-Path $data '要件一覧.csv') -OutXlsx $o }
 Invoke-Step 'Select-RegressionTests（再テストするケース）' '06b_再テスト.xlsx' '選んだ理由の列と、テスト仕様書の場所のリンク（該当セルが開く）' { param($o) & (& $t 'Select-RegressionTests.ps1') -Old $design -New $designV2 -TestPath (Join-Path $data 'テスト') -OutXlsx $o }
+Invoke-Step 'Test-CodeTrace（設計書とソース）' '06c_設計とソース.xlsx' '指摘のリンクで、メッセージ一覧の該当行と OrderList.java が開く。対応表の E0001 の行にソースの場所がある' { param($o) & (& $t 'Test-CodeTrace.ps1') -DesignPath $design -SourcePath $source -OutXlsx $o }
 Invoke-Step 'New-TestData（テストデータ）' '09b_テストデータ.xlsx' 'テーブルごとのシートに標準・最大・最小・NULL の行がある。09b_テストデータ フォルダの CSV を Excel で開いても文字化けしない' { param($o) & (& $t 'New-TestData.ps1') -Path $design -OutDir (Join-Path $OutDir '09b_テストデータ') -BaseDate '2026-04-01' -OutXlsx $o }
 Invoke-Step 'Measure-DesignSize（規模）' '07_規模.xlsx' '集計・規模一覧・係数表のシート' { param($o) & (& $t 'Measure-DesignSize.ps1') -Path $design -OutXlsx $o }
 Invoke-Step 'Test-ExcelEstimate（見積書の検算）' '08_見積書の検算.xlsx' '検算結果のリンクで、見積書の該当セルが開く' { param($o) & (& $t 'Test-ExcelEstimate.ps1') -Path (Join-Path $fixtures 'estimate/見積書.xlsx') -OutXlsx $o }

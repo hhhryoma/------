@@ -29,6 +29,7 @@
 | [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系・必須・型・境界値・コード値のケースの不足を見つける（Excel 不要） |
 | [Test-TestEvidence.ps1](#test-testevidenceps1) | テストのエビデンス（画面のハードコピーなど）の抜け・空・同じ画像の使い回しと、結果の書き忘れを、テスト仕様書の結果と突き合わせて見つける（Excel 不要） |
 | [Test-Traceability.ps1](#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、設計の要素（画面・イベント・メッセージ・IF）にテストがあるかを確かめる。テストの抜けを全件、機械で見つける（Excel 不要） |
+| [Test-CodeTrace.ps1](#test-codetraceps1) | 設計書のメッセージ・画面・テーブル（・カラム）の ID とソースコードを突き合わせ、ソースで使っていない ID と、ソースで使っているのに設計書に無い ID（書き間違い・設計書の直し忘れ）を見つける（Excel 不要） |
 | [Select-RegressionTests.ps1](#select-regressiontestsps1) | 設計書の旧版と新版の差分から、変更した項目・イベント・メッセージなどが出てくるテストケースを、再テストするケースとして選ぶ（改修の回帰テストの範囲決め。Excel 不要） |
 | [Find-SimilarDefects.ps1](#find-similardefectsps1) | 障害の箇所と同じ作り（型・入力チェック・処理・カラムの型など）の箇所を設計書から集め、横展開の候補の一覧を作る。候補の絞り込みは Copilot に頼める（Excel 不要） |
 
@@ -62,7 +63,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Find-SimilarDefects.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Find-SimilarDefects.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Test-CodeTrace.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Start-ExcelTools.ps1（画面）
 
@@ -1249,6 +1250,84 @@ Kind       Scope  Id    Name           Judgement
 
 - テストに「出てくる」かを**文字で**確かめます。テストの内容が正しいか、十分かまでは確かめません
 - イベントは名前で探すため、「登録」のような短い名前は、別のイベント（「新規登録」）のテストでもあるとみなすことがあります
+
+## Test-CodeTrace.ps1
+
+設計書の **ID（メッセージ・画面・テーブル・カラム）** がソースコードのどこにあるかを探し、**ソースで使っていない ID** と、ソースで使っているのに**設計書に無い ID** を見つけます。Excel は不要です。
+「メッセージ一覧に載せたのに使っていない」「ソースのメッセージ ID が一覧に無い（書き間違い・一覧の直し忘れ）」「SQL のテーブル名が定義書と違う」を、製造の終わりやテストの前に全件確かめます。
+
+```powershell
+.\Test-CodeTrace.ps1 D:\設計書 D:\src -OutXlsx D:\設計とソースの突き合わせ.xlsx
+.\Test-CodeTrace.ps1 D:\設計書\DD03_テーブル定義書.xlsx D:\src -Kind Column      # カラムも突き合わせる
+```
+
+```
+Level  : 警告
+Item   : 実装に無い
+Kind   : メッセージ
+Id     : E0003
+Detail : メッセージ E0003「{0}は半角英数字で入力してください。」がソースに見つかりません（使っていないか、ID の書き間違い）
+
+Level  : 警告
+Item   : 設計書に無い
+Kind   : メッセージ
+Id     : E0099
+Detail : ソースのメッセージ ID E0099（OrderList.java 9 行目）が、メッセージ一覧にありません
+
+Level  : 警告
+Item   : 設計書に無い
+Kind   : テーブル
+Id     : T_ORDR
+Detail : ソースの SQL のテーブル T_ORDR（OrderList.java 10 行目）が、テーブル定義書にありません
+...
+
+ソース 3 ファイルで、設計書の ID が見つかったもの: メッセージ 2/16・画面 1/3・テーブル 3/4
+設計書に無い ID: メッセージ 1・テーブル 1
+警告 19 件 / 情報 0 件
+```
+
+### 突き合わせる ID
+
+| 種類 | 設計書から読む ID | ソースで探すもの |
+| --- | --- | --- |
+| メッセージ | メッセージ一覧のメッセージ ID（E0001 など） | ID の単語（`"E0001"`・`E0001=…`） |
+| 画面 | 画面一覧（「画面ID」の右に「画面名」の見出しがある表）の画面 ID と、画面設計書のヘッダの「画面ID」の値 | ID の単語 |
+| テーブル | テーブル定義書のテーブル ID（[Export-TableDdl.ps1](#export-tableddlps1) と同じ見出しで読む） | 名前の単語と、`_` を除いた名前（`TOrder`） |
+| カラム（`-Kind Column`） | テーブル定義書のカラムの物理名 | 名前の単語と、`_` を除いた名前（ORM の `orderNo` など） |
+
+- 大文字小文字は区別しません。単語の一部（`E00011` の中の `E0001`）は数えません
+- **設計書に無い ID** は、設計書の ID と同じ形（`E0001` なら英字 `E` と数字 4 桁、`SCR001` なら `SCR` と数字 3 桁）の単語で、設計書に無いものです。テーブルは SQL の FROM・JOIN・INTO・UPDATE の後ろの名前（テーブル定義書のカラム名は除く）で、.sql・.pls などと MyBatis・iBATIS の .xml（mapper・sqlMap）はすべての行を、ほかのファイルは大文字で書いた SQL（`"SELECT * FROM T_ORDER"`）だけを見ます
+- コメントだけの行（`//`・`/* */`・`--`・`#` など。言語ごとの書き方は [Measure-CodeSize.ps1](#measure-codesizeps1) と同じ）は見ません。コメントに残した古い ID は「使っている」に数えません
+- カラムは数が多く、画面の項目名など別の名前で使うこともあるので、`-Kind Column` を付けたときだけ突き合わせ、見つからないものは情報として知らせます
+- 読むファイル: Measure-CodeSize.ps1 と同じ拡張子のソース（.java .cs .js .ts .py .sql .xml .html など）と、メッセージのリソース・設定ファイル（.properties .yml .yaml .json .ini .conf .cfg .toml .resx）
+
+| 区分 | 項目 | 内容 |
+| --- | --- | --- |
+| 警告 | 実装に無い | 設計書の ID がソースのどこにも無い（使っていないか、ID の書き間違い）。カラムは情報 |
+| 警告 | 設計書に無い | ソースの ID・SQL のテーブルが設計書に無い（設計書の直し忘れか、ソースの書き間違い） |
+
+`-OutXlsx` のシート:
+
+| シート | 内容 |
+| --- | --- |
+| 指摘 | 指摘の一覧（設計書の行か、ソースのファイルへのリンク付き） |
+| 対応表 | 設計書の ID ごとの名前・設計書の場所・ソースの箇所の数・ファイルの数・最初の場所（ソースのファイルへのリンク付き） |
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-DesignPath` | 設計書のフォルダまたはファイル（メッセージ一覧・画面一覧・画面設計書・テーブル定義書。複数可） |
+| `-SourcePath` | ソースのフォルダまたはファイル（複数可） |
+| `-Kind` | 突き合わせる ID の種類（`Message`・`Screen`・`Table`・`Column`）。既定は Message・Screen・Table |
+| `-Exclude` | 見ないフォルダの名前（既定は .git・node_modules・bin・obj・target・build・dist・out・vendor・.vs・.idea） |
+| `-Headers` | テーブル定義書の見出しの候補の CSV（既定は `tools\ddl\テーブル定義書の見出し.csv`。Export-TableDdl.ps1 と同じ） |
+| `-OutXlsx` | 指摘・対応表を保存する |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない（設計書・ソースとも） |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb の設計書は読まない） |
+
+### 注意
+
+- ID が**文字として**ソースにあるかを見るだけで、正しく使っているか（その画面で出しているか）は見ません
+- 文字をつないで組み立てる ID（`"E" + code`）や、DB から読むメッセージは見つけられません。メッセージを DB に入れているときは、投入用の SQL（INSERT 文）もソースのフォルダに入れてください
 
 ## Select-RegressionTests.ps1
 
