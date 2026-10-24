@@ -191,6 +191,7 @@ $t = { param($name) Join-Path $tools $name }
 Write-Host "動作確認の結果を作っています: $OutDir"
 Invoke-Step 'Search-Excel（検索）' '01_検索.xlsx' 'リンクをクリックすると、該当のブック・シート・セルが開く。Word（基本設計書_v1.2.docx）の行は「本文!段落 n」で、リンクで文書が開く' { param($o) & (& $t 'Search-Excel.ps1') -Pattern 'TODO' -Path (Join-Path $fixtures 'grep'), $versions -IncludeWord -NoExcel -OutXlsx $o }
 Invoke-Step 'Test-ExcelDeliverable（提出前チェック）' '02_提出前チェック.xlsx' '指摘一覧のリンクで、該当のブックのセルが開く（ファイル別のシートもある）。Word（基本設計書_v1.2.docx）の変更履歴・コメント・残っている文言（TODO）の行があり、リンクで文書が開く。Word で開いても同じ変更履歴とコメントが見える' { param($o) & (& $t 'Test-ExcelDeliverable.ps1') -Path (Join-Path $fixtures 'deliverable/bad.xlsx'), (Join-Path $fixtures 'print'), (Join-Path $versions '基本設計書_v1.2.docx') -OutXlsx $o }
+Invoke-Step 'New-DocumentRegister（成果物一覧）' '02b_成果物一覧.xlsx' 'ファイルのリンクで文書が開く。文書名・版数・最新の改訂が読める。古い版のシートに 基本設計書 の v1.0・v1.1 と SCR002 の v1.0 がある' { param($o) & (& $t 'New-DocumentRegister.ps1') -Path $versions -OutXlsx $o }
 Invoke-Step 'Test-ExcelTerms（表記ゆれ）' '03_表記ゆれ.xlsx' '表記ゆれ・出現箇所のシートが読める（文字化け・列幅）' { param($o) & (& $t 'Test-ExcelTerms.ps1') -Path $design -OutXlsx $o }
 Invoke-Step 'Compare-Excel（差分）' '04_差分.xlsx' '差分一覧のリンクが開く。04_差分_色付け フォルダの写しで、変更のあったセルに色が付いている' { param($o) & (& $t 'Compare-Excel.ps1') -Old (Join-Path $fixtures 'compare/v1') -New (Join-Path $fixtures 'compare/v2') -OutXlsx $o -OutMarkedDir (Join-Path $OutDir '04_差分_色付け') }
 Invoke-Step 'Compare-Excel（差分をブラウザーで見る）' '04b_差分.html' 'ブラウザーで開き、変わったセルに色が付く・マウスを重ねると変更前後が出る・左右に並べるとスクロールが連動する・一覧のクリックで該当セルへ移る' { param($o) & (& $t 'Compare-Excel.ps1') -Old $design -New $designV2 -OutHtml $o }

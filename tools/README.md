@@ -24,6 +24,7 @@
 | [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違い・スクリーンショットの縦横比や拡大をまとめて確認する（プロパティの個人名など、機械で直せるものは `-Fix` で直す）。Word（.docx）の変更履歴・コメント・隠し文字の残りも見つける |
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
+| [New-DocumentRegister.ps1](#new-documentregisterps1) | フォルダの成果物の表紙と改訂履歴から、文書番号・文書名・版数・更新日・最新の改訂の一覧（成果物一覧）を作り、古い版・版数の食い違い・未提出を見つける（Excel 不要） |
 | [New-TestSpecDraft.ps1](#new-testspecdraftps1) | 画面設計書（画面項目定義・イベント定義）とコード定義書・メッセージ一覧から、必須・桁数の境界・型・入力チェック・コード値・イベントのテストケースの下書きを、メッセージの文言付きで作る（Excel 不要） |
 | [Test-TestSpec.ps1](#test-testspecps1) | テスト仕様書の書き方の抜け・あいまいさ（期待結果の空欄・「正しく」など）・重複と、異常系・必須・型・境界値・コード値のケースの不足を見つける（Excel 不要） |
 | [Test-TestEvidence.ps1](#test-testevidenceps1) | テストのエビデンス（画面のハードコピーなど）の抜け・空・同じ画像の使い回しと、結果の書き忘れを、テスト仕様書の結果と突き合わせて見つける（Excel 不要） |
@@ -60,7 +61,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Start-ExcelTools.ps1（画面）
 
@@ -3271,6 +3272,55 @@ Get-ChildItem D:\Docs -Recurse -Include *.xlsx,*.xls,*.xlsm |
       --headless --convert-to pdf --outdir D:\Pdf $_.FullName
   }
 ```
+
+## New-DocumentRegister.ps1
+
+フォルダの成果物（設計書・報告書など）の表紙と改訂履歴を読み、**成果物一覧**（文書番号・文書名・版数・更新日・最新の改訂）を作ります。Excel は不要です。
+納品物一覧・成果物一覧を手で書き写す代わりに使え、あわせて古い版の混入・版数の直し忘れ・未提出の成果物を見つけます。
+
+```powershell
+.\New-DocumentRegister.ps1 D:\納品物 -OutXlsx D:\成果物一覧.xlsx
+.\New-DocumentRegister.ps1 D:\納品物 -Planned D:\成果物の予定.xlsx -OutXlsx D:\成果物一覧.xlsx     # 予定と突き合わせる
+```
+
+```
+成果物 5 件（Excel 3・Word 1・PDF 1）。古い版 1 件
+版数・更新日などの確認が要るもの 1 件: 基本設計書_v1.2.xlsx
+予定 6 件: 提出済み 4・未提出 2（予定日を過ぎたもの 1）。予定に無い成果物 1 件
+  未提出（予定日を過ぎています）: 運用手順書
+  未提出: 移行計画書
+```
+
+| 列 | 読むところ |
+| --- | --- |
+| 文書番号・文書名・版数・作成日・更新日・作成者 | 表紙の見出し（文書番号・文書名・版数・作成日・最終更新日・作成者など）の右の値。表紙は「表紙」という名前のシート（無ければ最初のシート）、Word は本文の表と「見出し：値」の段落。文書名の見出しが無ければ「…書」「…一覧」で終わる文字（後ろの（ ）は除いて見る）、それも無ければ版数を除いたファイル名 |
+| 最新の改訂 | 改訂履歴（`-HistorySheet` のシート。Word は版数と日付の見出しのある表）の、版数のある最後の行の版数・日付・内容・改訂者 |
+| ページ | PDF のページ数 |
+| 確認 | 下の表のこと |
+
+| 確認 | 内容 |
+| --- | --- |
+| 版数が違う | ファイル名・表紙・改訂履歴の最後の行の版数が違う（例: `版数が違う（ファイル名 1.2・表紙 1.1・改訂履歴 1.2）`） |
+| 更新日が違う | 表紙の更新日と、改訂履歴の最後の行の日付が違う |
+| 古い版 | 版数だけが違う同じ文書（`設計書_v1.0.xlsx` と `設計書_v1.1.xlsx`、`v1.0\設計書.xlsx` と `v1.1\設計書.xlsx` など）の古いもの。一覧には最新だけを載せ、古い版は別のシートに出す（`-AllVersions` で一覧にも載せる） |
+| 予定に無い・未提出 | `-Planned` の成果物の予定と、文書番号（無ければ名前）で突き合わせる |
+
+- `-Planned` は、成果物名（文書名・ファイル名でもよい）の見出しと、あれば文書番号・予定日・担当の見出しのある表（Excel か CSV）です。名前は、文書名か版数を除いたファイル名と同じもの、無ければそれを含むものと突き合わせます
+- 予定日を過ぎた未提出は「未提出（予定日を過ぎています）」です（基準日は `-AsOf`）
+- `~$` で始まる一時ファイル・`Thumbs.db`・`desktop.ini`・`.` で始まるファイルは載せません。.doc（古い Word）・.xls・.xlsb（Excel が無いとき）とそのほかのファイルは、名前・大きさ・更新日時だけです
+- 版数・更新日の食い違いの詳しい確認（改訂履歴の版数の逆戻りなど）は [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) で行います
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 成果物のフォルダ・ファイル（複数可） |
+| `-Planned` | 成果物の予定（Excel・CSV）。未提出と予定に無い成果物を知らせる |
+| `-AsOf` | 予定日を過ぎたかを決める基準日（既定は今日） |
+| `-AllVersions` | 古い版も一覧に載せる |
+| `-HistorySheet` | 改訂履歴のシート名の正規表現（既定は `改訂履歴\|変更履歴\|改版履歴\|更新履歴\|改訂記録`） |
+| `-OutXlsx` | 成果物一覧（ファイルへのリンク付き）・予定との突き合わせ・古い版を保存する |
+| `-OutCsv` | 成果物一覧を CSV（UTF-8・BOM 付き）に保存する（社内の様式に貼るとき） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb の表紙は読まない） |
 
 ## Invoke-DesignReview.ps1
 
