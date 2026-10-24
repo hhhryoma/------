@@ -788,6 +788,66 @@ function ConvertTo-ChartXml {
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:roundedCorners val="0"/><c:chart><c:title>{0}</c:title><c:autoTitleDeleted val="0"/><c:plotArea><c:layout/>{1}</c:plotArea>{2}<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="900"><a:latin typeface="游ゴシック"/><a:ea typeface="游ゴシック"/></a:defRPr></a:pPr><a:endParaRPr lang="ja-JP"/></a:p></c:txPr></c:chartSpace>' -f (& $text $Chart.Title 1200 $true), $plot.ToString(), $legend)
 }
 
+function ConvertTo-ShapeAnchorXml {
+    #     図形を描画（drawing）の twoCellAnchor にする（Export-Workbook の Shapes）。位置と大きさはます目の数（列・行は 0 始まり）。
+    #       Box:   @{ Type = 'Box'; Id; Name; Col; Row; Width; Height; Text = @(中央寄せの行...); Body = @(左寄せの行...); Fill; Line; Dash }（1 行目は太字）
+    #       Text:  @{ Type = 'Text'; Id; Name; Col; Row; Width; Height; Text = @(行...); Align（ctr（既定）・l・r） }（枠と塗りの無い文字）
+    #       Arrow: @{ Type = 'Arrow'; Id; Name; From = @(列, 行); To = @(列, 行); StartShape; StartSite; EndShape; EndSite; Head; Dash }
+    #              To の側に矢じり（Head なら From の側にも）。StartSite・EndSite は四角の接続点（0: 上・1: 左・2: 下・3: 右）
+    #     CellEmu: 1 ます目の大きさ（EMU。既定は 10 ピクセル）。図形はセルに付けるので、列の幅が違っても形は崩れない
+    param($Shape, [long] $CellEmu = 95250)
+    $anchor = {
+        param([int] $C1, [int] $R1, [int] $C2, [int] $R2)
+        '<xdr:from><xdr:col>{0}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{2}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{3}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>' -f $C1, $R1, $C2, $R2
+    }
+    $paragraphs = {
+        param($Lines, [string] $Align, [int] $Size, [bool] $BoldFirst)
+        $sb = New-Object System.Text.StringBuilder
+        $i = 0
+        foreach ($line in @($Lines | Where-Object { $null -ne $_ })) {
+            $bold = ''
+            if ($BoldFirst -and $i -eq 0) { $bold = ' b="1"' }
+            $i++
+            if (-not [string]$line) { [void]$sb.Append(('<a:p><a:pPr algn="{0}"/><a:endParaRPr lang="ja-JP" sz="{1}"/></a:p>' -f $Align, $Size)); continue }
+            [void]$sb.Append(('<a:p><a:pPr algn="{0}"/><a:r><a:rPr lang="ja-JP" altLang="en-US" sz="{1}"{2}><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:rPr><a:t>{3}</a:t></a:r></a:p>' -f $Align, $Size, $bold, (ConvertTo-XmlText ([string]$line))))
+        }
+        return $sb.ToString()
+    }
+    $name = ConvertTo-XmlText ([string]$Shape.Name)
+    if ($Shape.Type -eq 'Arrow') {
+        $x1 = [int]$Shape.From[0]; $y1 = [int]$Shape.From[1]; $x2 = [int]$Shape.To[0]; $y2 = [int]$Shape.To[1]
+        $flip = ''
+        if ($x1 -gt $x2) { $flip += ' flipH="1"' }
+        if ($y1 -gt $y2) { $flip += ' flipV="1"' }
+        $cx = [Math]::Min($x1, $x2); $cy = [Math]::Min($y1, $y2)
+        $connect = ''
+        if ($null -ne $Shape.StartShape) { $connect += '<a:stCxn id="{0}" idx="{1}"/>' -f $Shape.StartShape, $Shape.StartSite }
+        if ($null -ne $Shape.EndShape) { $connect += '<a:endCxn id="{0}" idx="{1}"/>' -f $Shape.EndShape, $Shape.EndSite }
+        $dash = ''
+        if ($Shape.Dash) { $dash = '<a:prstDash val="dash"/>' }
+        $head = ''
+        if ($Shape.Head) { $head = '<a:headEnd type="triangle"/>' }
+        return ('<xdr:twoCellAnchor>{0}<xdr:cxnSp macro=""><xdr:nvCxnSpPr><xdr:cNvPr id="{1}" name="{2}"/><xdr:cNvCxnSpPr>{3}</xdr:cNvCxnSpPr></xdr:nvCxnSpPr><xdr:spPr><a:xfrm{4}><a:off x="{5}" y="{6}"/><a:ext cx="{7}" cy="{8}"/></a:xfrm><a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom><a:ln w="12700"><a:solidFill><a:srgbClr val="404040"/></a:solidFill>{9}{10}<a:tailEnd type="triangle"/></a:ln></xdr:spPr></xdr:cxnSp><xdr:clientData/></xdr:twoCellAnchor>' -f
+            (& $anchor $cx $cy ([Math]::Max($x1, $x2)) ([Math]::Max($y1, $y2))), $Shape.Id, $name, $connect, $flip, ($cx * $CellEmu), ($cy * $CellEmu), ([Math]::Abs($x2 - $x1) * $CellEmu), ([Math]::Abs($y2 - $y1) * $CellEmu), $dash, $head)
+    }
+    $c = [int]$Shape.Col; $r = [int]$Shape.Row; $w = [int]$Shape.Width; $h = [int]$Shape.Height
+    $xfrm = '<a:xfrm><a:off x="{0}" y="{1}"/><a:ext cx="{2}" cy="{3}"/></a:xfrm>' -f ($c * $CellEmu), ($r * $CellEmu), ($w * $CellEmu), ($h * $CellEmu)
+    if ($Shape.Type -eq 'Text') {
+        return ('<xdr:twoCellAnchor>{0}<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="{1}" name="{2}"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr><xdr:spPr>{3}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow="overflow" horzOverflow="overflow" wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" rtlCol="0" anchor="ctr"/><a:lstStyle/>{4}</xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>' -f
+            (& $anchor $c $r ($c + $w) ($r + $h)), $Shape.Id, $name, $xfrm, (& $paragraphs $Shape.Text $(if ($Shape.Align) { $Shape.Align } else { 'ctr' }) 900 $false))
+    }
+    $fill = '<a:noFill/>'
+    if ($Shape.Fill) { $fill = '<a:solidFill><a:srgbClr val="{0}"/></a:solidFill>' -f $Shape.Fill }
+    $lineColor = '404040'
+    if ($Shape.Line) { $lineColor = $Shape.Line }
+    $dash = ''
+    if ($Shape.Dash) { $dash = '<a:prstDash val="dash"/>' }
+    $text = (& $paragraphs $Shape.Text 'ctr' 1000 $true) + (& $paragraphs $Shape.Body 'l' 900 $false)
+    if (-not $text) { $text = '<a:p><a:endParaRPr lang="ja-JP" sz="1000"/></a:p>' }
+    return ('<xdr:twoCellAnchor>{0}<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="{1}" name="{2}"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr>{3}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>{4}<a:ln w="12700"><a:solidFill><a:srgbClr val="{5}"/></a:solidFill>{6}</a:ln></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow="clip" horzOverflow="clip" wrap="square" lIns="45720" tIns="18288" rIns="45720" bIns="18288" rtlCol="0" anchor="ctr"/><a:lstStyle/>{7}</xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>' -f
+        (& $anchor $c $r ($c + $w) ($r + $h)), $Shape.Id, $name, $xfrm, $fill, $lineColor, $dash, $text)
+}
+
 function Export-Workbook {
     #     複数シートの表を xlsx に書き出す（Excel 不要）。各シートは見出し行の固定とオートフィルター付き。
     #     Sheets: @(@{ Name; Columns = @(@{ Header; Width }); Rows = @(@{ Values = @(...); Link = @{ Column; Path; Location; Tooltip } }) })
@@ -795,6 +855,8 @@ function Export-Workbook {
     #       Values に @{ Runs = @(@{ Text; Style }) } を渡すと、部分ごとに書式を付けた文字列にする（Style: Deleted / Inserted / なし）
     #       Link は Values の Column 番目（0 始まり）のセルに付ける外部リンク。Path のファイルの Location（'シート'!セル）を開く
     #       Charts: そのシートの表から作るグラフ（ConvertTo-ChartXml）。表の右に縦に並べて置く
+    #       Shapes: 図形（四角・文字・矢印。ConvertTo-ShapeAnchorXml）。Grid: @{ ColumnWidth; RowHeight } で、列と行を同じ大きさのます目にし、
+    #       枠線を消す（図のシート）。Columns が空のシートは表を書かず、Title があれば A1 に書く
     param($Sheets, [string] $FilePath)
 
     $font = '<sz val="10"/><name val="游ゴシック"/><family val="3"/><charset val="128"/>'
@@ -806,8 +868,10 @@ function Export-Workbook {
     $index = 0
     foreach ($s in $Sheets) {
         $index++
-        $colCount = $s.Columns.Count
-        $lastCol  = ConvertTo-ColumnName $colCount
+        $colCount = @($s.Columns | Where-Object { $_ }).Count
+        $hasTable = $colCount -gt 0
+        $lastCol  = 'A'
+        if ($hasTable) { $lastCol = ConvertTo-ColumnName $colCount }
         $rowCount = $s.Rows.Count + 1
 
         $xml   = New-Object System.Text.StringBuilder
@@ -817,16 +881,30 @@ function Export-Workbook {
         [void]$xml.Append(('<dimension ref="A1:{0}{1}"/>' -f $lastCol, $rowCount))
         $tab = ''
         if ($index -eq 1) { $tab = ' tabSelected="1"' }
-        [void]$xml.Append(('<sheetViews><sheetView{0} workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>' -f $tab))
-        [void]$xml.Append('<sheetFormatPr defaultRowHeight="18"/><cols>')
-        for ($i = 0; $i -lt $colCount; $i++) {
-            [void]$xml.Append(('<col min="{0}" max="{0}" width="{1}" customWidth="1"/>' -f ($i + 1), $s.Columns[$i].Width))
+        if ($s.Grid) {
+            # 図のシート: 枠線を消し、列と行を同じ大きさのます目にする（図形はます目の数で置く）
+            [void]$xml.Append(('<sheetViews><sheetView showGridLines="0"{0} workbookViewId="0"/></sheetViews>' -f $tab))
+            [void]$xml.Append(('<sheetFormatPr defaultColWidth="{0}" defaultRowHeight="{1}" customHeight="1"/>' -f ([double]$s.Grid.ColumnWidth).ToString('R', $invariant), ([double]$s.Grid.RowHeight).ToString('R', $invariant)))
         }
-        [void]$xml.Append('</cols><sheetData><row r="1">')
-        for ($i = 0; $i -lt $colCount; $i++) {
-            [void]$xml.Append(('<c r="{0}1" s="1" t="inlineStr"><is><t>{1}</t></is></c>' -f (ConvertTo-ColumnName ($i + 1)), (ConvertTo-XmlText $s.Columns[$i].Header)))
+        else {
+            [void]$xml.Append(('<sheetViews><sheetView{0} workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>' -f $tab))
+            [void]$xml.Append('<sheetFormatPr defaultRowHeight="18"/>')
         }
-        [void]$xml.Append('</row>')
+        if ($hasTable) {
+            [void]$xml.Append('<cols>')
+            for ($i = 0; $i -lt $colCount; $i++) {
+                [void]$xml.Append(('<col min="{0}" max="{0}" width="{1}" customWidth="1"/>' -f ($i + 1), $s.Columns[$i].Width))
+            }
+            [void]$xml.Append('</cols><sheetData><row r="1">')
+            for ($i = 0; $i -lt $colCount; $i++) {
+                [void]$xml.Append(('<c r="{0}1" s="1" t="inlineStr"><is><t>{1}</t></is></c>' -f (ConvertTo-ColumnName ($i + 1)), (ConvertTo-XmlText $s.Columns[$i].Header)))
+            }
+            [void]$xml.Append('</row>')
+        }
+        else {
+            [void]$xml.Append('<sheetData>')
+            if ($s.Title) { [void]$xml.Append(('<row r="1"><c r="A1" t="inlineStr"><is><t>{0}</t></is></c></row>' -f (ConvertTo-XmlText $s.Title))) }
+        }
         [void]$rels.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">')
 
         $r = 1; $linkCount = 0
@@ -873,12 +951,14 @@ function Export-Workbook {
             }
         }
         [void]$xml.Append('</sheetData>')
-        [void]$xml.Append(('<autoFilter ref="A1:{0}{1}"/>' -f $lastCol, $rowCount))
+        if ($hasTable) { [void]$xml.Append(('<autoFilter ref="A1:{0}{1}"/>' -f $lastCol, $rowCount)) }
         if ($linkCount -gt 0) { [void]$xml.Append('<hyperlinks>').Append($links.ToString()).Append('</hyperlinks>') }
         [void]$xml.Append('<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="landscape"/>')
         $charts = @($s.Charts | Where-Object { $_ })
-        if ($charts.Count -gt 0 -and $s.Rows.Count -gt 0) {
-            # グラフは描画（drawing）に置き、描画からグラフを参照する
+        if ($s.Rows.Count -eq 0) { $charts = @() }
+        $shapes = @($s.Shapes | Where-Object { $_ })
+        if ($charts.Count -gt 0 -or $shapes.Count -gt 0) {
+            # グラフと図形は描画（drawing）に置き、描画からグラフを参照する
             $drawingCount++
             $anchors = New-Object System.Text.StringBuilder
             $drawingRels = New-Object System.Text.StringBuilder
@@ -897,6 +977,7 @@ function Export-Workbook {
                 [void]$anchors.Append(('<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId{2}"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>' -f ($ci + 2), (ConvertTo-XmlText $chart.Title), ($ci + 1)))
                 $top += $height + 1
             }
+            foreach ($shape in $shapes) { [void]$anchors.Append((ConvertTo-ShapeAnchorXml $shape)) }
             [void]$drawingRels.Append('</Relationships>')
             $chartParts["xl/drawings/drawing$drawingCount.xml"] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' + $anchors.ToString() + '</xdr:wsDr>'
             $chartParts["xl/drawings/_rels/drawing$drawingCount.xml.rels"] = $drawingRels.ToString()
@@ -909,7 +990,7 @@ function Export-Workbook {
         [void]$rels.Append('</Relationships>')
 
         $sheetEntries.Add([pscustomobject]@{ Name = $s.Name; Xml = $xml.ToString(); Rels = $rels.ToString(); HasLinks = ($linkCount -gt 0 -or $hasDrawing) })
-        [void]$definedNames.Append(('<definedName name="_xlnm._FilterDatabase" localSheetId="{0}" hidden="1">''{1}''!$A$1:${2}${3}</definedName>' -f ($index - 1), (ConvertTo-XmlText $s.Name.Replace("'", "''")), $lastCol, $rowCount))
+        if ($hasTable) { [void]$definedNames.Append(('<definedName name="_xlnm._FilterDatabase" localSheetId="{0}" hidden="1">''{1}''!$A$1:${2}${3}</definedName>' -f ($index - 1), (ConvertTo-XmlText $s.Name.Replace("'", "''")), $lastCol, $rowCount)) }
     }
 
     $ct = New-Object System.Text.StringBuilder
@@ -932,7 +1013,7 @@ function Export-Workbook {
     $parts = [ordered]@{
         '[Content_Types].xml' = $ct.ToString()
         '_rels/.rels' = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'
-        'xl/workbook.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets>{0}</sheets><definedNames>{1}</definedNames></workbook>' -f $wbSheets.ToString(), $definedNames.ToString())
+        'xl/workbook.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets>{0}</sheets>{1}</workbook>' -f $wbSheets.ToString(), $(if ($definedNames.Length -gt 0) { '<definedNames>' + $definedNames.ToString() + '</definedNames>' } else { '' }))
         'xl/_rels/workbook.xml.rels' = $wbRels.ToString()
         # スタイル 0:標準 1:見出し 2:折り返し・上詰め 3:リンク
         'xl/styles.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="176" formatCode="yyyy/mm/dd"/></numFmts><fonts count="3"><font>{0}</font><font><b/>{0}</font><font><u/><sz val="10"/><color rgb="FF0563C1"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFBFBFBF"/></left><right style="thin"><color rgb="FFBFBFBF"/></right><top style="thin"><color rgb="FFBFBFBF"/></top><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="176" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf></cellXfs><cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles></styleSheet>' -f $font)
