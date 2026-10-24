@@ -149,7 +149,7 @@ Test-Case 'Invoke-DesignReview: 3 形式の回答を取り込んでレビュー�
 
     $report = Join-Path $dir 'レビュー結果.xlsx'
     $f = Read-XlsxSheet -Path $report -Index 1
-    Assert-Equal @('指摘一覧', '観点消化状況', '依頼一覧') $f.Sheets
+    Assert-Equal @('指摘一覧', '観点消化状況', '依頼一覧', '観点別の採用率') $f.Sheets
     Assert-Equal 11 $f.Rows.Count '見出し＋指摘 10 件（AI 7 件・ツール 3 件）'
     # 設計書ごとに重要度の高い順。ツールの指摘（同梱の観点表では初期値の空欄が 3 か所）も入る
     Assert-Equal @('S01', 'S06', 'C03', 'C02', 'S08', 'S03', 'S03', 'S03', 'T03', 'T06') @(2..11 | ForEach-Object { $f.Rows[$_]['E'] })
@@ -402,6 +402,47 @@ W02 | NG | 本文!段落 1 | 受注番号 | 桁数の単位が分からない | 
     New-WordDoc (Join-Path $old 'BD01_基本設計書_受注管理.docx') @('1. 概要', '受注を登録する画面である。', '以上')
     $text = Get-HostText { & $Review -Path $design -Checklist $csv -OutDir (Join-Path $dir 'review2') -PromptOnly -Baseline $old }
     Assert-Match $text '前の版と比べた設計書: Word（全体） 1'
+}
+
+Test-Case 'Invoke-DesignReview: 作り直しても指摘一覧の対応要否などを引き継ぎ、対応要否から観点ごとの AI の指摘の採用率を出す' {
+    $dir = New-TestDir
+    $null = & $Review -Path $designDir -OutDir $dir -PromptOnly 6>$null 3>$null
+    Write-Answer $dir 'R002' @'
+S01 | NG | 画面項目定義!AB11 | （空欄） | 受注ステータスの桁数が空欄 | 入力項目には桁数が必要
+S06 | NG | イベント定義!P7 | 1. 入力チェックを行う | 0 件のときの動きが無い | 異常時の記載
+S06 | 要確認 | イベント定義!P8 | 検索条件を初期表示の状態に戻し | クリア後の一覧の扱い | 異常時の記載
+C03 | NG | イベント定義!J9 | 新規登録ボタン押下 | 「押下」と「クリック」が混在 | 用語の統一
+'@
+    $report = Join-Path $dir 'レビュー結果.xlsx'
+    $null = & $Review -OutDir $dir -ImportOnly 6>$null 3>$null
+    $f = Read-XlsxSheet -Path $report -Index 1
+    Assert-Equal @('S01', 'S06', 'S06', 'C03', 'S03') @(2..6 | ForEach-Object { $f.Rows[$_]['E'] })
+    # 人が対応要否などを書く（O: 対応要否・P: 対応状況・Q: 対応者・R: 対応内容）
+    Set-CellValues $report '指摘一覧' @{ O2 = '要'; P2 = '完了'; Q2 = '山田'; R2 = "型と桁数を書いた`n（v1.1）"; O3 = '不要'; O4 = '不要'; O6 = '要' }
+
+    # 回答を足して作り直しても、同じ指摘の値は引き継ぐ
+    Write-Answer $dir 'R003' "C02 | NG | イベント定義!P11 | 受注番号を採番する | 連番の採番単位が不明 | 解釈が分かれる"
+    $text = Get-HostText { & $Review -OutDir $dir -ImportOnly }
+    Assert-Match $text '前のレビュー結果の対応要否・対応状況・対応者・対応内容を 4 件引き継ぎました'
+    Assert-Match $text 'AI の指摘の採用率（対応要否から）: 要 1・不要 2（33%）'
+    Assert-Match $text '不要が多い観点: S06 0/2'
+    $f = Read-XlsxSheet -Path $report -Index 1
+    $rows = @(2..($f.Rows.Count) | ForEach-Object { $r = $f.Rows[$_]; '{0}|{1}|{2}|{3}|{4}|{5}' -f $r['C'], $r['E'], $r['O'], $r['P'], $r['Q'], ([string]$r['R']).Replace("`n", '/') })
+    Assert-True ($rows -contains 'AI|S01|要|完了|山田|型と桁数を書いた/（v1.1）') ($rows -join "`n")
+    Assert-Equal 2 @($rows | Where-Object { $_ -like 'AI|S06|不要|*' }).Count
+    Assert-True ($rows -contains 'ツール（初期値）|S03|要|||') 'ツールの指摘も引き継ぐ'
+    Assert-True ($rows -contains 'AI|C02||||') '新しい指摘は空欄'
+
+    $a = Read-XlsxSheet -Path $report -Index 4
+    Assert-Equal '観点ID|AI の指摘|要|不要|未記入|採用率|ツールの指摘' ((@('A', 'D', 'E', 'F', 'G', 'H', 'I') | ForEach-Object { $a.Rows[1][$_] }) -join '|')
+    $byId = @{}
+    foreach ($r in @($a.Rows.Keys | Where-Object { $_ -gt 1 })) { $byId[$a.Rows[$r]['A']] = $a.Rows[$r] }
+    Assert-Equal @('C02', 'C03', 'S01', 'S03', 'S06') @($a.Rows.Keys | Where-Object { $_ -gt 1 } | Sort-Object | ForEach-Object { $a.Rows[$_]['A'] }) '観点表の順'
+    Assert-Equal '1|1|0|0|1|0' ('{0}|{1}|{2}|{3}|{4}|{5}' -f $byId['S01']['D'], $byId['S01']['E'], $byId['S01']['F'], $byId['S01']['G'], $byId['S01']['H'], $byId['S01']['I'])
+    Assert-Equal '2|0|2|0|0' ('{0}|{1}|{2}|{3}|{4}' -f $byId['S06']['D'], $byId['S06']['E'], $byId['S06']['F'], $byId['S06']['G'], $byId['S06']['H'])
+    Assert-Match $byId['S06']['J'] '^不要が多い観点です'
+    Assert-Equal '0|3' ('{0}|{1}' -f $byId['S03']['D'], $byId['S03']['I']) 'ツールの指摘は採用率に数えない'
+    Assert-Match $byId['C02']['J'] '対応要否（要・不要）を書くと'
 }
 
 Test-Case 'Invoke-DesignReview: 設計書・観点が変わった依頼の古い回答は退避する' {

@@ -1233,6 +1233,59 @@ function Resolve-Quote {
     return (& $result '見つからない' '' '' '引用が設計書に見つかりません（AI の誤った指摘かもしれません）')
 }
 
+# ---------------------------------------------------------------- 人が書く列（対応要否など）
+
+
+# 指摘一覧のうち、人が書く列。レビュー結果を作り直しても消さない
+$responseColumns = @('対応要否', '対応状況', '対応者', '対応内容')
+
+function Get-FindingKey {
+    #     指摘を見分けるキー（判定元・観点ID・設計書・場所・指摘内容。空白・改行の違いは見ない）
+    param([string] $Source, [string] $PointId, [string] $Document, [string] $Location, [string] $Finding)
+    return (@($Source, $PointId, $Document, $Location, $Finding) | ForEach-Object { ([string]$_).Replace('↵', '') -replace '\s', '' }) -join '|'
+}
+
+function Read-PreviousResponses {
+    #     前のレビュー結果（指摘一覧）の、人が書く列を読む。
+    #     戻り値: 指摘のキー（Get-FindingKey）→ 値（列名 → 文字）の待ち行列（同じキーが複数あれば上から順）
+    param([string] $FilePath)
+    $result = @{}
+    if (-not (Test-Path -LiteralPath $FilePath)) { return $result }
+    $rows = @{}
+    foreach ($h in @(& $searchScript -Pattern '\S' -Path ([System.Management.Automation.WildcardPattern]::Escape($FilePath)) -Target Value -SheetNamePattern '^指摘一覧$' 6>$null 3>$null)) {
+        $m = [regex]::Match([string]$h.Cell, '^([A-Z]+)(\d+)$')
+        if (-not $m.Success) { continue }
+        $r = [int]$m.Groups[2].Value
+        if (-not $rows.ContainsKey($r)) { $rows[$r] = @{} }
+        $rows[$r][$m.Groups[1].Value] = ([string]$h.Text).Replace('↵', "`n")
+    }
+    if (-not $rows.ContainsKey(1)) { return $result }
+    $col = @{}
+    foreach ($c in $rows[1].Keys) { $col[$rows[1][$c]] = $c }
+    foreach ($r in @($rows.Keys | Where-Object { $_ -gt 1 } | Sort-Object)) {
+        $get = { param([string] $Name) if ($col.ContainsKey($Name) -and $rows[$r].ContainsKey($col[$Name])) { $rows[$r][$col[$Name]] } else { '' } }
+        $values = @{}
+        foreach ($name in $responseColumns) { $v = & $get $name; if ($v) { $values[$name] = $v } }
+        if ($values.Count -eq 0) { continue }
+        # 判定元の列の無い、前の版のツールのレビュー結果は、どれも AI の指摘
+        $source = & $get '判定元'
+        if (-not $col.ContainsKey('判定元')) { $source = 'AI' }
+        $key = Get-FindingKey $source (& $get '観点ID') (& $get '設計書') (& $get '場所') (& $get '指摘内容')
+        if (-not $result.ContainsKey($key)) { $result[$key] = New-Object System.Collections.Generic.Queue[object] }
+        $result[$key].Enqueue($values)
+    }
+    return $result
+}
+
+function Get-ResponseKind {
+    #     対応要否の値を「要」「不要」に分ける（どちらでもなければ空）
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant()
+    if ($t -match '^(要|必要|対応要|対応する|する|あり|有|○|〇|◯|Y|YES|1)$') { return '要' }
+    if ($t -match '^(不要|対応不要|対応しない|しない|なし|無|×|✕|N|NO|0|対象外|取下げ|取り下げ|誤指摘|重複)$') { return '不要' }
+    return ''
+}
+
 # ---------------------------------------------------------------- 依頼（プロンプト）の作成
 
 
@@ -1677,6 +1730,11 @@ if ($toolResult) {
 
 # 設計書ごとに重要度の高い順。同じ観点では AI の指摘、ツールの指摘の順（読んだ順）
 $sorted = $findings | Sort-Object @{ e = { $_.Request.Relative } }, @{ e = { $s = $pointById[$_.Entry.PointId].Severity; if ($severityOrder.ContainsKey($s)) { $severityOrder[$s] } else { 9 } } }, @{ e = { $_.Entry.PointId } }, @{ e = { $_.Seq } }
+# 前のレビュー結果に人が書いた対応要否などは、同じ指摘に引き継ぐ
+$previous = Read-PreviousResponses $reportPath
+$keptCount = 0
+# 観点ID → @{ Ai; Yes; No; Tool }（AI の指摘の採用率）
+$adoption = @{}
 # AI の指摘の引用を設計書のセルと突き合わせ、場所が違えば引用のあるセルに直す
 $quoteCells = @{}
 $quoteCounts = [ordered]@{}
@@ -1711,7 +1769,21 @@ foreach ($f in $sorted) {
     }
     if ($location -and -not $loc -and -not $note) { $note = '場所のシート名・セル番地を設計書で確認してください' }
     if ($loc -and (Test-WordPath $f.Request.File)) { $location = '{0}!{1}' -f $loc.Sheet, $loc.Cell }
-    $row = @{ Values = @($n, $f.Entry.Verdict, $f.Source, $p.Severity, $p.Id, $p.Category, $p.Point, $f.Request.Relative, $location, $quote, $check, $f.Entry.Finding, $f.Entry.Reason, $f.Request.Id, '', '', '', '', $note) }
+    $kept = @('', '', '', '')
+    $key = Get-FindingKey $f.Source $p.Id $f.Request.Relative $location $f.Entry.Finding
+    if ($previous.ContainsKey($key) -and $previous[$key].Count -gt 0) {
+        $v = $previous[$key].Dequeue()
+        $kept = @($responseColumns | ForEach-Object { if ($v.ContainsKey($_)) { $v[$_] } else { '' } })
+        $keptCount++
+    }
+    if (-not $adoption.ContainsKey($p.Id)) { $adoption[$p.Id] = @{ Ai = 0; Yes = 0; No = 0; Tool = 0 } }
+    if ($f.Source -eq 'AI') {
+        $adoption[$p.Id].Ai++
+        $kind = Get-ResponseKind $kept[0]
+        if ($kind -eq '要') { $adoption[$p.Id].Yes++ } elseif ($kind -eq '不要') { $adoption[$p.Id].No++ }
+    }
+    else { $adoption[$p.Id].Tool++ }
+    $row = @{ Values = @($n, $f.Entry.Verdict, $f.Source, $p.Severity, $p.Id, $p.Category, $p.Point, $f.Request.Relative, $location, $quote, $check, $f.Entry.Finding, $f.Entry.Reason, $f.Request.Id, $kept[0], $kept[1], $kept[2], $kept[3], $note) }
     if ($loc -and (Test-WordPath $f.Request.File)) {
         # Word の文書は開くだけ（セルの場所が無い）
         $row.Link = @{ Column = 8; Path = $f.Request.File; Location = '' }
@@ -1758,6 +1830,20 @@ foreach ($cv in @($coverage.Values | Sort-Object @{ e = { $fileOrder[$_.File] } 
     $statusRows.Add(@{ Values = @($cv.Relative, $p.Id, $p.Category, $p.Point, $p.Severity, $verdict, $ng, ($cv.Requests -join ', ')); Link = @{ Column = 0; Path = $cv.File; Location = $location } })
 }
 
+# 観点ごとの、AI の指摘の採用率（人が書いた対応要否から。不要が多い観点は判定基準を見直す）
+$adoptionRows = New-Object System.Collections.Generic.List[object]
+foreach ($p in $points) {
+    if (-not $adoption.ContainsKey($p.Id)) { continue }
+    $a = $adoption[$p.Id]
+    $decided = $a.Yes + $a.No
+    $rate = ''
+    if ($decided -gt 0) { $rate = [math]::Round($a.Yes / $decided, 3) }
+    $hint = ''
+    if ($a.Ai -gt 0 -and $decided -eq 0) { $hint = '対応要否（要・不要）を書くと、採用率が出ます' }
+    elseif ($decided -gt 0 -and $a.No -ge 2 -and $a.Yes / $decided -lt 0.5) { $hint = '不要が多い観点です。判定基準を具体的にするか、確かめ方をツールにできないか見直してください' }
+    $adoptionRows.Add(@{ Values = @($p.Id, $p.Category, $p.Point, $a.Ai, $a.Yes, $a.No, ($a.Ai - $decided), $rate, $a.Tool, $hint) })
+}
+
 $sheets = @(
     @{
         Name = '指摘一覧'
@@ -1781,6 +1867,14 @@ $sheets = @(
             @{ Header = '依頼No'; Width = 8 }, @{ Header = '設計書'; Width = 45 }, @{ Header = '分割'; Width = 6 }, @{ Header = '観点ID'; Width = 40 },
             @{ Header = '文字数'; Width = 8 }, @{ Header = '状態'; Width = 9 }, @{ Header = 'プロンプト'; Width = 18 })
         Rows = $requestRows
+    },
+    @{
+        Name = '観点別の採用率'
+        Columns = @(
+            @{ Header = '観点ID'; Width = 8 }, @{ Header = '分類'; Width = 10 }, @{ Header = '観点'; Width = 40 }, @{ Header = 'AI の指摘'; Width = 9 },
+            @{ Header = '要'; Width = 6 }, @{ Header = '不要'; Width = 6 }, @{ Header = '未記入'; Width = 7 }, @{ Header = '採用率'; Width = 8 },
+            @{ Header = 'ツールの指摘'; Width = 10 }, @{ Header = '見方'; Width = 50 })
+        Rows = $adoptionRows
     }
 )
 
@@ -1801,6 +1895,14 @@ if ($quoteCounts.Count -gt 0) {
     Write-Host ("AI の指摘の引用: {0}" -f (@($quoteCounts.Keys | ForEach-Object { '{0} {1}' -f $_, $quoteCounts[$_] }) -join '・'))
     if ($quoteCounts.Contains('見つからない')) { Write-Host '  引用が見つからない指摘は、AI の誤りかもしれません。指摘一覧の「引用の確認」で絞り込んで確かめてください' }
 }
+if ($keptCount -gt 0) { Write-Host ("前のレビュー結果の対応要否・対応状況・対応者・対応内容を {0} 件引き継ぎました" -f $keptCount) }
+$yes = 0; $no = 0
+foreach ($a in $adoption.Values) { $yes += $a.Yes; $no += $a.No }
+if ($yes + $no -gt 0) {
+    Write-Host ("AI の指摘の採用率（対応要否から）: 要 {0}・不要 {1}（{2:0}%）" -f $yes, $no, ($yes * 100.0 / ($yes + $no)))
+    $low = @($adoptionRows | Where-Object { $_.Values[9] -like '不要が多い*' } | ForEach-Object { '{0} {1}/{2}' -f $_.Values[0], $_.Values[4], ($_.Values[4] + $_.Values[5]) })
+    if ($low.Count -gt 0) { Write-Host ("  不要が多い観点: {0}（観点別の採用率のシート）" -f ($low -join '・')) }
+}
 Write-Host "レビュー結果: $reportPath"
 
 # .SYNOPSIS
@@ -1812,7 +1914,7 @@ Write-Host "レビュー結果: $reportPath"
 #        シート単位で分割します。
 #     2. 対話モード（既定）では、プロンプトをクリップボードに入れて待ちます。Copilot に貼り付けて送信し、
 #        回答をコピーすると、回答を読み取って保存し、次の依頼に進みます（Enter は要りません。-AnswerMode）。
-#     3. 全回答から「レビュー結果.xlsx」（指摘一覧・観点消化状況・依頼一覧）を作ります。
+#     3. 全回答から「レビュー結果.xlsx」（指摘一覧・観点消化状況・依頼一覧・観点別の採用率）を作ります。
 #        指摘の場所は、クリックすると設計書の該当セルが開くリンクになります。
 #        AI には指摘ごとに場所のセルの文字（引用）も書かせ、設計書と突き合わせます。場所が違えば引用のあるセルに直し、
 #        引用が設計書に無ければ「見つからない」と知らせます（指摘一覧の「引用の確認」）。
@@ -1837,6 +1939,8 @@ Write-Host "レビュー結果: $reportPath"
 #       カラムの型・桁数         カラムの型の空欄と、桁数・小数の要る型（tools\ddl\型の対応.csv）の桁数・小数の空欄
 #
 #     途中で中断しても、回答済みの分は保存され、次回は続きから再開します。
+#     レビュー結果を作り直しても、指摘一覧に人が書いた対応要否・対応状況・対応者・対応内容は、同じ指摘に引き継ぎます。
+#     対応要否（要・不要）からは、観点ごとの AI の指摘の採用率を出します（不要が多い観点は、判定基準を見直す目安）。
 #     設計書の読み取りには同じフォルダの Search-Excel.ps1 を使います（Excel 不要）。
 #
 # .PARAMETER Path
