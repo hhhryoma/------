@@ -14,25 +14,6 @@ function Get-ConsistencyKeys {
     return @($Issues | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Level, $_.Item, $_.File, $_.Location } | Sort-Object)
 }
 
-function Set-CellValues {
-    #     ブックのシートのセルの値を書き換える（テスト用。$null で空にする）
-    param([string] $File, [string] $Sheet, [hashtable] $Values)
-    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
-    $pkg = Open-ZipPackage $File
-    try {
-        $part = (Get-WorkbookSheetParts $pkg).Sheets[$Sheet]
-        $doc = Read-PartXmlForEdit $pkg $part
-        foreach ($ref in $Values.Keys) {
-            $row = [int]($ref -replace '^[A-Z]+', '')
-            $rowEl = Get-SheetRowElement $doc $row -Create
-            Set-SheetCellValue $doc (Get-SheetCellElement $doc $rowEl $row (Get-ColumnIndex $ref) -Create) $Values[$ref]
-        }
-        $changes = @{ $part.ToLowerInvariant() = (ConvertTo-XmlString $doc) }
-    }
-    finally { $pkg.Zip.Dispose() }
-    Save-ZipPackage -FilePath $File -Changes $changes
-}
-
 Test-Case 'Test-DesignConsistency: 参照が整合している詳細設計サンプルでは指摘しない' {
     $issues = Invoke-Consistency @{ Path = $sampleDir }
     Assert-Equal 0 $issues.Count ((Get-ConsistencyKeys $issues) -join ', ')
@@ -84,6 +65,9 @@ Test-Case 'Test-DesignConsistency: 参照先なし・重複定義・一覧との
             '「Ｔ_ORDER.ORDER_NO」は、定義では「T_ORDER.ORDER_NO」と書かれています（全角・半角や大文字・小文字）')) {
         Assert-True ($details -contains $expected) "指摘がありません: $expected"
     }
+    # 指摘の Kind は定義・参照の種類（Invoke-DesignReview の「参照先なし（メッセージ）」などで使う）
+    Assert-Equal @('カラム', 'メッセージ', 'コード', 'カラム', 'テーブル') @($issues | Where-Object Item -eq '参照先なし' | ForEach-Object { $_.Kind })
+    Assert-Equal @('画面', '画面', 'テーブル') @($issues | Where-Object Item -eq '一覧との違い' | ForEach-Object { $_.Kind })
 }
 
 Test-Case 'Test-DesignConsistency: 属性の違い（桁数・型・必須と既定値）と、どこからも参照されていない定義を見つける' {

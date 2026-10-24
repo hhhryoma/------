@@ -179,6 +179,13 @@ def make_review_fixtures():
     src = os.path.join(REPO, "tools", "review-checklists", "詳細設計レビュー観点.xlsx")
     wb = openpyxl.load_workbook(src)
     ws = wb.active
+    # 確かめ方・ツールの確認（I・J 列）と、ツールだけで確かめる C04（5 行目）の無い、前からの書式の観点表にする
+    # （確かめ方・ツールの確認のチェックは、テストの中で作る CSV の観点表で確かめる）
+    assert ws["A5"].value == "C04"
+    ws.delete_rows(5)
+    ws.delete_cols(9, 2)
+    ws.data_validations.dataValidation = [dv for dv in ws.data_validations.dataValidation if not str(dv.sqref).startswith("I")]
+    ws.auto_filter.ref = "A1:H%d" % ws.max_row
     # 列: A観点ID B分類 C観点 D判定基準 E重要度 F対象設計書 G参照設計書 H有効
     ws["A3"] = "s01"                                   # 5 行目の S01 と大文字小文字違いの重複
     ws["C4"] = None                                    # 観点が空欄

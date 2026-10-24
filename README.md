@@ -50,7 +50,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 
 | ツール | できること | Excel | 「送る」 |
 | --- | --- | --- | --- |
-| [Invoke-DesignReview.ps1](tools/README.md#invoke-designreviewps1) | 設計書を観点表に沿って Microsoft 365 Copilot にレビューさせ、指摘一覧にまとめる | 不要 | － |
+| [Invoke-DesignReview.ps1](tools/README.md#invoke-designreviewps1) | 設計書を観点表に沿って Microsoft 365 Copilot にレビューさせ（数える・突き合わせるだけの観点はツールで確かめ）、指摘一覧にまとめる | 不要 | － |
 | [Test-ExcelDeliverable.ps1](tools/README.md#test-exceldeliverableps1) | 提出前チェック（体裁・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・表紙と改訂履歴の版数の食い違い・スクリーンショットの縦横比の崩れや拡大しすぎ）。Word（.docx）の変更履歴・コメント・隠し文字の残りも。プロパティの個人名・ヘッダーのファイルの場所・表示の状態は `-Fix` で直せる | 不要 | 提出前チェック |
 | [Reset-ExcelView.ps1](tools/README.md#reset-excelviewps1) | 開いたときに先頭シートの A1 が表示される状態に一括で直す | 不要 | 表示を整える |
 | [Export-ExcelToPdf.ps1](tools/README.md#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える | 必要 ※2 | PDF にする |

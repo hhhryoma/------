@@ -94,6 +94,15 @@ Test-Case 'Compare-ReviewFindings: 人だけの指摘と AI だけの指摘か�
     Assert-Match $book.Rows[5]['J'] 'AI の指摘 2 件のうち 2 件が AI だけ'
     $text = Get-HostText { & $CompareFindings (Join-Path $dir 'ai.csv') (Join-Path $dir 'human.csv') -Checklist $checklist | Out-Null }
     Assert-Match $text '観点表への反映案: .*観点を足す 2'
+
+    # Invoke-DesignReview のツールの確認の指摘（判定元がツール）は、判定基準を見直す案に数えない
+    $lines = @(Get-Content -LiteralPath (Join-Path $dir 'ai.csv') -Encoding UTF8 | ForEach-Object {
+            if ($_ -like '設計書,*') { "$_,判定元" } elseif ($_ -like '*,S02') { "$_,ツール（入力チェックのメッセージ）" } else { "$_,AI" } })
+    $lines | Set-Content -LiteralPath (Join-Path $dir 'ai-tool.csv') -Encoding UTF8
+    $null = & $CompareFindings (Join-Path $dir 'ai-tool.csv') (Join-Path $dir 'human.csv') -Checklist $checklist -OutXlsx $out 6>$null
+    $book = Read-XlsxSheet -Path $out -Index 4
+    Assert-Equal @('判定基準を具体的にする', '観点を足す', '観点を足す') @(2..4 | ForEach-Object { $book.Rows[$_]['A'] })
+    Assert-Equal 4 $book.Rows.Count '判定基準を見直す案が無い'
 }
 
 Test-Case 'Compare-ReviewFindings: Get-Help でヘルプが表示される' {

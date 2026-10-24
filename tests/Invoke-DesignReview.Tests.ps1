@@ -3,6 +3,7 @@
 $Review = Join-Path $script:ToolsDir 'Invoke-DesignReview.ps1'
 $designDir = Join-Path $script:RepoRoot 'docs/design-sample'
 $brokenChecklist = Join-Path $script:Fixtures 'review/broken-checklist.xlsx'
+$consistencyDir = Join-Path $script:Fixtures 'consistency'
 
 function Get-Manifest {
     param([string] $OutDir)
@@ -40,7 +41,7 @@ $answerCode = @'
 C01 | OK | - | - | -
 C02 | NG | イベント定義!P11 | 連番の採番単位が不明 | 解釈が分かれる
 S01 | OK | - | - | -
-S04 | NG | 存在しないシート!A1 | 行追加ボタンの非活性条件 | テスト
+S08 | NG | 存在しないシート!A1 | 使用テーブルの記載 | テスト
 S05 | ○ | - | - | -
 ```
 '@
@@ -48,7 +49,8 @@ $answerTsv = "C01`tOK`t-`t-`t-`nC02`tOK`t-`t-`t-`nC03`tOK`t-`t-`t-`nT01`tOK`t-`t
 
 Test-Case 'Invoke-DesignReview: 同梱の観点表はチェックで問題なし' {
     $out = Get-HostText { & $Review -Path $designDir -CheckOnly }
-    Assert-Match $out '有効 27 観点'
+    Assert-Match $out '有効 28 観点'
+    Assert-Match $out '確かめ方: AI 14 観点・ツール 7 観点・両方 7 観点'
     Assert-Match $out '問題ありません'
 }
 
@@ -147,20 +149,135 @@ Test-Case 'Invoke-DesignReview: 3 形式の回答を取り込んでレビュー�
     $report = Join-Path $dir 'レビュー結果.xlsx'
     $f = Read-XlsxSheet -Path $report -Index 1
     Assert-Equal @('指摘一覧', '観点消化状況', '依頼一覧') $f.Sheets
-    Assert-Equal 8 $f.Rows.Count '見出し＋指摘 7 件'
-    # 設計書ごとに重要度の高い順
-    Assert-Equal @('S01', 'S06', 'C03', 'C02', 'S04', 'T03', 'T06') @(2..8 | ForEach-Object { $f.Rows[$_]['D'] })
+    Assert-Equal 11 $f.Rows.Count '見出し＋指摘 10 件（AI 7 件・ツール 3 件）'
+    # 設計書ごとに重要度の高い順。ツールの指摘（同梱の観点表では初期値の空欄が 3 か所）も入る
+    Assert-Equal @('S01', 'S06', 'C03', 'C02', 'S08', 'S03', 'S03', 'S03', 'T03', 'T06') @(2..11 | ForEach-Object { $f.Rows[$_]['E'] })
+    Assert-Equal @('AI', 'AI', 'AI', 'AI', 'AI', 'ツール（初期値）', 'ツール（初期値）', 'ツール（初期値）', 'AI', 'AI') @(2..11 | ForEach-Object { $f.Rows[$_]['C'] })
     Assert-Equal 'NG' $f.Rows[2]['B'] '**NG** は NG'
-    Assert-Equal 6 $f.Links.Count '存在しないシートの場所にはリンクを付けない'
+    Assert-Equal 9 $f.Links.Count '存在しないシートの場所にはリンクを付けない'
     Assert-True (@($f.Links | Where-Object { $_.Location -eq "'M_CUSTOMER'!A1" }).Count -eq 1) 'シート名だけの場所は A1'
-    Assert-Match $f.Rows[6]['P'] '場所のシート名・セル番地を設計書で確認'
+    Assert-Match $f.Rows[6]['Q'] '場所のシート名・セル番地を設計書で確認'
 
     $s = Read-XlsxSheet -Path $report -Index 2
     $verdicts = @($s.Rows.Keys | Where-Object { $_ -gt 1 } | ForEach-Object { $s.Rows[$_]['F'] })
-    Assert-Equal 5 @($verdicts | Where-Object { $_ -eq 'NG' }).Count 'NG'
+    Assert-Equal 7 @($verdicts | Where-Object { $_ -eq 'NG' }).Count 'NG'
     Assert-Equal 2 @($verdicts | Where-Object { $_ -eq '要確認' }).Count '要確認'
-    Assert-Equal 20 @($verdicts | Where-Object { $_ -eq 'OK' }).Count 'OK（○ も OK）'
-    Assert-Equal 41 @($verdicts | Where-Object { $_ -eq '未回答' }).Count '未回答'
+    Assert-Equal 34 @($verdicts | Where-Object { $_ -eq 'OK' }).Count 'OK（○ も OK。ツールだけの観点も）'
+    Assert-Equal 33 @($verdicts | Where-Object { $_ -eq '未回答' }).Count '未回答（両方の観点は、AI の回答が無ければ未回答）'
+}
+
+Test-Case 'Invoke-DesignReview: 確かめ方がツールの観点は AI に依頼せず、ツールで見つけた指摘を判定元「ツール（確認の名前）」で入れる' {
+    $dir = Copy-Fixture $designDir
+    $scr1 = Join-Path $dir 'DD02_画面設計書_SCR001_受注一覧.xlsx'
+    $scr2 = Join-Path $dir 'DD02_画面設計書_SCR002_受注登録.xlsx'
+    # 表紙の版数を改訂履歴と違えて、消し忘れの TBD と長音の無い「ユーザ」を書く
+    Set-CellValues $scr1 '表紙' @{ X23 = '1.1' }
+    Set-CellValues $scr1 '画面概要' @{ I9 = '受注担当者（ログインユーザ）。TBD' }
+    # 型・桁数の空欄、メッセージID の無い入力チェック、イベントの無いボタン、定義されていないメッセージ（希望納品日の初期値は「なし」にする）
+    Set-CellValues $scr2 '画面項目定義' @{ X7 = $null; AB12 = $null; AK18 = '必須（E0001）、範囲（1〜999）'; AF10 = 'なし'; C21 = 'CSV出力'; AK12 = '桁数（E0099）' }
+    # 処理概要の E0008 をメッセージ欄から消す
+    Set-CellValues $scr2 'イベント定義' @{ AU11 = 'Q0001, E0001, E0002, E0003, E0004, E0005, E0007, E0009, E0010, I0001' }
+    # 主キーと、CHAR の桁数・NUMERIC の小数を消す
+    Set-CellValues (Join-Path $dir 'DD03_テーブル定義書.xlsx') 'T_ORDER' @{ AC13 = $null; X15 = $null; AA20 = $null }
+
+    $out = Join-Path $dir 'review'
+    $null = & $Review -Path $dir -OutDir $out -PromptOnly 6>$null 3>$null
+    $prompt = [System.IO.File]::ReadAllText((Join-Path $out 'prompts/R002.txt'))
+    Assert-NotMatch $prompt '\nS02 \|' 'ツールだけの観点は AI に依頼しない'
+    Assert-Match $prompt '\nC01 \| 表紙と改訂履歴が記入されている \| [^\n]*（表紙・改訂履歴・ファイル名の版数と更新日の食い違いは、ツールで確かめるので指摘しなくてよい）\n'
+
+    # 依頼の一覧に設計書の一覧があるので、-ImportOnly だけでもツールで確かめる
+    $text = Get-HostText { & $Review -OutDir $out -ImportOnly }
+    Assert-Match $text 'ツールの確認: 指摘 14 件'
+    $f = Read-XlsxSheet -Path (Join-Path $out 'レビュー結果.xlsx') -Index 1
+    Assert-Equal 'No|判定|判定元|重要度|観点ID' ((@('A', 'B', 'C', 'D', 'E') | ForEach-Object { $f.Rows[1][$_] }) -join '|')
+    $scr1Name = 'DD02_画面設計書_SCR001_受注一覧.xlsx'
+    $scr2Name = 'DD02_画面設計書_SCR002_受注登録.xlsx'
+    Assert-Equal @(
+        "ツール（残っている文言）|C02|$scr1Name|画面概要!I9",
+        "ツール（版数）|C01|$scr1Name|表紙!X23",
+        "ツール（表記ゆれ）|C03|$scr1Name|画面概要!I9",
+        "ツール（参照先なし）|C04|$scr2Name|画面項目定義!AK12",
+        "ツール（入力項目の型・桁数）|S01|$scr2Name|画面項目定義!X7",
+        "ツール（入力項目の型・桁数）|S01|$scr2Name|画面項目定義!AB12",
+        "ツール（ボタンのイベント）|S04|$scr2Name|画面項目定義!C21",
+        "ツール（入力チェックのメッセージ）|S02|$scr2Name|画面項目定義!AK18",
+        "ツール（メッセージ欄）|S07|$scr2Name|イベント定義!AU11",
+        'ツール（初期値）|S03|DD02_画面設計書_SCR003_受注詳細.xlsx|画面項目定義!AF12',
+        'ツール（初期値）|S03|DD02_画面設計書_SCR003_受注詳細.xlsx|画面項目定義!AF13',
+        'ツール（主キー）|T01|DD03_テーブル定義書.xlsx|T_ORDER!AC12',
+        'ツール（カラムの型・桁数）|T02|DD03_テーブル定義書.xlsx|T_ORDER!X15',
+        'ツール（カラムの型・桁数）|T02|DD03_テーブル定義書.xlsx|T_ORDER!AA20') @(2..15 | ForEach-Object { $r = $f.Rows[$_]; '{0}|{1}|{2}|{3}' -f $r['C'], $r['E'], $r['H'], $r['I'] })
+    $details = @(2..15 | ForEach-Object { $f.Rows[$_]['J'] })
+    foreach ($expected in @(
+            '表紙の版数（1.1）と、改訂履歴の最後の版数（1.0）が違います',
+            '「ログインユーザ」は「ログインユーザー」の表記ゆれです（長音（ー）。このファイルで 1 か所）',
+            'メッセージ「E0099」が定義されていません',
+            '入力項目「顧客コード」の型が空欄です',
+            '入力項目「備考」（型: 文字）の桁数が空欄です',
+            'ボタン「CSV出力」のイベントが、イベント定義にありません',
+            '入力項目「数量」の入力チェック「範囲(1〜999)」に、エラーのときのメッセージIDがありません',
+            'イベント「登録」の処理概要にあるメッセージ E0008 が、メッセージ欄にありません',
+            'テーブル T_ORDER に主キーがありません（PK の欄がどのカラムも空欄です）',
+            'T_ORDER.CUSTOMER_CD（CHAR）の桁数が空欄です',
+            'T_ORDER.TOTAL_AMOUNT（NUMERIC）の小数の桁数が空欄です')) {
+        Assert-True ($details -contains $expected) ("指摘がありません: {0}`n実際: {1}" -f $expected, ($details -join "`n"))
+    }
+    Assert-Equal '機械のチェック（版数）' $f.Rows[3]['K']
+    Assert-Equal 'ツール' $f.Rows[3]['L'] '依頼No'
+    Assert-True (@($f.Links | Where-Object { $_.Location -eq "'T_ORDER'!AA20" }).Count -eq 1) 'ツールの指摘の場所へのリンク'
+
+    $s = Read-XlsxSheet -Path (Join-Path $out 'レビュー結果.xlsx') -Index 2
+    $rows = @($s.Rows.Keys | Where-Object { $_ -gt 1 } | ForEach-Object { $r = $s.Rows[$_]; '{0}|{1}|{2}|{3}|{4}' -f $r['A'], $r['B'], $r['F'], $r['G'], $r['H'] })
+    Assert-True ($rows -contains "$scr2Name|S02|NG|1|ツール") 'ツールだけの観点は、ツールの指摘で NG'
+    Assert-True ($rows -contains "$scr2Name|S04|NG|1|ツール")
+    Assert-True ($rows -contains 'DD05_メッセージ一覧.xlsx|C04|OK|0|ツール') 'ツールの指摘が無ければ OK'
+    Assert-True ($rows -contains "$scr1Name|C01|NG|1|R002, ツール") '両方の観点は、AI が未回答でもツールの指摘で NG'
+    Assert-True ($rows -contains "$scr2Name|C01|未回答|0|R003, ツール") '両方の観点は、ツールの指摘が無くても AI が未回答なら未回答'
+}
+
+Test-Case 'Invoke-DesignReview: ツールの確認に（ ）で種類を付けると、その種類の食い違いだけを入れる。ツールだけの観点表は依頼を作らない' {
+    $dir = New-TestDir
+    $csv = Join-Path $dir '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効,確かめ方,ツールの確認',
+        'X01,整合性,メッセージの参照,,高,*,○,ツール,参照先なし（メッセージ）',
+        'X02,画面一覧,画面一覧との違い,,中,*画面一覧*,○,ツール,一覧との違い（画面）') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $out = Join-Path $dir 'review'
+    $text = Get-HostText { & $Review -Path $consistencyDir -Checklist $csv -OutDir $out -PromptOnly }
+    Assert-Match $text 'AI に依頼する観点はありません'
+    $null = & $Review -Checklist $csv -OutDir $out -ImportOnly 6>$null 3>$null
+    $f = Read-XlsxSheet -Path (Join-Path $out 'レビュー結果.xlsx') -Index 1
+    # テーブル・カラム・コードの参照先なしと、テーブル一覧との違いは入れない
+    Assert-Equal @(
+        'ツール（一覧との違い）|X02|DD01_画面一覧.xlsx|画面一覧!C8',
+        'ツール（一覧との違い）|X02|DD01_画面一覧.xlsx|画面一覧!C9',
+        'ツール（参照先なし）|X01|DD02_画面設計書_SCR001_受注一覧.xlsx|画面項目定義!AK9') @(2..($f.Rows.Count) | ForEach-Object { $r = $f.Rows[$_]; '{0}|{1}|{2}|{3}' -f $r['C'], $r['E'], $r['H'], $r['I'] })
+}
+
+Test-Case 'Invoke-DesignReview: 観点表の確かめ方・ツールの確認の誤りを知らせる（ツールだけの観点は判定基準を調べない）' {
+    $dir = New-TestDir
+    $csv = Join-Path $dir '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効,確かめ方,ツールの確認',
+        'V01,画面項目,ツールの確認の無い観点,ツールで確かめる,中,*画面設計書*,○,ツール,',
+        'V02,画面項目,名前の誤り,ツールで確かめる,中,*画面設計書*,○,ツール,初期値、存在しない確認',
+        'V03,画面項目,種類を付けられない確認,ツールで確かめる,中,*画面設計書*,○,ツール,版数（画面）',
+        'V04,画面項目,種類の誤り,ツールで確かめる,中,*画面設計書*,○,両方,参照先なし（存在しない種類）',
+        'V05,画面項目,確かめ方の誤り,桁数が書かれている,中,*画面設計書*,○,tool,初期値',
+        'V06,画面項目,使わないツールの確認,桁数が書かれている,中,*画面設計書*,○,AI,初期値',
+        'V07,画面項目,ツールだけの観点,適切に設定されている,中,*画面設計書*,○,ツール,初期値',
+        'V08,画面項目,種類を付けた確認,桁数が書かれている,中,*画面設計書*,○,ＡＩ,',
+        'V09,画面項目,種類を付けた確認,桁数が書かれている,中,*画面設計書*,○,,参照先なし（メッセージ）') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $out = Get-HostText { & $Review -Checklist $csv -CheckOnly }
+    Assert-Match $out '確かめ方: AI 2 観点・ツール 4 観点・両方 3 観点' 'ツールの確認があって確かめ方が空欄・誤りなら両方'
+    Assert-Match $out 'エラー 4 件 / 警告 2 件'
+    Assert-Match $out '\[エラー\] 2行目 V01 確かめ方が「ツール」ですが、「ツールの確認」が空欄です'
+    Assert-Match $out '\[エラー\] 3行目 V02 ツールの確認「存在しない確認」はありません（使える確認: 版数、残っている文言、'
+    Assert-Match $out '\[エラー\] 4行目 V03 ツールの確認「版数（画面）」には、（ ）で種類を付けられません'
+    Assert-Match $out '\[エラー\] 5行目 V04 ツールの確認「参照先なし（存在しない種類）」の種類「存在しない種類」は、整合性チェックの参照のルールにありません（種類: テーブル、カラム、'
+    Assert-Match $out '\[警告\] 6行目 V05 「確かめ方」の値「tool」は AI・ツール・両方 のどれかにしてください（両方として扱います）'
+    Assert-Match $out '\[警告\] 7行目 V06 確かめ方が「AI」のため、「ツールの確認」は使いません'
+    Assert-NotMatch $out 'V07' 'ツールだけの観点の判定基準は AI に渡さないので、あいまいな言葉を調べない'
+    Assert-Throws { & $Review -Path $designDir -Checklist $csv -OutDir (New-TestDir) -PromptOnly 6>$null 3>$null } '観点表にエラー'
 }
 
 Test-Case 'Invoke-DesignReview: 設計書・観点が変わった依頼の古い回答は退避する' {

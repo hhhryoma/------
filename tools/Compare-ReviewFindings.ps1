@@ -46,14 +46,15 @@ Update-TypeData -TypeName 'ReviewCompare.Pair' -DefaultDisplayPropertySet Status
 $nfkc = [System.Text.NormalizationForm]::FormKC
 $excludedPattern = '取下げ|取り下げ|取消|却下|対象外|重複|誤指摘'
 
-# 指摘管理表の見出しの候補に、場所・観点・判定の候補を足す（CSV に書けば CSV が優先）
-$fields = @('設計書', '指摘内容', '状態', '重要度', '分類', '場所', 'シート', '観点ID', '判定')
+# 指摘管理表の見出しの候補に、場所・観点・判定・判定元の候補を足す（CSV に書けば CSV が優先）
+$fields = @('設計書', '指摘内容', '状態', '重要度', '分類', '場所', 'シート', '観点ID', '判定', '判定元')
 $candidates = Read-HeaderCandidates $Headers $fields
 $extra = @{
     '場所'   = @('場所', '箇所', '指摘箇所', '該当箇所', '位置', 'セル', '該当セル', 'セル番地')
     'シート' = @('シート', 'シート名', '該当シート')
     '観点ID' = @('観点ID', '観点No', '観点番号', 'チェック項目ID')
     '判定'   = @('判定', '結果')
+    '判定元' = @('判定元')
 }
 foreach ($k in $extra.Keys) { if ($candidates[$k].Count -eq 0) { $candidates[$k] = @($extra[$k] | ForEach-Object { ConvertTo-Label $_ }) } }
 
@@ -115,6 +116,8 @@ function Read-Findings {
             Source = $Source; Document = $document; DocKey = (ConvertTo-NameKey $v['設計書']); Content = ([string]$v['指摘内容']).Trim()
             Location = $location; SheetKey = (ConvertTo-Label $sheet).ToUpperInvariant(); Row = $row; Col = $col
             PointId = ([string]$v['観点ID']).Trim(); Category = ([string]$v['分類']).Trim(); Severity = ([string]$v['重要度']).Trim()
+            # Invoke-DesignReview.ps1 のツールの確認の指摘（判定元が「ツール（…）」）
+            ByTool = (([string]$v['判定元']).Trim() -like 'ツール*')
             Bigrams = (ConvertTo-Bigrams $v['指摘内容']); Place = $rec; Matched = $null; Seq = $list.Count
         })
     }
@@ -288,10 +291,11 @@ foreach ($k in $newPoint.Keys) {
     $category = $(if ($k -eq '（分類なし）') { '' } else { $k })
     Add-Proposal '観点を足す' $null $category $severity ($targets -join '、') $group ('観点表に近い観点が無く、人だけが指摘しています。観点と判定基準を書いて足してください')
 }
-# AI だけの指摘が多い観点: 判定基準を見直す（人が見落とした正しい指摘か、AI の誤った指摘かを確かめる）
-foreach ($g in @($ai | Where-Object { $_.PointId -and -not $_.Matched } | Group-Object PointId | Sort-Object Name)) {
+# AI だけの指摘が多い観点: 判定基準を見直す（人が見落とした正しい指摘か、AI の誤った指摘かを確かめる）。
+# ツールの確認の指摘は、判定基準で決まるものではないので数えない
+foreach ($g in @($ai | Where-Object { $_.PointId -and -not $_.Matched -and -not $_.ByTool } | Group-Object PointId | Sort-Object Name)) {
     if ($g.Count -lt $MinAiOnly) { continue }
-    $all = @($ai | Where-Object { $_.PointId -eq $g.Name }).Count
+    $all = @($ai | Where-Object { $_.PointId -eq $g.Name -and -not $_.ByTool }).Count
     if ($g.Count / $all -lt 0.5) { continue }
     $pt = @($points | Where-Object { $_.Id -eq $g.Name })[0]
     if (-not $pt) { $pt = [pscustomobject]@{ Id = $g.Name; Category = ''; Point = ''; Criteria = ''; Severity = ''; Target = '' } }
@@ -366,6 +370,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER AiPath
 #     AI のレビュー結果のファイル・フォルダ（Invoke-DesignReview.ps1 のレビュー結果.xlsx など）。判定が OK の行は数えません。
+#     判定元が「ツール（…）」の行（ツールの確認の指摘）も人の指摘と突き合わせますが、判定基準を見直す案には数えません。
 #
 # .PARAMETER HumanPath
 #     人のレビューの指摘管理表のファイル・フォルダ（Excel・CSV）。
