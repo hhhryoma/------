@@ -86,8 +86,7 @@ foreach ($r in (Read-CsvFile $Limits @('分母', '下限', '上限') '基準値'
 function ConvertTo-DocKey {
     #     設計書の名前を比べる形（フォルダと拡張子を除き、全角・半角と空白をそろえる）
     param([string] $Name)
-    $n = ([string]$Name).Trim()
-    $n = $n.Split(@('\', '/'))[-1]
+    $n = Get-LeafName $Name
     if ($n -match '\.(xlsx|xlsm|xls|xlsb|pdf|docx?|pptx?)$') { $n = [System.IO.Path]::GetFileNameWithoutExtension($n) }
     return (ConvertTo-Label $n).ToUpperInvariant()
 }
@@ -386,7 +385,7 @@ if ($SizeCsv) {
             $n = 0.0
             if (-not [double]::TryParse(([string]$r.$sizeCol).Trim(), [ref]$n)) { continue }
             $k = ConvertTo-DocKey $r.$nameCol
-            if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = ([string]$r.$nameCol).Split(@('\', '/'))[-1]; Size = 0.0; Unit = $sizeCol } }
+            if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = @(([string]$r.$nameCol).Trim() -split '[\\/]')[-1]; Size = 0.0; Unit = $sizeCol } }
             $sizes[$k].Size += $n
         }
     }

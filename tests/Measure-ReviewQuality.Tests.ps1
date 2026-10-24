@@ -192,6 +192,20 @@ Test-Case 'Measure-ReviewQuality: 指摘の数が同じ工程は、先に出て�
     Assert-Match $dd02.Judgement '^多い' '詳細設計の基準値（0.1〜0.3）と比べる'
 }
 
+Test-Case 'Measure-ReviewQuality: 設計書の名前のフォルダ（D:\納品物\…・sub\…）を除いて同じ設計書にまとめ、「外部I/F設計書」と「内部I/F設計書」は分ける' {
+    $dir = New-TestDir
+    New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況') @(
+        @('1', '2026/10/01', 'DD03_テーブル定義書', '型が違う', '対応中'),
+        @('2', '2026/10/02', 'D:\納品物\DD03_テーブル定義書.xlsx', '桁数が違う', '対応中'),
+        @('3', '2026/10/02', '外部I/F設計書', '項目が足りない', '対応中'),
+        @('4', '2026/10/03', '内部I/F設計書', '誤記', '対応中'))
+    $csv = Join-Path $dir 'pages.csv'
+    # DD03_テーブル定義書 を含む名前が 2 つあるので、フォルダを除かないと規模と突き合わせられない
+    @('"ファイル","出力先","ページ数","除外ページ","結果","詳細","秒"', '"sub\DD03_テーブル定義書.pdf","","10","0","成功","","0"', '"DD03_テーブル定義書_別紙.pdf","","5","0","成功","","0"') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $r = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -AsOf '2026-10-20' 6>$null 3>$null)
+    Assert-Equal @('DD03_テーブル定義書|2|10|0.2', '内部I/F設計書|1||', '外部I/F設計書|1||', 'DD03_テーブル定義書_別紙.pdf|0|5|0') @($r | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Document, $_.Findings, $_.Size, $_.Density })
+}
+
 Test-Case 'Measure-ReviewQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityTool
     Assert-Match $h.Synopsis '指摘'
