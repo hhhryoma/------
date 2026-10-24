@@ -92,7 +92,8 @@ function Get-NameWords {
 function ConvertTo-FileKey {
     #     ファイルの名前を比べる形（フォルダと、エビデンスとして読む拡張子を除き、全角・半角と空白、大文字小文字をそろえる）
     param([string] $Name)
-    $n = ([string]$Name).Trim().Split(@('\', '/'))[-1]
+    # ファイルの名前に / は使えないので、\ と / のどちらもフォルダの区切り
+    $n = @(([string]$Name).Trim() -split '[\\/]')[-1]
     if ($n -match '\.([A-Za-z0-9]+)$' -and ($bookExtensions + $imageExtensions + $fileExtensions) -contains ('.' + $Matches[1].ToLowerInvariant())) { $n = $n.Substring(0, $n.Length - $Matches[0].Length) }
     return (ConvertTo-Label $n).ToUpperInvariant()
 }
