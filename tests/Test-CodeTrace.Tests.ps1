@@ -130,6 +130,38 @@ Test-Case 'Test-CodeTrace: SELECT … INTO の変数・FOR UPDATE NOWAIT・MyBat
     Assert-Equal @('T_ORDER_HIST', 'T_ORDER_BIG', 'T_ORDER_LOG', 'T_ORDER_SUM', 'T_ORDR') @($issues | Where-Object Item -eq '設計書に無い' | ForEach-Object { $_.Id }) 'INSERT・MERGE の INTO（ヒントの後ろも）・UPDATE の後ろと、CDATA の中の SQL のテーブルは見る'
 }
 
+Test-Case 'Test-CodeTrace: 行をまたぐ SQL のテーブルも見て、ON UPDATE CASCADE・ON DUPLICATE KEY UPDATE・トリガーの UPDATE ON はテーブルにせず、行の後ろのコメントの ID は数えない' {
+    $dir = New-TestDir
+    $src = Join-Path $dir 'src'
+    $null = New-Item -ItemType Directory -Path $src
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText((Join-Path $src 'order.sql'), ((@(
+                'SELECT o.ORDER_NO',
+                '  FROM',
+                '    T_ORDR o',
+                '  JOIN /* 明細 */ T_ORDER_DETAL d ON d.ORDER_NO = o.ORDER_NO;',
+                'INSERT',
+                '  INTO T_ORDER_LOGG (ORDER_NO) VALUES (1);',
+                'UPDATE',
+                '  -- 受注',
+                '    T_ODER SET ORDER_STATUS = ''90'';',
+                'ALTER TABLE T_ORDER_DETAIL ADD FOREIGN KEY (ORDER_NO) REFERENCES T_ORDER (ORDER_NO) ON DELETE CASCADE ON UPDATE CASCADE;',
+                'INSERT INTO T_ORDER (ORDER_NO) VALUES (1) ON DUPLICATE KEY UPDATE UPD_COUNT = UPD_COUNT + 1;',
+                'CREATE TRIGGER TR_ORDER BEFORE INSERT OR UPDATE ON T_ORDER FOR EACH ROW BEGIN NULL; END;') -join "`n") + "`n"), $utf8)
+    # ほかのファイルは行をまたがない（行の終わりの UPDATE と、次の行のキー）
+    [System.IO.File]::WriteAllText((Join-Path $src 'messages.properties'), "confirm.title=Do you want to UPDATE`nnext.key=value`n", $utf8)
+    [System.IO.File]::WriteAllText((Join-Path $src 'OrderList.java'), ((@(
+                'class OrderList {',
+                '    void f() { error("E0001"); } // E0002 は使わなくなった',
+                '    void g() { forward("SCR001"); /* SCR002 へは行かない */ }',
+                '}') -join "`n") + "`n"), $utf8)
+    $issues = @(& $TraceTool -DesignPath $designDir -SourcePath $src 6>$null)
+    Assert-Equal @('T_ORDR|3', 'T_ORDER_DETAL|4', 'T_ORDER_LOGG|6', 'T_ODER|9') @($issues | Where-Object Item -eq '設計書に無い' | ForEach-Object { '{0}|{1}' -f $_.Id, ([regex]::Match($_.Detail, '(\d+) 行目').Groups[1].Value) }) 'テーブル名のある行。CASCADE・UPD_COUNT・ON はテーブルにしない'
+    $missing = @($issues | Where-Object Item -eq '実装に無い' | ForEach-Object { $_.Id })
+    Assert-True ($missing -contains 'E0002' -and $missing -contains 'SCR002') '行の後ろの // と /* */ の中の ID は数えない'
+    Assert-True ($missing -notcontains 'E0001' -and $missing -notcontains 'SCR001')
+}
+
 Test-Case 'Test-CodeTrace: - や _ で区切ったメッセージ ID（MSG-E001・MSG_E002）も突き合わせる' {
     $dir = New-TestDir
     $design = Join-Path $dir 'design'

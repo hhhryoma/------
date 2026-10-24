@@ -1353,8 +1353,8 @@ Detail : ソースの SQL のテーブル T_ORDR（OrderList.java 10 行目）�
 | カラム（`-Kind Column`） | テーブル定義書のカラムの物理名 | 名前の単語と、`_` を除いた名前（ORM の `orderNo` など） |
 
 - 大文字小文字は区別しません。単語の一部（`E00011` の中の `E0001`）は数えません
-- **設計書に無い ID** は、設計書の ID と同じ形（`E0001` なら英字 `E` と数字 4 桁、`SCR001` なら `SCR` と数字 3 桁）の単語で、設計書に無いものです。テーブルは SQL の FROM・JOIN・UPDATE と、INSERT・MERGE などの INTO の後ろの名前（テーブル定義書のカラム名と、`SELECT … INTO` の変数・`FOR UPDATE NOWAIT` などは除く）で、.sql・.pls などと MyBatis・iBATIS の .xml（mapper・sqlMap。タグの中は見ない）はすべての行を、ほかのファイルは大文字で書いた SQL（`"SELECT * FROM T_ORDER"`）だけを見ます
-- コメントだけの行（`//`・`/* */`・`--`・`#` など。言語ごとの書き方は [Measure-CodeSize.ps1](#measure-codesizeps1) と同じ）は見ません。コメントに残した古い ID は「使っている」に数えません
+- **設計書に無い ID** は、設計書の ID と同じ形（`E0001` なら英字 `E` と数字 4 桁、`SCR001` なら `SCR` と数字 3 桁）の単語で、設計書に無いものです。テーブルは SQL の FROM・JOIN・UPDATE と、INSERT・MERGE などの INTO の後ろの名前（テーブル定義書のカラム名と、`SELECT … INTO` の変数・`FOR UPDATE NOWAIT`・`ON UPDATE CASCADE`・`ON DUPLICATE KEY UPDATE` などは除く）で、.sql・.pls などと MyBatis・iBATIS の .xml（mapper・sqlMap。タグの中は見ない）はすべての行を、行をまたいでも（`FROM` と次の行のテーブル名など）見ます。ほかのファイルは、大文字で書いた SQL（`"SELECT * FROM T_ORDER"`）を 1 行ずつ見ます
+- コメント（`//`・`/* */`・`--`・`#` など。言語ごとの書き方は [Measure-CodeSize.ps1](#measure-codesizeps1) と同じ）は、コメントだけの行も、行の後ろのコメント（`error("E0001"); // E0002 は廃止`）も見ません。コメントに残した古い ID は「使っている」に数えません
 - カラムは数が多く、画面の項目名など別の名前で使うこともあるので、`-Kind Column` を付けたときだけ突き合わせ、見つからないものは情報として知らせます
 - 読むファイル: Measure-CodeSize.ps1 と同じ拡張子のソース（.java .cs .js .ts .py .sql .xml .html など）と、メッセージのリソース・設定ファイル（.properties .yml .yaml .json .ini .conf .cfg .toml .resx）
 
