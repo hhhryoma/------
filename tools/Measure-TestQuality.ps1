@@ -203,7 +203,7 @@ if ($BugList) {
         if (-not $functionName) { $functionName = ([string]$v['機能']).Trim() }
         $bugs.Add([pscustomobject]@{
             Id = @(ConvertTo-BugIds $v['障害ID'])[0]; Function = $functionName; Content = ([string]$v['障害内容']).Trim()
-            Found = (ConvertTo-DateValue $v['起票日'] $AsOf); ClosedOn = $closedOn; Closed = [bool](($status -match $closedPattern) -or ((-not $status) -and $closedOn))
+            Found = (ConvertTo-DateValue $v['起票日'] $AsOf); ClosedOn = $closedOn; Closed = [bool]((Test-ClosedStatus $status $closedPattern) -or ((-not $status) -and $closedOn))
             Status = $status; Severity = ([string]$v['重要度']).Trim(); Cause = ([string]$v['原因']).Trim()
             Injected = ([string]$v['混入工程']).Trim(); Detected = ([string]$v['摘出工程']).Trim(); Place = $rec
         })

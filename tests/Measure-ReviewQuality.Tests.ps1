@@ -192,6 +192,19 @@ Test-Case 'Measure-ReviewQuality: 指摘の数が同じ工程は、先に出て�
     Assert-Match $dd02.Judgement '^多い' '詳細設計の基準値（0.1〜0.3）と比べる'
 }
 
+Test-Case 'Measure-ReviewQuality: 状態の「未完了」「未済」「完了予定」「差し戻し」は、完了・済を含んでも未完了に数える' {
+    $dir = New-TestDir
+    New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況') @(
+        @('1', '2026/10/01', 'DD03_テーブル定義書', '型が違う', '完了'),
+        @('2', '2026/10/01', 'DD03_テーブル定義書', '桁数が違う', '未完了'),
+        @('3', '2026/10/02', 'DD03_テーブル定義書', '誤記', '未済'),
+        @('4', '2026/10/02', 'DD03_テーブル定義書', '名前の揺れ', '完了予定'),
+        @('5', '2026/10/03', 'DD03_テーブル定義書', '説明が足りない', '対応済（差し戻し）'),
+        @('6', '2026/10/03', 'DD03_テーブル定義書', '索引が足りない', '済'))
+    $r = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -AsOf '2026-10-20' 6>$null 3>$null)
+    Assert-Equal 'DD03_テーブル定義書|6|4' ('{0}|{1}|{2}' -f $r[0].Document, $r[0].Findings, $r[0].Open)
+}
+
 Test-Case 'Measure-ReviewQuality: 設計書の名前のフォルダ（D:\納品物\…・sub\…）を除いて同じ設計書にまとめ、「外部I/F設計書」と「内部I/F設計書」は分ける' {
     $dir = New-TestDir
     New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況') @(
