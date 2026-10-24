@@ -112,6 +112,22 @@ Test-Case 'Test-ScreenNumbers: スクリーンショットの無い詳細設計�
     Assert-Equal 0 (Invoke-ScreenNumbers @{ Path = $sample }).Count
 }
 
+Test-Case 'Test-ScreenNumbers: レイアウトと画面項目定義のブックの両方に画面ID の名前のシート（SCR002）があっても、その画面の表と対応付ける' {
+    $dir = New-TestDir
+    $layout = Join-Path $dir 'レイアウト.xlsx'
+    New-SheetsBook $layout ([ordered]@{ 'SCR002' = @(, @('メモ')); 'SCR003' = @(, @('メモ')) })
+    $screen = @(@{ Kind = 'pic'; Name = '図 1'; Png = 'Old'; From = @(1, 2); To = @(12, 30) }, (New-Marker '楕円 2' '②' 2 4), (New-Marker '楕円 3' '⑤' 2 6))
+    Add-TestDrawing $layout $screen
+    Add-TestDrawing $layout $screen -Sheet 2
+    $header = { param($id, $name) @('画面ID', $id, '画面名', $name) }
+    $table = @(@(), @('No', '項目名', '桁数'), @('1', '受注日', '8'), @('2', '顧客コード', '8'))
+    New-SheetsBook (Join-Path $dir '画面項目定義.xlsx') ([ordered]@{
+            'SCR002' = @(, (& $header 'SCR002' '受注登録')) + $table
+            'SCR003' = @(, (& $header 'SCR003' '受注詳細')) + $table + @(, @('5', '受注金額', '9')) })
+    $issues = Invoke-ScreenNumbers @{ Path = $dir }
+    Assert-Equal @('エラー|定義に無い番号|レイアウト.xlsx|SCR002!C7') (Get-ScreenNumberKeys $issues) 'SCR002 の表に No 5 は無い。SCR003 の表には ②・⑤ がある（「定義なし」にしない）'
+}
+
 Test-Case 'Test-ScreenNumbers: Get-Help でヘルプが表示される' {
     $h = Get-Help $ScreenNumbersTool
     Assert-Match $h.Synopsis '画面項目定義'
