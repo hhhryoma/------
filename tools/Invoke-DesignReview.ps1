@@ -16,6 +16,8 @@ param(
 
     [string] $SheetNameExclude,
 
+    [string] $Glossary,
+
     [ValidateSet('Rows', 'Markdown')]
     [string] $TextFormat = 'Rows',
 
@@ -43,6 +45,10 @@ if (-not $Path -and -not $ImportOnly -and -not $CheckOnly) {
 
 $OutDir    = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
 $Checklist = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Checklist)
+if ($Glossary) {
+    $Glossary = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Glossary)
+    if (-not (Test-Path -LiteralPath $Glossary)) { throw "用語集が見つかりません: $Glossary" }
+}
 $promptDir = Join-Path $OutDir 'prompts'
 $answerDir = Join-Path $OutDir 'answers'
 $manifestPath = Join-Path $OutDir 'requests.json'
@@ -50,6 +56,7 @@ $reportPath   = Join-Path $OutDir 'レビュー結果.xlsx'
 
 $utf8Bom = New-Object System.Text.UTF8Encoding($true)
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+$nfkc = [System.Text.NormalizationForm]::FormKC
 
 $severityOrder = @{ '高' = 0; '中' = 1; '低' = 2 }
 
@@ -192,8 +199,31 @@ function ConvertTo-DesignMarkdown {
 # ---------------------------------------------------------------- 観点表
 
 
+function ConvertTo-MethodName {
+    #     「確かめ方」の値（AI・ツール・両方）。それ以外は空
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant()
+    if (@('AI', 'ツール', '両方') -contains $t) { return $t }
+    return ''
+}
+
+function ConvertTo-RuleSpecs {
+    #     「ツールの確認」の欄（「,」「、」・改行区切り）を、確認の名前と（ ）の中の種類に分ける。例: 参照先なし（メッセージ）
+    param([string] $Text)
+    $specs = New-Object System.Collections.Generic.List[object]
+    foreach ($t in (([string]$Text) -split '[,、\r\n]+')) {
+        $t = $t.Trim()
+        if (-not $t) { continue }
+        $m = [regex]::Match($t, '^(?<name>.+?)\s*[（(]\s*(?<kind>[^（()）]*?)\s*[）)]$')
+        if ($m.Success) { $specs.Add([pscustomobject]@{ Text = $t; Name = $m.Groups['name'].Value; Kind = $m.Groups['kind'].Value }) }
+        else { $specs.Add([pscustomobject]@{ Text = $t; Name = $t; Kind = '' }) }
+    }
+    return , $specs
+}
+
 function Read-Checklist {
     #     観点表（xlsx / csv）を読む。1 行目または「観点ID」を含む行を見出しとし、列は見出しの文字で特定する。
+    #     確かめ方（AI・ツール・両方）が空欄なら、ツールの確認があれば両方、無ければ AI
     param([string] $FilePath)
 
     if (-not (Test-Path -LiteralPath $FilePath)) { throw "観点表が見つかりません: $FilePath" }
@@ -247,6 +277,11 @@ function Read-Checklist {
         if ($r.PSObject.Properties['有効']) { $enabledRaw = ([string]$r.'有効').Trim() }
         $target = [string]$r.'対象設計書'
         if (-not $target.Trim()) { $target = '*' }
+        $methodRaw = ''
+        if ($r.PSObject.Properties['確かめ方']) { $methodRaw = ([string]$r.'確かめ方').Trim() }
+        $rules = ConvertTo-RuleSpecs $(if ($r.PSObject.Properties['ツールの確認']) { [string]$r.'ツールの確認' } else { '' })
+        $method = ConvertTo-MethodName $methodRaw
+        if (-not $method) { $method = $(if ($rules.Count -gt 0) { '両方' } else { 'AI' }) }
         $all.Add([pscustomobject]@{
             Row        = $r.'__Row'
             Id         = ([string]$r.'観点ID').Trim()
@@ -258,6 +293,12 @@ function Read-Checklist {
             Refs       = @(([string]$r.'参照設計書') -split '[,、\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
             EnabledRaw = $enabledRaw
             Enabled    = (@('×', '✕', '-', '－', '0', 'FALSE', '無効') -notcontains $enabledRaw)
+            MethodRaw  = $methodRaw
+            Method     = $method
+            Rules      = $rules
+            # AI に依頼する観点・ツールで確かめる観点
+            ByAi       = ($method -ne 'ツール')
+            ByTool     = ($method -ne 'AI' -and $rules.Count -gt 0)
         })
     }
 
@@ -307,10 +348,11 @@ function Test-Checklist {
         if (-not $p.Enabled) { continue }
 
         if (-not $p.Point.Trim()) { & $add 'エラー' $p.Row $p.Id '観点が空欄です' }
-        if (-not $p.Criteria.Trim()) {
+        # 判定基準は AI に渡すときだけ調べる（ツールだけで確かめる観点は AI に渡さない）
+        if ($p.ByAi -and -not $p.Criteria.Trim()) {
             & $add '警告' $p.Row $p.Id '判定基準が空欄です（AI の判定がぶれやすくなります）'
         }
-        else {
+        elseif ($p.ByAi) {
             # 「」や例示の中は判定基準そのものではないので除いて調べる
             $plain = [regex]::Replace($p.Criteria, '「[^」]*」|（例[^）]*）|\(例[^)]*\)', '')
             $found = @([regex]::Matches($plain, $vague) | ForEach-Object { $_.Value } | Sort-Object -Unique)
@@ -318,8 +360,30 @@ function Test-Checklist {
                 & $add '警告' $p.Row $p.Id ("判定基準にあいまいな言葉があります（{0}）。何が書かれていれば OK かを具体的に書いてください" -f ($found -join '、'))
             }
         }
-        if (($p.Point + $p.Criteria) -match '[|｜]') {
+        if ($p.ByAi -and ($p.Point + $p.Criteria) -match '[|｜]') {
             & $add '警告' $p.Row $p.Id '観点・判定基準に「|」があります（プロンプトの区切りと紛れるため、別の記号にしてください）'
+        }
+
+        # 確かめ方・ツールの確認
+        if ($p.MethodRaw -and -not (ConvertTo-MethodName $p.MethodRaw)) {
+            & $add '警告' $p.Row $p.Id ("「確かめ方」の値「{0}」は AI・ツール・両方 のどれかにしてください（{1}として扱います）" -f $p.MethodRaw, $p.Method)
+        }
+        if ($p.Method -ne 'AI' -and $p.Rules.Count -eq 0) {
+            & $add 'エラー' $p.Row $p.Id ("確かめ方が「{0}」ですが、「ツールの確認」が空欄です" -f $p.Method)
+        }
+        elseif ($p.Method -eq 'AI' -and $p.Rules.Count -gt 0) {
+            & $add '警告' $p.Row $p.Id '確かめ方が「AI」のため、「ツールの確認」は使いません'
+        }
+        foreach ($r in $p.Rules) {
+            if (-not $toolRules.Contains($r.Name)) {
+                & $add 'エラー' $p.Row $p.Id ("ツールの確認「{0}」はありません（使える確認: {1}）" -f $r.Name, (@($toolRules.Keys) -join '、'))
+            }
+            elseif ($r.Kind -and $toolRules[$r.Name].Source -ne '整合性') {
+                & $add 'エラー' $p.Row $p.Id ("ツールの確認「{0}」には、（ ）で種類を付けられません" -f $r.Text)
+            }
+            elseif ($r.Kind -and (Get-ConsistencyKinds) -notcontains $r.Kind) {
+                & $add 'エラー' $p.Row $p.Id ("ツールの確認「{0}」の種類「{1}」は、整合性チェックの参照のルールにありません（種類: {2}）" -f $r.Text, $r.Kind, ((Get-ConsistencyKinds) -join '、'))
+            }
         }
         if ($p.Severity -and @('高', '中', '低') -notcontains $p.Severity) {
             & $add '警告' $p.Row $p.Id "重要度「$($p.Severity)」は 高／中／低 のどれかにしてください（並び順が最後になります）"
@@ -368,6 +432,11 @@ function Show-ChecklistIssues {
     $disabled = @($List.All | Where-Object { -not $_.Enabled }).Count
 
     Write-Host ("観点表: {0}（有効 {1} 観点、無効 {2} 観点）" -f $List.Path, $List.Points.Count, $disabled)
+    $byMethod = @{ 'AI' = 0; 'ツール' = 0; '両方' = 0 }
+    foreach ($p in $List.Points) { $byMethod[$p.Method]++ }
+    if ($byMethod['ツール'] + $byMethod['両方'] -gt 0) {
+        Write-Host ("  確かめ方: AI {0} 観点・ツール {1} 観点・両方 {2} 観点" -f $byMethod['AI'], $byMethod['ツール'], $byMethod['両方'])
+    }
     if ($Issues.Count -eq 0) {
         Write-Host '  観点表のチェック: 問題ありません'
         return $false
@@ -423,6 +492,323 @@ function Test-NameLike {
     return $false
 }
 
+# ---------------------------------------------------------------- ツールの確認（機械で確かめる観点）
+
+
+# 観点表の「ツールの確認」に書く名前 → 確かめ方。Source は使うツール（提出前チェック・表記ゆれ・整合性）か、
+# このスクリプトの中の確認（画面・テーブル）。Items はツールの指摘の項目のうち、この確認にあたるもの。Text は AI に伝える説明
+$toolRules = [ordered]@{
+    '版数'                     = @{ Source = '提出前チェック'; Items = @('表紙の版数', '表紙の更新日', 'ファイル名の版数', '改訂履歴の版数'); Text = '表紙・改訂履歴・ファイル名の版数と更新日の食い違い' }
+    '残っている文言'           = @{ Source = '提出前チェック'; Items = @('残っている文言'); Text = 'TODO・TBD・未定・検討中などの消し忘れ' }
+    '表記ゆれ'                 = @{ Source = '表記ゆれ'; Text = 'カタカナの長音（ー）や全角・半角の表記ゆれ' }
+    '参照先なし'               = @{ Source = '整合性'; Items = @('参照先なし'); Text = '定義されていない ID の参照' }
+    '重複定義'                 = @{ Source = '整合性'; Items = @('重複定義'); Text = '同じ ID の重複した定義' }
+    '一覧との違い'             = @{ Source = '整合性'; Items = @('一覧との違い'); Text = '画面一覧・テーブル一覧と設計書の過不足・名前の違い' }
+    'ヘッダの違い'             = @{ Source = '整合性'; Items = @('ヘッダの違い'); Text = 'シートのヘッダ・ファイル名の ID と名前の食い違い' }
+    '組み合わせの違い'         = @{ Source = '整合性'; Items = @('組み合わせの違い'); Text = '画面遷移の一覧・イベント定義の遷移先・画面概要の遷移先の食い違い' }
+    '属性の違い'               = @{ Source = '整合性'; Items = @('属性の違い'); Text = '画面項目・IF の項目と、参照先のカラムの型・桁数・必須の違い' }
+    '入力項目の型・桁数'       = @{ Source = '画面'; Text = '入力項目の型の空欄と、文字・数値の型の桁数の空欄' }
+    '入力チェックのメッセージ' = @{ Source = '画面'; Text = 'メッセージIDの無い入力チェック' }
+    '初期値'                   = @{ Source = '画面'; Text = '選択・日付・チェックボックスの入力項目の初期値の空欄' }
+    'ボタンのイベント'         = @{ Source = '画面'; Text = 'イベント定義の無いボタン・リンク' }
+    'メッセージ欄'             = @{ Source = '画面'; Text = '処理概要とメッセージ欄のメッセージIDの過不足' }
+    '主キー'                   = @{ Source = 'テーブル'; Text = '主キーの無いテーブル' }
+    'カラムの型・桁数'         = @{ Source = 'テーブル'; Text = 'カラムの型の空欄と、桁数・小数の要る型の桁数・小数の空欄' }
+}
+
+function Get-RuleText {
+    #     ツールの確認の説明（種類を付けた確認は種類も添える）
+    param($Spec)
+    $t = $toolRules[$Spec.Name].Text
+    if ($Spec.Kind) { $t += '（{0}）' -f $Spec.Kind }
+    return $t
+}
+
+$script:consistencyRules = $null
+function Get-ConsistencyRules {
+    #     整合性チェック（Test-DesignConsistency.ps1）の参照のルール
+    if ($null -eq $script:consistencyRules) {
+        $script:consistencyRules = Read-CsvFile (Join-Path $PSScriptRoot 'consistency/参照のルール.csv') @('区分', '種類', '書き方') '参照のルール'
+    }
+    return , $script:consistencyRules
+}
+
+function Get-ConsistencyKinds {
+    #     参照のルールの種類（テーブル・メッセージ・画面など）。ツールの確認の（ ）に書ける
+    return @((Get-ConsistencyRules) | ForEach-Object { ([string]$_.'種類').Trim() } | Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Get-MessagePattern {
+    #     メッセージIDの書き方（参照のルールの、メッセージの参照の書き方。無ければ E0001 の形）
+    $rule = @((Get-ConsistencyRules) | Where-Object { ([string]$_.'区分').Trim() -eq '参照' -and ([string]$_.'種類').Trim() -eq 'メッセージ' -and ([string]$_.'書き方').Trim() })[0]
+    $pattern = '(?<![A-Za-z0-9])(?<id>[EWIQ]\d{4})(?![0-9])'
+    if ($rule) { $pattern = ([string]$rule.'書き方').Trim() }
+    return New-Object System.Text.RegularExpressions.Regex($pattern)
+}
+
+function Get-MessageIds {
+    #     文の中のメッセージID（大文字。出てきた順・重複なし）
+    param([string] $Text, [regex] $Rx)
+    $ids = New-Object System.Collections.Generic.List[string]
+    if (-not $Text) { return , $ids }
+    foreach ($m in $Rx.Matches($Text.Normalize($nfkc))) {
+        $id = $m.Value
+        if ($m.Groups['id'].Success) { $id = $m.Groups['id'].Value }
+        $id = $id.ToUpperInvariant()
+        if (-not $ids.Contains($id)) { $ids.Add($id) }
+    }
+    return , $ids
+}
+
+function Split-CheckText {
+    #     入力チェックの欄を、チェックごとに分ける（「、」「,」「;」・改行で区切る。括弧の中の区切りでは分けない）
+    param([string] $Text)
+    $parts = New-Object System.Collections.Generic.List[string]
+    $sb = New-Object System.Text.StringBuilder
+    $depth = 0
+    foreach ($ch in ([string]$Text).ToCharArray()) {
+        if ('（(「【['.IndexOf($ch) -ge 0) { $depth++ }
+        elseif ('）)」】]'.IndexOf($ch) -ge 0 -and $depth -gt 0) { $depth-- }
+        if (($depth -eq 0 -and '、,，;；'.IndexOf($ch) -ge 0) -or $ch -eq "`n" -or $ch -eq "`r") {
+            if ($sb.ToString().Trim()) { $parts.Add($sb.ToString().Trim()) }
+            [void]$sb.Clear()
+            continue
+        }
+        [void]$sb.Append($ch)
+    }
+    if ($sb.ToString().Trim()) { $parts.Add($sb.ToString().Trim()) }
+    return , $parts
+}
+
+function Add-ScreenRuleFindings {
+    #     画面設計書の画面項目定義・イベント定義を確かめる（入力項目の型・桁数・入力チェックのメッセージ・初期値・ボタンのイベント・メッセージ欄）。
+    #     Books は ConvertTo-DesignBooks の結果、Names は行う確認、Add は指摘を足すスクリプトブロック
+    param($Books, [string[]] $Names, [scriptblock] $Add)
+    $design = Read-ScreenDesign $Books
+    $msgRx = Get-MessagePattern
+    $cellOf = { param($o, [string] $Label) '{0}{1}' -f (ConvertTo-ColumnName $o.Columns[$Label]), $o.Row }
+    # 確かめる列が表に無ければ、表ごとに 1 回だけ知らせる
+    $missingColumn = @{}
+    $needColumn = {
+        param($o, [string] $Label, [string] $Rule, [string] $What)
+        if ($o.Columns.ContainsKey($Label)) { return $true }
+        $k = '{0}|{1}|{2}|{3}' -f $o.Path, $o.Sheet, $o.HeaderRow, $Label
+        if (-not $missingColumn.ContainsKey($k)) {
+            $missingColumn[$k] = $true
+            $first = @($o.Columns.Values | Sort-Object)[0]
+            & $Add $Rule $o.Path $o.Sheet ('{0}{1}' -f (ConvertTo-ColumnName $first), $o.HeaderRow) ('{0}の表に「{1}」の列がありません' -f $What, $Label)
+        }
+        return $false
+    }
+    # 画面のイベント・画面項目（画面IDが表ごとに違って、その画面のものが無ければ、同じファイルのもの）
+    $sameScreen = {
+        param($List, $o)
+        $mine = @($List | Where-Object { $_.Path -eq $o.Path -and $_.Screen -eq $o.Screen })
+        if ($mine.Count -eq 0) { $mine = @($List | Where-Object { $_.Path -eq $o.Path }) }
+        return , $mine
+    }
+    $notInput = 'ボタン|リンク|ラベル'
+    $digitType = '文字|英数|英字|数値|数字|カナ|かな|全角|半角|金額|整数|小数'
+    $initialKind = '選択|プルダウン|ドロップダウン|コンボ|ラジオ|チェック|日付|カレンダー'
+    foreach ($it in $design.Items) {
+        $isInput = $it.Input -and $it.Kind -notmatch $notInput
+        if ($Names -contains '入力項目の型・桁数' -and $isInput -and (& $needColumn $it '型' '入力項目の型・桁数' '画面項目定義')) {
+            if (-not $it.Type) {
+                & $Add '入力項目の型・桁数' $it.Path $it.Sheet (& $cellOf $it '型') ('入力項目「{0}」の型が空欄です' -f $it.Item)
+            }
+            elseif ($it.Type -match $digitType -and -not $it.DigitsText) {
+                & $Add '入力項目の型・桁数' $it.Path $it.Sheet (& $cellOf $it '桁数') ('入力項目「{0}」（型: {1}）の桁数が空欄です' -f $it.Item, $it.Type)
+            }
+        }
+        if ($Names -contains '初期値' -and $isInput -and $it.Kind -match $initialKind -and -not $it.Initial -and (& $needColumn $it '初期値' '初期値' '画面項目定義')) {
+            & $Add '初期値' $it.Path $it.Sheet (& $cellOf $it '初期値') ('入力項目「{0}」（区分: {1}）の初期値が空欄です。初期値が無いときは「なし」と書いてください' -f $it.Item, $it.Kind)
+        }
+        if ($Names -contains '入力チェックのメッセージ' -and $it.Checks) {
+            $parts = @((Split-CheckText $it.Checks) | Where-Object { $_ -notmatch '^(なし|無し|－|-|ー|―)$' -and -not $msgRx.IsMatch($_.Normalize($nfkc)) })
+            if ($parts.Count -gt 0) {
+                & $Add '入力チェックのメッセージ' $it.Path $it.Sheet (& $cellOf $it '入力チェック') ('入力項目「{0}」の入力チェック「{1}」に、エラーのときのメッセージIDがありません' -f $it.Item, ($parts -join '」「'))
+            }
+        }
+        if ($Names -contains 'ボタンのイベント' -and $it.Kind -match 'ボタン|リンク') {
+            # イベント名・トリガーに項目名（末尾の「ボタン」を除く）がある、またはイベント名が項目名の中にあるイベント
+            $name = (ConvertTo-Label $it.Item) -replace '(ボタン|リンク)$', ''
+            $hit = $false
+            foreach ($e in (& $sameScreen $design.Events $it)) {
+                $eventName = (ConvertTo-Label $e.Name) -replace '(ボタン|リンク)$', ''
+                $trigger = ConvertTo-Label $e.Trigger
+                if (($name -and ($eventName.Contains($name) -or $trigger.Contains($name))) -or ($eventName -and $name.Contains($eventName))) { $hit = $true; break }
+            }
+            if (-not $hit) {
+                & $Add 'ボタンのイベント' $it.Path $it.Sheet (& $cellOf $it '項目名') ('{0}「{1}」のイベントが、イベント定義にありません' -f $it.Kind, $it.Item)
+            }
+        }
+    }
+    if ($Names -contains 'メッセージ欄') {
+        foreach ($e in $design.Events) {
+            if (-not (& $needColumn $e 'メッセージ' 'メッセージ欄' 'イベント定義')) { continue }
+            $summary = Get-MessageIds $e.Summary $msgRx
+            $column = Get-MessageIds $e.Messages $msgRx
+            $missing = @($summary | Where-Object { -not $column.Contains($_) })
+            if ($missing.Count -gt 0) {
+                & $Add 'メッセージ欄' $e.Path $e.Sheet (& $cellOf $e 'メッセージ') ('イベント「{0}」の処理概要にあるメッセージ {1} が、メッセージ欄にありません' -f $e.Name, ($missing -join '・'))
+            }
+            # 画面の入力チェックで使うメッセージID
+            $checkIds = @{}
+            foreach ($it in (& $sameScreen $design.Items $e)) { foreach ($id in (Get-MessageIds $it.Checks $msgRx)) { $checkIds[$id] = $true } }
+            $unused = @($column | Where-Object { -not $summary.Contains($_) -and -not $checkIds.ContainsKey($_) })
+            if ($unused.Count -gt 0) {
+                & $Add 'メッセージ欄' $e.Path $e.Sheet (& $cellOf $e 'メッセージ') ('イベント「{0}」のメッセージ欄の {1} が、処理概要にも画面の入力チェックにもありません' -f $e.Name, ($unused -join '・'))
+            }
+        }
+    }
+}
+
+function Test-PrimaryKeyMark {
+    #     主キーの欄の印（主キーの順番の数字・○・PK など）があるか
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant()
+    return ($t -match '^[1-9]\d*$' -or $t -match '^(○|◯|〇|●|✓|✔|Y|YES|TRUE|PK)$')
+}
+
+function Add-TableRuleFindings {
+    #     テーブル定義書のカラム定義を確かめる（主キー・カラムの型・桁数）。見出しと型は Export-TableDdl.ps1 と同じ ddl\ の CSV で決める
+    param($Books, [string[]] $Names, [scriptblock] $Add)
+    $ddl = Join-Path $PSScriptRoot 'ddl'
+    $candidates = Read-HeaderCandidates (Join-Path $ddl 'テーブル定義書の見出し.csv') @('テーブルID', '物理名', 'データ型', '桁数', '小数', '主キー')
+    # 桁数・小数の要る型（型の対応で {n}・{s} を使う型）
+    $needLength = @{}; $needScale = @{}
+    foreach ($r in (Read-CsvFile (Join-Path $ddl '型の対応.csv') @('定義書の型') '型の対応')) {
+        $key = (([string]$r.'定義書の型').Normalize($nfkc) -replace '\s', '').ToUpperInvariant()
+        $templates = @($r.PSObject.Properties | Where-Object { $_.Name -ne '定義書の型' } | ForEach-Object { [string]$_.Value })
+        if (@($templates | Where-Object { $_.Contains('{n}') }).Count -gt 0) { $needLength[$key] = $true }
+        if (@($templates | Where-Object { $_.Contains('{s}') }).Count -gt 0) { $needScale[$key] = $true }
+    }
+    foreach ($book in $Books.Values) {
+        foreach ($sheetName in $book.Sheets.Keys) {
+            $grid = $book.Sheets[$sheetName]
+            # カラム定義の見出しの行（物理名とデータ型の見出しがそろっている行）
+            $phys = $null; $type = $null
+            foreach ($row in $grid.Rows) {
+                $labels = @($grid.Labels[$row].Values)
+                $p = @($candidates['物理名'] | Where-Object { $labels -contains $_ })[0]
+                $t = @($candidates['データ型'] | Where-Object { $labels -contains $_ })[0]
+                if ($p -and $t -and $p -ne $t) { $phys = $p; $type = $t; break }
+            }
+            if (-not $phys) { continue }
+            $table = @(Find-DesignTables $grid @($phys, $type) $phys)[0]
+            if (-not $table -or $table.Rows.Count -eq 0) { continue }
+            $cof = $table.ColumnOf
+            $label = @{}
+            foreach ($f in @('桁数', '小数', '主キー')) { $label[$f] = @($candidates[$f] | Where-Object { $cof.ContainsKey($_) })[0] }
+            $tableId = $sheetName
+            foreach ($n in $candidates['テーブルID']) { $c = Find-LabelCell $grid $n; if ($c -and $c.Value) { $tableId = $c.Value; break } }
+            $at = { param([int] $Row, [string] $Label) '{0}{1}' -f (ConvertTo-ColumnName $cof[$Label]), $Row }
+            $text = { param($dr, [string] $Label) if ($Label) { ([string]$dr.Cells[$cof[$Label]]).Normalize($nfkc).Trim() } else { '' } }
+            if ($Names -contains '主キー') {
+                if (-not $label['主キー']) {
+                    & $Add '主キー' $book.Path $sheetName (& $at $table.HeaderRow $phys) ('テーブル {0} のカラム定義に、主キー（PK）の列がありません' -f $tableId)
+                }
+                elseif (@($table.Rows | Where-Object { Test-PrimaryKeyMark (& $text $_ $label['主キー']) }).Count -eq 0) {
+                    & $Add '主キー' $book.Path $sheetName (& $at $table.HeaderRow $label['主キー']) ('テーブル {0} に主キーがありません（{1} の欄がどのカラムも空欄です）' -f $tableId, $grid.Cells[$table.HeaderRow][$cof[$label['主キー']]])
+                }
+            }
+            if ($Names -contains 'カラムの型・桁数') {
+                foreach ($dr in $table.Rows) {
+                    $column = & $text $dr $phys
+                    $typeText = & $text $dr $type
+                    if (-not $typeText) {
+                        & $Add 'カラムの型・桁数' $book.Path $sheetName (& $at $dr.Row $type) ('{0}.{1} のデータ型が空欄です' -f $tableId, $column)
+                        continue
+                    }
+                    # 「VARCHAR(100)」「NUMERIC(11,2)」のように型に桁数を書いた形、桁数の欄の「11,2」も読む
+                    $n = ''; $s = ''
+                    $m = [regex]::Match($typeText, '^(.+?)\s*\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)$')
+                    if ($m.Success) { $typeText = $m.Groups[1].Value; $n = $m.Groups[2].Value; $s = $m.Groups[3].Value }
+                    $lm = [regex]::Match((& $text $dr $label['桁数']), '^(\d+)(?:\s*[,.]\s*(\d+))?$')
+                    if ($lm.Success) { $n = $lm.Groups[1].Value; if ($lm.Groups[2].Success) { $s = $lm.Groups[2].Value } }
+                    $scaleText = & $text $dr $label['小数']
+                    if ($scaleText -match '^\d+$') { $s = $scaleText }
+                    $key = ($typeText -replace '\s', '').ToUpperInvariant()
+                    if ($needLength.ContainsKey($key) -and -not $n) {
+                        $where = $type
+                        if ($label['桁数']) { $where = $label['桁数'] }
+                        & $Add 'カラムの型・桁数' $book.Path $sheetName (& $at $dr.Row $where) ('{0}.{1}（{2}）の桁数が空欄です' -f $tableId, $column, $typeText)
+                    }
+                    elseif ($needScale.ContainsKey($key) -and $label['小数'] -and -not $s) {
+                        & $Add 'カラムの型・桁数' $book.Path $sheetName (& $at $dr.Row $label['小数']) ('{0}.{1}（{2}）の小数の桁数が空欄です' -f $tableId, $column, $typeText)
+                    }
+                }
+            }
+        }
+    }
+}
+
+function Invoke-ToolChecks {
+    #     観点表の「ツールの確認」を、設計書に対して行う（ツールで確かめる観点で使う確認だけ）。
+    #     戻り値: @{ Findings = @(@{ Rule（確認の名前）; Kind（整合性チェックの種類）; Path; Sheet; Cell; Detail }); Failed = 行えなかった確認の名前 → $true }
+    param($Points, $Files)
+    $result = [pscustomobject]@{ Findings = (New-Object System.Collections.Generic.List[object]); Failed = @{} }
+    $sources = [ordered]@{}
+    foreach ($p in $Points) {
+        if (-not $p.ByTool) { continue }
+        foreach ($r in $p.Rules) {
+            $src = $toolRules[$r.Name].Source
+            if (-not $sources.Contains($src)) { $sources[$src] = New-Object System.Collections.Generic.List[string] }
+            if (-not $sources[$src].Contains($r.Name)) { $sources[$src].Add($r.Name) }
+        }
+    }
+    if ($sources.Count -eq 0 -or @($Files).Count -eq 0) { return $result }
+    $paths = [string[]]@($Files | ForEach-Object { $_.Path })
+    $add = {
+        param([string] $Rule, [string] $Path, [string] $Sheet, [string] $Cell, [string] $Detail, [string] $Kind)
+        $result.Findings.Add([pscustomobject]@{ Rule = $Rule; Kind = $Kind; Path = $Path; Sheet = $Sheet; Cell = $Cell; Detail = $Detail })
+    }
+    $books = $null
+    foreach ($src in $sources.Keys) {
+        $names = $sources[$src]
+        Write-Host ('  ツールの確認: {0}' -f ($names -join '・'))
+        # ツールの指摘の項目 → 確認の名前
+        $itemRule = @{}
+        foreach ($n in $names) { foreach ($i in @($toolRules[$n].Items)) { if ($i) { $itemRule[$i] = $n } } }
+        try {
+            if ($src -eq '提出前チェック') {
+                $checks = @()
+                if ($names.Contains('版数')) { $checks += 'Version' }
+                if ($names.Contains('残っている文言')) { $checks += 'Word' }
+                foreach ($i in @(& (Join-Path $PSScriptRoot 'Test-ExcelDeliverable.ps1') -Path $paths -Check $checks 6>$null 3>$null)) {
+                    if ($itemRule.ContainsKey($i.Item)) { & $add $itemRule[$i.Item] $i.Path $i.Sheet $i.Cell $i.Detail '' }
+                }
+            }
+            elseif ($src -eq '表記ゆれ') {
+                $termArgs = @{ Path = $paths }
+                if ($Glossary) { $termArgs['Glossary'] = $Glossary }
+                foreach ($v in @(& (Join-Path $PSScriptRoot 'Test-ExcelTerms.ps1') @termArgs 6>$null 3>$null)) {
+                    # 揺れの表記ごと・ファイルごとに 1 件（場所は最初に出てくるセル）
+                    foreach ($g in @($v.Occurrences | Group-Object Path)) {
+                        $o = $g.Group[0]
+                        & $add '表記ゆれ' $o.Path $o.Sheet $o.Cell ('「{0}」は「{1}」の表記ゆれです（{2}。このファイルで {3} か所）' -f $v.Variant, $v.Preferred, $v.Kind, $g.Count) ''
+                    }
+                }
+            }
+            elseif ($src -eq '整合性') {
+                foreach ($i in @(& (Join-Path $PSScriptRoot 'Test-DesignConsistency.ps1') -Path $paths 6>$null 3>$null)) {
+                    if ($i.Path -and $itemRule.ContainsKey($i.Item)) { & $add $itemRule[$i.Item] $i.Path $i.Sheet $i.Cell $i.Detail $i.Kind }
+                }
+            }
+            else {
+                if ($null -eq $books) { $books = ConvertTo-DesignBooks @(& $searchScript -Pattern '\S' -Path $paths -Target Value 6>$null 3>$null) }
+                if ($src -eq '画面') { Add-ScreenRuleFindings $books $names $add }
+                else { Add-TableRuleFindings $books $names $add }
+            }
+        }
+        catch {
+            Write-Warning ("ツールの確認（{0}）を行えませんでした。この確認を使う観点は「未回答」になります: {1}" -f ($names -join '・'), $_.Exception.Message)
+            foreach ($n in $names) { $result.Failed[$n] = $true }
+        }
+    }
+    return $result
+}
+
 # ---------------------------------------------------------------- プロンプト
 
 
@@ -463,7 +849,10 @@ function New-PromptText {
     [void]$sb.Append('【レビュー観点】').Append("`n")
     [void]$sb.Append('観点ID | 観点 | 判定基準').Append("`n")
     foreach ($p in $Points) {
-        [void]$sb.Append(('{0} | {1} | {2}' -f $p.Id, $p.Point.Replace("`n", ' '), $p.Criteria.Replace("`n", ' '))).Append("`n")
+        $criteria = $p.Criteria.Replace("`n", ' ')
+        # ツールでも確かめる観点は、ツールの分を AI の判定から外す（同じ指摘が二重にならないよう）
+        if ($p.ByTool) { $criteria += '（{0}は、ツールで確かめるので指摘しなくてよい）' -f (@($p.Rules | ForEach-Object { Get-RuleText $_ }) -join '、') }
+        [void]$sb.Append(('{0} | {1} | {2}' -f $p.Id, $p.Point.Replace("`n", ' '), $criteria)).Append("`n")
     }
     [void]$sb.Append("`n")
     [void]$sb.Append("【設計書】$FileName$PartNote").Append("`n")
@@ -611,7 +1000,7 @@ function New-ReviewRequests {
     $requests = New-Object System.Collections.Generic.List[object]
     $no = 0
     foreach ($f in $files) {
-        $targetPoints = @($points | Where-Object { Test-NameLike $f.Name $_.Targets })
+        $targetPoints = @($points | Where-Object { $_.ByAi -and (Test-NameLike $f.Name $_.Targets) })
         if ($targetPoints.Count -eq 0) { continue }
         $sheetTexts = & $getText $f
         $docLength = 0
@@ -710,6 +1099,18 @@ if ($ImportOnly) {
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw "依頼の一覧がありません。先に -PromptOnly などで依頼を作成してください: $manifestPath" }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $requests = @($manifest.Requests)
+    if (-not $designFiles) {
+        # 依頼を作ったときの設計書（古い依頼の一覧には無いので、依頼のある設計書）
+        $designFiles = New-Object System.Collections.Generic.List[object]
+        if ($manifest.PSObject.Properties['Files']) {
+            foreach ($f in @($manifest.Files)) { $designFiles.Add([pscustomobject]@{ Path = $f.Path; Name = $f.Name; Relative = $f.Relative }) }
+        }
+        else {
+            foreach ($r in $requests) {
+                if (@($designFiles | Where-Object { $_.Path -eq $r.File }).Count -eq 0) { $designFiles.Add([pscustomobject]@{ Path = $r.File; Name = [System.IO.Path]::GetFileName($r.File); Relative = $r.Relative }) }
+            }
+        }
+    }
 }
 else {
     Write-Host '依頼を作成しています...'
@@ -735,11 +1136,14 @@ else {
         Created  = (Get-Date).ToString('yyyy/MM/dd HH:mm:ss')
         MaxChars = $MaxChars
         Requests = @($requests | Select-Object Id, File, Relative, Part, PointIds, Sheets, Chars, Hash)
+        # -ImportOnly でツールの確認をする設計書
+        Files    = @($designFiles | Select-Object Path, Name, Relative)
     }
     [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5), $utf8Bom)
 
     Write-Host ''
-    Write-Host ("依頼 {0} 件を作成しました（1 件あたり最大 {1} 文字）: {2}" -f $requests.Count, (($requests | Measure-Object Chars -Maximum).Maximum), $promptDir)
+    if ($requests.Count -eq 0) { Write-Host 'AI に依頼する観点はありません（どの観点も、確かめ方がツールです）。' }
+    else { Write-Host ("依頼 {0} 件を作成しました（1 件あたり最大 {1} 文字）: {2}" -f $requests.Count, (($requests | Measure-Object Chars -Maximum).Maximum), $promptDir) }
 }
 
 $pointById = @{}
@@ -809,9 +1213,30 @@ $findingRows = New-Object System.Collections.Generic.List[object]
 $statusRows  = New-Object System.Collections.Generic.List[object]
 $requestRows = New-Object System.Collections.Generic.List[object]
 
-# 設計書 × 観点 ごとに、分割された依頼の回答をまとめる
+# ---- ツールの確認（確かめ方がツール・両方の観点）
+$toolPoints = @($points | Where-Object { $_.ByTool })
+$toolFiles = @()
+$toolResult = $null
+if ($toolPoints.Count -gt 0) {
+    $toolFiles = @($designFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_.Path) })
+    $gone = @($designFiles | Where-Object { $_ -and -not (Test-Path -LiteralPath $_.Path) })
+    if ($gone.Count -gt 0) { Write-Warning ("見つからない設計書は、ツールで確かめません: {0}" -f (($gone | ForEach-Object { $_.Relative }) -join ', ')) }
+    Write-Host ''
+    Write-Host 'ツールで確かめています...'
+    $toolResult = Invoke-ToolChecks -Points $toolPoints -Files $toolFiles
+}
+
+# 設計書 × 観点 ごとに、分割された依頼の回答とツールの確認をまとめる
 $coverage = [ordered]@{}
 $findings = New-Object System.Collections.Generic.List[object]
+$newCoverage = {
+    param([string] $File, [string] $Relative, [string] $PointId)
+    $key = "$File|$PointId"
+    if (-not $coverage.Contains($key)) {
+        $coverage[$key] = [pscustomobject]@{ File = $File; Relative = $Relative; PointId = $PointId; Verdicts = New-Object System.Collections.Generic.List[string]; Requests = New-Object System.Collections.Generic.List[string]; Missing = $false }
+    }
+    return $coverage[$key]
+}
 foreach ($r in $requests) {
     $ansPath = Join-Path $answerDir "$($r.Id).txt"
     $state = '未回答'
@@ -823,24 +1248,62 @@ foreach ($r in $requests) {
     $requestRows.Add(@{ Values = @($r.Id, $r.Relative, $r.Part, ($r.PointIds -join ', '), $r.Chars, $state, "prompts\$($r.Id).txt") })
 
     foreach ($pointId in $r.PointIds) {
-        $key = "$($r.File)|$pointId"
-        if (-not $coverage.Contains($key)) {
-            $coverage[$key] = [pscustomobject]@{ File = $r.File; Relative = $r.Relative; PointId = $pointId; Verdicts = New-Object System.Collections.Generic.List[string]; Requests = New-Object System.Collections.Generic.List[string]; Missing = $false }
-        }
-        $cv = $coverage[$key]
+        $cv = & $newCoverage $r.File $r.Relative $pointId
         $cv.Requests.Add($r.Id)
         $mine = @($entries | Where-Object PointId -eq $pointId)
         if ($mine.Count -eq 0) { $cv.Missing = $true }
         foreach ($e in $mine) {
             $cv.Verdicts.Add($e.Verdict)
             if ($e.Verdict -ne 'OK') {
-                $findings.Add([pscustomobject]@{ Request = $r; Entry = $e })
+                $findings.Add([pscustomobject]@{ Request = $r; Entry = $e; Source = 'AI'; Seq = $findings.Count })
             }
         }
     }
 }
 
-$sorted = $findings | Sort-Object @{ e = { $_.Request.Relative } }, @{ e = { $s = $pointById[$_.Entry.PointId].Severity; if ($severityOrder.ContainsKey($s)) { $severityOrder[$s] } else { 9 } } }, @{ e = { $_.Entry.PointId } }
+# ツールの指摘は、その確認を書いた観点のうち、観点表で先にあって設計書が対象のものに入れる。
+# 対象の観点が無ければ（設計書どうしの食い違いを、一覧ではなく設計書の側で見つけたときなど）、その確認を書いた観点に入れる
+$toolCounts = [ordered]@{}
+if ($toolResult) {
+    $relativeOf = @{}
+    foreach ($f in $toolFiles) { $relativeOf[$f.Path] = $f.Relative }
+    $byKey = @{}
+    foreach ($tf in $toolResult.Findings) {
+        if (-not $relativeOf.ContainsKey($tf.Path)) { continue }
+        $name = [System.IO.Path]::GetFileName($tf.Path)
+        $owners = @($toolPoints | Where-Object { @($_.Rules | Where-Object { $_.Name -eq $tf.Rule -and (-not $_.Kind -or $_.Kind -eq $tf.Kind) }).Count -gt 0 })
+        $owner = @($owners | Where-Object { Test-NameLike $name $_.Targets })[0]
+        if (-not $owner) { $owner = $owners[0] }
+        if (-not $owner) { continue }
+        $key = "$($tf.Path)|$($owner.Id)"
+        if (-not $byKey.ContainsKey($key)) { $byKey[$key] = New-Object System.Collections.Generic.List[object] }
+        $byKey[$key].Add($tf)
+        $location = $tf.Sheet
+        if ($tf.Sheet -and $tf.Cell) { $location = '{0}!{1}' -f $tf.Sheet, $tf.Cell }
+        $request = [pscustomobject]@{ Id = 'ツール'; File = $tf.Path; Relative = $relativeOf[$tf.Path]; Sheets = @($tf.Sheet) }
+        $entry = [pscustomobject]@{ PointId = $owner.Id; Verdict = 'NG'; Location = $location; Finding = $tf.Detail; Reason = ('機械のチェック（{0}）' -f $tf.Rule) }
+        $findings.Add([pscustomobject]@{ Request = $request; Entry = $entry; Source = ('ツール（{0}）' -f $tf.Rule); Seq = $findings.Count })
+        if (-not $toolCounts.Contains($tf.Rule)) { $toolCounts[$tf.Rule] = 0 }
+        $toolCounts[$tf.Rule]++
+    }
+    foreach ($f in $toolFiles) {
+        foreach ($p in $toolPoints) {
+            if (-not (Test-NameLike $f.Name $p.Targets)) { continue }
+            $cv = & $newCoverage $f.Path $f.Relative $p.Id
+            $cv.Requests.Add('ツール')
+            $key = "$($f.Path)|$($p.Id)"
+            if ($byKey.ContainsKey($key)) { foreach ($tf in $byKey[$key]) { $cv.Verdicts.Add('NG') } }
+            elseif (@($p.Rules | Where-Object { $toolResult.Failed.ContainsKey($_.Name) }).Count -gt 0) { $cv.Missing = $true }
+            else { $cv.Verdicts.Add('OK') }
+        }
+    }
+    $countText = @($toolCounts.Keys | ForEach-Object { '{0} {1}' -f $_, $toolCounts[$_] }) -join '・'
+    if ($countText) { Write-Host ("ツールの確認: 指摘 {0} 件（{1}）" -f @($findings | Where-Object { $_.Source -ne 'AI' }).Count, $countText) }
+    else { Write-Host 'ツールの確認: 指摘はありません' }
+}
+
+# 設計書ごとに重要度の高い順。同じ観点では AI の指摘、ツールの指摘の順（読んだ順）
+$sorted = $findings | Sort-Object @{ e = { $_.Request.Relative } }, @{ e = { $s = $pointById[$_.Entry.PointId].Severity; if ($severityOrder.ContainsKey($s)) { $severityOrder[$s] } else { 9 } } }, @{ e = { $_.Entry.PointId } }, @{ e = { $_.Seq } }
 $n = 0
 foreach ($f in $sorted) {
     $n++
@@ -848,14 +1311,26 @@ foreach ($f in $sorted) {
     $loc = Resolve-Location -Location $f.Entry.Location -SheetNames @($f.Request.Sheets)
     $note = ''
     if ($f.Entry.Location -and -not $loc) { $note = '場所のシート名・セル番地を設計書で確認してください' }
-    $row = @{ Values = @($n, $f.Entry.Verdict, $p.Severity, $p.Id, $p.Category, $p.Point, $f.Request.Relative, $f.Entry.Location, $f.Entry.Finding, $f.Entry.Reason, $f.Request.Id, '', '', '', '', $note) }
+    $row = @{ Values = @($n, $f.Entry.Verdict, $f.Source, $p.Severity, $p.Id, $p.Category, $p.Point, $f.Request.Relative, $f.Entry.Location, $f.Entry.Finding, $f.Entry.Reason, $f.Request.Id, '', '', '', '', $note) }
     if ($loc) {
-        $row.Link = @{ Column = 7; Path = $f.Request.File; Location = "'{0}'!{1}" -f $loc.Sheet.Replace("'", "''"), $loc.Cell }
+        $row.Link = @{ Column = 8; Path = $f.Request.File; Location = "'{0}'!{1}" -f $loc.Sheet.Replace("'", "''"), $loc.Cell }
+    }
+    elseif ($f.Source -ne 'AI') {
+        # 場所の無いツールの指摘（ファイル名の版数など）は、設計書を開く
+        $row.Link = @{ Column = 7; Path = $f.Request.File; Location = '' }
     }
     $findingRows.Add($row)
 }
 
-foreach ($cv in $coverage.Values) {
+# 設計書の順、観点表の順に並べる
+$fileOrder = @{}
+foreach ($f in $designFiles) { if ($f -and -not $fileOrder.ContainsKey($f.Path)) { $fileOrder[$f.Path] = $fileOrder.Count } }
+foreach ($r in $requests) { if (-not $fileOrder.ContainsKey($r.File)) { $fileOrder[$r.File] = $fileOrder.Count } }
+$pointOrder = @{}
+foreach ($p in $points) { $pointOrder[$p.Id] = $pointOrder.Count }
+$firstSheet = @{}
+foreach ($r in $requests) { if (-not $firstSheet.ContainsKey($r.File) -and @($r.Sheets).Count -gt 0) { $firstSheet[$r.File] = @($r.Sheets)[0] } }
+foreach ($cv in @($coverage.Values | Sort-Object @{ e = { $fileOrder[$_.File] } }, @{ e = { $pointOrder[$_.PointId] } })) {
     $p = $pointById[$cv.PointId]
     $ng = @($cv.Verdicts | Where-Object { $_ -eq 'NG' }).Count
     if ($ng -gt 0) { $verdict = 'NG' }
@@ -864,14 +1339,17 @@ foreach ($cv in $coverage.Values) {
     else { $verdict = 'OK' }
     # 分割した依頼の一部だけ未回答なら、OK と言い切らない
     if ($cv.Missing -and $verdict -eq 'OK') { $verdict = '未回答' }
-    $statusRows.Add(@{ Values = @($cv.Relative, $p.Id, $p.Category, $p.Point, $p.Severity, $verdict, $ng, ($cv.Requests -join ', ')); Link = @{ Column = 0; Path = $cv.File; Location = "'{0}'!A1" -f ((@($requests | Where-Object File -eq $cv.File))[0].Sheets[0]).Replace("'", "''") } })
+    # 依頼の無い設計書（ツールだけで確かめた設計書）は、ファイルを開くだけ
+    $location = ''
+    if ($firstSheet.ContainsKey($cv.File)) { $location = "'{0}'!A1" -f $firstSheet[$cv.File].Replace("'", "''") }
+    $statusRows.Add(@{ Values = @($cv.Relative, $p.Id, $p.Category, $p.Point, $p.Severity, $verdict, $ng, ($cv.Requests -join ', ')); Link = @{ Column = 0; Path = $cv.File; Location = $location } })
 }
 
 $sheets = @(
     @{
         Name = '指摘一覧'
         Columns = @(
-            @{ Header = 'No'; Width = 5 }, @{ Header = '判定'; Width = 8 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '観点ID'; Width = 8 },
+            @{ Header = 'No'; Width = 5 }, @{ Header = '判定'; Width = 8 }, @{ Header = '判定元'; Width = 12 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '観点ID'; Width = 8 },
             @{ Header = '分類'; Width = 10 }, @{ Header = '観点'; Width = 30 }, @{ Header = '設計書'; Width = 30 }, @{ Header = '場所'; Width = 20 },
             @{ Header = '指摘内容'; Width = 45 }, @{ Header = '根拠'; Width = 35 }, @{ Header = '依頼No'; Width = 8 },
             @{ Header = '対応要否'; Width = 9 }, @{ Header = '対応状況'; Width = 9 }, @{ Header = '対応者'; Width = 10 }, @{ Header = '対応内容'; Width = 30 }, @{ Header = '備考'; Width = 25 })
@@ -902,8 +1380,10 @@ catch {
 
 $answeredCount = @($requestRows | Where-Object { $_.Values[5] -eq '回答済み' }).Count
 $statusCounts = $statusRows | Group-Object { $_.Values[5] } | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
+$toolNote = ''
+if ($toolPoints.Count -gt 0) { $toolNote = '（うちツール {0} 件）' -f @($findings | Where-Object { $_.Source -ne 'AI' }).Count }
 Write-Host ''
-Write-Host ("依頼 {0} 件中 {1} 件回答済み / 観点の判定: {2} / 指摘 {3} 件" -f $requests.Count, $answeredCount, ($statusCounts -join '・'), $findingRows.Count)
+Write-Host ("依頼 {0} 件中 {1} 件回答済み / 観点の判定: {2} / 指摘 {3} 件{4}" -f $requests.Count, $answeredCount, ($statusCounts -join '・'), $findingRows.Count, $toolNote)
 Write-Host "レビュー結果: $reportPath"
 
 # .SYNOPSIS
@@ -918,6 +1398,25 @@ Write-Host "レビュー結果: $reportPath"
 #     3. 全回答から「レビュー結果.xlsx」（指摘一覧・観点消化状況・依頼一覧）を作ります。
 #        指摘の場所は、クリックすると設計書の該当セルが開くリンクになります。
 #
+#     観点表の「確かめ方」を「ツール」にした観点は AI に依頼せず、「ツールの確認」に書いた確認を
+#     ツール（提出前チェック・表記ゆれ・整合性チェックと、画面項目定義・テーブル定義の確認）で行います。
+#     「両方」の観点は AI にも依頼します（ツールで確かめる分は、AI には指摘しなくてよいと伝えます）。
+#     ツールの指摘は、指摘一覧に判定元「ツール（確認の名前）」で入ります。数える・突き合わせるだけで決まる観点は、
+#     AI より漏れが無く、依頼の数も減ります。ツールの確認（「ツールの確認」の欄に書く名前）:
+#       版数                     表紙・改訂履歴・ファイル名の版数と更新日の食い違い（Test-ExcelDeliverable.ps1）
+#       残っている文言           TODO・TBD・未定・検討中などの消し忘れ（Test-ExcelDeliverable.ps1）
+#       表記ゆれ                 カタカナの長音・全角半角の揺れと、-Glossary の用語集の揺れ（Test-ExcelTerms.ps1）
+#       参照先なし・重複定義・一覧との違い・ヘッダの違い・組み合わせの違い・属性の違い
+#                                設計書どうしの食い違い（Test-DesignConsistency.ps1）。「参照先なし（メッセージ）」のように、
+#                                （ ）で種類（参照のルールの種類）を付けると、その種類だけにします
+#       入力項目の型・桁数       入力項目の型の空欄と、文字・数値の型の桁数の空欄
+#       入力チェックのメッセージ メッセージIDの無い入力チェック
+#       初期値                   選択・日付・チェックボックスの入力項目の初期値の空欄
+#       ボタンのイベント         イベント定義の無いボタン・リンク
+#       メッセージ欄             イベントの処理概要とメッセージ欄のメッセージIDの過不足
+#       主キー                   主キーの無いテーブル
+#       カラムの型・桁数         カラムの型の空欄と、桁数・小数の要る型（tools\ddl\型の対応.csv）の桁数・小数の空欄
+#
 #     途中で中断しても、回答済みの分は保存され、次回は続きから再開します。
 #     設計書の読み取りには同じフォルダの Search-Excel.ps1 を使います（Excel 不要）。
 #
@@ -926,7 +1425,8 @@ Write-Host "レビュー結果: $reportPath"
 #
 # .PARAMETER Checklist
 #     観点表（xlsx または UTF-8 の csv）。省略時は review-checklists\詳細設計レビュー観点.xlsx。
-#     列: 観点ID / 分類 / 観点 / 判定基準 / 重要度 / 対象設計書 / 参照設計書 / 有効
+#     列: 観点ID / 分類 / 観点 / 判定基準 / 重要度 / 対象設計書 / 参照設計書 / 有効 / 確かめ方 / ツールの確認
+#     確かめ方（AI・ツール・両方）が空欄なら、ツールの確認があれば両方、無ければ AI です。
 #
 # .PARAMETER OutDir
 #     プロンプト・回答・レビュー結果の保存先。省略時は .\design-review
@@ -947,6 +1447,9 @@ Write-Host "レビュー結果: $reportPath"
 #
 # .PARAMETER SheetNameExclude
 #     テキスト化しないシート名の正規表現（例: '表紙|改訂履歴'）。文字数の節約に使います。
+#
+# .PARAMETER Glossary
+#     表記ゆれ（ツールの確認）で使う用語集の CSV（正しい表記・揺れ）。Test-ExcelTerms.ps1 の -Glossary と同じです。
 #
 # .PARAMETER TextFormat
 #     設計書を AI に渡すときのテキストの形。Rows（既定）は「行番号| 列:値 | 列:値」の行の形、Markdown は

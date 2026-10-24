@@ -434,8 +434,9 @@ if ($Where) {
 $script:Issues = New-Object System.Collections.Generic.List[object]
 
 function Add-Issue {
-    param([ValidateSet('エラー', '警告', '情報')] [string] $Level, [string] $Item, [string] $Detail, $Place)
-    $issue = [pscustomobject]@{ File = ''; Location = ''; Level = $Level; Item = $Item; Detail = $Detail; Sheet = ''; Cell = ''; Path = ''; SheetIndex = 0; Row = 0; Col = 0 }
+    #     Kind: 定義・参照の種類（ルールの「種類」。テーブル・メッセージ・画面など）
+    param([ValidateSet('エラー', '警告', '情報')] [string] $Level, [string] $Item, [string] $Detail, $Place, [string] $Kind)
+    $issue = [pscustomobject]@{ File = ''; Location = ''; Level = $Level; Item = $Item; Detail = $Detail; Kind = $Kind; Sheet = ''; Cell = ''; Path = ''; SheetIndex = 0; Row = 0; Col = 0 }
     if ($Place) {
         $issue.File = $Place.File; $issue.Path = $Place.Path; $issue.Sheet = $Place.Sheet; $issue.Cell = $Place.Cell
         $issue.SheetIndex = $Place.SheetIndex; $issue.Row = $Place.Row; $issue.Col = $Place.Col
@@ -493,7 +494,7 @@ foreach ($section in @('定義', '一覧')) {
         # 2 つ目の場所に、ほかの場所を添えて知らせる
         $others = @($g | Where-Object { $_ -ne $g[1] } | ForEach-Object { $_.Place })
         if ($section -eq '定義') { $fmt = '{0}「{1}」は、ほかの場所でも定義されています（{2}）' } else { $fmt = '{0}「{1}」が、一覧のほかの行にも書かれています（{2}）' }
-        Add-Issue 'エラー' '重複定義' ($fmt -f $g[0].Kind, $g[0].Shown, (Format-Places $others $g[1].Place.Path)) $g[1].Place
+        Add-Issue 'エラー' '重複定義' ($fmt -f $g[0].Kind, $g[0].Shown, (Format-Places $others $g[1].Place.Path)) $g[1].Place $g[0].Kind
     }
 }
 
@@ -503,12 +504,12 @@ foreach ($d in $defs) {
     if ($d.Unit -eq 'ファイル') {
         foreach ($v in $d.Values.Ids) {
             if ((ConvertTo-Key $v.Value) -ne (ConvertTo-Key $d.Id)) {
-                Add-Issue '警告' 'ヘッダの違い' ('{0}が「{1}」です（このファイルのほかのシートは「{2}」）' -f $d.Rule.Column.Text, $v.Value, $d.Id) $v.Place
+                Add-Issue '警告' 'ヘッダの違い' ('{0}が「{1}」です（このファイルのほかのシートは「{2}」）' -f $d.Rule.Column.Text, $v.Value, $d.Id) $v.Place $d.Kind
             }
         }
         foreach ($v in $d.Values.Names) {
             if ((ConvertTo-Label $v.Value) -ne (ConvertTo-Label $d.Name)) {
-                Add-Issue '警告' 'ヘッダの違い' ('{0}が「{1}」です（このファイルのほかのシートは「{2}」）' -f $d.Rule.Name.Text, $v.Value, $d.Name) $v.Place
+                Add-Issue '警告' 'ヘッダの違い' ('{0}が「{1}」です（このファイルのほかのシートは「{2}」）' -f $d.Rule.Name.Text, $v.Value, $d.Name) $v.Place $d.Kind
             }
         }
     }
@@ -524,7 +525,7 @@ foreach ($d in $defs) {
     if ($best -and $best -ne $d.Key) {
         $whereName = 'ファイル名'
         if ($d.Unit -eq 'シート') { $whereName = 'シート名' }
-        Add-Issue '警告' 'ヘッダの違い' ('{0}は「{1}」ですが、{2}は「{3}」です' -f $whereName, $index[$d.Kind].ById[$best].Id, $d.Rule.Column.Text, $d.Id) $d.Place
+        Add-Issue '警告' 'ヘッダの違い' ('{0}は「{1}」ですが、{2}は「{3}」です' -f $whereName, $index[$d.Kind].ById[$best].Id, $d.Rule.Column.Text, $d.Id) $d.Place $d.Kind
     }
 }
 
@@ -541,17 +542,17 @@ foreach ($kind in $kinds) {
     $listName = '{0}（{1}）' -f $first.Place.File, $first.Place.Sheet
     foreach ($l in $list.Values) {
         if (-not $main.Contains($l.Key)) {
-            Add-Issue '警告' '一覧との違い' ('一覧にある{0}「{1} {2}」の定義が見つかりません（設計書が無いか、ID が違います）' -f $kind, $l.Shown, $l.Name).Replace(' 」', '」') $l.Place
+            Add-Issue '警告' '一覧との違い' ('一覧にある{0}「{1} {2}」の定義が見つかりません（設計書が無いか、ID が違います）' -f $kind, $l.Shown, $l.Name).Replace(' 」', '」') $l.Place $kind
             continue
         }
         $m = $main[$l.Key]
         if ($l.Name -and $m.Name -and (ConvertTo-Label $l.Name) -ne (ConvertTo-Label $m.Name)) {
-            Add-Issue '警告' '一覧との違い' ('{0}「{1}」の名前が違います（一覧: {2} / {3}: {4}）' -f $kind, $l.Shown, $l.Name, $m.Place.File, $m.Name) $l.Place
+            Add-Issue '警告' '一覧との違い' ('{0}「{1}」の名前が違います（一覧: {2} / {3}: {4}）' -f $kind, $l.Shown, $l.Name, $m.Place.File, $m.Name) $l.Place $kind
         }
     }
     foreach ($m in $main.Values) {
         if (-not $list.Contains($m.Key)) {
-            Add-Issue '警告' '一覧との違い' ('{0}「{1} {2}」が一覧（{3}）にありません' -f $kind, $m.Shown, $m.Name, $listName).Replace(' 」', '」') $m.Place
+            Add-Issue '警告' '一覧との違い' ('{0}「{1} {2}」が一覧（{3}）にありません' -f $kind, $m.Shown, $m.Name, $listName).Replace(' 」', '」') $m.Place $kind
         }
     }
 }
@@ -578,7 +579,7 @@ function Test-Attributes {
     $hasIo = $ra.ContainsKey('入出力')
     $isInput = $hasIo -and (([string]$ra['入出力']).Normalize($nfkc) -match 'I|入')
     if ($ra['型'] -and $da['型'] -and (ConvertTo-Key $ra['型']) -ne (ConvertTo-Key $da['型'])) {
-        Add-Issue '警告' '属性の違い' ('型が「{0}」ですが、{1} は「{2}」です' -f $ra['型'], $Def.Shown, $da['型']) $Ref.Place
+        Add-Issue '警告' '属性の違い' ('型が「{0}」ですが、{1} は「{2}」です' -f $ra['型'], $Def.Shown, $da['型']) $Ref.Place $Ref.Kind
     }
     foreach ($n in @('桁数', '小数')) {
         if (-not $ra.ContainsKey($n) -or -not $da.ContainsKey($n)) { continue }
@@ -588,7 +589,7 @@ function Test-Attributes {
         if ($hasIo -and -not $isInput -and $a -gt $b) { continue }
         $tail = ''
         if ($isInput -and $a -gt $b) { $tail = '（入力した値がカラムに入りきりません）' }
-        Add-Issue '警告' '属性の違い' ('{0}が {1} ですが、{2} は {3} です{4}' -f $n, $a, $Def.Shown, $b, $tail) $Ref.Place
+        Add-Issue '警告' '属性の違い' ('{0}が {1} ですが、{2} は {3} です{4}' -f $n, $a, $Def.Shown, $b, $tail) $Ref.Place $Ref.Kind
     }
     if ($ra.ContainsKey('必須') -and $da.ContainsKey('必須')) {
         $refRequired = Test-Flag $ra['必須']; $defRequired = Test-Flag $da['必須']
@@ -599,10 +600,10 @@ function Test-Attributes {
             $writes = $script:Crud[$owner].Targets[$Ref.ParentKey].Letters -match '[CU]'
         }
         if ($isInput -and $writes -and -not $refRequired -and $defRequired -and -not $da['既定値']) {
-            Add-Issue '警告' '属性の違い' ('入力が任意ですが、{0} は必須で既定値がありません（未入力では登録できません）' -f $Def.Shown) $Ref.Place
+            Add-Issue '警告' '属性の違い' ('入力が任意ですが、{0} は必須で既定値がありません（未入力では登録できません）' -f $Def.Shown) $Ref.Place $Ref.Kind
         }
         elseif (-not $hasIo -and $refRequired -and -not $defRequired) {
-            Add-Issue '警告' '属性の違い' ('必須の項目ですが、{0} は必須ではありません（値が無いことがあります）' -f $Def.Shown) $Ref.Place
+            Add-Issue '警告' '属性の違い' ('必須の項目ですが、{0} は必須ではありません（値が無いことがあります）' -f $Def.Shown) $Ref.Place $Ref.Kind
         }
     }
 }
@@ -625,19 +626,19 @@ foreach ($ref in $refs) {
     if ($ref.Rule.Column) { $context = '（{0}）' -f $ref.Rule.Column.Text }
     if ($ref.Parent -and -not $e.Parents.ContainsKey($ref.ParentKey)) {
         $parentLabel = @($ruleList | Where-Object { $_.Kind -eq $ref.Kind -and $_.Section -ne '参照' -and $_.Parent } | ForEach-Object { $_.Parent.Text })[0]
-        Add-Issue 'エラー' '参照先なし' ('{0}「{1}」が定義されていません（{2}）' -f $parentLabel, $ref.Parent, $ref.Shown) $ref.Place
+        Add-Issue 'エラー' '参照先なし' ('{0}「{1}」が定義されていません（{2}）' -f $parentLabel, $ref.Parent, $ref.Shown) $ref.Place $ref.Kind
         $missingCount[$ref.Kind]++
         continue
     }
     if (-not $e.ById.ContainsKey($ref.Key)) {
-        Add-Issue 'エラー' '参照先なし' ('{0}「{1}」が定義されていません{2}' -f $ref.Kind, $ref.Shown, $context) $ref.Place
+        Add-Issue 'エラー' '参照先なし' ('{0}「{1}」が定義されていません{2}' -f $ref.Kind, $ref.Shown, $context) $ref.Place $ref.Kind
         $missingCount[$ref.Kind]++
         continue
     }
     $d = $e.ById[$ref.Key]
     $original = Find-Original $ref.Raw $ref.Shown
     if (-not [string]::Equals($original, $d.Shown, [System.StringComparison]::Ordinal)) {
-        Add-Issue '情報' '表記の違い' ('「{0}」は、定義では「{1}」と書かれています（全角・半角や大文字・小文字）' -f $original, $d.Shown) $ref.Place
+        Add-Issue '情報' '表記の違い' ('「{0}」は、定義では「{1}」と書かれています（全角・半角や大文字・小文字）' -f $original, $d.Shown) $ref.Place $ref.Kind
     }
     if ($ref.Attrs -and $d.Attrs) { Test-Attributes $ref $d }
 }
@@ -668,10 +669,10 @@ foreach ($d in $defs) {
     $uk = '{0}|{1}' -f $d.Kind, $d.Key
     if ($used.ContainsKey($uk) -or $reportedUnused.ContainsKey($uk)) { continue }
     $reportedUnused[$uk] = $true
-    Add-Issue '情報' '未使用' ('{0}「{1} {2}」は、どこからも参照されていません' -f $d.Kind, $d.Shown, $d.Name).Replace(' 」', '」') $d.Place
+    Add-Issue '情報' '未使用' ('{0}「{1} {2}」は、どこからも参照されていません' -f $d.Kind, $d.Shown, $d.Name).Replace(' 」', '」') $d.Place $d.Kind
 }
 foreach ($k in $unchecked.Keys) {
-    Add-Issue '情報' '未確認' ('{0}の定義が見つからないため、{0}の参照（{1} か所）は確かめていません' -f $k, $unchecked[$k]) $null
+    Add-Issue '情報' '未確認' ('{0}の定義が見つからないため、{0}の参照（{1} か所）は確かめていません' -f $k, $unchecked[$k]) $null $k
 }
 
 # 組み合わせの違い: 「元」のある参照（画面の遷移先など）を、書かれている設計書どうしで比べる
@@ -692,7 +693,7 @@ foreach ($g in @($ruleList | Where-Object { $_.Section -eq '参照' -and $_.From
                 $reported[$rk] = $true
                 $label1 = $r1.Kind; if ($r1.Column) { $label1 = $r1.Column.Text }
                 $label2 = $r2.Kind; if ($r2.Column) { $label2 = $r2.Column.Text }
-                Add-Issue '警告' '組み合わせの違い' ('{0} の{1}「{2}」が、{3}の{4}にありません' -f $p.From, $label1, $p.To, $where2, $label2) $p.Place
+                Add-Issue '警告' '組み合わせの違い' ('{0} の{1}「{2}」が、{3}の{4}にありません' -f $p.From, $label1, $p.To, $where2, $label2) $p.Place $r1.Kind
             }
         }
     }
@@ -800,7 +801,7 @@ if ($OutXlsx) {
 #       未使用           どこからも参照されていないメッセージ・コード区分・テーブル（ルールの「未使用」が「確認」の種類。情報）
 #       未確認           定義が見つからない種類の参照（設計書がフォルダに無いなど。情報）
 #
-#     結果は 1 指摘 1 行のオブジェクトで出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
+#     結果は 1 指摘 1 行のオブジェクト（Kind は定義・参照の種類）で出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
 #     -OutXlsx には、イベント定義の使用テーブル（T_ORDER(R,U) など）と IF の設定元から作った CRUD 図も入れます。
 #     -Where を付けると、食い違いは確かめずに、指定した ID の定義と参照している場所（影響範囲）を一覧にします。
 #

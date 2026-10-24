@@ -182,6 +182,25 @@ function Read-XlsxCharts {
     finally { $fs.Dispose() }
 }
 
+function Set-CellValues {
+    #     ブックのシートのセルの値を書き換える（テスト用。$null で空にする）
+    param([string] $File, [string] $Sheet, [hashtable] $Values)
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $pkg = Open-ZipPackage $File
+    try {
+        $part = (Get-WorkbookSheetParts $pkg).Sheets[$Sheet]
+        $doc = Read-PartXmlForEdit $pkg $part
+        foreach ($ref in $Values.Keys) {
+            $row = [int]($ref -replace '^[A-Z]+', '')
+            $rowEl = Get-SheetRowElement $doc $row -Create
+            Set-SheetCellValue $doc (Get-SheetCellElement $doc $rowEl $row (Get-ColumnIndex $ref) -Create) $Values[$ref]
+        }
+        $changes = @{ $part.ToLowerInvariant() = (ConvertTo-XmlString $doc) }
+    }
+    finally { $pkg.Zip.Dispose() }
+    Save-ZipPackage -FilePath $File -Changes $changes
+}
+
 function New-SheetsBook {
     #     複数シートのブックを作る（テスト用）。Sheets: @{ 名前 = @(見出しの配列, 行の配列...) } の順序付き辞書
     param([string] $Path, $Sheets)

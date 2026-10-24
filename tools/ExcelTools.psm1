@@ -929,8 +929,9 @@ $script:Nfkc = [System.Text.NormalizationForm]::FormKC
 function Read-ScreenDesign {
     #     画面設計書の画面項目定義・イベント定義と、コード定義書・メッセージ一覧を読む（Books は ConvertTo-DesignBooks の結果）。
     #     画面項目定義・イベント定義は、「画面ID」の欄のあるシートだけを読む（AnySheet を付けると、欄の無いシートも読み、Screen は空）
-    #     戻り値: @{ Items（画面項目。No は No の列の値、Input は入力のある項目）; Events（イベント）; Codes（コード区分名 → 表示名の一覧）;
+    #     戻り値: @{ Items（画面項目。No は No の列の値、Input は入力のある項目、DigitsText は桁数の欄の文字）; Events（イベント）; Codes（コード区分名 → 表示名の一覧）;
     #             Messages（メッセージID（大文字）→ @{ Text; File; Sheet; Row }） }
+    #     画面項目・イベントの HeaderRow・Columns は、表の見出しの行と、見出し（ConvertTo-Label 済み）→ 列番号
     param($Books, [switch] $AnySheet)
     $nfkc = [System.Text.NormalizationForm]::FormKC
     $items = New-Object System.Collections.Generic.List[object]
@@ -977,10 +978,10 @@ function Read-ScreenDesign {
                     $items.Add([pscustomobject]@{
                             Screen = $screen; ScreenName = $screenName; No = $no; Item = ([string]$dr.Cells[$t.ColumnOf['項目名']]).Trim(); ItemId = (& $cell $dr '項目ID')
                             Kind = (& $cell $dr '区分'); Io = $io; Input = (-not $t.ColumnOf.ContainsKey('入出力') -or $io -match 'I')
-                            Type = (& $cell $dr '型'); Digits = $(if ($digits -match '^\d+$') { [int]$digits } else { $null })
+                            Type = (& $cell $dr '型'); Digits = $(if ($digits -match '^\d+$') { [int]$digits } else { $null }); DigitsText = $digits
                             Required = ((& $cell $dr '必須') -match '^(○|〇|◯|必須|要|Y|YES|1)$'); Initial = (& $cell $dr '初期値')
                             Checks = (& $cell $dr '入力チェック'); Note = (& $cell $dr '備考')
-                            File = $book.File; Path = $book.Path; Sheet = $sheetName; Row = $dr.Row
+                            File = $book.File; Path = $book.Path; Sheet = $sheetName; Row = $dr.Row; HeaderRow = $t.HeaderRow; Columns = $t.ColumnOf
                         })
                 }
             }
@@ -991,7 +992,7 @@ function Read-ScreenDesign {
                     $events.Add([pscustomobject]@{
                             Screen = $screen; ScreenName = $screenName; Id = (& $cell $dr 'イベントID'); Name = (& $cell $dr 'イベント名')
                             Trigger = (& $cell $dr 'トリガー'); Summary = (& $cell $dr '処理概要'); Messages = (& $cell $dr 'メッセージ'); Next = (& $cell $dr '遷移先')
-                            File = $book.File; Sheet = $sheetName; Row = $dr.Row
+                            File = $book.File; Path = $book.Path; Sheet = $sheetName; Row = $dr.Row; HeaderRow = $t.HeaderRow; Columns = $t.ColumnOf
                         })
                 }
             }
