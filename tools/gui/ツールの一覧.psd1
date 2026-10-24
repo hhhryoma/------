@@ -65,6 +65,14 @@
             Output = @('OutXlsx'); OutputName = '表記ゆれ'; Keywords = '用語 表記'
         }
         @{
+            Id = 'Glossary'; Label = '用語集の下書きを作る'; Group = '設計書を作る・直す'; Tool = 'New-GlossaryDraft.ps1'
+            Summary = '設計書からカタカナ語・略語・よく出る用語を数え、用語集の下書きを作ります。表記ゆれのある用語は、「表記ゆれを見つける」の用語集（CSV）にもします。'
+            Main = @('Path', 'IncludeWord', 'OutXlsx', 'OutCsv')
+            Labels = @{ Path = '設計書のフォルダ・ファイル'; IncludeWord = 'Word の文書も読む'; OutXlsx = '用語集の下書きの保存先'; OutCsv = '表記ゆれの用語集の保存先（CSV）' }
+            Required = @('Path'); Defaults = @{ IncludeWord = $true }
+            Output = @('OutXlsx'); OutputName = '用語集の下書き'; Keywords = '用語集 用語 表記ゆれ カタカナ 略語'
+        }
+        @{
             Id = 'Consistency'; Label = '設計書の整合性チェック'; Group = '設計書を作る・直す'; Tool = 'Test-DesignConsistency.ps1'
             Summary = '設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面など）を見つけます。CRUD 図も作ります。影響調査では、ID を使っている場所の一覧を作ります。'
             Main = @('Path', 'Where', 'OutXlsx')
