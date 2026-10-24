@@ -67,3 +67,4 @@ CI は両方で動かしますが、テストの入力では同じ結果にな�
 | Group-Object のまとまりの並び（5.1 は出てきた順、7 は値の順） | 並びが結果に出るところ（同じ数のときに選ぶもの・表や件数の並び）は、`ExcelTools.psm1` の `Group-InOrder`（出てきた順）を使うか、`Sort-Object` で並べ直す |
 | Sort-Object で同じ値の並び（5.1 は保たれないことがある） | 並べ替えのキーを足して、同じ値が残らないようにする（名前・出てきた順など） |
 | `-Encoding UTF8`（5.1 は BOM 付き、7 は BOM なし） | ツールが書くファイルは、BOM の有無を決めて書く（`[System.IO.File]::WriteAllText` と `UTF8Encoding`。Export-Csv は 7 なら `utf8BOM`）。読むときは `Read-TextFile`（どちらも読める）を使う |
+| `New-Object` で作った `List[object]` を `@()` で囲む（PowerShell 7.4 では「Argument types do not match」で止まる。`List[string]` などは大丈夫） | `@($list)` と書かず、そのまま使うか `.ToArray()` にする。絞り込むならパイプライン（`@($list \| Where-Object …)`）は使える |
