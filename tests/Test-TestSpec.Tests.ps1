@@ -141,6 +141,25 @@ Test-Case 'Test-TestSpec: 区分の列が無ければ、期待結果の言葉か
     Assert-Equal 'cases.csv|2 行目' ('{0}|{1}' -f $issues[0].File, $issues[0].Location) '機能の最初のケース'
 }
 
+Test-Case 'Test-TestSpec: -DesignPath の必須の印（●・◎・✓）と、桁数の「全角20」「40バイト」「7,2」（全体の 7 桁）からも、必須・境界値のケースの抜けを知らせる' {
+    $dir = New-TestDir
+    $design = Join-Path $dir 'design'
+    $null = New-Item -ItemType Directory -Path $design
+    $hdr = @('画面ID', 'SCR010', '画面名', '顧客登録', '', '')
+    New-SheetsBook (Join-Path $design '画面設計書_SCR010.xlsx') ([ordered]@{ '画面項目定義' = @($hdr, @(), @('No', '項目名', '入出力', '型', '桁数', '必須'),
+                @('1', '顧客名', 'I', '全角', '全角20', '●'), @('2', '顧客名カナ', 'I', '全角カナ', '40バイト', '◎'), @('3', '単価', 'I', '数値', '7,2', '✓')) })
+    $path = Join-Path $dir 'UT_顧客登録.xlsx'
+    New-SpecBook $path @('No', '機能', '区分', '前提条件', '手順', '入力値', '期待結果', '結果') @(, @('1', 'SCR010', '正常', '', '顧客を登録する', '', '登録される', 'OK'))
+    $issues = @(& $TestSpecTool -Path $path -DesignPath $design 6>$null | Where-Object { $_.Item -match '^(必須|境界値)' })
+    Assert-Equal @(
+        '必須のテストが無い|SCR010 の必須の入力項目「顧客名」（画面設計書_SCR010.xlsx 画面項目定義 4 行目）を未入力にするケースが見つかりません',
+        '境界値のテストが無い|SCR010 の入力項目「顧客名」（20 桁。画面設計書_SCR010.xlsx 画面項目定義 4 行目）の桁数の境界（20 桁・21 桁）を確かめるケースが見つかりません',
+        '必須のテストが無い|SCR010 の必須の入力項目「顧客名カナ」（画面設計書_SCR010.xlsx 画面項目定義 5 行目）を未入力にするケースが見つかりません',
+        '境界値のテストが無い|SCR010 の入力項目「顧客名カナ」（40 桁。画面設計書_SCR010.xlsx 画面項目定義 5 行目）の桁数の境界（40 桁・41 桁）を確かめるケースが見つかりません',
+        '必須のテストが無い|SCR010 の必須の入力項目「単価」（画面設計書_SCR010.xlsx 画面項目定義 6 行目）を未入力にするケースが見つかりません',
+        '境界値のテストが無い|SCR010 の入力項目「単価」（7 桁。画面設計書_SCR010.xlsx 画面項目定義 6 行目）の桁数の境界（7 桁・8 桁）を確かめるケースが見つかりません') @($issues | ForEach-Object { '{0}|{1}' -f $_.Item, $_.Detail })
+}
+
 Test-Case 'Test-TestSpec: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestSpecTool
     Assert-Match $h.Synopsis 'テスト仕様書'

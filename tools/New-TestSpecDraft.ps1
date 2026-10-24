@@ -34,42 +34,65 @@ if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
 $design = Read-ScreenDesign (ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null))
 $screens = @($design.Items | ForEach-Object { $_.Screen }) + @($design.Events | ForEach-Object { $_.Screen }) | Select-Object -Unique
-if ($Screen) { $screens = @($screens | Where-Object { $s = $_; @($Screen | Where-Object { $s -like $_ }).Count -gt 0 }) }
 if (@($screens).Count -eq 0) { throw '画面設計書（画面ID と、項目名・桁数の画面項目定義、またはイベント定義）が見つかりません' }
+if ($Screen) {
+    # どの画面にも合わなければ、設計書の画面 ID を挙げて止める。合わない ID（書き間違いなど）があれば知らせる
+    $selected = @($screens | Where-Object { $s = $_; @($Screen | Where-Object { $s -like $_ }).Count -gt 0 })
+    if ($selected.Count -eq 0) {
+        $known = @($screens | Select-Object -First 5) -join '・'
+        if (@($screens).Count -gt 5) { $known += ' ほか {0} 画面' -f (@($screens).Count - 5) }
+        throw ('-Screen に合う画面がありません: {0}（設計書の画面: {1}）' -f ($Screen -join ', '), $known)
+    }
+    foreach ($p in $Screen) { if (@($screens | Where-Object { $_ -like $p }).Count -eq 0) { Write-Warning ('-Screen の {0} に合う画面がありません' -f $p) } }
+    $screens = $selected
+}
 
 # ---------------------------------------------------------------- ケースを作る
 
 
 $selectKinds = '選択|ラジオ|チェック|プルダウン|リスト|コンボ'
+# メッセージ ID の形（E0001・MSG-E001・MSGE001 など。メッセージ一覧を読むときと同じ）
+$idPattern = '(?i:{0})' -f $design.MessageIdPattern
+$nfkc = [System.Text.NormalizationForm]::FormKC
 
 function Format-Message {
     #     メッセージ ID と文言（{0} は項目名、{1} はチェックの値（桁数・「1以上」の 1・「受注日以降」の受注日））。
-    #     メッセージ一覧に無い ID は ID だけ。項目名・値が無ければ {0}・{1} のまま
+    #     メッセージ一覧に無い ID は ID だけ。項目名・値が無ければ {0}・{1} のまま。文言は一覧のまま（全角の ｛０｝ も置き換える）
     param([string] $Id, [string] $ItemName, $Param)
     if (-not $Id) { return 'エラーメッセージ' }
     $m = $design.Messages[$Id.ToUpperInvariant()]
     if (-not $m) { return $Id }
     $text = $m.Text
-    if ($ItemName) { $text = $text.Replace('{0}', $ItemName) }
-    if ($null -ne $Param -and "$Param" -ne '') { $text = $text.Replace('{1}', [string]$Param) }
+    if ($ItemName) { $text = $text.Replace('{0}', $ItemName).Replace('｛０｝', $ItemName) }
+    if ($null -ne $Param -and "$Param" -ne '') { $text = $text.Replace('{1}', [string]$Param).Replace('｛１｝', [string]$Param) }
     return '{0}「{1}」' -f $Id, $text
+}
+
+function Get-MessageKind {
+    #     メッセージ ID の種類の英字（E はエラー、Q は確認）。数字の直前の E・W・I・Q（E0001・MSG-E001・MSGE001 の E）。
+    #     無ければ、数字の前の英字の最初の文字（ERR001・EM0001 の E）
+    param([string] $Id)
+    if ($Id -match '([EWIQ])[_\-]?\d+$') { return $Matches[1].ToUpperInvariant() }
+    if ($Id -match '([A-Z])[A-Z]*[_\-]?\d+$') { return $Matches[1].ToUpperInvariant() }
+    return ''
 }
 
 function Find-MessageId {
     #     入力チェックの欄に ID が無いとき、メッセージ一覧の文言から探す（必須・桁数・半角英数 など）
     param([string] $Pattern)
-    foreach ($id in ($design.Messages.Keys | Sort-Object)) { if ($id -like 'E*' -and $design.Messages[$id].Text -match $Pattern) { return $id } }
+    foreach ($id in ($design.Messages.Keys | Sort-Object)) { if ((Get-MessageKind $id) -eq 'E' -and $design.Messages[$id].Text.Normalize($nfkc) -match $Pattern) { return $id } }
     return $null
 }
 
 function Split-Checks {
-    #     入力チェックの欄（「必須（E0001）、半角英数（E0003）」）を、名前とメッセージ ID の組にする
+    #     入力チェックの欄（「必須（E0001）、半角英数（E0003）」）を、名前とメッセージ ID の組にする。
+    #     「、」「,」「;」とセル内の改行（Search-Excel の ↵）で区切る。「1,000以上」のような数の中の「,」では区切らない
     param([string] $Text)
     $out = New-Object System.Collections.Generic.List[object]
-    foreach ($part in ($Text -split '[、,，;；]')) {
+    foreach ($part in ($Text -split '[、，;；\r\n↵]|(?<!\d),|,(?!\d)')) {
         $p = $part.Trim()
         if (-not $p) { continue }
-        $m = [regex]::Match($p, '^(?<name>.+?)\s*[（(]\s*(?<ids>[A-Za-z]+\d+(?:\s*[／/・,]\s*[A-Za-z]+\d+)*)\s*[）)]$')
+        $m = [regex]::Match($p, ('^(?<name>.+?)\s*[（(]\s*(?<ids>{0}(?:\s*[／/・,]\s*{0})*)\s*[）)]$' -f $idPattern))
         if ($m.Success) { $out.Add([pscustomobject]@{ Name = $m.Groups['name'].Value.Trim(); Id = ($m.Groups['ids'].Value -split '[／/・,]')[0].Trim().ToUpperInvariant() }) }
         else { $out.Add([pscustomobject]@{ Name = $p; Id = $null }) }
     }
@@ -102,9 +125,10 @@ foreach ($scr in $screens) {
     $usedIds = @{}
     $add = {
         param([string] $Viewpoint, [string] $Kind, [string] $Content, [string] $Steps, [string] $InputValue, [string] $Expected, $Source)
+        # 設計書から写した文（処理概要・遷移先・初期値・メッセージ）のセル内の改行は、Search-Excel では ↵ なので、改行に戻して書く
         $c = [pscustomobject]@{
             Id = '{0}-{1:000}' -f $scr, ($list.Count + 1); Function = $function; Viewpoint = $Viewpoint; Kind = $Kind; Content = $Content
-            Steps = $Steps; InputValue = $InputValue; Expected = $Expected; Source = $(if ($Source) { '{0} {1} {2} 行目' -f $Source.File, $Source.Sheet, $Source.Row } else { '' })
+            Steps = $Steps.Replace('↵', "`n"); InputValue = $InputValue; Expected = $Expected.Replace('↵', "`n"); Source = $(if ($Source) { '{0} {1} {2} 行目' -f $Source.File, $Source.Sheet, $Source.Row } else { '' })
         }
         $c.PSObject.TypeNames.Insert(0, 'TestSpecDraft.Case')
         $list.Add($c)
@@ -129,6 +153,10 @@ foreach ($scr in $screens) {
         $codes = $design.Codes[(ConvertTo-Label $it.Item)]
         $isSelect = $codes -or $it.Kind -match $selectKinds
         $isText = -not $isSelect -and $it.Type -notmatch '日付|時刻' -and $null -ne $it.Digits
+        # 桁数の欄に書いてあっても数を読めない（範囲・「可変」など）ときは、桁数の境界のケースを作れないことを知らせる
+        if (-not $isSelect -and $it.Type -notmatch '日付|時刻' -and $null -eq $it.Digits -and $it.DigitsText -and $it.DigitsText -notmatch '^(-|ー|―|‐|×|なし|N/A)$') {
+            Write-Warning ('{0} の「{1}」の桁数「{2}」を読めないため、桁数の境界のケースを作りません（{3} {4} {5} 行目）' -f $scr, $it.Item, $it.DigitsText, $it.File, $it.Sheet, $it.Row)
+        }
         # 項目ごとのイベント（フォーカスアウトなど）があれば、そのトリガーで確かめる
         $itemEvent = @($events | Where-Object { $_.Name -match [regex]::Escape($it.Item) -or $_.Trigger -match [regex]::Escape($it.Item) })[0]
         $stepOf = { param($value, $useItemEvent) $trigger = $checkStep; if ($useItemEvent -and $itemEvent -and $itemEvent.Trigger) { $trigger = $itemEvent.Trigger }; '{0}に{1}、{2}' -f $it.Item, $value, $trigger }
@@ -168,9 +196,10 @@ foreach ($scr in $screens) {
             $value = '「{0}」を満たさない値' -f $ck.Name
             $param = $null
             $useItemEvent = $false
+            # 以上・以下の数の「,」は桁区切り（「1,000以上」なら {1} は 1,000 のまま、入れる値は 999）
             if ($ck.Name -match '存在') { $value = '登録されていない値'; $useItemEvent = $true }
-            elseif ($ck.Name -match '(\d+)\s*以上') { $param = $Matches[1]; $value = [string]([int]$Matches[1] - 1) }
-            elseif ($ck.Name -match '(\d+)\s*以下') { $param = $Matches[1]; $value = [string]([int]$Matches[1] + 1) }
+            elseif ($ck.Name -match '(\d+(?:,\d+)*)\s*以上') { $param = $Matches[1]; $value = [string]([long]($Matches[1] -replace ',', '') - 1) }
+            elseif ($ck.Name -match '(\d+(?:,\d+)*)\s*以下') { $param = $Matches[1]; $value = [string]([long]($Matches[1] -replace ',', '') + 1) }
             elseif ($ck.Name -match '(.+)以降') { $param = $Matches[1]; $value = '{0}より前の日付' -f $Matches[1] }
             elseif ($ck.Name -match '(.+)以前') { $param = $Matches[1]; $value = '{0}より後の日付' -f $Matches[1] }
             if ($ck.Id) { $usedIds[$ck.Id] = $true }
@@ -195,13 +224,13 @@ foreach ($scr in $screens) {
         $expected = $ev.Summary
         if ($ev.Next) { $expected = ($expected + "`n遷移先: " + $ev.Next).Trim() }
         & $add 'イベント' '正常' ('{0}（{1}）: 正しい値で実行する' -f $ev.Name, $ev.Id) $trigger '' $expected $ev
-        $ids = @([regex]::Matches($ev.Messages, '[A-Za-z]+\d+') | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique)
+        $ids = @([regex]::Matches($ev.Messages, $idPattern) | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique)
         # 確認メッセージ: キャンセルしたとき
-        foreach ($q in @($ids | Where-Object { $_ -like 'Q*' })) {
+        foreach ($q in @($ids | Where-Object { (Get-MessageKind $_) -eq 'Q' })) {
             & $add 'イベント' '異常' ('{0}（{1}）: 確認で「キャンセル」を選ぶ' -f $ev.Name, $ev.Id) ('{0}し、{1} で「キャンセル」を選ぶ' -f $trigger, (Format-Message $q '' $null)) '' '処理を中断し、画面は操作する前のまま' $ev
         }
         # エラーメッセージのうち、入力項目のケースで確かめていないもの（在庫不足・排他など）。なる条件は設計書から書き足す
-        foreach ($e in @($ids | Where-Object { $_ -like 'E*' -and -not $usedIds.ContainsKey($_) })) {
+        foreach ($e in @($ids | Where-Object { (Get-MessageKind $_) -eq 'E' -and -not $usedIds.ContainsKey($_) })) {
             $usedIds[$e] = $true
             & $add 'イベント' '異常' ('{0}（{1}）: {2} になる場合' -f $ev.Name, $ev.Id, $e) ('{0} になる条件（処理概要から書き足す）で、{1}' -f $e, $trigger) '' ('{0} が表示され、処理が進まない' -f (Format-Message $e '' $null)) $ev
         }
@@ -254,7 +283,7 @@ Write-Host '下書きです。「（処理概要から書き足す）」の条�
 #     書き出すテスト仕様書の下書き（.xlsx）。同じ名前のファイルがあるときは -Force を付けたときだけ上書きします。
 #
 # .PARAMETER Screen
-#     下書きを作る画面 ID（ワイルドカード可。複数可）。既定はすべての画面。
+#     下書きを作る画面 ID（ワイルドカード可。複数可）。既定はすべての画面。合う画面の無い ID は警告します（どれも合わなければエラー）。
 #
 # .PARAMETER Force
 #     -OutXlsx のファイルがあっても上書きします。

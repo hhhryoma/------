@@ -3,6 +3,18 @@
 $TestDraft = Join-Path $script:ToolsDir 'New-TestSpecDraft.ps1'
 $designSample = Join-Path $script:RepoRoot 'docs/design-sample'
 
+function New-DraftDesign {
+    #     画面 SCR010（顧客登録）の画面設計書（画面項目定義と、登録のイベント）とメッセージ一覧を作る（テスト用）。
+    #     Items: 画面項目定義の行（No・項目名・入出力・型・桁数・必須・入力チェック）の配列、EventMessages: 登録のイベントのメッセージ欄、Messages: メッセージ一覧の行（ID・文言）の配列
+    param([string] $Dir, [object[]] $Items, [string] $EventMessages, [object[]] $Messages)
+    $hdr = @('画面ID', 'SCR010', '画面名', '顧客登録', '', '', '', '')
+    New-SheetsBook (Join-Path $Dir '画面設計書_SCR010.xlsx') ([ordered]@{
+            '画面項目定義' = @($hdr, @(), @('No', '項目名', '入出力', '型', '桁数', '必須', '入力チェック')) + $Items
+            'イベント定義' = @($hdr, @(), @('イベントID', 'イベント名', 'トリガー', '処理概要', 'メッセージ'), @('EV02', '登録', '登録ボタン押下', '入力チェックを行い、顧客を登録する。', $EventMessages))
+        })
+    New-SheetsBook (Join-Path $Dir 'メッセージ一覧.xlsx') ([ordered]@{ 'メッセージ一覧' = @(, @('メッセージID', 'メッセージ')) + $Messages })
+}
+
 Test-Case 'New-TestSpecDraft: 入力項目の必須・桁数・型・入力チェック・コード値と、イベントのケースを、メッセージの文言付きで作る' {
     $out = Join-Path (New-TestDir) 'UT_下書き.xlsx'
     $cases = @(& $TestDraft $designSample -OutXlsx $out 6>$null)
@@ -42,6 +54,88 @@ Test-Case 'New-TestSpecDraft: 画面設計書が無いときと、拡張子の�
     $dir = New-TestDir
     Assert-Throws { & $TestDraft (Join-Path $designSample 'DD05_メッセージ一覧.xlsx') -OutXlsx (Join-Path $dir 'a.xlsx') 6>$null } '画面設計書'
     Assert-Throws { & $TestDraft $designSample -OutXlsx (Join-Path $dir 'a.csv') 6>$null } '拡張子は .xlsx'
+}
+
+Test-Case 'New-TestSpecDraft: 入力チェック欄はセル内の改行でも区切り、「1,000以上」のような数の中の「,」では区切らない' {
+    $dir = New-TestDir
+    New-DraftDesign $dir @(
+        @('1', '顧客コード', 'I', '半角英数', '8', '○', "必須（E0001）`n半角英数（E0003）`n存在（E0005）"),
+        @('2', '与信限度額', 'I', '数値', '9', '', '1,000以上（E0009）、9,999,999以下（E0011）')) 'E0001, E0003, E0005, E0009, E0011' @(
+        @('E0001', '{0}は必須入力です。'), @('E0003', '{0}は半角英数字で入力してください。'), @('E0005', '指定された{0}は存在しません。'),
+        @('E0009', '{0}は{1}以上の値を入力してください。'), @('E0011', '{0}は{1}以下の値を入力してください。'))
+    $cases = @(& $TestDraft $dir -OutXlsx (Join-Path $dir 'UT.xlsx') 6>$null)
+    $find = { param($content) @($cases | Where-Object { $_.Content -eq $content })[0] }
+
+    Assert-Equal 'E0001「顧客コードは必須入力です。」 が表示され、処理が進まない' (& $find '顧客コード: 未入力（必須）').Expected
+    Assert-Match (& $find '顧客コード: 半角英数').Expected '^E0003「顧客コードは半角英数字で入力してください。」'
+    Assert-Match (& $find '顧客コード: 存在').Expected '^E0005「指定された顧客コードは存在しません。」'
+    Assert-Equal 0 @($cases | Where-Object { $_.Content -match 'になる場合' }).Count '入力チェックで確かめたエラーは、イベントのケースにしない'
+    # 「1,000以上」には 999、「9,999,999以下」には 10000000 を入れる（{1} は設計書の書き方のまま）
+    Assert-Equal @(
+        '与信限度額: 1,000以上|999|E0009「与信限度額は1,000以上の値を入力してください。」 が表示され、処理が進まない',
+        '与信限度額: 9,999,999以下|10000000|E0011「与信限度額は9,999,999以下の値を入力してください。」 が表示され、処理が進まない') @($cases | Where-Object { $_.Viewpoint -eq '入力チェック' -and $_.Content -like '与信限度額*' } | ForEach-Object { '{0}|{1}|{2}' -f $_.Content, $_.InputValue, $_.Expected })
+}
+
+Test-Case 'New-TestSpecDraft: 処理概要・遷移先・初期値のセル内の改行は改行で書き、メッセージと初期値の文言は設計書のまま（全角の「？」「－」）にする' {
+    $out = Join-Path (New-TestDir) 'UT_下書き.xlsx'
+    $cases = @(& $TestDraft $designSample -OutXlsx $out 6>$null)
+    Assert-Equal 0 @($cases | Where-Object { "$($_.Content)$($_.Steps)$($_.Expected)" -match '↵' }).Count '↵ のまま書かない'
+    $initial = @($cases | Where-Object { $_.Function -eq 'SCR001 受注一覧' -and $_.Content -eq '初期表示（EV01）' })[0]
+    Assert-Match $initial.Expected "システム日付を設定する。`n2\. 受注ステータスの選択肢"
+    Assert-Match $initial.Expected '初期値: 受注日（From）: システム日付－30日、'
+    Assert-Match @($cases | Where-Object { $_.Content -eq '登録（EV06）: 確認で「キャンセル」を選ぶ' })[0].Steps 'Q0001「登録します。よろしいですか？」 で「キャンセル」を選ぶ$'
+    # 書き出したセルも改行で区切る
+    $sheet = Read-XlsxSheet -Path $out -Index 2
+    Assert-Match $sheet.Rows[2]['H'] "設定する。`n2\. "
+}
+
+Test-Case 'New-TestSpecDraft: MSG-E001・MSGE001 のような接頭辞のあるメッセージ ID も、期待結果の文言・確認のキャンセル・エラーのケースにする' {
+    foreach ($p in @('MSG-', 'MSG')) {
+        $dir = New-TestDir
+        New-DraftDesign $dir @(, @('1', '顧客コード', 'I', '半角英数', '8', '○', ('必須（{0}E001）、半角英数（{0}E003）' -f $p))) ('{0}Q001, {0}E001, {0}E003, {0}E008' -f $p) @(
+            @("${p}E001", '{0}は必須入力です。'), @("${p}E002", '{0}は{1}文字以内で入力してください。'), @("${p}E003", '｛０｝は半角英数字で入力してください。'),
+            @("${p}E008", '在庫が不足しています。'), @("${p}Q001", '登録します。よろしいですか？'))
+        $cases = @(& $TestDraft $dir -OutXlsx (Join-Path $dir 'UT.xlsx') 6>$null)
+        $find = { param($content) @($cases | Where-Object { $_.Content -eq $content })[0] }
+
+        Assert-Equal "${p}E001「顧客コードは必須入力です。」 が表示され、処理が進まない" (& $find '顧客コード: 未入力（必須）').Expected $p
+        Assert-Match (& $find '顧客コード: 最大を超える 9 桁').Expected ('^{0}E002「顧客コードは8文字以内で入力してください。」' -f $p) $p
+        # 全角で書いた ｛０｝ も項目名にする
+        Assert-Equal "${p}E003「顧客コードは半角英数字で入力してください。」 が表示され、処理が進まない" (& $find '顧客コード: 半角英数').Expected $p
+        Assert-Match (& $find '登録（EV02）: 確認で「キャンセル」を選ぶ').Steps ('{0}Q001「登録します。よろしいですか？」 で「キャンセル」' -f $p) $p
+        Assert-Equal @("登録（EV02）: ${p}E008 になる場合") @($cases | Where-Object { $_.Content -match 'になる場合' } | ForEach-Object { $_.Content }) $p
+    }
+}
+
+Test-Case 'New-TestSpecDraft: 必須の印（●・◎・✓）と、桁数の「全角20」「40バイト」「7,2」を読み、読めない桁数は知らせる' {
+    $dir = New-TestDir
+    New-DraftDesign $dir @(
+        @('1', '顧客コード', 'I', '半角英数', '8', '●', ''),
+        @('2', '顧客名', 'I', '全角', '全角20', '◎', ''),
+        @('3', '顧客名カナ', 'I', '全角カナ', '40バイト', '✓', ''),
+        @('4', '単価', 'I', '数値', '7,2', '', ''),
+        @('5', '電話番号', 'I', '半角数字', '10-11', '', ''),
+        @('6', '備考', 'I', '文字', '可変', '', ''),
+        @('7', '生年月日', 'I', '日付', 'yyyy/MM/dd', '', '')) 'E0001' @(@('E0001', '{0}は必須入力です。'), @('E0002', '{0}は{1}文字以内で入力してください。'))
+    $cases = @(& $TestDraft $dir -OutXlsx (Join-Path $dir 'UT.xlsx') -WarningVariable warnings -WarningAction SilentlyContinue 6>$null)
+
+    Assert-Equal @('顧客コード: 未入力（必須）', '顧客名: 未入力（必須）', '顧客名カナ: 未入力（必須）') @($cases | Where-Object { $_.Viewpoint -eq '必須' } | ForEach-Object { $_.Content })
+    # 「7,2」（全体と小数の桁数）は全体の 7 桁
+    Assert-Equal @('顧客コード: 最大の 8 桁', '顧客コード: 最大を超える 9 桁', '顧客名: 最大の 20 文字', '顧客名: 最大を超える 21 文字',
+        '顧客名カナ: 最大の 40 文字', '顧客名カナ: 最大を超える 41 文字', '単価: 最大の 7 桁', '単価: 最大を超える 8 桁') @($cases | Where-Object { $_.Viewpoint -eq '桁数' } | ForEach-Object { $_.Content })
+    # 読めない桁数（範囲・可変）は知らせる。日付の書式は境界のケースを作らないので知らせない
+    $messages = @($warnings | ForEach-Object { $_.Message })
+    Assert-Equal 2 $messages.Count ($messages -join ' / ')
+    Assert-Match $messages[0] '「電話番号」の桁数「10-11」を読めない'
+    Assert-Match $messages[1] '「備考」の桁数「可変」を読めない'
+}
+
+Test-Case 'New-TestSpecDraft: -Screen に合う画面が無ければ設計書の画面 ID を挙げて止め、一部の ID だけが合わなければ知らせる' {
+    $out = Join-Path (New-TestDir) 'UT.xlsx'
+    Assert-Throws { & $TestDraft $designSample -OutXlsx $out -Screen 'SCR999' 6>$null } '-Screen に合う画面がありません: SCR999（設計書の画面: SCR001・SCR002・SCR003）'
+    $cases = @(& $TestDraft $designSample -OutXlsx $out -Screen 'SCR002', 'SCR999' -WarningVariable warnings -WarningAction SilentlyContinue 6>$null)
+    Assert-Equal @('SCR002 受注登録') @($cases | ForEach-Object { $_.Function } | Select-Object -Unique)
+    Assert-Equal @('-Screen の SCR999 に合う画面がありません') @($warnings | ForEach-Object { $_.Message })
 }
 
 Test-Case 'New-TestSpecDraft: Get-Help でヘルプが表示される' {
