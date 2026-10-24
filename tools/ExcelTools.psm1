@@ -1939,8 +1939,8 @@ function Get-TestResultKind {
     param([string] $Text)
     $t = ([string]$Text).Normalize($script:Nfkc).Trim().ToUpperInvariant()
     if (-not $t) { return '未実施' }
-    if ($t -match '^(OK|○|〇|◯|合格|PASS|良)') { return 'OK' }
-    if ($t -match '^(NG|×|✕|不合格|FAIL|不可)') { return 'NG' }
+    if ($t -match '^(OK|○|〇|◯|◎|✓|✔|☑|合格|PASS|良|済|実施済|確認済|完了)') { return 'OK' }
+    if ($t -match '^(NG|×|✕|✖|✗|✘|☓|X$|不合格|FAIL|不可)') { return 'NG' }
     if ($t -match '^(対象外|-|―|N/?A|スキップ|SKIP|削除|欠番)') { return '対象外' }
     if ($t -match '保留|中断|ブロック|BLOCK') { return '保留' }
     return '未実施'
