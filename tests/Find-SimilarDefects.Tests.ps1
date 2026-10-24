@@ -74,6 +74,74 @@ Test-Case 'Find-SimilarDefects: 表示の項目・カラム・メッセージ ID
     Assert-True ($anchors -contains 'SCR001 受注番号' -and $anchors -contains 'SCR001 検索（EV02）') '障害内容に出てくる項目とイベント（入力の受注番号。表示の受注番号ではない）'
 }
 
+Test-Case 'Find-SimilarDefects: 空白で区切ったメッセージ ID・カラム名・画面 ID も、前後の英数字とつなげずに見つける' {
+    $dir = New-TestDir
+    $bugs = Join-Path $dir '障害管理表.csv'
+    New-BugCsv $bugs @(
+        , @('B011', '', 'メッセージID E0006 が出ない', '', '', '', '')
+        , @('B012', '', 'E0006 E0008 が出ない', '', '', '', '')
+        , @('B013', 'バッチ', 'UPDATE T_ORDER SET TOTAL_AMOUNT = ? が 11 桁を超えるとエラー', '', '', '', '')
+        , @('B014', '画面ID SCR003', '希望納品日に 2028/02/29 を入れると E0004 になる', '', '', '', '')
+        , @('B015', 'バッチ', 'T_ORDER_DETAIL . ORDER_NO が重複する', '', '', '', ''))
+    $results = @(& $SimilarTool -BugList $bugs -DesignPath $designDir -MaxCandidates 2 6>$null)
+    Assert-Equal @(
+        '1|B011|イベント|SCR003 更新（EV02）|3',
+        '2|B011|イベント|SCR003 キャンセル（EV03）|3',
+        '3|B012|イベント|SCR002 登録（EV06）|3',
+        '4|B012|イベント|SCR003 更新（EV02）|3',
+        '5|B013|カラム|T_ORDER_DETAIL.AMOUNT（金額）|5',
+        '6|B013|カラム|M_PRODUCT.UNIT_PRICE（単価）|3',
+        '7|B014|項目|SCR002 希望納品日|9',
+        '8|B014|項目|SCR001 受注日（From）|5',
+        '9|B015|カラム|T_ORDER.ORDER_NO（受注番号）|8',
+        '10|B015|カラム|M_CUSTOMER.CUSTOMER_CD（顧客コード）|3') (Get-CandidateKeys $results) '「メッセージID E0006」の ID と E0006、「E0006 E0008」の 2 つの ID をつなげない'
+    Assert-Match $results[0].Anchor '^E0006「'
+    Assert-Equal 'T_ORDER.TOTAL_AMOUNT（合計金額）' $results[4].Anchor 'SQL の文の中のカラム名'
+    Assert-Equal 'SCR003 希望納品日' $results[6].Anchor '機能の「画面ID SCR003」の画面の項目'
+    Assert-Equal 'T_ORDER_DETAIL.ORDER_NO（受注番号）' $results[8].Anchor 'テーブル名.カラム名の「.」の前後の空白は、これまでどおり許す'
+}
+
+Test-Case 'Find-SimilarDefects: 画面名を含む長い項目名（画面「ログイン」の「ログインID」）は、項目として見つける' {
+    $design = New-TestDir
+    # 1 行目（画面ID・画面名）は、下の表の列の数だけ書く（New-SheetsBook は 1 行目の数の列を書く）
+    $header = { param($id, $name) @('画面ID', $id, '画面名', $name, '') }
+    $table = @(@(), @('項目名', '入出力', '型', '桁数', '入力チェック'), @('ログインID', 'I', '半角英数', '20', '必須(E0001)、半角英数(E0003)'))
+    New-SheetsBook (Join-Path $design '画面設計書.xlsx') ([ordered]@{
+            'SCR001' = @(, (& $header 'SCR001' 'ログイン')) + $table + @(, @('ログイン', '-', '-', '', ''))
+            'SCR002' = @(, (& $header 'SCR002' 'ユーザー登録')) + $table
+            'SCR003' = @(, (& $header 'SCR003' 'パスワード変更')) + $table })
+    $dir = New-TestDir
+    $bugs = Join-Path $dir '障害管理表.csv'
+    New-BugCsv $bugs @(
+        , @('B021', 'SCR002', 'ログインIDに全角を入れても登録できてしまう', '半角英数のチェック漏れ', '', '', '')
+        , @('B022', 'SCR001', 'ログイン画面でログインIDを空にしてもエラーにならない', '', '', '', ''))
+    $out = Join-Path $dir '横展開.xlsx'
+    $results = @(& $SimilarTool -BugList $bugs -DesignPath $design -OutXlsx $out 6>$null)
+    Assert-Equal @(
+        '1|B021|項目|SCR001 ログインID|11',
+        '2|B021|項目|SCR003 ログインID|11',
+        '3|B022|項目|SCR002 ログインID|11',
+        '4|B022|項目|SCR003 ログインID|11') (Get-CandidateKeys $results)
+    $sheet = Read-XlsxSheet -Path $out -Index 2
+    Assert-Equal 'B021|SCR002 ログインID / B022|SCR001 ログインID' ((@(2, 3) | ForEach-Object { '{0}|{1}' -f $sheet.Rows[$_]['A'], $sheet.Rows[$_]['E'] }) -join ' / ') '「ログイン画面」は画面名で、ボタンの「ログイン」の項目ではない'
+}
+
+Test-Case 'Find-SimilarDefects: 桁数の無いカラム（DATE など）どうしは、桁数を共通点にしない' {
+    $design = New-TestDir
+    $header = @('論理名', '物理名', 'データ型', '桁数', '必須')
+    New-SheetsBook (Join-Path $design 'テーブル定義書.xlsx') ([ordered]@{
+            'T_SHIP' = @($header, @('出荷予定', 'SHIP_PLAN', 'DATE', '', '○'))
+            'T_EMP' = @($header, @('入社', 'HIRED', 'DATE', '', '○'))
+            'T_ITEM' = @($header, @('発売', 'RELEASED', 'DATE', '', '')) })
+    $dir = New-TestDir
+    $bugs = Join-Path $dir '障害管理表.csv'
+    New-BugCsv $bugs @(, @('B031', 'バッチ', 'T_SHIP.SHIP_PLAN が NULL で落ちる', '', '', '', ''))
+    $results = @(& $SimilarTool -BugList $bugs -DesignPath $design 6>$null)
+    Assert-Equal @('1|B031|カラム|T_EMP.HIRED（入社）|3') (Get-CandidateKeys $results) '型だけが同じカラム（T_ITEM.RELEASED。2 点）は候補にしない'
+    Assert-Equal '型 DATE・NOT NULL' $results[0].Common
+    Assert-Equal '論理名 入社・型 DATE・NOT NULL' $results[0].Detail
+}
+
 Test-Case 'Find-SimilarDefects: -OutPrompt で Copilot への依頼を作り、-Answer の回答（表）の判定と理由を一覧と -OutXlsx に入れる' {
     $dir = New-TestDir
     $bugs = Join-Path $dir '障害管理表.csv'
