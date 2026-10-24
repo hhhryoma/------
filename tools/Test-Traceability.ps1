@@ -33,9 +33,13 @@ Update-TypeData -TypeName 'Traceability.Gap' -DefaultDisplayPropertySet Kind, Sc
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
 
-# テスト仕様書で、行の機能（画面）を表す列の見出し。空の行は上の行の値を引き継ぐ
+# テスト仕様書で、行の機能（画面）を表す列の見出し。空の行は上の行の値を引き継ぐ。ID の列（画面ID・機能ID）があれば、名前の列より ID の列を使う
 $functionHeaders = @('機能', '機能名', '機能ID', '対象機能', 'テスト対象', '画面', '画面ID', '画面名', '対象画面', '対象画面ID')
-# 要件一覧の見出し
+# テスト仕様書の表の見出し。これが 2 つ以上ある最初の行を表の見出しの行とする（表の上の「テスト対象: 受注管理システム」のような行は見出しにしない）
+$testHeaders = @('No', 'No.', '項番', 'テストID', 'テストNo', 'ケースID', 'ケースNo', '確認内容', 'テスト内容', 'テスト項目', 'テストケース', '確認項目', '確認観点', '期待結果', '期待値', '手順', 'テスト手順', '操作')
+# テスト仕様書の結果の列の見出し。結果が対象外（削除・欠番など）の行は、テストとみなさない
+$resultHeaders = @('結果', 'テスト結果', '実施結果', '判定', '合否', '確認結果', '試験結果')
+# 要件一覧の見出し（ID は前のものほど詳しい）
 $requirementIdHeaders = @('要件ID', '要件No', '要求ID', '要求No', '要件番号', '要求番号', 'ID', 'No')
 $requirementNameHeaders = @('要件名', '要件', '要求名', '要求', '要件内容', '要求内容', '機能要件', '内容', '概要')
 
@@ -134,17 +138,22 @@ if ($Requirement) {
     $excelPaths = @($requirementFiles | Where-Object { $_ -match '\.xls[xmb]?$' -and -not ([System.IO.Path]::GetFileName($_)).StartsWith('~$') } | ForEach-Object { [System.Management.Automation.WildcardPattern]::Escape($_) })
     if ($excelPaths.Count -gt 0) {
         foreach ($book in (Read-Books $excelPaths $null).Values) {
+            $found = $false
             foreach ($sheetName in $book.Sheets.Keys) {
                 $grid = $book.Sheets[$sheetName]
+                # 要件 ID と要件名の見出しがある行のうち、ID の見出しがいちばん詳しい行（2 行の見出しの「No | 要件」の下の「ID | 内容」など）
                 $idLabel = $null; $nameLabel = $null
                 foreach ($row in $grid.Rows) {
                     $labels = @($grid.Labels[$row].Values)
-                    $idLabel = @($idLabels | Where-Object { $labels -contains $_ })[0]
-                    $nameLabel = @($nameLabels | Where-Object { $labels -contains $_ })[0]
-                    if ($idLabel -and $nameLabel) { break }
+                    $rowIdLabel = @($idLabels | Where-Object { $labels -contains $_ })[0]
+                    $rowNameLabel = @($nameLabels | Where-Object { $labels -contains $_ })[0]
+                    if ($rowIdLabel -and $rowNameLabel -and (-not $idLabel -or [Array]::IndexOf($idLabels, $rowIdLabel) -lt [Array]::IndexOf($idLabels, $idLabel))) { $idLabel = $rowIdLabel; $nameLabel = $rowNameLabel }
                 }
-                if (-not ($idLabel -and $nameLabel)) { continue }
+                if (-not $idLabel) { continue }
                 foreach ($t in (Find-DesignTables $grid @($idLabel, $nameLabel) $idLabel)) {
+                    # ID が数字だけの表（改訂履歴の No など。行の番号で、要件 ID ではない）は読まない
+                    if (@($t.Rows | Where-Object { ([string]$_.Cells[$t.ColumnOf[$idLabel]]).Normalize($nfkc) -match '[A-Za-z]' }).Count -eq 0) { continue }
+                    $found = $true
                     foreach ($dr in $t.Rows) {
                         $id = ([string]$dr.Cells[$t.ColumnOf[$idLabel]]).Trim()
                         $k = ConvertTo-Key $id
@@ -152,14 +161,16 @@ if ($Requirement) {
                     }
                 }
             }
+            if (-not $found) { Write-Warning ("{0}: 要件の表が見つかりません（要件ID と要件名の見出しがあり、ID が REQ-001 のように英字を含む表を探します）" -f $book.File) }
         }
     }
     foreach ($csv in @($requirementFiles | Where-Object { $_ -match '\.csv$' })) {
         $rows = Read-CsvFile $csv @() '要件一覧'
         if ($rows.Count -eq 0) { continue }
         $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
-        $idCol = @($names | Where-Object { $idLabels -contains (ConvertTo-Label $_) })[0]
-        $nameCol = @($names | Where-Object { $nameLabels -contains (ConvertTo-Label $_) })[0]
+        # 見出しがいちばん詳しい列（No と要件ID があれば要件ID）
+        $idCol = @(foreach ($l in $idLabels) { $names | Where-Object { (ConvertTo-Label $_) -eq $l } })[0]
+        $nameCol = @(foreach ($l in $nameLabels) { $names | Where-Object { (ConvertTo-Label $_) -eq $l } })[0]
         if (-not $idCol) { Write-Warning ("{0}: 要件 ID の列が見つかりません" -f [System.IO.Path]::GetFileName($csv)); continue }
         $line = 1
         foreach ($r in $rows) {
@@ -246,22 +257,36 @@ if ($elements.Count -eq 0 -and $requirements.Count -eq 0) { Write-Warning '設�
 $testBooks = Read-Books $TestPath $requirementFiles
 $testCells = New-Object System.Collections.Generic.List[object]
 $functionLabels = @($functionHeaders | ForEach-Object { ConvertTo-Label $_ })
+$tableLabels = @(($testHeaders + $resultHeaders) | ForEach-Object { ConvertTo-Label $_ })
+$resultLabels = @($resultHeaders | ForEach-Object { ConvertTo-Label $_ })
 foreach ($book in $testBooks.Values) {
     foreach ($sheetName in $book.Sheets.Keys) {
         $grid = $book.Sheets[$sheetName]
-        $headerRow = 0; $functionCol = 0
+        # 表の見出しの行の、機能の列（ID の列があれば ID の列だけ）と結果の列
+        $headerRow = 0; $functionCols = @(); $resultCol = $null
         foreach ($row in $grid.Rows) {
-            foreach ($col in $grid.Cols[$row]) { if ($functionLabels -contains $grid.Labels[$row][$col]) { $headerRow = $row; $functionCol = $col; break } }
-            if ($headerRow) { break }
+            if (@($grid.Labels[$row].Values | Where-Object { $tableLabels -contains $_ }).Count -ge 2) { $headerRow = $row; break }
+        }
+        if ($headerRow) {
+            $labelOf = $grid.Labels[$headerRow]
+            $functionCols = @($grid.Cols[$headerRow] | Where-Object { $functionLabels -contains $labelOf[$_] })
+            $idCols = @($functionCols | Where-Object { $labelOf[$_] -match 'ID$' })
+            if ($idCols.Count -gt 0) { $functionCols = $idCols }
+            $resultCol = @($grid.Cols[$headerRow] | Where-Object { $resultLabels -contains $labelOf[$_] })[0]
         }
         # シートの上の「画面ID: SCR001」のような見出しの右の値は、シートのすべての行の範囲にする
         $sheetScope = (@($functionLabels | ForEach-Object { Find-LabelValue $grid $_ } | Where-Object { $_ }) -join ' ')
-        $current = ''
+        $current = @{}   # 機能の列 → 上の行から引き継ぐ値
         foreach ($row in $grid.Rows) {
             $cells = $grid.Cells[$row]
-            if ($headerRow -and $row -gt $headerRow -and $cells.ContainsKey($functionCol) -and $cells[$functionCol].Trim()) { $current = $cells[$functionCol].Trim() }
+            if ($headerRow -and $row -gt $headerRow) {
+                foreach ($c in $functionCols) { if ($cells.ContainsKey($c) -and $cells[$c].Trim()) { $current[$c] = $cells[$c].Trim() } }
+                # 結果が対象外（削除・欠番・- など）の行は、テストとみなさない（機能は下の行に引き継ぐ）
+                if ($resultCol -and $cells.ContainsKey($resultCol) -and (Get-TestResultKind $cells[$resultCol]) -eq '対象外') { continue }
+            }
+            $functionText = @($functionCols | ForEach-Object { $current[$_] }) -join ' '
             $rowText = (@($grid.Cols[$row] | ForEach-Object { $cells[$_] }) -join ' ').Normalize($nfkc)
-            $scopeText = ('{0} {1} {2} {3} {4}' -f $book.File, $sheetName, $sheetScope, $current, $rowText).Normalize($nfkc)
+            $scopeText = ('{0} {1} {2} {3} {4}' -f $book.File, $sheetName, $sheetScope, $functionText, $rowText).Normalize($nfkc)
             foreach ($col in $grid.Cols[$row]) {
                 $text = $cells[$col].Normalize($nfkc)
                 $testCells.Add([pscustomobject]@{ Text = $text; Label = (ConvertTo-Label $text).ToUpperInvariant(); Scope = $scopeText; Place = (New-Place $book $sheetName $row $col) })
@@ -432,6 +457,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       IF         IF 定義書の IF ID が、テスト仕様書に出てくるか
 #
 #     「その画面のテスト」は、ファイル名・シート名・行（機能・画面の列。空なら上の行の値）に画面 ID があるテスト仕様書のセルです。
+#     結果が削除・対象外・欠番などの行は、テストとみなしません。
 #     -Requirement で要件一覧を渡すと、要件 ID ごとに設計書とテスト仕様書に出てくるかを確かめ、一覧に無い要件 ID も知らせます。
 #
 # .PARAMETER DesignPath
@@ -441,7 +467,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     テスト仕様書のフォルダまたはファイル（複数可・ワイルドカード可）。
 #
 # .PARAMETER Requirement
-#     要件一覧のファイル（Excel・CSV。要件ID と要件名の見出しがある表）。設計書・テスト仕様書のフォルダの中にあっても、そちらとしては読みません。
+#     要件一覧のファイル（Excel・CSV。要件ID と要件名の見出しがある表）。Excel の ID が数字だけの表（改訂履歴など）は読みません。
+#     設計書・テスト仕様書のフォルダの中にあっても、そちらとしては読みません。
 #
 # .PARAMETER Rules
 #     網羅のルールの CSV（種類・ファイル名・シート名・見出し・列・名前・範囲・探し方）。既定は tools\traceability\網羅のルール.csv。
