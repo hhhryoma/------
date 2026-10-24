@@ -252,6 +252,16 @@ Test-Case 'New-DocumentRegister: -Findings のフォルダに読めない CSV（
     Assert-Equal 1 @($warnings | Where-Object { $_ -match '^レビュー記録\.csv: CSV を読めません' }).Count ($warnings -join "`n")
 }
 
+Test-Case 'New-DocumentRegister: -Findings の状態の「未完了」「未済」は、完了・済を含んでも未完了の指摘に数える' {
+    $dir = New-TestDir
+    $docsDir = Join-Path $dir '納品物'
+    New-CoverBook (Join-Path $docsDir '設計書_v1.1.xlsx') @(@('受注管理システム', ''), @('文書名', '設計書'), @('文書番号', 'X-01'), @('版数', '1.1')) $null
+    $findings = Join-Path $dir '指摘管理表.csv'
+    @('No,対象成果物,指摘内容,対応状況,対応期限', '1,設計書,画面の説明が足りない,未完了,2026/10/20', '2,設計書,用語の誤り,未済,2026/10/30', '3,設計書,誤字,完了,') | Set-Content -LiteralPath $findings -Encoding UTF8
+    $docs = @(& $RegisterTool -Path $docsDir -Findings $findings -AsOf '2026-10-24' 6>$null)
+    Assert-Equal '設計書_v1.1.xlsx|2|未完了の指摘 2 件（期限切れ 1 件）' ('{0}|{1}|{2}' -f $docs[0].File, $docs[0].OpenFindings, $docs[0].Note)
+}
+
 Test-Case 'New-DocumentRegister: Get-Help でヘルプが表示される' {
     $h = Get-Help $RegisterTool
     Assert-Match $h.Synopsis '成果物'

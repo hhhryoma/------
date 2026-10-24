@@ -1934,11 +1934,20 @@ function Resolve-FunctionName {
     return $null
 }
 
+function Get-LeafName {
+    #     名前からフォルダを除く（D:\設計書\基本設計書.xlsx・設計書/基本設計書.xlsx は「基本設計書.xlsx」）。
+    #     「\」はいつもフォルダの区切り。「/」は、拡張子で終わる名前のときだけ区切りにする（「外部I/F設計書」はそのまま）。
+    #     （文字列の .Split(@('\', '/')) は、PowerShell 7 では「\ /」の 1 つの区切りになって分けないので使わない）
+    param([string] $Name)
+    $n = @(([string]$Name).Trim() -split '\\')[-1]
+    if ($n -match '\.[A-Za-z][A-Za-z0-9]{1,4}$') { $n = @($n -split '/')[-1] }
+    return $n
+}
+
 function ConvertTo-NameKey {
     #     機能・設計書の名前を比べる形（フォルダと拡張子を除き、全角・半角と空白をそろえる）
     param([string] $Name)
-    $n = ([string]$Name).Trim()
-    $n = $n.Split(@('\', '/'))[-1]
+    $n = Get-LeafName $Name
     if ($n -match '\.(xlsx|xlsm|xls|xlsb|csv|pdf|docx?)$') { $n = [System.IO.Path]::GetFileNameWithoutExtension($n) }
     return (ConvertTo-Label $n).ToUpperInvariant()
 }
@@ -1966,6 +1975,18 @@ function ConvertTo-DateValue {
     }
     catch { }
     return $null
+}
+
+# 状態の文字のうち、終わっていないことを表すもの（「未完了」「未済」「未解決」「完了待ち」「完了予定」「not done」「reopen」「差し戻し」など）。
+# 「完了」「済」などを含んでいても、終わったものにしない
+$script:OpenStatusPattern = '未(完了|済|クローズ|解決|対応)|(完了|クローズ|解決)(待ち|予定)|(?i:not\s*(done|closed?)|un(done|closed)|re-?open)|再オープン|差し?戻'
+
+function Test-ClosedStatus {
+    #     状態の文字（対応状況など）が、終わったもの（ClosedPattern に合い、「未完了」「完了待ち」などの打ち消しでない）か
+    param([string] $Status, [string] $ClosedPattern)
+    $s = ([string]$Status).Trim()
+    if (-not $s -or $s -notmatch $ClosedPattern) { return $false }
+    return $s -notmatch $script:OpenStatusPattern
 }
 
 function Get-TestResultKind {

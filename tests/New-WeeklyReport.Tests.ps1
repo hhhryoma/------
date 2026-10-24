@@ -207,6 +207,16 @@ Test-Case 'New-WeeklyReport: 地域の設定で日付の区切りを「-」に�
     Assert-Match $text '・来週（10/24～10/30）の予定: 3 件'
 }
 
+Test-Case 'New-WeeklyReport: 指摘の状態の「未完了」「完了予定」は、完了を含んでも未完了として担当者ごとのやることに入れる' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $cols = @('No', '設計書', '指摘内容', '対応状況', '対応期限', '対応者') | ForEach-Object { @{ Header = $_; Width = 12 } }
+    $rows = @(@('1', 'DD02 画面設計書', '桁数が違う', '未完了', '2026/10/30', '山田'), @('2', 'DD02 画面設計書', '誤記', '完了', '', '山田'), @('3', 'DD03 テーブル定義書', '型が違う', '完了予定', '2026/10/30', '佐藤'))
+    Export-Workbook -FilePath (Join-Path $dir '指摘管理表.xlsx') -Sheets @(@{ Name = '指摘'; Columns = $cols; Rows = @($rows | ForEach-Object { @{ Values = $_ } }) })
+    $items = @(& $WeeklyReport -Findings (Join-Path $dir '指摘管理表.xlsx') -AsOf '2026-10-23' -OutDir (Join-Path $dir '週次報告') 6>$null 3>$null)
+    Assert-Equal @('佐藤|期限間近|DD03 テーブル定義書: 型が違う', '山田|期限間近|DD02 画面設計書: 桁数が違う') @($items | ForEach-Object { '{0}|{1}|{2}' -f $_.Owner, $_.State, $_.Title })
+}
+
 Test-Case 'New-WeeklyReport: Get-Help でヘルプが表示される' {
     $h = Get-Help $WeeklyReport
     Assert-Match $h.Synopsis '週次報告'

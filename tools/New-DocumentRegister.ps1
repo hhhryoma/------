@@ -564,7 +564,7 @@ if ($Findings) {
         $status = ([string]$v['状態']).Trim()
         if ($status -match $excludedPattern) { continue }
         $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
-        if (($status -match $closedPattern) -or (([string]$v['対応要否']).Trim() -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)) { continue }
+        if ((Test-ClosedStatus $status $closedPattern) -or (([string]$v['対応要否']).Trim() -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)) { continue }
         $name = ([string]$v['設計書']).Trim()
         $matched = New-Object System.Collections.Generic.List[object]
         foreach ($k in @((ConvertTo-NameKey $name), (& $docNoKey $name))) {

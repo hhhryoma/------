@@ -86,8 +86,7 @@ foreach ($r in (Read-CsvFile $Limits @('分母', '下限', '上限') '基準値'
 function ConvertTo-DocKey {
     #     設計書の名前を比べる形（フォルダと拡張子を除き、全角・半角と空白をそろえる）
     param([string] $Name)
-    $n = ([string]$Name).Trim()
-    $n = $n.Split(@('\', '/'))[-1]
+    $n = Get-LeafName $Name
     if ($n -match '\.(xlsx|xlsm|xls|xlsb|pdf|docx?|pptx?)$') { $n = [System.IO.Path]::GetFileNameWithoutExtension($n) }
     return (ConvertTo-Label $n).ToUpperInvariant()
 }
@@ -120,7 +119,7 @@ function Add-Finding {
     $required = ([string]$Values['対応要否']).Trim()
     if ($status -match $excludedPattern) { $script:excluded++; return }
     $closedOn = ConvertTo-Date $Values['完了日']
-    $closed = ($status -match $closedPattern) -or ($required -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)
+    $closed = (Test-ClosedStatus $status $closedPattern) -or ($required -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)
     $due = ConvertTo-Date $Values['期限']
     $doc = ([string]$Values['設計書']).Trim()
     if (-not $doc) { $doc = '（設計書なし）' }
@@ -386,7 +385,7 @@ if ($SizeCsv) {
             $n = 0.0
             if (-not [double]::TryParse(([string]$r.$sizeCol).Trim(), [ref]$n)) { continue }
             $k = ConvertTo-DocKey $r.$nameCol
-            if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = ([string]$r.$nameCol).Split(@('\', '/'))[-1]; Size = 0.0; Unit = $sizeCol } }
+            if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = @(([string]$r.$nameCol).Trim() -split '[\\/]')[-1]; Size = 0.0; Unit = $sizeCol } }
             $sizes[$k].Size += $n
         }
     }
