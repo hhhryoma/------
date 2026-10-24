@@ -12,6 +12,7 @@
 | [Search-Excel.ps1](#search-excelps1) | フォルダ配下の Excel を横断して文字列を検索する（Excel 版 grep） |
 | [Replace-Excel.ps1](#replace-excelps1) | 複数の Excel の文字を一括で置換する（Excel 不要。置換する箇所を確認してから書き換える） |
 | [Test-ExcelTerms.ps1](#test-exceltermsps1) | 複数の Excel の表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を見つけ、Replace-Excel 用の置換リストを作る |
+| [New-GlossaryDraft.ps1](#new-glossarydraftps1) | 設計書からカタカナ語・略語・よく出る用語を数え、用語集の下書きと、表記ゆれの用語集（Test-ExcelTerms の `-Glossary`）を作る（Excel 不要） |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、桁数・必須の違いなど）を全件見つける。CRUD 図と影響調査も（Excel 不要） |
 | [Test-ScreenNumbers.ps1](#test-screennumbersps1) | 画面レイアウトのスクリーンショットに重ねた丸数字（①・No.5 など）を、画面項目定義の No と突き合わせる。無い番号・重なった番号と、前の版と比べて No がずれたのに直していない丸数字を見つける（Excel 不要） |
 | [Test-Screenshots.ps1](#test-screenshotsps1) | 設計書に貼った画面のスクリーンショットが、元のワイヤーフレーム（Excel）より古くなっていないかを確かめる。貼り替えたあとに記録し、元の印刷範囲の中が変わると「元が更新された」と知らせる（Excel 不要。設計書は変更しない） |
@@ -65,7 +66,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Find-SimilarDefects.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Export-DesignDiagram.ps1`・`New-TestData.ps1`・`Test-CodeTrace.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`New-WbsDraft.ps1` は `Measure-DesignSize.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`New-GlossaryDraft.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Find-SimilarDefects.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Export-DesignDiagram.ps1`・`New-TestData.ps1`・`Test-CodeTrace.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`New-WbsDraft.ps1` は `Measure-DesignSize.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Start-ExcelTools.ps1（画面）
 
@@ -441,6 +442,60 @@ ID               ＩＤ               2              31 全角・半角
 | `-OutXlsx` | 表記ゆれの一覧と、出現箇所へのリンク付きの一覧を保存する（Word の文書へのリンクは文書を開くだけ） |
 | `-IncludeWord` | Word の文書の本文・表・脚注・コメント・テキストボックスも調べる |
 | `-NoRecurse` / `-NoExcel` | サブフォルダを見ない／Excel を起動しない（.xls / .xlsb は調べない） |
+
+## New-GlossaryDraft.ps1
+
+設計書から**カタカナ語・略語・よく出る用語**を数え、**用語集の下書き**を作ります。Excel は不要です。
+表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）のある用語は、[Test-ExcelTerms.ps1](#test-exceltermsps1) の `-Glossary` にそのまま渡せる用語集（CSV）にもします。プロジェクトの最初に用語集を作るとき・途中から表記をそろえるときに使います。
+
+```powershell
+.\New-GlossaryDraft.ps1 D:\設計書 -IncludeWord -OutXlsx D:\用語集の下書き.xlsx -OutCsv D:\用語集.csv
+.\Test-ExcelTerms.ps1 D:\設計書 -Glossary D:\用語集.csv -OutCsv D:\置換リスト.csv     # 表記ゆれの置換リストを作る
+```
+
+```
+Term         Kind       Count Files Variants
+----         ----       ----- ----- --------
+ユーザー     カタカナ語     4     1 ユーザ（1）・ﾕｰｻﾞｰ（1）
+データベース カタカナ語     3     1 データ・ベース（1）
+ID           略語           3     1 ＩＤ（1）
+受注番号     用語           3     1
+
+1 ファイルから用語 4（カタカナ語 2・略語 1・用語 1）。3 回以上出てくるもの
+表記ゆれ 3 組: ユーザー／ユーザ／ﾕｰｻﾞｰ・データベース／データ・ベース・ID／ＩＤ
+```
+
+### 集める言葉
+
+| 種類 | 集めるもの |
+| --- | --- |
+| カタカナ語 | 3 文字以上のカタカナの続き（ユーザー・ステータス・ログインユーザーなど）。半角カタカナは全角にして数える。「ユーザー・グループ」のような中黒の並びは 1 語ずつ数える |
+| 略語 | 英大文字だけの 2〜6 文字（ID・CSV・API など。全角も）。数字の入った ID（SCR001・E0001 など）は除く |
+| 用語 | 漢字を含む、漢字とカタカナの続き（受注番号・顧客マスタなど）。「場合」「処理」「表示」「確認」など、どの設計書にも出てくる言葉は除く |
+
+- **表記ゆれ**: 全角・半角（ﾕｰｻﾞｰ／ユーザー・ＩＤ／ID）、語末の長音（ユーザ／ユーザー）、中黒（データ・ベース／データベース）だけが違う表記は、1 つの用語にまとめます。中黒のある表記は、中黒の無い表記も出てくるときだけ表記ゆれにします
+- 用語の表記は多く使われているもの（同じ数なら長音のある方）です。半角カタカナ・全角英数字は用語にしません（それしか無ければ、全角カタカナ・半角英数字にしたものを用語にします）。この決め方は Test-ExcelTerms の推奨と同じです
+- 表記ゆれを合わせて `-MinCount`（既定 3）回以上出てくるものを、種類ごとに多い順に出します
+- 言葉は文字の種類（カタカナ・漢字・英字）の続きで区切るだけなので、「受注番号入力」のような長い続きは 1 つの言葉になります。要らない言葉は `-Exclude` で除けます
+
+`-OutXlsx` のシート:
+
+| シート | 内容 |
+| --- | --- |
+| 用語集 | 用語・意味（空欄。人が書く）・種類・出現数・設計書の数・表記ゆれ・最初の場所（リンク付き） |
+| 表記ゆれ | 正しい表記・揺れ・種類・表記ごとの出現数 |
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 設計書のフォルダまたはファイル（複数可） |
+| `-Kind` | 集める言葉の種類（`Katakana`: カタカナ語・`Abbreviation`: 略語・`Word`: 用語）。既定はすべて |
+| `-MinCount` | 用語にする出現数の下限（表記ゆれを合わせた数。既定 3） |
+| `-Exclude` | 用語にしない言葉（複数可・カンマ区切り可）。表記ゆれと大文字小文字の違うものも除く |
+| `-IncludeWord` | Word の文書（.docx / .docm）も読む |
+| `-OutXlsx` | 用語集の下書きと表記ゆれの一覧を保存する |
+| `-OutCsv` | 表記ゆれのある用語を、Test-ExcelTerms.ps1 の `-Glossary` の形（正しい表記・揺れ・備考。UTF-8・BOM 付き）で保存する |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ## Test-ExcelDeliverable.ps1
 
