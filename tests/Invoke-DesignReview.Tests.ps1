@@ -301,6 +301,8 @@ Test-Case 'Invoke-DesignReview: 回答の引用を設計書のセルと突き合
 '@
     $text = Get-HostText { & $Review -OutDir $dir -ImportOnly }
     Assert-Match $text 'AI の指摘の引用: 引用なし 1・一致 2・見つからない 2・場所を直した 2'
+    # 観点の判定の数は、出てきた順（最初の設計書は未回答。PowerShell 7 の Group-Object のように名前の順にしない）
+    Assert-Match $text '観点の判定: 未回答 \d+・OK \d+・NG \d+・要確認 \d+ /'
     $f = Read-XlsxSheet -Path (Join-Path $dir 'レビュー結果.xlsx') -Index 1
     Assert-Equal '場所|引用|引用の確認|指摘内容' ((@('I', 'J', 'K', 'L') | ForEach-Object { $f.Rows[1][$_] }) -join '|')
     $rows = @{}

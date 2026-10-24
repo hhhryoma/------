@@ -510,7 +510,7 @@ function Test-Checklist {
     if ($points.Count -eq 0) { & $add 'エラー' $null $null '有効な観点が 1 つもありません' }
 
     # 回答の照合は大文字小文字を区別しないため、ID の重複も区別せずに調べる
-    foreach ($g in ($points | Group-Object { $_.Id.ToUpperInvariant() } | Where-Object { $_.Count -gt 1 })) {
+    foreach ($g in ($points | Group-InOrder { $_.Id.ToUpperInvariant() } | Where-Object { $_.Count -gt 1 })) {
         $rows = ($g.Group | ForEach-Object { "$($_.Row)行目" }) -join '、'
         foreach ($p in $g.Group) { & $add 'エラー' $p.Row $p.Id "観点IDが重複しています（$rows）" }
     }
@@ -963,7 +963,7 @@ function Invoke-ToolChecks {
                 if ($Glossary) { $termArgs['Glossary'] = $Glossary }
                 foreach ($v in @(& (Join-Path $PSScriptRoot 'Test-ExcelTerms.ps1') @termArgs 6>$null 3>$null)) {
                     # 揺れの表記ごと・ファイルごとに 1 件（場所は最初に出てくるセル）
-                    foreach ($g in @($v.Occurrences | Group-Object Path)) {
+                    foreach ($g in @($v.Occurrences | Group-InOrder Path)) {
                         $o = $g.Group[0]
                         & $add '表記ゆれ' $o.Path $o.Sheet $o.Cell ('「{0}」は「{1}」の表記ゆれです（{2}。このファイルで {3} か所）' -f $v.Variant, $v.Preferred, $v.Kind, $g.Count) ''
                     }
@@ -2194,7 +2194,7 @@ catch {
 }
 
 $answeredCount = @($requestRows | Where-Object { $_.Values[5] -eq '回答済み' }).Count
-$statusCounts = $statusRows | Group-Object { $_.Values[5] } | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
+$statusCounts = $statusRows | Group-InOrder { $_.Values[5] } | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
 $toolNote = ''
 if ($toolPoints.Count -gt 0) { $toolNote = '（うちツール {0} 件）' -f @($findings | Where-Object { $_.Source -ne 'AI' }).Count }
 Write-Host ''
