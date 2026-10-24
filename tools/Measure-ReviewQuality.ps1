@@ -47,7 +47,7 @@ $invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
 # 対応が終わった・指摘として数えない状態
 $closedPattern = '完了|済|クローズ|close|done|対応不要|不要|対処なし'
-$excludedPattern = '取下げ|取り下げ|取消|却下|対象外|重複|誤指摘'
+$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|誤指摘'
 
 # ---------------------------------------------------------------- 設定
 

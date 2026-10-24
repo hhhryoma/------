@@ -230,6 +230,18 @@ Test-Case 'Measure-ReviewQuality: 設計書の名前のフォルダ（D:\納品�
     Assert-Equal @('DD03_テーブル定義書|2|10|0.2', '内部I/F設計書|1||', '外部I/F設計書|1||', 'DD03_テーブル定義書_別紙.pdf|0|5|0') @($r | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Document, $_.Findings, $_.Size, $_.Density })
 }
 
+Test-Case 'Measure-ReviewQuality: 状態の「取消」「取り消し」「取り下げ」の指摘は数えない' {
+    $dir = New-TestDir
+    New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況') @(
+        @('1', '2026/10/01', 'DD03_テーブル定義書', '型が違う', '対応中'),
+        @('2', '2026/10/01', 'DD03_テーブル定義書', '桁数が違う', '取消'),
+        @('3', '2026/10/02', 'DD03_テーブル定義書', '誤記', '取り消し'),
+        @('4', '2026/10/02', 'DD03_テーブル定義書', '名前の揺れ', '取り下げ'))
+    $text = Get-HostText { $script:r = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -AsOf '2026-10-20' 3>$null) }
+    Assert-Equal 'DD03_テーブル定義書|1|1' ('{0}|{1}|{2}' -f $script:r[0].Document, $script:r[0].Findings, $script:r[0].Open)
+    Assert-Match $text '取下げなどで数えなかったもの 3 件'
+}
+
 Test-Case 'Measure-ReviewQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityTool
     Assert-Match $h.Synopsis '指摘'
