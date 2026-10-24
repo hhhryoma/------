@@ -237,6 +237,88 @@ Test-Case 'New-DocumentRegister: 詳細設計サンプルの表紙（見出し�
     Assert-Equal '画面設計書（SCR001 受注一覧）' @($docs | Where-Object { $_.File -like 'DD02*SCR001*' })[0].Title
 }
 
+Test-Case 'New-DocumentRegister: -Previous で、数値のセルの版数（1.09 の次の 1.10 は 1.1）を「前回より小さい」とせず、Excel で開き直した CSV の 1.10（1.1）は同じ版数とする' {
+    $dir = New-TestDir
+    $docsDir = Join-Path $dir '納品物'
+    $file = Join-Path $docsDir '外部設計書.xlsx'
+    New-CoverBook $file @(@('外部設計書', ''), @('文書番号', 'E-01'), @('版数', [double]1.09)) @(@([double]1.08, '2026/10/01', '見直し', '佐藤'), @([double]1.09, '2026/10/10', '指摘の反映', '佐藤'))
+    (Get-Item -LiteralPath $file).LastWriteTime = Get-Date '2026-10-10 10:00'
+    $prev = Join-Path $dir '前回.xlsx'
+    $null = & $RegisterTool -Path $docsDir -OutXlsx $prev 6>$null
+    # 次の提出は 1.10（数値のセルの値は 1.1）
+    New-CoverBook $file @(@('外部設計書', ''), @('文書番号', 'E-01'), @('版数', [double]1.1)) @(@([double]1.09, '2026/10/10', '指摘の反映', '佐藤'), @([double]1.1, '2026/10/20', '帳票の追加', '佐藤'))
+    (Get-Item -LiteralPath $file).LastWriteTime = Get-Date '2026-10-20 10:00'
+    $r = @(& $RegisterTool -Path $docsDir -Previous $prev 6>$null)
+    Assert-Equal '外部設計書.xlsx|版数 1.09→1.1|' ('{0}|{1}|{2}' -f $r[0].File, $r[0].Change, $r[0].Note) '1.09 を 1.9 にせず、1.1 を前回より小さいとしない'
+
+    # Word の表紙の 1.10 と、Excel で開き直して 1.1 になった前回の CSV
+    $word = Join-Path $dir 'word'
+    New-WordDoc (Join-Path $word '運用手順書.docx') @(, @(@('文書名', '運用手順書'), @('文書番号', 'OP-01'), @('版数', '1.10')))
+    (Get-Item -LiteralPath (Join-Path $word '運用手順書.docx')).LastWriteTime = Get-Date '2026-10-20 10:00'
+    $prevCsv = Join-Path $dir '前回.csv'
+    $null = & $RegisterTool -Path $word -OutCsv $prevCsv 6>$null
+    $lines = @([System.IO.File]::ReadAllLines($prevCsv) | ForEach-Object { $_.Replace(',1.10,', ',1.1,') })
+    [System.IO.File]::WriteAllLines($prevCsv, $lines, (New-Object System.Text.UTF8Encoding($true)))
+    $r = @(& $RegisterTool -Path $word -Previous $prevCsv 6>$null)
+    Assert-Equal '運用手順書.docx|' ('{0}|{1}' -f $r[0].File, $r[0].Change) '直していなければ変化なし'
+    (Get-Item -LiteralPath (Join-Path $word '運用手順書.docx')).LastWriteTime = Get-Date '2026-10-22 15:30'
+    $r = @(& $RegisterTool -Path $word -Previous $prevCsv 6>$null)
+    Assert-Equal '運用手順書.docx|版数を上げずに更新' ('{0}|{1}' -f $r[0].File, $r[0].Change) '1.10 と 1.1 は同じ版数'
+}
+
+Test-Case 'New-DocumentRegister: -Previous で、-AllVersions の一覧のフォルダの版数（v1.0/・v1.1/）と、Excel で開き直した CSV の「01」フォルダ（1）を読み違えない' {
+    $dir = New-TestDir
+    $docsDir = Join-Path $dir '納品物'
+    New-CoverBook (Join-Path $docsDir 'v1.0/基本設計書.xlsx') @(@('受注管理システム', ''), @('文書名', '基本設計書'), @('文書番号', 'B-01'), @('版数', '1.0')) $null
+    New-CoverBook (Join-Path $docsDir 'v1.1/基本設計書.xlsx') @(@('受注管理システム', ''), @('文書名', '基本設計書'), @('文書番号', 'B-01'), @('版数', '1.1')) $null
+    (Get-Item -LiteralPath (Join-Path $docsDir 'v1.0/基本設計書.xlsx')).LastWriteTime = Get-Date '2026-10-01 10:00'
+    (Get-Item -LiteralPath (Join-Path $docsDir 'v1.1/基本設計書.xlsx')).LastWriteTime = Get-Date '2026-10-15 10:00'
+    $prev = Join-Path $dir '前回.xlsx'
+    $null = & $RegisterTool -Path $docsDir -AllVersions -OutXlsx $prev 6>$null
+    $r = @(& $RegisterTool -Path $docsDir -Previous $prev 6>$null)
+    Assert-Equal @('v1.1|基本設計書.xlsx|') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Folder, $_.File, $_.Change }) '前回の一覧の古い版（v1.0）と比べない'
+
+    $docs2 = Join-Path $dir '納品物2'
+    New-CoverBook (Join-Path $docs2 '01/基本設計書_v1.0.xlsx') @(@('受注管理システム', ''), @('文書名', '基本設計書'), @('版数', '1.0')) $null
+    New-CoverBook (Join-Path $docs2 '02/詳細設計書_v1.0.xlsx') @(@('受注管理システム', ''), @('文書名', '詳細設計書'), @('版数', '1.0')) $null
+    Get-ChildItem -LiteralPath $docs2 -File -Recurse | ForEach-Object { $_.LastWriteTime = Get-Date '2026-10-20 10:00' }
+    $prevCsv = Join-Path $dir '前回.csv'
+    $null = & $RegisterTool -Path $docs2 -OutCsv $prevCsv 6>$null
+    # Excel で開き直すと、フォルダの 01 は 1、版数の 1.0 は 1 になる
+    $lines = @([System.IO.File]::ReadAllLines($prevCsv) | ForEach-Object { $_.Replace(',01,', ',1,').Replace(',02,', ',2,').Replace(',1.0,', ',1,') })
+    [System.IO.File]::WriteAllLines($prevCsv, $lines, (New-Object System.Text.UTF8Encoding($true)))
+    $r = @(& $RegisterTool -Path $docs2 -Previous $prevCsv 6>$null)
+    Assert-Equal @('01|基本設計書_v1.0.xlsx|', '02|詳細設計書_v1.0.xlsx|') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Folder, $_.File, $_.Change })
+}
+
+Test-Case 'New-DocumentRegister: -Findings の対象のフォルダ（結合テスト/テスト仕様書.xlsx）はその場所の成果物だけに数え、「外部I/F設計書」と「内部I/F設計書」、文書番号の「－」を取り違えない' {
+    $dir = New-TestDir
+    $docsDir = Join-Path $dir '納品物'
+    New-CoverBook (Join-Path $docsDir '結合テスト/テスト仕様書.xlsx') @(@('テスト仕様書', ''), @('文書番号', 'T-01')) $null
+    New-CoverBook (Join-Path $docsDir '総合テスト/テスト仕様書.xlsx') @(@('テスト仕様書', ''), @('文書番号', 'T-02')) $null
+    New-CoverBook (Join-Path $docsDir '外部IF設計書.xlsx') @(@('受注管理システム', ''), @('文書名', '外部I/F設計書'), @('文書番号', '－')) $null
+    New-CoverBook (Join-Path $docsDir '内部IF設計書.xlsx') @(@('受注管理システム', ''), @('文書名', '内部I/F設計書'), @('文書番号', '－')) $null
+    $findings = Join-Path $dir '指摘管理表.csv'
+    @('No,対象成果物,指摘内容,対応状況', '1,結合テスト/テスト仕様書.xlsx,観点が足りない,対応中', '2,総合テスト\テスト仕様書,手順の誤り,対応中', '3,外部I/F設計書,項目の誤り,対応中', '4,－,全体の用語,対応中') | Set-Content -LiteralPath $findings -Encoding UTF8
+    $docs = @(& $RegisterTool -Path $docsDir -Findings $findings -AsOf '2026-10-24' 6>$null)
+    Assert-Equal @('内部IF設計書.xlsx|0', '外部IF設計書.xlsx|1', '結合テスト/テスト仕様書.xlsx|1', '総合テスト/テスト仕様書.xlsx|1') @($docs | Sort-Object Relative | ForEach-Object { '{0}|{1}' -f $_.Relative.Replace('\', '/'), $_.OpenFindings })
+    $text = Get-HostText { & $RegisterTool -Path $docsDir -Findings $findings -AsOf '2026-10-24' | Out-Null }
+    Assert-Match $text '一覧の成果物と対応付かない指摘 1 件: －'
+}
+
+Test-Case 'New-DocumentRegister: -Previous の前回の一覧に読めないファイルの更新日時（前の版が和暦の設定で書いた 08/10/20 10:00 など）があれば知らせる' {
+    $dir = New-TestDir
+    $docsDir = Join-Path $dir '納品物'
+    New-CoverBook (Join-Path $docsDir '設計書_v1.1.xlsx') @(@('受注管理システム', ''), @('文書名', '設計書'), @('版数', '1.1')) $null
+    (Get-Item -LiteralPath (Join-Path $docsDir '設計書_v1.1.xlsx')).LastWriteTime = Get-Date '2026-10-20 10:00'
+    $prevCsv = Join-Path $dir '前回.csv'
+    $null = & $RegisterTool -Path $docsDir -OutCsv $prevCsv 6>$null
+    $lines = @([System.IO.File]::ReadAllLines($prevCsv) | ForEach-Object { $_.Replace('2026/10/20 10:00', '08/10/20 10:00') })
+    [System.IO.File]::WriteAllLines($prevCsv, $lines, (New-Object System.Text.UTF8Encoding($true)))
+    $warnings = @(& $RegisterTool -Path $docsDir -Previous $prevCsv 6>$null 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
+    Assert-Equal 1 @($warnings | Where-Object { $_ -match '^前回の一覧の 1 行で、ファイルの更新日時を読めません（08/10/20 10:00 など）' }).Count ($warnings -join "`n")
+}
+
 Test-Case 'New-DocumentRegister: Get-Help でヘルプが表示される' {
     $h = Get-Help $RegisterTool
     Assert-Match $h.Synopsis '成果物'

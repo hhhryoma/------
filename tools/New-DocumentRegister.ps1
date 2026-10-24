@@ -68,17 +68,40 @@ $skipPattern = '^(~\$|\.)|^(Thumbs\.db|desktop\.ini)$'
 
 
 function ConvertTo-VersionText {
-    #     版数の文字（「第1.1版」「Ver.1.10」「v1.1」など）を比べる形「1.1」にする（無ければ空）
+    #     版数の文字（「第1.1版」「Ver.1.10」「v1.1」など）を「1.1」の形にする（無ければ空）。
+    #     最初の数の前の 0 だけを除き、ほかは書いたまま（1.09 を 1.9 にしない）
     param([string] $Text)
     $m = [regex]::Match(([string]$Text).Normalize($nfkc), '(\d+(?:\.\d+)*)')
     if (-not $m.Success) { return '' }
-    return (@($m.Groups[1].Value.Split('.') | ForEach-Object { [string][int64]$_ }) -join '.')
+    $parts = $m.Groups[1].Value.Split('.')
+    $parts[0] = $parts[0].TrimStart('0')
+    if (-not $parts[0]) { $parts[0] = '0' }
+    return ($parts -join '.')
 }
 
 function ConvertTo-VersionKey {
-    #     版数を比べる形（ConvertTo-VersionText の後ろの「.0」を除く。数値のセルの 1.0 は「1」と読めるので、1 と 1.0 を同じにする）
+    #     版数を、点で区切った数の並びで比べる形（数の前の 0 と、後ろの「.0」を除く。1.09 と 1.9、1 と 1.0 は同じ）
     param([string] $Version)
-    return [regex]::Replace($Version, '(\.0)+$', '')
+    $parts = @($Version.Split('.') | ForEach-Object { $t = $_.TrimStart('0'); if ($t) { $t } else { '0' } })
+    return [regex]::Replace(($parts -join '.'), '(\.0)+$', '')
+}
+
+function Test-SameVersion {
+    #     版数 A と B が同じか。どちらも「1.10」のような小数（点が 1 つまで）なら、数の大きさで比べる
+    #     （数値のセルや Excel で開き直した CSV では、1.10 が 1.1、1.0 が 1 になるため）。ほかは点で区切った数の並びで比べる
+    param([string] $A, [string] $B)
+    if ($A -match '^\d+(\.\d+)?$' -and $B -match '^\d+(\.\d+)?$') { return [decimal]::Parse($A, $invariant) -eq [decimal]::Parse($B, $invariant) }
+    return (ConvertTo-VersionKey $A) -eq (ConvertTo-VersionKey $B)
+}
+
+function Test-LowerVersion {
+    #     版数 A が B より小さいか。どちらも小数（点が 1 つまで）なら、点で区切った数の並びでも、数の大きさでも小さいときだけ
+    #     （1.9 → 1.10 は数では小さいが、版数としては大きい。数値のセルの 1.09 → 1.10（1.1）は、並びでは小さいが数では大きい）
+    param([string] $A, [string] $B)
+    $lower = $false
+    try { $lower = (Get-NameVersion ('v' + $A)) -lt (Get-NameVersion ('v' + $B)) } catch { return $false }
+    if ($lower -and $A -match '^\d+(\.\d+)?$' -and $B -match '^\d+(\.\d+)?$') { $lower = [decimal]::Parse($A, $invariant) -lt [decimal]::Parse($B, $invariant) }
+    return [bool]$lower
 }
 
 function Get-FileNameVersion {
@@ -341,7 +364,9 @@ foreach ($entry in $fileArray) {
     if ($doc.NameVersion) { $versions['ファイル名'] = $doc.NameVersion }
     if ($doc.Version) { $v = ConvertTo-VersionText $doc.Version; if ($v) { $versions['表紙'] = $v } }
     if ($doc.History) { $versions['改訂履歴'] = $doc.History.Version }
-    if (@($versions.Values | ForEach-Object { ConvertTo-VersionKey $_ } | Select-Object -Unique).Count -gt 1) {
+    $distinct = New-Object System.Collections.Generic.List[string]
+    foreach ($v in $versions.Values) { if (@($distinct | Where-Object { Test-SameVersion $_ $v }).Count -eq 0) { $distinct.Add($v) } }
+    if ($distinct.Count -gt 1) {
         $doc.Notes.Add(('版数が違う（{0}）' -f ((@($versions.Keys | ForEach-Object { '{0} {1}' -f $_, $versions[$_] })) -join '・')))
     }
     if ($doc.Updated -and $doc.History -and $doc.History.Date -and $doc.Updated -ne $doc.History.Date) {
@@ -366,7 +391,15 @@ foreach ($g in @($docs | Group-InOrder Key)) {
 
 
 $labels = { param([string[]] $Names) @($Names | ForEach-Object { ConvertTo-Label $_ }) }
-$docNoKey = { param([string] $Text) (ConvertTo-Label $Text).ToUpperInvariant() }
+# 文書番号を比べる形（全角・半角と大文字小文字をそろえる。数字だけの番号は前の 0 を除く（Excel で開き直した CSV の 001 は 1）。
+# 「－」「-」など英数字の無いものは文書番号にしない（空）
+$docNoKey = {
+    param([string] $Text)
+    $k = (ConvertTo-Label $Text).ToUpperInvariant()
+    if ($k -notmatch '[\p{L}\p{N}]') { return '' }
+    if ($k -match '^\d+$') { $k = $k.TrimStart('0'); if (-not $k) { $k = '0' } }
+    return $k
+}
 $plannedRows = New-Object System.Collections.Generic.List[object]
 $readLog = New-Object System.Collections.Generic.List[object]
 if ($Planned) {
@@ -385,7 +418,8 @@ if ($Planned) {
         $docNo = ([string]$rec.Values['文書番号']).Trim()
         if (-not $name -and -not $docNo) { continue }
         $matched = @()
-        if ($docNo) { $matched = @($current | Where-Object { $_.DocNo -and (& $key $_.DocNo) -eq (& $key $docNo) }) }
+        $no = & $docNoKey $docNo
+        if ($no) { $matched = @($current | Where-Object { (& $docNoKey $_.DocNo) -eq $no }) }
         if ($matched.Count -eq 0 -and $name) {
             # 成果物の名前が、ファイル名（版数を除く）か文書名に含まれるもの（同じ名前があればそれだけ）
             $nk = & $key (Get-VersionlessName $name).Replace('{v}', '')
@@ -409,7 +443,7 @@ if ($Planned) {
 
 
 function Get-DocVersion {
-    #     比べる版数（表紙・改訂履歴・ファイル名の版数のうち、いちばん大きいもの。無ければ空）
+    #     比べる版数（表紙・改訂履歴・ファイル名の版数のうち、いちばん大きいもの。同じ版数なら桁の多い書き方（1.1 より 1.10）。無ければ空）
     param([string] $Cover, [string] $History, [string] $FileName)
     $best = ''
     $bestOrder = $null
@@ -417,9 +451,17 @@ function Get-DocVersion {
         if (-not $v) { continue }
         $order = $null
         try { $order = Get-NameVersion ('v' + $v) } catch { }
-        if (-not $best -or $order -gt $bestOrder) { $best = $v; $bestOrder = $order }
+        $same = $best -and (Test-SameVersion $v $best)
+        if (-not $best -or ($same -and $v.Length -gt $best.Length) -or (-not $same -and $order -gt $bestOrder)) { $best = $v; $bestOrder = $order }
     }
     return $best
+}
+
+function Get-PairKey {
+    #     前回と今回の成果物を突き合わせる形（版数を除いた場所と名前。Excel で開き直した CSV では「01」のフォルダが「1」になるので、
+    #     数字だけのフォルダの前の 0 を除く）
+    param([string] $Relative)
+    return [regex]::Replace((Get-VersionlessName $Relative.Replace('\', '/')), '(?<=^|/)0+(?=\d+(?:/|$))', '')
 }
 
 function ConvertTo-ModifiedTime {
@@ -460,6 +502,7 @@ if ($Previous) {
         -Need @('ファイル', '更新日時') -Key @('ファイル') -What '前回の成果物一覧' -NoExcel:$NoExcel -ReadLog $readLog
     if ($records.Count -eq 0) { Write-Warning "前回の成果物一覧に、ファイルとファイルの更新日時の見出しのある表がありません: $Previous" }
     $before = [ordered]@{}
+    $unreadable = New-Object System.Collections.Generic.List[string]
     foreach ($rec in $records) {
         $v = $rec.Values
         $file = ([string]$v['ファイル']).Trim()
@@ -471,8 +514,15 @@ if ($Previous) {
             Folder = $folder; File = $file; Relative = $relative; DocNo = ([string]$v['文書番号']).Trim(); Title = ([string]$v['文書名']).Trim()
             Version = (Get-DocVersion $v['版数'] $v['最新の改訂'] $file); Modified = (ConvertTo-ModifiedTime $v['更新日時']); Order = (Get-NameVersion $file)
         }
-        $k = Get-VersionlessName $relative
+        # 版数はファイル名、無ければフォルダ名（v1.0\設計書.xlsx と v1.1\設計書.xlsx。-AllVersions の一覧には両方ある）
+        if ($null -eq $p.Order) { $p.Order = Get-NameVersion $relative }
+        if (-not $p.Modified -and ([string]$v['更新日時']).Trim()) { $unreadable.Add(([string]$v['更新日時']).Trim()) }
+        $k = Get-PairKey $relative
         if (-not $before.Contains($k) -or ($p.Order -and $p.Order -gt $before[$k].Order)) { $before[$k] = $p }
+    }
+    # 前の版で、和暦の設定のまま書いた一覧（08/10/20 10:00）など。版数を上げずに直したものを見逃すので知らせる
+    if ($unreadable.Count -gt 0) {
+        Write-Warning ('前回の一覧の {0} 行で、ファイルの更新日時を読めません（{1} など）。この行は、版数を上げずに直したかを確かめません' -f $unreadable.Count, $unreadable[0])
     }
     $previousCount = $before.Count
 
@@ -481,14 +531,15 @@ if ($Previous) {
     $pairs = @{}
     $used = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($d in $current) {
-        $k = Get-VersionlessName $d.Relative.Replace('\', '/')
+        $k = Get-PairKey $d.Relative
         if ($before.Contains($k)) { $pairs[$d.Relative] = $before[$k]; [void]$used.Add($k) }
     }
     foreach ($d in $current) {
-        if ($pairs.ContainsKey($d.Relative) -or -not $d.DocNo) { continue }
+        if ($pairs.ContainsKey($d.Relative)) { continue }
         $no = & $docNoKey $d.DocNo
-        $same = @($before.Keys | Where-Object { -not $used.Contains($_) -and $before[$_].DocNo -and (& $docNoKey $before[$_].DocNo) -eq $no })
-        $others = @($current | Where-Object { -not $pairs.ContainsKey($_.Relative) -and $_.DocNo -and (& $docNoKey $_.DocNo) -eq $no })
+        if (-not $no) { continue }
+        $same = @($before.Keys | Where-Object { -not $used.Contains($_) -and (& $docNoKey $before[$_].DocNo) -eq $no })
+        $others = @($current | Where-Object { -not $pairs.ContainsKey($_.Relative) -and (& $docNoKey $_.DocNo) -eq $no })
         if ($same.Count -eq 1 -and $others.Count -eq 1) { $pairs[$d.Relative] = $before[$same[0]]; [void]$used.Add($same[0]) }
     }
 
@@ -501,12 +552,10 @@ if ($Previous) {
             continue
         }
         $parts = New-Object System.Collections.Generic.List[string]
-        if ((Get-VersionlessName $p.Relative) -ne (Get-VersionlessName $d.Relative.Replace('\', '/'))) { $parts.Add(('名前・場所が変わった（前回: {0}）' -f $p.Relative)) }
-        if ($p.Version -and $version -and (ConvertTo-VersionKey $p.Version) -ne (ConvertTo-VersionKey $version)) {
+        if ((Get-PairKey $p.Relative) -ne (Get-PairKey $d.Relative)) { $parts.Add(('名前・場所が変わった（前回: {0}）' -f $p.Relative)) }
+        if ($p.Version -and $version -and -not (Test-SameVersion $p.Version $version)) {
             $parts.Add(('版数 {0}→{1}' -f $p.Version, $version))
-            $lower = $false
-            try { $lower = (Get-NameVersion ('v' + $version)) -lt (Get-NameVersion ('v' + $p.Version)) } catch { }
-            if ($lower) { $d.Notes.Add(('版数が前回（{0}）より小さい' -f $p.Version)) }
+            if (Test-LowerVersion $version $p.Version) { $d.Notes.Add(('版数が前回（{0}）より小さい' -f $p.Version)) }
         }
         elseif ($p.Modified -and $d.Modified.ToString($p.Modified.Format, $invariant) -ne $p.Modified.Value.ToString($p.Modified.Format, $invariant)) {
             # 版数のある文書を、版数を変えずに直した（版数の無いファイルは「更新」だけ）
@@ -525,10 +574,11 @@ if ($Previous) {
 
 
 function ConvertTo-NameKey {
-    #     成果物の名前を比べる形（フォルダ・拡張子・版数を除き、全角・半角と空白をそろえる）
+    #     成果物の名前を比べる形（拡張子・版数を除き、全角・半角と空白をそろえる。フォルダは除かない（「外部I/F設計書」の / を残す））
     param([string] $Name)
-    $n = ([string]$Name).Trim().Split(@('\', '/'))[-1]
-    if ($n -match '(?i)\.(xlsx|xlsm|xls|xlsb|docx|docm|doc|pdf|pptx|ppt)$') { $n = [System.IO.Path]::GetFileNameWithoutExtension($n) }
+    $n = ([string]$Name).Trim()
+    $ext = [regex]::Match($n, '(?i)\.(xlsx|xlsm|xls|xlsb|docx|docm|doc|pdf|pptx|ppt)$')
+    if ($ext.Success) { $n = $n.Substring(0, $ext.Index) }
     $n = [regex]::Replace($n.Normalize($nfkc), '[_\-\s]*(?:(?<![A-Za-z])[vV](?:[eE][rR])?\.?\s*\d+(?:\.\d+)*版?|第\s*\d+(?:\.\d+)*\s*版)', '')
     return (ConvertTo-Label $n).ToUpperInvariant()
 }
@@ -546,11 +596,14 @@ if ($Findings) {
         -Need @('指摘内容', '設計書') -Key @('指摘内容') -What '指摘管理表' -Skip $skip -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
     if ($records.Count -eq 0) { Write-Warning '指摘管理表が見つかりませんでした（指摘内容と、設計書（対象成果物）の見出しがある表を探します）' }
 
-    # 文書番号・文書名・ファイル名（版数と拡張子を除く）→ 成果物
+    # 文書番号・文書名・ファイル名（版数と拡張子を除く）→ 成果物。場所（フォルダと名前）は、フォルダの付いた指摘の対象と突き合わせる
     $index = @{}
     $order = @{}
-    foreach ($d in @($docs | Where-Object { $_.Latest })) {
+    $pathKeyOf = @{}
+    $latestDocs = @($docs | Where-Object { $_.Latest })
+    foreach ($d in $latestDocs) {
         $order[$d.Relative] = $order.Count
+        $pathKeyOf[$d.Relative] = ConvertTo-NameKey $d.Relative.Replace('\', '/')
         foreach ($k in @((ConvertTo-NameKey $d.File), (ConvertTo-NameKey $d.Title), $(if ($d.DocNo) { & $docNoKey $d.DocNo }))) {
             if (-not $k) { continue }
             if (-not $index.ContainsKey($k)) { $index[$k] = New-Object System.Collections.Generic.List[object] }
@@ -567,9 +620,19 @@ if ($Findings) {
         if (($status -match $closedPattern) -or (([string]$v['対応要否']).Trim() -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)) { continue }
         $name = ([string]$v['設計書']).Trim()
         $matched = New-Object System.Collections.Generic.List[object]
-        foreach ($k in @((ConvertTo-NameKey $name), (& $docNoKey $name))) {
-            if (-not $k -or -not $index.ContainsKey($k)) { continue }
-            foreach ($d in $index[$k]) { if (-not $matched.Contains($d)) { $matched.Add($d) } }
+        # フォルダの付いた対象（結合テスト/テスト仕様書.xlsx・D:\納品物\…）は、まず成果物の場所と突き合わせる（ほかのフォルダの同じ名前に数えない）
+        if ($name -match '[\\/]') {
+            $pathKey = ConvertTo-NameKey $name.Replace('\', '/')
+            foreach ($d in $latestDocs) {
+                if ($pathKey -eq $pathKeyOf[$d.Relative] -or $pathKey.EndsWith('/' + $pathKeyOf[$d.Relative], [System.StringComparison]::Ordinal)) { $matched.Add($d) }
+            }
+        }
+        # 無ければ、文書名（外部I/F設計書）・ファイル名・文書番号
+        if ($matched.Count -eq 0) {
+            foreach ($k in @((ConvertTo-NameKey $name), (ConvertTo-NameKey (Get-LeafName $name)), (& $docNoKey $name))) {
+                if (-not $k -or -not $index.ContainsKey($k)) { continue }
+                foreach ($d in $index[$k]) { if (-not $matched.Contains($d)) { $matched.Add($d) } }
+            }
         }
         $due = ConvertTo-DateValue $v['期限'] $AsOf
         $overdue = [bool]($due -and $due -lt $AsOf)
