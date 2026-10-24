@@ -263,6 +263,20 @@ Test-Case 'Test-TestEvidence: ケースのフォルダのブックの表（確�
     Assert-Match (Get-HostText { & $EvidenceTool -Path $dir | Out-Null }) 'テストケース 8 件'
 }
 
+Test-Case 'Test-TestEvidence: エビデンスの列のフォルダ付きの名前（画面\UT-001.png・画面/UT-002.png）もフォルダを除いて探す（PowerShell 5.1 と 7 で同じ）' {
+    $dir = New-TestDir
+    $spec = Join-Path $dir 'UT_受注一覧.xlsx'
+    New-SheetsBook $spec ([ordered]@{ 'テストケース' = @(
+            @('テストID', '確認内容', '結果', 'エビデンス'),
+            @('UT-001', '一覧が表示される', 'OK', '画面\UT-001.png'),
+            @('UT-002', '検索できる', 'OK', '画面/UT-002.png')) })
+    $ev = Join-Path $dir 'エビデンス'
+    New-EvidencePng (Join-Path $ev '画面/UT-001.png') 'Screen'
+    New-EvidencePng (Join-Path $ev '画面/UT-002.png') 'New'
+    $issues = @(& $EvidenceTool -Path $spec -EvidencePath $ev 6>$null)
+    Assert-Equal @() (Get-IssueKeys $issues)
+}
+
 Test-Case 'Test-TestEvidence: Get-Help でヘルプが表示される' {
     $h = Get-Help $EvidenceTool
     Assert-Match $h.Synopsis 'エビデンス'
