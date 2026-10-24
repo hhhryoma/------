@@ -57,6 +57,64 @@ Test-Case 'Measure-ReviewEffectiveness: 設計書ごとに指摘密度と設計�
     Assert-Equal '1|レビューの見逃しの疑い' ('{0}|{1}' -f @($r | Where-Object { $_.Document -like 'DD06*' })[0].DesignBugs, @($r | Where-Object { $_.Document -like 'DD06*' })[0].Zone)
 }
 
+Test-Case 'Measure-ReviewEffectiveness: 設計書の欄が設計書の種類（画面設計書）や「－」「なし」のバグも機能で対応付け、ほかの機能の設計書には対応付けない' {
+    $dir = New-TestDir
+    @('設計書,指摘内容,分類,状態',
+        'DD02_画面設計書_SCR001_受注一覧,桁数が違う,誤り,完了',
+        'DD02_画面設計書_SCR003_受注詳細,型が違う,誤り,完了',
+        'DD06_IF定義書_IF001_出荷指示データ,項目の抜け,漏れ,完了') | Set-Content -LiteralPath (Join-Path $dir 'findings.csv') -Encoding UTF8
+    # B1 の「画面設計書」は 2 つの設計書に当たるので、機能（SCR001）で決める。B2 の IF002 はレビューした設計書が無い（「IF定義書」だけで IF001 にしない）
+    @('障害番号,障害内容,機能,設計書,混入工程,状態',
+        'B1,一覧のソート順,SCR001,画面設計書,詳細設計,完了',
+        'B2,出荷日の桁,IF002,IF定義書,詳細設計,完了',
+        'B3,出荷指示の項目の抜け,IF001,－,詳細設計,完了',
+        'B4,詳細の表示項目の抜け,SCR003,,詳細設計,完了',
+        'B5,詳細の初期表示,SCR003,なし,詳細設計,完了') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $text = Get-HostText { $script:effect = @(& $EffectTool -Findings (Join-Path $dir 'findings.csv') -BugList (Join-Path $dir 'bugs.csv') -AsOf '2026-10-20') }
+    Assert-Equal @('DD02_画面設計書_SCR001_受注一覧|B1', 'DD02_画面設計書_SCR003_受注詳細|B4、B5', 'DD06_IF定義書_IF001_出荷指示データ|B3') @($script:effect | Sort-Object Document | ForEach-Object { '{0}|{1}' -f $_.Document, $_.BugIds })
+    Assert-Match $text '設計書に対応付けられなかったバグ: B2（IF002・IF定義書）'
+}
+
+Test-Case 'Measure-ReviewEffectiveness: 全体の摘出率に未レビューの設計書のバグを入れず、混入工程を工程として読めないバグは知らせる' {
+    $dir = New-TestDir
+    @('設計書,指摘内容,分類,状態', 'SCR001_受注一覧,桁数が違う,誤り,完了', 'SCR001_受注一覧,型が違う,誤り,完了', 'SCR001_受注一覧,イベントの抜け,漏れ,完了', 'SCR001_受注一覧,遷移先の誤り,誤り,完了') | Set-Content -LiteralPath (Join-Path $dir 'findings.csv') -Encoding UTF8
+    @('ファイル,ページ数', 'SCR001_受注一覧.pdf,4', 'SCR002_受注登録.pdf,4') | Set-Content -LiteralPath (Join-Path $dir 'pages.csv') -Encoding UTF8
+    @('設計書,工数', 'SCR001_受注一覧,2') | Set-Content -LiteralPath (Join-Path $dir 'reviewlog.csv') -Encoding UTF8
+    # B2 はレビューしていない SCR002 のバグ。B3・B4 の混入工程（設計・UI設計）は工程として読めない
+    @('障害番号,障害内容,設計書,混入工程,状態',
+        'B1,一覧のソート順,SCR001_受注一覧,詳細設計,完了',
+        'B2,登録の桁あふれ,SCR002_受注登録,詳細設計,完了',
+        'B3,一覧の表示項目の抜け,SCR001_受注一覧,設計,完了',
+        'B4,一覧の配色,SCR001_受注一覧,UI設計,完了') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $options = @{ Findings = (Join-Path $dir 'findings.csv'); BugList = (Join-Path $dir 'bugs.csv'); SizeCsv = (Join-Path $dir 'pages.csv'); ReviewLog = (Join-Path $dir 'reviewlog.csv'); AsOf = '2026-10-20' }
+    $text = Get-HostText { $script:effect = @(& $EffectTool @options -WarningVariable script:effectWarnings -WarningAction SilentlyContinue) }
+    Assert-Equal @('SCR001_受注一覧|1|レビューの見逃しの疑い', 'SCR002_受注登録.pdf|1|未レビュー（設計で入ったバグあり）') @($script:effect | Sort-Object Document | ForEach-Object { '{0}|{1}|{2}' -f $_.Document, $_.DesignBugs, $_.Zone })
+    Assert-Match $text '設計工程の摘出率（レビューの指摘 ÷ \(指摘 \+ 設計で入ったバグ\)）: 80\.0%（指摘 4 件・バグ 1 件）' '未レビューの設計書（SCR002）のバグ B2 は全体に入れない'
+    $unread = @($script:effectWarnings | Where-Object { "$_" -match '混入工程を工程として読めないバグ 2 件' })
+    Assert-True ($unread.Count -eq 1 -and "$($unread[0])" -match ': (設計、UI設計|UI設計、設計)$') ('読めない混入工程を知らせる: ' + (@($script:effectWarnings) -join ' | '))
+}
+
+Test-Case 'Measure-ReviewEffectiveness: 指摘管理表に設計書の列が無い（設計書ごとのレビュー記録）ときは、設計書の無い指摘の件数とファイルを知らせ、その指摘にゾーンを付けない' {
+    $dir = New-TestDir
+    $review = Join-Path $dir 'レビュー'
+    New-Item -ItemType Directory -Path $review | Out-Null
+    foreach ($name in @('SCR001_受注一覧', 'SCR002_受注登録')) {
+        New-SheetsBook (Join-Path $review "レビュー記録_$name.xlsx") ([ordered]@{ '指摘' = @(@('指摘内容', '分類', '状態'), @('桁数が違う', '誤り', '完了'), @('型が違う', '誤り', '完了')) })
+    }
+    @('ファイル,ページ数', 'SCR001_受注一覧.pdf,4', 'SCR002_受注登録.pdf,4') | Set-Content -LiteralPath (Join-Path $dir 'pages.csv') -Encoding UTF8
+    # B2 の「設計書なし」は、設計書の無い指摘のまとまり（（設計書なし））に対応付けない
+    @('障害番号,障害内容,機能,設計書,混入工程,状態', 'B1,一覧のソート順,SCR001,,詳細設計,完了', 'B2,どこかの設計誤り,,設計書なし,詳細設計,完了') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $text = Get-HostText { $script:effect = @(& $EffectTool -Findings $review -BugList (Join-Path $dir 'bugs.csv') -SizeCsv (Join-Path $dir 'pages.csv') -AsOf '2026-10-20' -WarningVariable script:effectWarnings -WarningAction SilentlyContinue) }
+    $noDoc = @($script:effect | Where-Object Document -eq '（設計書なし）')
+    Assert-Equal '4|0||False' ('{0}|{1}|{2}|{3}' -f $noDoc[0].Findings, $noDoc[0].DesignBugs, $noDoc[0].Zone, $noDoc[0].NeedsAction) '設計書の無い指摘にはバグを対応付けず、ゾーンを付けない'
+    Assert-Match $text '設計書に対応付けられなかったバグ: B2（設計書なし）'
+    $warning = @($script:effectWarnings | Where-Object { "$_" -match '設計書の無い指摘が 4 件' })
+    Assert-True ($warning.Count -eq 1) ('設計書の無い指摘を知らせる: ' + (@($script:effectWarnings) -join ' | '))
+    Assert-Match "$($warning[0])" '設計書の列を足して'
+    Assert-Match "$($warning[0])" 'レビュー記録_SCR001_受注一覧\.xlsx'
+    Assert-Match "$($warning[0])" 'レビュー記録_SCR002_受注登録\.xlsx'
+}
+
 Test-Case 'Measure-ReviewEffectiveness: Get-Help でヘルプが表示される' {
     $h = Get-Help $EffectTool -Full
     Assert-Match $h.Synopsis 'レビューで見逃した'

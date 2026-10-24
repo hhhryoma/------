@@ -1825,7 +1825,10 @@ function Read-PhaseList {
 function Resolve-PhaseName {
     #     工程の文字（「詳細設計レビュー」「UT」など）を、Read-PhaseList の工程にする。読めなければ $null
     param($PhaseList, [string] $Text)
-    $t = (ConvertTo-Label $Text).ToUpperInvariant() -replace '(レビュー|工程|フェーズ|段階)$', ''
+    # 名前・別名と同じ文字（「コードレビュー」のように、レビューの付いた別名も）を先に探し、無ければ「レビュー」「工程」などを除いて探す
+    $t = (ConvertTo-Label $Text).ToUpperInvariant()
+    foreach ($p in $PhaseList) { if ($p.Aliases -contains $t) { return $p } }
+    $t = $t -replace '(レビュー|工程|フェーズ|段階)$', ''
     if (-not $t) { return $null }
     foreach ($p in $PhaseList) { if ($p.Aliases -contains $t) { return $p } }
     # 英字だけの短い別名（UT・IT など）は完全一致だけ。日本語の別名は含んでいればよい（長い別名を優先）

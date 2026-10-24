@@ -42,13 +42,25 @@ $unknown = '（不明）'
 
 
 $phaseList = Read-PhaseList $Phases
-$phaseByName = @{}
-foreach ($p in $phaseList) { $phaseByName[$p.Name] = $p }
 
 function Resolve-Phase {
     param([string] $Text)
     return (Resolve-PhaseName $phaseList $Text)
 }
+
+# 工程 → 摘出すべき工程（UT のような別名でも書ける。空か、工程として読めなければ同じ工程）
+$expectedOf = @{}
+$unreadExpected = New-Object System.Collections.Generic.List[string]
+foreach ($p in $phaseList) {
+    $expected = $null
+    if ($p.Expected) {
+        $expected = Resolve-Phase $p.Expected
+        if (-not $expected) { $unreadExpected.Add(('{0}の「{1}」' -f $p.Name, $p.Expected)) }
+    }
+    if (-not $expected) { $expected = $p }
+    $expectedOf[$p.Name] = $expected
+}
+if ($unreadExpected.Count -gt 0) { Write-Warning ('工程の CSV の摘出すべき工程に、工程として読めない値があります（その工程で入った欠陥は、同じ工程までに見つけるものとして数えます）: {0}' -f ($unreadExpected -join '、')) }
 
 # ---------------------------------------------------------------- 欠陥を読む
 
@@ -108,9 +120,7 @@ if ($unreadPhases.Count -gt 0) { Write-Warning ('工程として読めない値�
 function Test-InTime {
     param($Defect)
     if (-not $Defect.InjectedPhase -or -not $Defect.DetectedPhase) { return $null }
-    $expected = $phaseByName[$Defect.InjectedPhase.Expected]
-    if (-not $expected) { $expected = $Defect.InjectedPhase }
-    return $Defect.DetectedPhase.Index -le $expected.Index
+    return $Defect.DetectedPhase.Index -le $expectedOf[$Defect.InjectedPhase.Name].Index
 }
 
 foreach ($d in $defects) { $d | Add-Member -NotePropertyName InTime -NotePropertyValue (Test-InTime $d) }
@@ -204,8 +214,9 @@ $judged = @($defects | Where-Object { $null -ne $_.InTime })
 if ($judged.Count -gt 0) {
     $leakedAll = @($judged | Where-Object { $_.InTime -eq $false })
     Write-Host ('摘出すべき工程までに見つかった欠陥: {0} / {1} 件（{2:0.0}%）。流出 {3} 件' -f ($judged.Count - $leakedAll.Count), $judged.Count, (($judged.Count - $leakedAll.Count) * 100.0 / $judged.Count), $leakedAll.Count)
-    $designPhases = @($phaseList | Where-Object { $_.Expected -eq $_.Name -and $_.Name -match '設計|要件' } | ForEach-Object { $_.Name })
-    $designLeak = @($leakedAll | Where-Object { $designPhases -contains $_.Injected })
+    $designPhases = @($phaseList | Where-Object { $expectedOf[$_.Name].Name -eq $_.Name -and $_.Name -match '設計|要件' } | ForEach-Object { $_.Name })
+    # 設計で入り、テストの工程（設計の工程でない、名前に「テスト」「試験」を含む工程）で見つかったもの。後の工程のレビューや製造で見つかったものは数えない
+    $designLeak = @($leakedAll | Where-Object { $designPhases -contains $_.Injected -and $designPhases -notcontains $_.Detected -and $_.Detected -match 'テスト|試験' })
     if ($bugCount -gt 0 -and $designLeak.Count -gt 0) { Write-Host ('  設計で入り、テストで見つかった欠陥: {0} 件（{1}）' -f $designLeak.Count, ((@($designLeak | Group-Object Injected | Sort-Object @{ e = { $_.Count }; Descending = $true }, Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・')) }
 }
 if ($pareto.Count -gt 0) { Write-Host ('原因の上位: {0}' -f ((@($pareto | Select-Object -First 3 | ForEach-Object { '{0} {1}（{2:0}%）' -f $_.Cause, $_.Count, ($_.Ratio * 100) })) -join '・')) }

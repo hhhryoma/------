@@ -365,7 +365,8 @@ try {
     if ($null -ne $effect) {
         $reviewedDocs = @($effect | Where-Object { $_.Reviewed -ne $false })
         $findingSum = ($reviewedDocs | Measure-Object -Property Findings -Sum).Sum
-        $bugSum = ($effect | Measure-Object -Property DesignBugs -Sum).Sum
+        # 未レビューの設計書は、指摘もバグも入れない（Measure-ReviewEffectiveness.ps1 の全体の摘出率と同じ）
+        $bugSum = ($reviewedDocs | Measure-Object -Property DesignBugs -Sum).Sum
         if ($findingSum + $bugSum -gt 0) {
             Add-Metric 'レビュー' '設計工程の摘出率' ([double][math]::Round($findingSum / ($findingSum + $bugSum), 3)) ('レビューの指摘 {0} 件 ÷ (指摘 + 設計で入ったバグ {1} 件)' -f $findingSum, $bugSum) $file
         }
