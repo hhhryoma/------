@@ -30,91 +30,19 @@ if ($OutXlsx -and [System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw 
 
 Update-TypeData -TypeName 'CodeSize.Group' -DefaultDisplayPropertySet Group, Files, Lines, Comment, Blank, Steps, Added, Changed, Deleted -Force -WhatIf:$false
 
-# 言語ごとのコメントの書き方（行コメント・ブロックコメントの開始と終了）
-$languages = @(
-    @{ Name = 'C 系'; Ext = @('.c', '.h', '.cpp', '.hpp', '.cc', '.cs', '.java', '.js', '.jsx', '.ts', '.tsx', '.go', '.kt', '.kts', '.swift', '.scala', '.groovy', '.dart', '.rs', '.css', '.scss', '.less'); Line = @('//'); Block = @('/*', '*/') }
-    @{ Name = 'PHP'; Ext = @('.php'); Line = @('//', '#'); Block = @('/*', '*/') }
-    @{ Name = 'SQL'; Ext = @('.sql', '.pls', '.pks', '.pkb'); Line = @('--'); Block = @('/*', '*/') }
-    @{ Name = 'VB'; Ext = @('.vb', '.vbs', '.bas', '.cls', '.frm'); Line = @("'", 'REM '); Block = $null }
-    @{ Name = 'Python'; Ext = @('.py'); Line = @('#'); Block = $null }
-    @{ Name = 'Ruby'; Ext = @('.rb'); Line = @('#'); Block = @('=begin', '=end') }
-    @{ Name = 'シェル'; Ext = @('.sh', '.bash', '.pl'); Line = @('#'); Block = $null }
-    @{ Name = 'PowerShell'; Ext = @('.ps1', '.psm1', '.psd1'); Line = @('#'); Block = @('<#', '#>') }
-    @{ Name = 'HTML・XML'; Ext = @('.html', '.htm', '.xml', '.xhtml', '.jsp', '.aspx', '.vue', '.cshtml'); Line = @(); Block = @('<!--', '-->') }
-    @{ Name = 'COBOL'; Ext = @('.cob', '.cbl', '.cpy'); Line = @(); Block = $null; Cobol = $true }
-)
-$languageOf = @{}
-foreach ($l in $languages) { foreach ($e in $l.Ext) { $languageOf[$e] = $l } }
-
-# ---------------------------------------------------------------- 数える
-
-
-function Measure-SourceLines {
-    #     1 ファイルの行を、空行・コメント・ステップ（コメント以外の行）に分ける。
-    #     戻り値: @{ Lines; Blank; Comment; Steps; Code = ステップの行（前後の空白を除いた文字）の一覧 }
-    param([string] $FilePath, $Language)
-    $text = Read-TextFile $FilePath
-    $lines = $text -split "\r\n|\n|\r"
-    if ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines = $lines[0..($lines.Count - 2)] }
-    $blank = 0; $comment = 0
-    $code = New-Object System.Collections.Generic.List[string]
-    $inBlock = $false
-    foreach ($raw in $lines) {
-        if ($Language.Cobol) {
-            # 固定形式の COBOL: 7 桁目が * か / ならコメント
-            if (-not $raw.Trim()) { $blank++ }
-            elseif ($raw.Length -ge 7 -and ($raw[6] -eq '*' -or $raw[6] -eq '/')) { $comment++ }
-            else { $code.Add($raw.Trim()) }
-            continue
-        }
-        $t = $raw.Trim()
-        if (-not $t) { $blank++; continue }
-        $isCode = $false
-        $rest = $t
-        while ($rest) {
-            if ($inBlock) {
-                $end = $rest.IndexOf($Language.Block[1])
-                if ($end -lt 0) { $rest = ''; break }
-                $inBlock = $false
-                $rest = $rest.Substring($end + $Language.Block[1].Length).Trim()
-                continue
-            }
-            if (@($Language.Line | Where-Object { $rest.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { break }
-            if ($Language.Block -and $rest.StartsWith($Language.Block[0])) {
-                $inBlock = $true
-                $rest = $rest.Substring($Language.Block[0].Length)
-                continue
-            }
-            # コメント以外の文字がある（行の後ろのコメントは数えない）
-            $isCode = $true
-            if ($Language.Block) {
-                $start = $rest.IndexOf($Language.Block[0])
-                if ($start -ge 0) {
-                    # 行の途中から始まるブロックコメントが、この行で閉じなければ次の行もコメント
-                    $after = $rest.Substring($start + $Language.Block[0].Length)
-                    if ($after.IndexOf($Language.Block[1]) -lt 0) { $inBlock = $true }
-                }
-            }
-            break
-        }
-        if ($isCode) { $code.Add($t) } else { $comment++ }
-    }
-    return [pscustomobject]@{ Lines = $lines.Count; Blank = $blank; Comment = $comment; Steps = $code.Count; Code = $code }
-}
-
 function Get-SourceFiles {
     #     数えるファイル（言語の拡張子のもの）。相対パス → FileInfo
     param([string] $Root)
     $result = [ordered]@{}
     $rootItem = Get-Item -LiteralPath $Root
     if (-not $rootItem.PSIsContainer) {
-        if ($languageOf.ContainsKey($rootItem.Extension.ToLowerInvariant())) { $result[$rootItem.Name] = $rootItem }
+        if (Get-SourceLanguage $rootItem.Extension) { $result[$rootItem.Name] = $rootItem }
         return $result
     }
     $rootPath = $rootItem.FullName.TrimEnd('\', '/')
     $excludeSet = @($Exclude | ForEach-Object { $_.ToLowerInvariant() })
     foreach ($f in @(Get-ChildItem -LiteralPath $rootPath -File -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName)) {
-        if (-not $languageOf.ContainsKey($f.Extension.ToLowerInvariant())) { continue }
+        if (-not (Get-SourceLanguage $f.Extension)) { continue }
         $rel = $f.FullName.Substring($rootPath.Length).TrimStart('\', '/')
         $segments = $rel -split '[\\/]'
         if (@($segments[0..($segments.Count - 2)] | Where-Object { $excludeSet -contains $_.ToLowerInvariant() }).Count -gt 0) { continue }
@@ -152,7 +80,7 @@ if ($Baseline) { $baseFiles = Get-SourceFiles $Baseline }
 $fileResults = New-Object System.Collections.Generic.List[object]
 foreach ($rel in $files.Keys) {
     $f = $files[$rel]
-    $lang = $languageOf[$f.Extension.ToLowerInvariant()]
+    $lang = Get-SourceLanguage $f.Extension
     $m = Measure-SourceLines $f.FullName $lang
     $diff = $null
     if ($Baseline) {
@@ -171,7 +99,7 @@ if ($Baseline) {
     foreach ($rel in $baseFiles.Keys) {
         if ($files.Contains($rel)) { continue }
         $f = $baseFiles[$rel]
-        $lang = $languageOf[$f.Extension.ToLowerInvariant()]
+        $lang = Get-SourceLanguage $f.Extension
         $m = Measure-SourceLines $f.FullName $lang
         $fileResults.Add([pscustomobject]@{ File = $rel; Group = (Get-GroupName $rel); Language = $lang.Name; Lines = 0; Blank = 0; Comment = 0; Steps = 0; Added = 0; Changed = 0; Deleted = $m.Steps; Status = '削除' })
     }
