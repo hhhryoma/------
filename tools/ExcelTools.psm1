@@ -271,8 +271,13 @@ function Add-DrawingItem {
     if ($ParentPath) { $path = $ParentPath + '/' + $name }
     $item = [pscustomobject]@{
         Name = $name; Kind = $Node.LocalName; Text = $text; Path = $path; Key = ''; Group = ''; Cell = $Cell; Anchor = $Anchor; Box = $null
-        Hidden = $hidden; Bounds = $null; Size = $null; Crop = $null; Hash = ''; Media = ''; Width = 0; Height = 0
+        Hidden = $hidden; Bounds = $null; Size = $null; Crop = $null; Look = ''; Hash = ''; Media = ''; Width = 0; Height = 0
     }
+    # 見た目の要約: 名前・番号（nvSpPr など）と、グループの中の図形（それぞれの要約がある）を除いた XML。
+    # 画像などへの参照の番号（r:embed）は保存し直すと変わることがあるので除く（画像の中身は Hash で比べる）
+    $look = -join @($Node.ChildNodes | Where-Object { $_ -is [System.Xml.XmlElement] -and -not $_.LocalName.StartsWith('nv') -and @('sp', 'pic', 'grpSp', 'graphicFrame', 'cxnSp', 'AlternateContent') -notcontains $_.LocalName } | ForEach-Object { $_.OuterXml })
+    $look = [regex]::Replace($look, '\s\w+:(?:embed|link|id)="[^"]*"', '')
+    $item.Look = ([System.BitConverter]::ToString($script:ImageHash.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($look)))).Replace('-', '').Substring(0, 16).ToLowerInvariant()
     $xf = Get-DrawingXfrm $Node
     if ($Top) {
         $item.Group = $Top.Name
@@ -350,7 +355,7 @@ function Read-SheetDrawingItems {
     #       Cell（シートに置いた図形の左上のセル）・Anchor（R1 C1 OX OY と、R2 C2 EX EY（セルに合わせる）または W H。ピクセル）
     #       Box（グループの中のもの。いちばん外のグループの中での X Y W H の割合）・Hidden（非表示）
     #       Size（表示の大きさ W H。EMU。わからなければ $null）・Bounds（シートの上の位置と大きさ。Set-DrawingBounds で求める）
-    #       Crop（画像のトリミング L T R B の割合。無ければ $null）
+    #       Crop（画像のトリミング L T R B の割合。無ければ $null）・Look（名前を除いた見た目（位置・書式・文字）の要約）
     #       画像: Hash（中身の要約）・Media（パーツ名）・Width Height（画像の大きさ。わからなければ 0）
     #     Images は画像のパーツ名 → 中身の要約と大きさ（同じブックの中で使い回す）
     param($Package, [string] $SheetPart, [hashtable] $Images)
@@ -381,6 +386,19 @@ function Read-SheetDrawingItems {
     $seen = @{}
     foreach ($it in $items) { $seen[$it.Path] = 1 + [int]$seen[$it.Path]; $it.Key = '{0}#{1}' -f $it.Path, $seen[$it.Path] }
     return , $items
+}
+
+function Get-PrintAreas {
+    #     名前の定義 _xlnm.Print_Area（'シート'!$A$1:$H$40,'シート'!$J$1:$K$5）を、行・列の範囲の一覧にする
+    param([string] $Text)
+    $areas = New-Object System.Collections.Generic.List[object]
+    foreach ($m in [regex]::Matches($Text, '\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?(?=,|$)')) {
+        $c0 = Get-ColumnIndex $m.Groups[1].Value; $r0 = [int]$m.Groups[2].Value
+        $c1 = $c0; $r1 = $r0
+        if ($m.Groups[3].Success) { $c1 = Get-ColumnIndex $m.Groups[3].Value; $r1 = [int]$m.Groups[4].Value }
+        $areas.Add([pscustomobject]@{ R0 = $r0; R1 = $r1; C0 = $c0; C1 = $c1 })
+    }
+    return , $areas
 }
 
 function Get-MaxDigitWidth {

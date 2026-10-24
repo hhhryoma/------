@@ -79,6 +79,14 @@
             Required = @('Path'); Output = @('OutXlsx'); OutputName = '画面の番号'; Keywords = '丸数字 番号 画面項目 スクリーンショット ワイヤーフレーム'
         }
         @{
+            Id = 'Screenshots'; Label = '古いスクリーンショットを見つける'; Group = '設計書を作る・直す'; Tool = 'Test-Screenshots.ps1'
+            Summary = '設計書に貼った画面のスクリーンショットが、元のワイヤーフレーム（Excel）より古くなっていないかを確かめます。貼り替えたあとに「貼り替えた画面を記録する」を選んで実行すると、いまの状態を記録します（設計書は変更しません）。'
+            Main = @('Path', 'Wireframe', 'Record', 'OutXlsx')
+            Labels = @{ Path = '設計書のフォルダ'; Wireframe = '元のワイヤーフレームのフォルダ'; Record = '貼り替えた画面を記録する'; OutXlsx = '結果の保存先' }
+            Kinds = @{ RecordFile = 'SaveFile' }; Extensions = @{ RecordFile = '.csv' }
+            Required = @('Path', 'Wireframe'); Output = @('OutXlsx'); OutputName = 'スクリーンショットの状態'; Keywords = 'スクリーンショット 貼り替え ワイヤーフレーム 古い 記録'
+        }
+        @{
             Id = 'NewDoc'; Label = '雛形から設計書を作る'; Group = '設計書を作る・直す'; Tool = 'New-DesignDocument.ps1'; Set = 'Create'
             Summary = '一覧（Excel・CSV）の行ごとに、雛形の {{名前}} の欄を埋めた設計書を作ります。'
             Main = @('Template', 'List', 'FileName', 'OutDir')
