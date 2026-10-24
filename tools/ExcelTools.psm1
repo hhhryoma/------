@@ -1146,6 +1146,19 @@ function Read-CsvFile {
     return , $rows
 }
 
+function Read-InputCsv {
+    #     フォルダの中のデータの CSV（指摘管理表・WBS など）を読む。見出しの重なった CSV など読めないファイルは知らせて
+    #     （ReadLog があれば読み取り結果にも書き）、空として返す（フォルダのほかのファイルは読み続ける）
+    param([string] $FilePath, [string] $What, $ReadLog, [string[]] $Fields)
+    try { return , (Read-CsvFile $FilePath @() $What) }
+    catch {
+        $name = [System.IO.Path]::GetFileName($FilePath)
+        Write-Warning ("{0}: CSV を読めません（{1}）" -f $name, $_.Exception.Message)
+        Add-ReadLog $ReadLog $What $name '' $null 0 $null $Fields ('CSV を読めません: ' + $_.Exception.Message)
+        return , @()
+    }
+}
+
 function ConvertTo-DesignBooks {
     #     Search-Excel.ps1 の結果（-Pattern '\S' -Target Value）を、ファイル → シート → 行番号 → 列番号 → 文字 の形にまとめる
     #     戻り値: パス → @{ File; Path; Sheets = シート名 → シート }（ファイル・シートは読んだ順）
@@ -1726,7 +1739,7 @@ function Read-HeaderRecords {
     }
     foreach ($c in $Inputs.Csv) {
         if ($Skip -and $Skip.Contains($c.FullName)) { continue }
-        $rows = Read-CsvFile $c.FullName @() $What
+        $rows = Read-InputCsv $c.FullName $What $ReadLog $Fields
         if ($rows.Count -eq 0) { continue }
         $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
         $map = @{}

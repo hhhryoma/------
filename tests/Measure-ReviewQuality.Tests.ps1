@@ -192,6 +192,17 @@ Test-Case 'Measure-ReviewQuality: 指摘の数が同じ工程は、先に出て�
     Assert-Match $dd02.Judgement '^多い' '詳細設計の基準値（0.1〜0.3）と比べる'
 }
 
+Test-Case 'Measure-ReviewQuality: フォルダに読めない CSV（見出しが重なったもの）があっても、知らせてほかのファイルを読む' {
+    $dir = New-TestDir
+    @('No,対象成果物,指摘内容,対応状況', '1,DD03_テーブル定義書,型が違う,対応中') | Set-Content -LiteralPath (Join-Path $dir '指摘管理表.csv') -Encoding UTF8
+    @('日付,内容,日付', '2026/10/01,レビュー,2026/10/02') | Set-Content -LiteralPath (Join-Path $dir 'レビュー記録.csv') -Encoding UTF8
+    $out = @(& $QualityTool -Path $dir -AsOf '2026-10-20' 6>$null 3>&1)
+    $warnings = @($out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
+    $r = @($out | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] })
+    Assert-Equal 'DD03_テーブル定義書|1|1' ('{0}|{1}|{2}' -f $r[0].Document, $r[0].Findings, $r[0].Open)
+    Assert-Equal 1 @($warnings | Where-Object { $_ -match '^レビュー記録\.csv: CSV を読めません' }).Count ($warnings -join "`n")
+}
+
 Test-Case 'Measure-ReviewQuality: 状態の「未完了」「未済」「完了予定」「差し戻し」は、完了・済を含んでも未完了に数える' {
     $dir = New-TestDir
     New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況') @(
