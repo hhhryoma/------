@@ -819,19 +819,23 @@ $promptHeader = @'
 - 観点ごとに判定してください。判定は OK／NG／要確認 のどれかです。
   - NG：観点を満たしていない箇所がある。箇所ごとに 1 行ずつ出力する。
   - 要確認：設計書の記載だけでは判断できない。理由を書く。
-  - OK：問題がない。観点ごとに 1 行だけ出力し、場所・指摘内容・根拠は「-」とする。
+  - OK：問題がない。観点ごとに 1 行だけ出力し、場所・引用・指摘内容・根拠は「-」とする。
 - すべての観点について、必ず 1 行以上出力してください。
 - 場所は「シート名!セル番地」で書いてください。設計書の各行は「行番号| 列:値」の形で、例えば「12| K:必須」なら K12 です。
+- 引用には、場所のセルに書かれている文字をそのまま写してください（長いときは先頭の 30 文字）。空欄のセルを指摘するときは「（空欄）」と書きます。
 - 設計書に書かれていないことを推測で補わないでください。
 - 【参照資料】は判定の参考にするだけで、指摘の対象にはしないでください。
 - 回答形式の行以外（前置き、まとめ、表の見出し）は出力しないでください。
 
 【回答形式】1 行に 1 件、区切りは半角の「|」
-観点ID | 判定 | 場所 | 指摘内容 | 根拠
+観点ID | 判定 | 場所 | 引用 | 指摘内容 | 根拠
 （例）
-V01 | NG | 画面項目定義!G12 | 桁数が記入されていない | 入力項目は文字・数値の場合に桁数が必要
-V02 | OK | - | - | -
+V01 | NG | 画面項目定義!G12 | （空欄） | 桁数が記入されていない | 入力項目は文字・数値の場合に桁数が必要
+V02 | NG | イベント定義!J9 | 検索ボタン押下 | 「押下」と「クリック」が混在している | 用語をそろえる
+V03 | OK | - | - | - | -
 '@
+# 回答の形（引用の列があるか）。依頼の一覧に残し、-ImportOnly で前の形の依頼を読むときに使う
+$answerFormat = '引用付き'
 # プロンプトの改行は OS によらず LF にそろえる。AppendLine や CRLF のスクリプトファイルのままだと
 # Windows では 1 行ごとに 1 文字多く数えられ、同じ設計書でも依頼の分割数が変わってしまう
 $promptHeader = $promptHeader.Replace("`r`n", "`n")
@@ -912,9 +916,10 @@ function Get-TextHash {
 
 
 function ConvertFrom-Answer {
-    #     Copilot の回答から「観点ID | 判定 | 場所 | 指摘内容 | 根拠」の行を取り出す。
+    #     Copilot の回答から「観点ID | 判定 | 場所 | 引用 | 指摘内容 | 根拠」の行を取り出す。
     #     Markdown の表、コードブロック、表をコピーしたときのタブ区切りのどれでも読める。
-    param([string] $Text, [string[]] $PointIds)
+    #     Quote を付けないとき（前の形の依頼）と、引用の列の無い 5 列の行は「観点ID | 判定 | 場所 | 指摘内容 | 根拠」として読む
+    param([string] $Text, [string[]] $PointIds, [switch] $Quote)
 
     $known = @{}
     foreach ($id in $PointIds) { $known[$id.ToUpperInvariant()] = $id }
@@ -940,14 +945,19 @@ function ConvertFrom-Answer {
         else { $verdict = '要確認' }
 
         $get = { param($i) if ($fields.Count -gt $i -and $fields[$i] -ne '-' -and $fields[$i] -ne '－') { $fields[$i] } else { '' } }
-        $reason = & $get 4
-        if ($fields.Count -gt 5) { $reason = ($fields[4..($fields.Count - 1)] -join ' | ') }
+        # 指摘内容の列（引用の列があれば 1 つ右）
+        $base = 3
+        $quoteText = ''
+        if ($Quote -and $fields.Count -ge 6) { $quoteText = (& $get 3).Trim('「', '」', '"', '“', '”'); $base = 4 }
+        $reason = & $get ($base + 1)
+        if ($fields.Count -gt $base + 2) { $reason = ($fields[($base + 1)..($fields.Count - 1)] -join ' | ') }
 
         $entries.Add([pscustomobject]@{
             PointId  = $known[$id]
             Verdict  = $verdict
             Location = & $get 2
-            Finding  = & $get 3
+            Quote    = $quoteText
+            Finding  = & $get $base
             Reason   = $reason
         })
     }
@@ -973,6 +983,74 @@ function Resolve-Location {
     return $null
 }
 
+
+function ConvertTo-QuoteKey {
+    #     引用とセルの文字を比べる形（全角・半角をそろえ、空白・改行・末尾の … を除く）
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($nfkc).Replace('↵', '') -replace '\s', ''
+    return ($t -replace '(…|\.\.\.)$', '')
+}
+
+function Read-QuoteCells {
+    #     引用を確かめるための、設計書のセルの文字（値・コメント・図形。全シート）。
+    #     戻り値: シート名 → セル番地 → @{ Cell; Col; Row; Text; Key（ConvertTo-QuoteKey の形） }
+    param([string] $FilePath)
+    $sheets = @{}
+    $hits = @(& $searchScript -Pattern '\S' -Path ([System.Management.Automation.WildcardPattern]::Escape($FilePath)) -Target Value, Comment, Shape 6>$null 3>$null)
+    foreach ($h in $hits) {
+        if (-not $sheets.ContainsKey($h.Sheet)) { $sheets[$h.Sheet] = @{} }
+        $cells = $sheets[$h.Sheet]
+        $cell = [string]$h.Cell
+        if ($cells.ContainsKey($cell)) { $cells[$cell].Text += [string]$h.Text; continue }
+        $m = [regex]::Match($cell, '^([A-Z]+)(\d+)$')
+        $col = 0; $row = 0
+        if ($m.Success) { $col = Get-ColumnIndex $m.Groups[1].Value; $row = [int]$m.Groups[2].Value }
+        $cells[$cell] = [pscustomobject]@{ Cell = $cell; Col = $col; Row = $row; Text = [string]$h.Text; Key = '' }
+    }
+    foreach ($cells in $sheets.Values) { foreach ($c in $cells.Values) { $c.Key = ConvertTo-QuoteKey $c.Text } }
+    return $sheets
+}
+
+function Resolve-Quote {
+    #     AI の引用を設計書のセル（Read-QuoteCells）と突き合わせる。Location は Resolve-Location の結果（シートが無ければ $null）、
+    #     Sheet は AI が書いたシート名。戻り値: @{ State = 一致 / 場所を直した / 見つからない; Sheet; Cell（引用のあるセル）; Note }
+    param($Cells, [string] $Quote, $Location, [string] $Sheet)
+    $q = ConvertTo-QuoteKey $Quote
+    $result = { param([string] $State, [string] $S, [string] $C, [string] $Note) [pscustomobject]@{ State = $State; Sheet = $S; Cell = $C; Note = $Note } }
+    $here = $null
+    if ($Location -and $Cells.ContainsKey($Location.Sheet) -and $Cells[$Location.Sheet].ContainsKey($Location.Cell)) { $here = $Cells[$Location.Sheet][$Location.Cell] }
+    # 空欄の指摘は、場所のセルが空欄かを確かめる
+    if ($q -match '^[(（]?空欄[)）]?$') {
+        if (-not $Location) { return (& $result '見つからない' '' '' '空欄の場所のシートが設計書にありません') }
+        if (-not $here -or -not $here.Key) { return (& $result '一致' $Location.Sheet $Location.Cell '') }
+        return (& $result '見つからない' '' '' ('場所のセルは空欄ではありません（{0}）' -f $here.Text))
+    }
+    if ($here -and $here.Key.Contains($q)) { return (& $result '一致' $Location.Sheet $Location.Cell '') }
+    $origin = @(0, 0)
+    if ($Location) {
+        $m = [regex]::Match($Location.Cell, '^([A-Z]+)(\d+)$')
+        if ($m.Success) { $origin = @((Get-ColumnIndex $m.Groups[1].Value), [int]$m.Groups[2].Value) }
+        # 行を引用したとき（同じ行のセルをつなげた文字にある）
+        if ($q.Length -ge 2 -and $Cells.ContainsKey($Location.Sheet)) {
+            $line = (@($Cells[$Location.Sheet].Values | Where-Object { $_.Row -eq $origin[1] } | Sort-Object Col | ForEach-Object { $_.Key }) -join '')
+            if ($line.Contains($q)) { return (& $result '一致' $Location.Sheet $Location.Cell '') }
+        }
+    }
+    # 1 文字の引用（○ など）は、ほかのセルにもよくあるので探さない
+    if ($q.Length -lt 2) { return (& $result '見つからない' '' '' '引用が短く、場所のセルにもありません') }
+    # 同じシートの、場所にいちばん近いセル。無ければほかのシート（AI が書いたシート名に近いものから）
+    $order = @($Cells.Keys | Sort-Object @{ e = { if ($Location -and $_ -eq $Location.Sheet) { 0 } elseif ($Sheet -and ($_.Contains($Sheet) -or $Sheet.Contains($_))) { 1 } else { 2 } } }, @{ e = { $_ } })
+    foreach ($s in $order) {
+        $best = $null; $bestDistance = [double]::MaxValue
+        foreach ($c in $Cells[$s].Values) {
+            if (-not $c.Key.Contains($q)) { continue }
+            $distance = [math]::Abs($c.Row - $origin[1]) * 1000 + [math]::Abs($c.Col - $origin[0])
+            if ($distance -lt $bestDistance -or ($distance -eq $bestDistance -and [string]::CompareOrdinal($c.Cell, $best.Cell) -lt 0)) { $best = $c; $bestDistance = $distance }
+        }
+        if ($best) { return (& $result '場所を直した' $s $best.Cell '') }
+    }
+    return (& $result '見つからない' '' '' '引用が設計書に見つかりません（AI の誤った指摘かもしれません）')
+}
 
 # ---------------------------------------------------------------- 依頼（プロンプト）の作成
 
@@ -1052,7 +1130,10 @@ function New-ReviewRequests {
                 $budget = 1000
             }
 
-            $chunks = Split-SheetTexts -SheetTexts $sheetTexts -Budget $budget
+            # 1 回に収まるなら分けない（分けたときの「n/m の一部」の注記の分を見込んで、収まるのに分けてしまわないよう）
+            $wholeLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote '' -RefText $refText).Length + $docLength
+            if ($wholeLen -le $MaxChars) { $chunks = Split-SheetTexts -SheetTexts $sheetTexts -Budget ([int]::MaxValue) }
+            else { $chunks = Split-SheetTexts -SheetTexts $sheetTexts -Budget $budget }
             for ($i = 0; $i -lt $chunks.Count; $i++) {
                 $partNote = ''
                 if ($chunks.Count -gt 1) {
@@ -1099,6 +1180,8 @@ if ($ImportOnly) {
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw "依頼の一覧がありません。先に -PromptOnly などで依頼を作成してください: $manifestPath" }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $requests = @($manifest.Requests)
+    # 前の形の依頼（引用の列の無い回答形式）は、引用を読まない
+    $quoteFormat = [bool]($manifest.PSObject.Properties['AnswerFormat'] -and $manifest.AnswerFormat -eq $answerFormat)
     if (-not $designFiles) {
         # 依頼を作ったときの設計書（古い依頼の一覧には無いので、依頼のある設計書）
         $designFiles = New-Object System.Collections.Generic.List[object]
@@ -1113,6 +1196,7 @@ if ($ImportOnly) {
     }
 }
 else {
+    $quoteFormat = $true
     Write-Host '依頼を作成しています...'
     $requests = (New-ReviewRequests -Points $points -Files $designFiles).ToArray()
 
@@ -1136,6 +1220,7 @@ else {
         Created  = (Get-Date).ToString('yyyy/MM/dd HH:mm:ss')
         MaxChars = $MaxChars
         Requests = @($requests | Select-Object Id, File, Relative, Part, PointIds, Sheets, Chars, Hash)
+        AnswerFormat = $answerFormat
         # -ImportOnly でツールの確認をする設計書
         Files    = @($designFiles | Select-Object Path, Name, Relative)
     }
@@ -1179,7 +1264,7 @@ if (-not $PromptOnly -and -not $ImportOnly) {
                 Write-Warning 'クリップボードの内容が依頼のままです。Copilot の回答をコピーしてから Enter を押してください。'
                 continue
             }
-            $entries = ConvertFrom-Answer -Text $answer -PointIds $r.PointIds
+            $entries = ConvertFrom-Answer -Text $answer -PointIds $r.PointIds -Quote:$quoteFormat
             if ($entries.Count -eq 0) {
                 Write-Warning '回答から「観点ID | 判定 | ...」の行を読み取れませんでした。回答全体をコピーし直すか、Copilot に「回答形式どおりに出し直して」と依頼してください。'
                 continue
@@ -1242,7 +1327,7 @@ foreach ($r in $requests) {
     $state = '未回答'
     $entries = @()
     if (Test-Path -LiteralPath $ansPath) {
-        $entries = ConvertFrom-Answer -Text ([System.IO.File]::ReadAllText($ansPath)) -PointIds $r.PointIds
+        $entries = ConvertFrom-Answer -Text ([System.IO.File]::ReadAllText($ansPath)) -PointIds $r.PointIds -Quote:$quoteFormat
         $state = '回答済み'
     }
     $requestRows.Add(@{ Values = @($r.Id, $r.Relative, $r.Part, ($r.PointIds -join ', '), $r.Chars, $state, "prompts\$($r.Id).txt") })
@@ -1304,14 +1389,40 @@ if ($toolResult) {
 
 # 設計書ごとに重要度の高い順。同じ観点では AI の指摘、ツールの指摘の順（読んだ順）
 $sorted = $findings | Sort-Object @{ e = { $_.Request.Relative } }, @{ e = { $s = $pointById[$_.Entry.PointId].Severity; if ($severityOrder.ContainsKey($s)) { $severityOrder[$s] } else { 9 } } }, @{ e = { $_.Entry.PointId } }, @{ e = { $_.Seq } }
+# AI の指摘の引用を設計書のセルと突き合わせ、場所が違えば引用のあるセルに直す
+$quoteCells = @{}
+$quoteCounts = [ordered]@{}
 $n = 0
 foreach ($f in $sorted) {
     $n++
     $p = $pointById[$f.Entry.PointId]
-    $loc = Resolve-Location -Location $f.Entry.Location -SheetNames @($f.Request.Sheets)
+    $location = $f.Entry.Location
+    $loc = Resolve-Location -Location $location -SheetNames @($f.Request.Sheets)
     $note = ''
-    if ($f.Entry.Location -and -not $loc) { $note = '場所のシート名・セル番地を設計書で確認してください' }
-    $row = @{ Values = @($n, $f.Entry.Verdict, $f.Source, $p.Severity, $p.Id, $p.Category, $p.Point, $f.Request.Relative, $f.Entry.Location, $f.Entry.Finding, $f.Entry.Reason, $f.Request.Id, '', '', '', '', $note) }
+    $quote = ''; $check = ''
+    if ($f.Source -eq 'AI' -and $quoteFormat) {
+        $quote = [string]$f.Entry.Quote
+        if (-not $quote) { $check = '引用なし' }
+        elseif (-not (Test-Path -LiteralPath $f.Request.File)) { $check = '確かめていない'; $note = '設計書が見つからないため、引用を確かめていません' }
+        else {
+            if (-not $quoteCells.ContainsKey($f.Request.File)) { $quoteCells[$f.Request.File] = Read-QuoteCells $f.Request.File }
+            $aiSheet = ''
+            $sm = [regex]::Match([string]$location, "^\s*'?(?<sheet>[^!'！]+?)'?\s*[!！]")
+            if ($sm.Success) { $aiSheet = $sm.Groups['sheet'].Value.Trim() }
+            $qr = Resolve-Quote $quoteCells[$f.Request.File] $quote $loc $aiSheet
+            $check = $qr.State
+            if ($qr.State -eq '場所を直した') {
+                $note = 'AI の場所: {0}（引用のあるセルに直しました）' -f $location
+                $location = '{0}!{1}' -f $qr.Sheet, $qr.Cell
+                $loc = [pscustomobject]@{ Sheet = $qr.Sheet; Cell = $qr.Cell }
+            }
+            elseif ($qr.State -eq '見つからない') { $note = $qr.Note }
+        }
+        if (-not $quoteCounts.Contains($check)) { $quoteCounts[$check] = 0 }
+        $quoteCounts[$check]++
+    }
+    if ($location -and -not $loc -and -not $note) { $note = '場所のシート名・セル番地を設計書で確認してください' }
+    $row = @{ Values = @($n, $f.Entry.Verdict, $f.Source, $p.Severity, $p.Id, $p.Category, $p.Point, $f.Request.Relative, $location, $quote, $check, $f.Entry.Finding, $f.Entry.Reason, $f.Request.Id, '', '', '', '', $note) }
     if ($loc) {
         $row.Link = @{ Column = 8; Path = $f.Request.File; Location = "'{0}'!{1}" -f $loc.Sheet.Replace("'", "''"), $loc.Cell }
     }
@@ -1351,7 +1462,7 @@ $sheets = @(
         Columns = @(
             @{ Header = 'No'; Width = 5 }, @{ Header = '判定'; Width = 8 }, @{ Header = '判定元'; Width = 12 }, @{ Header = '重要度'; Width = 7 }, @{ Header = '観点ID'; Width = 8 },
             @{ Header = '分類'; Width = 10 }, @{ Header = '観点'; Width = 30 }, @{ Header = '設計書'; Width = 30 }, @{ Header = '場所'; Width = 20 },
-            @{ Header = '指摘内容'; Width = 45 }, @{ Header = '根拠'; Width = 35 }, @{ Header = '依頼No'; Width = 8 },
+            @{ Header = '引用'; Width = 24 }, @{ Header = '引用の確認'; Width = 11 }, @{ Header = '指摘内容'; Width = 45 }, @{ Header = '根拠'; Width = 35 }, @{ Header = '依頼No'; Width = 8 },
             @{ Header = '対応要否'; Width = 9 }, @{ Header = '対応状況'; Width = 9 }, @{ Header = '対応者'; Width = 10 }, @{ Header = '対応内容'; Width = 30 }, @{ Header = '備考'; Width = 25 })
         Rows = $findingRows
     },
@@ -1384,6 +1495,10 @@ $toolNote = ''
 if ($toolPoints.Count -gt 0) { $toolNote = '（うちツール {0} 件）' -f @($findings | Where-Object { $_.Source -ne 'AI' }).Count }
 Write-Host ''
 Write-Host ("依頼 {0} 件中 {1} 件回答済み / 観点の判定: {2} / 指摘 {3} 件{4}" -f $requests.Count, $answeredCount, ($statusCounts -join '・'), $findingRows.Count, $toolNote)
+if ($quoteCounts.Count -gt 0) {
+    Write-Host ("AI の指摘の引用: {0}" -f (@($quoteCounts.Keys | ForEach-Object { '{0} {1}' -f $_, $quoteCounts[$_] }) -join '・'))
+    if ($quoteCounts.Contains('見つからない')) { Write-Host '  引用が見つからない指摘は、AI の誤りかもしれません。指摘一覧の「引用の確認」で絞り込んで確かめてください' }
+}
 Write-Host "レビュー結果: $reportPath"
 
 # .SYNOPSIS
@@ -1397,6 +1512,8 @@ Write-Host "レビュー結果: $reportPath"
 #        回答をコピーして Enter を押すと、回答を読み取って保存し、次の依頼に進みます。
 #     3. 全回答から「レビュー結果.xlsx」（指摘一覧・観点消化状況・依頼一覧）を作ります。
 #        指摘の場所は、クリックすると設計書の該当セルが開くリンクになります。
+#        AI には指摘ごとに場所のセルの文字（引用）も書かせ、設計書と突き合わせます。場所が違えば引用のあるセルに直し、
+#        引用が設計書に無ければ「見つからない」と知らせます（指摘一覧の「引用の確認」）。
 #
 #     観点表の「確かめ方」を「ツール」にした観点は AI に依頼せず、「ツールの確認」に書いた確認を
 #     ツール（提出前チェック・表記ゆれ・整合性チェックと、画面項目定義・テーブル定義の確認）で行います。
