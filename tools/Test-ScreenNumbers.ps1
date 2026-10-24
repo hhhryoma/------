@@ -130,9 +130,11 @@ function Read-ScreenLayouts {
     foreach ($k in $books.Keys) { $bookByPath[$k] = $books[$k] }
 
     # いくつものブックにある同じ名前のシート（「画面レイアウト」など）は、画面の名前とみなさない
+    # （どれかのシートの「画面ID」「画面名」と同じ名前は、レイアウトと画面項目定義のブックの両方にあっても画面の名前とみなす）
     $sheetCount = @{}
     foreach ($b in $books.Values) { foreach ($s in $b.Sheets.Keys) { $k = ConvertTo-ScreenKey $s; $sheetCount[$k] = 1 + [int]$sheetCount[$k] } }
-    $sheetKeyOf = { param([string] $Name) $k = ConvertTo-ScreenKey $Name; if ([int]$sheetCount[$k] -gt 1) { '' } else { $k } }
+    $screenKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    $sheetKeyOf = { param([string] $Name) $k = ConvertTo-ScreenKey $Name; if ([int]$sheetCount[$k] -gt 1 -and -not $screenKeys.Contains($k)) { '' } else { $k } }
 
     # 「画面ID」「画面名」の欄（シートに無ければ、ブックの中で 1 つだけの値）
     $labels = @{}
@@ -145,8 +147,8 @@ function Read-ScreenLayouts {
             $id = ConvertTo-ScreenKey (Find-LabelValue $b.Sheets[$s] '画面ID')
             $nm = ConvertTo-ScreenKey (Find-LabelValue $b.Sheets[$s] '画面名')
             $perSheet[$s] = @($id, $nm)
-            if ($id) { [void]$bookIds.Add($id) }
-            if ($nm) { [void]$bookNames.Add($nm) }
+            if ($id) { [void]$bookIds.Add($id); [void]$screenKeys.Add($id) }
+            if ($nm) { [void]$bookNames.Add($nm); [void]$screenKeys.Add($nm) }
         }
         $bookId = ''; if ($bookIds.Count -eq 1) { $bookId = @($bookIds)[0] }
         $bookName = ''; if ($bookNames.Count -eq 1) { $bookName = @($bookNames)[0] }
