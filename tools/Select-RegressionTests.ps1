@@ -60,12 +60,13 @@ $newBooks = Read-Books $New
 $oldBooks = Read-Books $Old
 
 function Get-BookScreen {
-    #     ブックの画面 ID（画面設計書の「画面ID」の欄）。無ければ空
+    #     ブックの画面 ID（画面設計書の「画面ID」の欄。SCR001・SCR-001・SCR_001 など。全角・半角をそろえた形）。無ければ空
     param($Book)
     if (-not $Book) { return '' }
     foreach ($grid in $Book.Sheets.Values) {
         $v = Find-LabelValue $grid '画面ID'
-        if ($v -and $v -match '^[A-Za-z]+\d+$') { return $v.Trim() }
+        if ($v) { $v = $v.Normalize($nfkc).Trim() }
+        if ($v -and $v -match '^[A-Za-z][A-Za-z0-9_-]*\d+$') { return $v }
     }
     return ''
 }
@@ -103,23 +104,38 @@ function Get-ChangeTarget {
 }
 
 $changes = New-Object System.Collections.Generic.List[object]
+$fileScreens = $null   # ファイル名から画面を探すときの、設計書の画面 ID（長いものから。初めて使うときに集める）
 foreach ($d in $diffs) {
-    if (@('値', '数式', '行', 'シート', '連番') -notcontains $d.Kind) { continue }
-    # 削除したセル・行は旧のブック、それ以外は新のブック
+    # 書式の変更と、改訂履歴のシート・版数・改訂日などの欄の変更（Compare-Excel の版情報）は、テストに関係しない
+    if ($d.Kind -eq '書式' -or $d.Tag -eq '版情報') { continue }
+    # 削除したセル・行・シート・ファイルは旧のブック、それ以外は新のブック（ファイルの追加・削除は、片方のパスが空）
     $deleted = $d.Change -eq '削除'
     $sheet = $(if ($deleted) { $d.OldSheet } else { $d.Sheet })
-    $location = $(if ($deleted) { $d.OldLocation } else { $d.Location })
+    # 旧の場所は、行・列やシート名が変わったときだけある（変わっていなければ、場所は旧版でも同じ）
+    $location = $(if ($deleted -and $d.OldLocation) { $d.OldLocation } else { $d.Location })
     if (-not $sheet) { $sheet = $d.Sheet }
     if ($sheet -match $ignoredSheets) { continue }
-    $book = $(if ($deleted) { $oldBooks[$d.OldPath] } else { $newBooks[$d.Path] })
-    if (-not $book) { $book = $(if ($d.Path) { $newBooks[$d.Path] } else { $oldBooks[$d.OldPath] }) }
+    $newBook = $null; $oldBook = $null
+    if ($d.Path) { $newBook = $newBooks[$d.Path] }
+    if ($d.OldPath) { $oldBook = $oldBooks[$d.OldPath] }
+    $book = $newBook
+    if (($deleted -and $oldBook) -or -not $book) { $book = $oldBook }
     $grid = $null
     if ($book -and $sheet -and $book.Sheets.Contains($sheet)) { $grid = $book.Sheets[$sheet] }
     $target = [pscustomobject]@{ Names = @(); Attribute = '' }
     $m = [regex]::Match([string]$location, '([A-Z]+)(\d+)$')
-    if ($grid -and $m.Success) { $target = Get-ChangeTarget $grid ([int]$m.Groups[2].Value) (Get-ColumnIndex $m.Groups[1].Value) }
+    # 行の名前と列の見出しは、セル・行の変更だけ（列・画像・図形の場所は、列の見出しや置いた位置のセル。シート・ファイルはセルが無い）
+    if ($grid -and $m.Success -and @('値', '数式', '行', '連番', 'コメント') -contains $d.Kind) { $target = Get-ChangeTarget $grid ([int]$m.Groups[2].Value) (Get-ColumnIndex $m.Groups[1].Value) }
     if ($target.Attribute -match $ignoredLabels) { continue }
-    $screen = Get-BookScreen $(if ($newBooks[$d.Path]) { $newBooks[$d.Path] } else { $oldBooks[$d.OldPath] })
+    $screen = Get-BookScreen $(if ($newBook) { $newBook } else { $oldBook })
+    if (-not $screen -and $d.Kind -eq 'ファイル') {
+        # 画面ID の欄の無い設計書（補足資料など）の追加・削除は、ファイル名に出てくる画面 ID（ほかの設計書の画面ID）の画面の変更とみなす
+        if ($null -eq $fileScreens) { $fileScreens = @(@($newBooks.Values) + @($oldBooks.Values) | ForEach-Object { Get-BookScreen $_ } | Where-Object { $_ } | Select-Object -Unique | Sort-Object @{ e = { $_.Length }; Descending = $true }, @{ e = { $_ } }) }
+        $fileName = $d.File.Normalize($nfkc)
+        foreach ($id in $fileScreens) {
+            if ([regex]::IsMatch($fileName, ('(?<![A-Za-z0-9]){0}(?![A-Za-z0-9])' -f [regex]::Escape($id)), 'IgnoreCase')) { $screen = $id; break }
+        }
+    }
     $what = $(if ($target.Names.Count -gt 0) { '「{0}」' -f ($target.Names -join '・') } else { '' })
     if ($target.Attribute -and $d.Kind -ne '行') { $what += 'の' + $target.Attribute }
     $changes.Add([pscustomobject]@{
@@ -162,7 +178,8 @@ function Add-Selection {
 }
 
 foreach ($ch in $changes) {
-    $reason = '{0} {1}（{2}）{3}を{4}' -f $ch.File, $ch.Location, $ch.Kind, $ch.What, $ch.Change
+    # ファイルの追加・削除には場所が無い
+    $reason = ('{0} {1}' -f $ch.File, $ch.Location).TrimEnd() + ('（{0}）{1}を{2}' -f $ch.Kind, $ch.What, $ch.Change)
     $reason = ($reason -replace '\s+', ' ').Trim()
     $inScreen = $cases
     if ($ch.Screen) {
@@ -199,7 +216,7 @@ if ($OutXlsx) {
     $caseRows = New-Object System.Collections.Generic.List[object]
     foreach ($r in $result) {
         $row = @{ Values = @($r.Priority, $r.Function, $r.Id, $r.Expected, $r.Reason, $r.File, $r.Location) }
-        if ($r.Sheet) { $row.Link = @{ Column = 7; Path = $r.Path; Location = ("'{0}'!{1}{2}" -f $r.Sheet.Replace("'", "''"), (ConvertTo-ColumnName $r.Col), $r.Row) } }
+        if ($r.Sheet) { $row.Link = @{ Column = 6; Path = $r.Path; Location = ("'{0}'!{1}{2}" -f $r.Sheet.Replace("'", "''"), (ConvertTo-ColumnName $r.Col), $r.Row) } }
         $caseRows.Add($row)
     }
     $changeRows = New-Object System.Collections.Generic.List[object]
@@ -218,7 +235,7 @@ if ($OutXlsx) {
 Write-Host ''
 Write-Host ('設計書の変更 {0} 件（差分 {1} 件。表紙・改訂履歴・作成日などは除く）: 再テストするケース {2} 件（高 {3}・中 {4}）/ テストケース {5} 件' -f $changes.Count, $diffs.Count, $result.Count, @($result | Where-Object Priority -eq '高').Count, @($result | Where-Object Priority -eq '中').Count, $cases.Count)
 if ($untested.Count -gt 0) {
-    Write-Host ('テストが見つからない変更 {0} 件: {1}' -f $untested.Count, ((@($untested | Select-Object -First 5 | ForEach-Object { '{0} {1}{2}' -f $_.File, $_.Location, $(if ($_.What) { ' ' + $_.What } else { '' }) })) -join '・'))
+    Write-Host ('テストが見つからない変更 {0} 件: {1}' -f $untested.Count, ((@($untested | Select-Object -First 5 | ForEach-Object { ('{0} {1}' -f $_.File, $_.Location).TrimEnd() + $(if ($_.What) { ' ' + $_.What } else { '' }) })) -join '・'))
 }
 Write-ReadLogSummary $readLog
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
@@ -233,7 +250,9 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       高  変更した行の名前（項目名・イベント名・メッセージID・コード区分名・表示名・論理名など）がケースに出てくる
 #       中  画面設計書の変更で、その画面のケース（機能・ファイル名・シート名に画面 ID が出てくる）
 #
-#     表紙・改訂履歴のシートと、作成者・更新日・版数などの欄の変更は除きます。
+#     画面 ID は画面設計書の「画面ID」の欄の値です（SCR001・SCR-001 など）。設計書のファイルの追加・削除と、
+#     画像（スクリーンショット）・図形・列・コメントの変更も、その画面の変更として扱います。
+#     表紙・改訂履歴のシートと、作成者・更新日・版数・改訂日などの欄の変更（Compare-Excel の版情報）は除きます。
 #     テストが見つからない変更（テストを足すか、影響が無いことを確かめるもの）も知らせます。
 #
 # .PARAMETER Old
