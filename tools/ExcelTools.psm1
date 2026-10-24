@@ -212,6 +212,267 @@ function Get-RelationshipIdAttribute {
     return $null
 }
 
+# ---------------------------------------------------------------- 図形・画像を読む（xlsx / xlsm の描画パーツ。Compare-Excel・Test-ScreenNumbers）
+
+
+$script:ImageHash = [System.Security.Cryptography.SHA256]::Create()
+
+function Get-ImageSize {
+    #     画像の大きさ（ピクセル。PNG・JPEG・GIF・BMP）。わからなければ 0, 0
+    param([byte[]] $Bytes)
+    $n = $Bytes.Length
+    $be = { param($i) [int]([long]$Bytes[$i] * 16777216 + [long]$Bytes[$i + 1] * 65536 + [long]$Bytes[$i + 2] * 256 + [long]$Bytes[$i + 3]) }
+    if ($n -ge 24 -and $Bytes[0] -eq 0x89 -and $Bytes[1] -eq 0x50 -and $Bytes[2] -eq 0x4E -and $Bytes[3] -eq 0x47) { return @((& $be 16), (& $be 20)) }
+    if ($n -ge 10 -and $Bytes[0] -eq 0x47 -and $Bytes[1] -eq 0x49 -and $Bytes[2] -eq 0x46) { return @(([int]$Bytes[6] + [int]$Bytes[7] * 256), ([int]$Bytes[8] + [int]$Bytes[9] * 256)) }
+    if ($n -ge 26 -and $Bytes[0] -eq 0x42 -and $Bytes[1] -eq 0x4D) { return @([System.BitConverter]::ToInt32($Bytes, 18), [math]::Abs([System.BitConverter]::ToInt32($Bytes, 22))) }
+    if ($n -ge 4 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xD8) {
+        # JPEG: SOF（C0〜CF のうち C4・C8・CC を除く）の高さと幅
+        $i = 2
+        while ($i + 8 -lt $n) {
+            if ($Bytes[$i] -ne 0xFF) { $i++; continue }
+            $m = $Bytes[$i + 1]
+            if ($m -eq 0xFF) { $i++; continue }
+            if ($m -ge 0xC0 -and $m -le 0xCF -and $m -ne 0xC4 -and $m -ne 0xC8 -and $m -ne 0xCC) { return @(([int]$Bytes[$i + 7] * 256 + [int]$Bytes[$i + 8]), ([int]$Bytes[$i + 5] * 256 + [int]$Bytes[$i + 6])) }
+            if ($m -eq 0x01 -or ($m -ge 0xD0 -and $m -le 0xD9)) { $i += 2; continue }
+            $i += 2 + [int]$Bytes[$i + 2] * 256 + [int]$Bytes[$i + 3]
+        }
+    }
+    return @(0, 0)
+}
+
+function Get-DrawingXfrm {
+    #     図形の位置と大きさ（xfrm の off・ext。グループは中の図形の座標の chOff・chExt も）。無ければ $null
+    param([System.Xml.XmlElement] $Node)
+    $x = $Node.SelectSingleNode("*[local-name()='spPr' or local-name()='grpSpPr']/*[local-name()='xfrm'] | *[local-name()='xfrm']")
+    if (-not $x) { return $null }
+    $get = { param($name, $a, $b) $e = $x.SelectSingleNode("*[local-name()='$name']"); if ($e) { , @([double]$e.GetAttribute($a), [double]$e.GetAttribute($b)) } }
+    $off = & $get 'off' 'x' 'y'
+    $ext = & $get 'ext' 'cx' 'cy'
+    if (-not $off -or -not $ext) { return $null }
+    $chOff = & $get 'chOff' 'x' 'y'
+    $chExt = & $get 'chExt' 'cx' 'cy'
+    if (-not $chOff) { $chOff = $off }
+    if (-not $chExt) { $chExt = $ext }
+    return [pscustomobject]@{ X = $off[0]; Y = $off[1]; W = $ext[0]; H = $ext[1]; CX = $chOff[0]; CY = $chOff[1]; CW = $chExt[0]; CH = $chExt[1] }
+}
+
+function Add-DrawingItem {
+    #     図形を 1 つ一覧に足す（グループなら中のものも）。Top はいちばん外のグループ（Name と、グループの座標での X Y W H。
+    #     シートに直接置いたものは $null）、Transform はグループの中の図形の座標を、いちばん外のグループの座標にする倍率と移動（SX TX SY TY）
+    param($Items, [System.Xml.XmlElement] $Node, $Anchor, [string] $Cell, [string] $ParentPath, $Top, $Transform, $Package, $Rels, [hashtable] $Images)
+    $nv = $Node.SelectSingleNode("*[starts-with(local-name(), 'nv')]/*[local-name()='cNvPr']")
+    $name = ''; $hidden = $false
+    if ($nv) { $name = $nv.GetAttribute('name'); $hidden = @('1', 'true') -contains $nv.GetAttribute('hidden') }
+    $text = ''
+    if ($Node.LocalName -eq 'sp') {
+        $text = (@($Node.SelectNodes("*[local-name()='txBody']/*[local-name()='p']") | ForEach-Object { -join @($_.SelectNodes(".//*[local-name()='t']") | ForEach-Object { $_.InnerText }) }) -join "`n").TrimEnd("`n")
+    }
+    $path = $name
+    if ($ParentPath) { $path = $ParentPath + '/' + $name }
+    $item = [pscustomobject]@{
+        Name = $name; Kind = $Node.LocalName; Text = $text; Path = $path; Key = ''; Group = ''; Cell = $Cell; Anchor = $Anchor; Box = $null
+        Hidden = $hidden; Bounds = $null; Hash = ''; Media = ''; Width = 0; Height = 0
+    }
+    $xf = Get-DrawingXfrm $Node
+    if ($Top) {
+        $item.Group = $Top.Name
+        if ($xf -and $Transform -and $Top.W -gt 0 -and $Top.H -gt 0) {
+            $item.Box = [pscustomobject]@{
+                X = ($Transform.TX + $Transform.SX * $xf.X - $Top.X) / $Top.W; Y = ($Transform.TY + $Transform.SY * $xf.Y - $Top.Y) / $Top.H
+                W = $Transform.SX * $xf.W / $Top.W; H = $Transform.SY * $xf.H / $Top.H
+            }
+        }
+    }
+    if ($Node.LocalName -eq 'pic') {
+        # 画像の中身は、パーツごとに 1 回だけ読む（同じ画像を何か所にも貼ったとき）
+        $blip = $Node.SelectSingleNode("*[local-name()='blipFill']/*[local-name()='blip']")
+        $rid = $null
+        if ($blip) { foreach ($at in $blip.Attributes) { if ($at.LocalName -eq 'embed' -and $at.NamespaceURI -like '*relationships') { $rid = $at.Value } } }
+        $target = $null
+        if ($rid) { $target = @($Rels | Where-Object { $_.Id -eq $rid })[0] }
+        if ($target) {
+            if (-not $Images.ContainsKey($target.Target)) {
+                $info = [pscustomobject]@{ Hash = ''; Width = 0; Height = 0 }
+                $entry = Get-PackageEntry -Package $Package -PartName $target.Target
+                if ($entry) {
+                    $ms = New-Object System.IO.MemoryStream
+                    $st = $entry.Open()
+                    try { $st.CopyTo($ms) } finally { $st.Dispose() }
+                    $bytes = $ms.ToArray()
+                    $info.Hash = ([System.BitConverter]::ToString($script:ImageHash.ComputeHash($bytes))).Replace('-', '').Substring(0, 16).ToLowerInvariant()
+                    $size = Get-ImageSize $bytes
+                    $info.Width = $size[0]; $info.Height = $size[1]
+                }
+                $Images[$target.Target] = $info
+            }
+            $info = $Images[$target.Target]
+            $item.Media = $target.Target; $item.Hash = $info.Hash; $item.Width = $info.Width; $item.Height = $info.Height
+        }
+    }
+    $Items.Add($item)
+    if ($Node.LocalName -ne 'grpSp') { return }
+    # グループの中: 中の図形の座標（chOff・chExt）を、いちばん外のグループの座標にする
+    $t = $null; $top2 = $Top
+    if ($xf) {
+        $sx = 1.0; if ($xf.CW -ne 0) { $sx = $xf.W / $xf.CW }
+        $sy = 1.0; if ($xf.CH -ne 0) { $sy = $xf.H / $xf.CH }
+        if ($Top) {
+            if ($Transform) { $t = [pscustomobject]@{ SX = $Transform.SX * $sx; TX = $Transform.TX + $Transform.SX * ($xf.X - $xf.CX * $sx); SY = $Transform.SY * $sy; TY = $Transform.TY + $Transform.SY * ($xf.Y - $xf.CY * $sy) } }
+        }
+        else {
+            $t = [pscustomobject]@{ SX = $sx; TX = $xf.X - $xf.CX * $sx; SY = $sy; TY = $xf.Y - $xf.CY * $sy }
+            $top2 = [pscustomobject]@{ Name = $name; X = $xf.X; Y = $xf.Y; W = $xf.W; H = $xf.H }
+        }
+    }
+    elseif (-not $Top) { $top2 = [pscustomobject]@{ Name = $name; X = 0; Y = 0; W = 0; H = 0 } }
+    foreach ($child in $Node.ChildNodes) {
+        if ($child -isnot [System.Xml.XmlElement]) { continue }
+        # 互換用の書き方（mc:AlternateContent）は、Choice の中の図形を使う
+        if ($child.LocalName -eq 'AlternateContent') { $child = $child.SelectSingleNode("*[local-name()='Choice']/*[local-name()='sp' or local-name()='pic' or local-name()='grpSp' or local-name()='graphicFrame' or local-name()='cxnSp']") }
+        if (-not $child -or @('sp', 'pic', 'grpSp', 'graphicFrame', 'cxnSp') -notcontains $child.LocalName) { continue }
+        Add-DrawingItem -Items $Items -Node $child -Anchor $Anchor -Cell $Cell -ParentPath $path -Top $top2 -Transform $t -Package $Package -Rels $Rels -Images $Images
+    }
+}
+
+function Read-SheetDrawingItems {
+    #     シートの図形・画像（描画パーツ）を、文書の順に読む（グループの中のものも。互換用の代替表示（mc:Fallback）は除く）。
+    #       Name・Kind（sp 図形 / pic 画像 / grpSp グループ / graphicFrame グラフ / cxnSp 線）・Text
+    #       Path（グループの中なら「グループ名/名前」）・Key（Path#同じ Path の何番目か）・Group（グループの中なら、いちばん外のグループの名前）
+    #       Cell（シートに置いた図形の左上のセル）・Anchor（R1 C1 OX OY と、R2 C2 EX EY（セルに合わせる）または W H。ピクセル）
+    #       Box（グループの中のもの。いちばん外のグループの中での X Y W H の割合）・Hidden（非表示）
+    #       Bounds（シートの上の位置と大きさ。Set-DrawingBounds で求める）
+    #       画像: Hash（中身の要約）・Media（パーツ名）・Width Height（画像の大きさ。わからなければ 0）
+    #     Images は画像のパーツ名 → 中身の要約と大きさ（同じブックの中で使い回す）
+    param($Package, [string] $SheetPart, [hashtable] $Images)
+    $items = New-Object System.Collections.Generic.List[object]
+    $px = { param($node, $name) $n = $node.SelectSingleNode("*[local-name()='$name']"); if ($n) { [int][math]::Round([double]$n.InnerText / 9525) } else { 0 } }
+    $num = { param($node, $name) $n = $node.SelectSingleNode("*[local-name()='$name']"); if ($n) { [int]$n.InnerText } else { 0 } }
+    # Get-PartRelationships は一覧を 1 つのまとまりで返すので、いったん変数に入れてから絞り込む
+    $rels = Get-PartRelationships -Package $Package -PartName $SheetPart
+    foreach ($rel in @($rels | Where-Object { $_.Kind -eq 'drawing' })) {
+        $doc = Read-PartXml -Package $Package -PartName $rel.Target
+        if (-not $doc) { continue }
+        $drawingRels = Get-PartRelationships -Package $Package -PartName $rel.Target
+        foreach ($a in $doc.SelectNodes("//*[(local-name()='twoCellAnchor' or local-name()='oneCellAnchor') and not(ancestor::*[local-name()='Fallback'])]")) {
+            $obj = $a.SelectSingleNode("*[local-name()='sp' or local-name()='pic' or local-name()='graphicFrame' or local-name()='grpSp' or local-name()='cxnSp']")
+            $from = $a.SelectSingleNode("*[local-name()='from']")
+            if (-not $obj -or -not $from) { continue }
+            $anchor = [ordered]@{ R1 = (& $num $from 'row') + 1; C1 = (& $num $from 'col') + 1; OX = (& $px $from 'colOff'); OY = (& $px $from 'rowOff') }
+            $to = $a.SelectSingleNode("*[local-name()='to']")
+            $ext = $a.SelectSingleNode("*[local-name()='ext']")
+            if ($to) { $anchor.R2 = (& $num $to 'row') + 1; $anchor.C2 = (& $num $to 'col') + 1; $anchor.EX = (& $px $to 'colOff'); $anchor.EY = (& $px $to 'rowOff') }
+            elseif ($ext) { $anchor.W = [int][math]::Round([double]$ext.GetAttribute('cx') / 9525); $anchor.H = [int][math]::Round([double]$ext.GetAttribute('cy') / 9525) }
+            else { continue }
+            $anchor = [pscustomobject]$anchor
+            $cell = (ConvertTo-ColumnName $anchor.C1) + $anchor.R1
+            Add-DrawingItem -Items $items -Node $obj -Anchor $anchor -Cell $cell -ParentPath '' -Top $null -Transform $null -Package $Package -Rels $drawingRels -Images $Images
+        }
+    }
+    $seen = @{}
+    foreach ($it in $items) { $seen[$it.Path] = 1 + [int]$seen[$it.Path]; $it.Key = '{0}#{1}' -f $it.Path, $seen[$it.Path] }
+    return , $items
+}
+
+function Get-SheetGeometry {
+    #     シートの列の幅・行の高さ（ピクセル。非表示は 0）。図形の位置をシートの上のピクセルにするため（Get-SheetPoint）。
+    #     列の幅は、標準のフォントの数字の幅を 7 ピクセルとして求める（Excel の表示と少し違うことがあるが、同じシートの図形どうしの位置を比べるには足りる）
+    param([System.Xml.XmlDocument] $Doc)
+    $num = { param([string] $Text, [double] $Default) $v = 0.0; if ($Text -and [double]::TryParse($Text, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$v)) { $v } else { $Default } }
+    $fmt = $Doc.SelectSingleNode("//*[local-name()='sheetFormatPr']")
+    $colDefault = 64
+    if ($fmt -and $fmt.GetAttribute('defaultColWidth')) { $colDefault = [int][math]::Round((& $num $fmt.GetAttribute('defaultColWidth') 9.14) * 7) }
+    $rowDefault = 20
+    if ($fmt -and $fmt.GetAttribute('defaultRowHeight')) { $rowDefault = [int][math]::Round((& $num $fmt.GetAttribute('defaultRowHeight') 15) * 4 / 3) }
+    # 列は「min〜max 列の幅」の範囲のまま持つ（最後の列までまとめて指定した <col max="16384"> もあるため）
+    $cols = New-Object System.Collections.Generic.List[object]
+    foreach ($c in $Doc.SelectNodes("//*[local-name()='cols']/*[local-name()='col']")) {
+        $min = 0; $max = 0
+        if (-not [int]::TryParse($c.GetAttribute('min'), [ref]$min) -or -not [int]::TryParse($c.GetAttribute('max'), [ref]$max)) { continue }
+        $px = [int][math]::Round((& $num $c.GetAttribute('width') ($colDefault / 7)) * 7)
+        if (@('1', 'true') -contains $c.GetAttribute('hidden')) { $px = 0 }
+        $cols.Add(@($min, $max, $px))
+    }
+    $rows = @{}
+    foreach ($row in $Doc.SelectNodes("//*[local-name()='sheetData']/*[local-name()='row'][@ht or @hidden]")) {
+        $r = 0
+        if (-not [int]::TryParse($row.GetAttribute('r'), [ref]$r)) { continue }
+        if (@('1', 'true') -contains $row.GetAttribute('hidden')) { $rows[$r] = 0; continue }
+        if ($row.GetAttribute('ht')) { $rows[$r] = [int][math]::Round((& $num $row.GetAttribute('ht') 15) * 4 / 3) }
+    }
+    # 行の上端を早く求めるため、高さを指定した行を番号の順に並べ、そこまでの既定の高さとの差の合計を持つ
+    $keys = [int[]]@($rows.Keys)
+    [Array]::Sort($keys)
+    $prefix = New-Object 'double[]' ($keys.Count + 1)
+    for ($i = 0; $i -lt $keys.Count; $i++) { $prefix[$i + 1] = $prefix[$i] + $rows[$keys[$i]] - $rowDefault }
+    return [pscustomobject]@{ ColDefault = $colDefault; Cols = $cols; RowDefault = $rowDefault; RowKeys = $keys; RowPrefix = $prefix }
+}
+
+function Get-SheetPoint {
+    #     セル（Col・Row は 1 から）の左上からのずれ（ピクセル）を、シートの左上からの位置（X, Y）にする
+    param($Geometry, [int] $Col, [int] $Row, [double] $OffsetX = 0, [double] $OffsetY = 0)
+    $x = ($Col - 1) * $Geometry.ColDefault
+    foreach ($c in $Geometry.Cols) {
+        $hi = [math]::Min($c[1], $Col - 1)
+        if ($hi -ge $c[0]) { $x += ($hi - $c[0] + 1) * ($c[2] - $Geometry.ColDefault) }
+    }
+    # $Row より前にある、高さを指定した行の数
+    $n = [Array]::BinarySearch($Geometry.RowKeys, $Row)
+    if ($n -lt 0) { $n = -bnot $n }
+    return @(($x + $OffsetX), (($Row - 1) * $Geometry.RowDefault + $Geometry.RowPrefix[$n] + $OffsetY))
+}
+
+function Get-SheetCell {
+    #     シートの左上からの位置（ピクセル）にあるセルの番地（A1 の形）
+    param($Geometry, [double] $X, [double] $Y)
+    # 左端・上端が位置より前にある最後の列・行を、二分探索で探す（幅 0 の非表示の列・行は、その次の列・行になる）
+    $lo = 1; $hi = 16384
+    while ($lo -lt $hi) { $mid = [int][math]::Floor(($lo + $hi + 1) / 2); if ((Get-SheetPoint $Geometry $mid 1)[0] -le $X) { $lo = $mid } else { $hi = $mid - 1 } }
+    $col = $lo
+    $lo = 1; $hi = 1048576
+    while ($lo -lt $hi) { $mid = [int][math]::Floor(($lo + $hi + 1) / 2); if ((Get-SheetPoint $Geometry 1 $mid)[1] -le $Y) { $lo = $mid } else { $hi = $mid - 1 } }
+    return '{0}{1}' -f (ConvertTo-ColumnName $col), $lo
+}
+
+function Set-DrawingBounds {
+    #     図形・画像（Read-SheetDrawingItems）のシートの上の位置と大きさ（Bounds: X Y W H。シートの左上からのピクセル）を求める。
+    #     グループの中のものは、グループの中での位置（Box）から求める（Box の無いものはグループと同じ）。
+    #     Bounds の Geometry は、位置からセルを求めるとき（Get-SheetCell）に使うシートの列の幅・行の高さ
+    param($Items, $Geometry)
+    foreach ($it in $Items) {
+        $a = $it.Anchor
+        $p1 = Get-SheetPoint $Geometry $a.C1 $a.R1 $a.OX $a.OY
+        if ($a.PSObject.Properties['R2']) { $p2 = Get-SheetPoint $Geometry $a.C2 $a.R2 $a.EX $a.EY }
+        else { $p2 = @(($p1[0] + $a.W), ($p1[1] + $a.H)) }
+        $x = $p1[0]; $y = $p1[1]
+        $w = [math]::Max(0, $p2[0] - $p1[0]); $h = [math]::Max(0, $p2[1] - $p1[1])
+        if ($it.Group -and $it.Box) { $x += $it.Box.X * $w; $y += $it.Box.Y * $h; $w *= $it.Box.W; $h *= $it.Box.H }
+        $it.Bounds = [pscustomobject]@{ X = $x; Y = $y; W = $w; H = $h; Geometry = $Geometry }
+    }
+}
+
+function Read-BookDrawings {
+    #     .xlsx / .xlsm のシート名 → 図形・画像の一覧（Read-SheetDrawingItems。シートの順）。描画パーツの無い形式（.xls など）は $null。
+    #     Bounds を付けると、シートの上の位置と大きさ（Bounds）も求める。読めないブックは例外
+    param([string] $FilePath, [switch] $Bounds)
+    if (@('.xlsx', '.xlsm', '.xltx', '.xltm') -notcontains [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()) { return $null }
+    $result = [ordered]@{}
+    $pkg = Open-ZipPackage $FilePath
+    try {
+        $parts = Get-WorkbookSheetParts $pkg
+        $images = @{}
+        foreach ($name in $parts.Sheets.Keys) {
+            $items = Read-SheetDrawingItems $pkg $parts.Sheets[$name] $images
+            if ($Bounds -and $items.Count -gt 0) {
+                $doc = Read-PartXml -Package $pkg -PartName $parts.Sheets[$name]
+                if ($doc) { Set-DrawingBounds $items (Get-SheetGeometry $doc) }
+            }
+            $result[$name] = $items
+        }
+    }
+    finally { $pkg.Zip.Dispose() }
+    return $result
+}
+
 # ---------------------------------------------------------------- 書き換え（xlsx / xlsm の一部のパーツだけ）
 
 
@@ -615,9 +876,10 @@ $script:Nfkc = [System.Text.NormalizationForm]::FormKC
 
 function Read-ScreenDesign {
     #     画面設計書の画面項目定義・イベント定義と、コード定義書・メッセージ一覧を読む（Books は ConvertTo-DesignBooks の結果）。
-    #     戻り値: @{ Items（画面項目。Input は入力のある項目）; Events（イベント）; Codes（コード区分名 → 表示名の一覧）;
+    #     画面項目定義・イベント定義は、「画面ID」の欄のあるシートだけを読む（AnySheet を付けると、欄の無いシートも読み、Screen は空）
+    #     戻り値: @{ Items（画面項目。No は No の列の値、Input は入力のある項目）; Events（イベント）; Codes（コード区分名 → 表示名の一覧）;
     #             Messages（メッセージID（大文字）→ @{ Text; File; Sheet; Row }） }
-    param($Books)
+    param($Books, [switch] $AnySheet)
     $nfkc = [System.Text.NormalizationForm]::FormKC
     $items = New-Object System.Collections.Generic.List[object]
     $events = New-Object System.Collections.Generic.List[object]
@@ -647,23 +909,26 @@ function Read-ScreenDesign {
                 }
             }
             $screen = Find-LabelValue $grid '画面ID'
-            if (-not $screen) { continue }
-            $screen = $screen.Trim()
+            if (-not $screen -and -not $AnySheet) { continue }
+            $screen = ([string]$screen).Trim()
             $screenName = Find-LabelValue $grid '画面名'
             if ($screenName) { $screenName = $screenName.Trim() }
             # 画面項目定義
             foreach ($t in (Find-DesignTables $grid @('項目名', '桁数') '項目名')) {
                 $cell = { param($dr, $name) if ($t.ColumnOf.ContainsKey($name)) { ([string]$dr.Cells[$t.ColumnOf[$name]]).Normalize($nfkc).Trim() } else { '' } }
+                $noCol = Find-NoColumn $t.ColumnOf
                 foreach ($dr in $t.Rows) {
                     $io = & $cell $dr '入出力'
                     $digits = & $cell $dr '桁数'
+                    $no = ''
+                    if ($noCol) { $no = ([string]$dr.Cells[$noCol]).Normalize($nfkc).Trim() }
                     $items.Add([pscustomobject]@{
-                            Screen = $screen; ScreenName = $screenName; Item = ([string]$dr.Cells[$t.ColumnOf['項目名']]).Trim(); ItemId = (& $cell $dr '項目ID')
+                            Screen = $screen; ScreenName = $screenName; No = $no; Item = ([string]$dr.Cells[$t.ColumnOf['項目名']]).Trim(); ItemId = (& $cell $dr '項目ID')
                             Kind = (& $cell $dr '区分'); Io = $io; Input = (-not $t.ColumnOf.ContainsKey('入出力') -or $io -match 'I')
                             Type = (& $cell $dr '型'); Digits = $(if ($digits -match '^\d+$') { [int]$digits } else { $null })
                             Required = ((& $cell $dr '必須') -match '^(○|〇|◯|必須|要|Y|YES|1)$'); Initial = (& $cell $dr '初期値')
                             Checks = (& $cell $dr '入力チェック'); Note = (& $cell $dr '備考')
-                            File = $book.File; Sheet = $sheetName; Row = $dr.Row
+                            File = $book.File; Path = $book.Path; Sheet = $sheetName; Row = $dr.Row
                         })
                 }
             }
@@ -681,6 +946,13 @@ function Read-ScreenDesign {
         }
     }
     return [pscustomobject]@{ Items = $items; Events = $events; Codes = $codes; Messages = $messages }
+}
+
+function Find-NoColumn {
+    #     表の見出し（Find-DesignTables の ColumnOf）のうち、No の列（No・No.・№・項番・番号・#）の列番号。無ければ $null
+    param([hashtable] $ColumnOf)
+    foreach ($label in @('No', 'No.', '#', '項番', '番号')) { if ($ColumnOf.ContainsKey($label)) { return $ColumnOf[$label] } }
+    return $null
 }
 
 function ConvertTo-Label {

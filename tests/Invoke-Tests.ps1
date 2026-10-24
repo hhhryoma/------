@@ -182,6 +182,87 @@ function Read-XlsxCharts {
     finally { $fs.Dispose() }
 }
 
+function New-SheetsBook {
+    #     複数シートのブックを作る（テスト用）。Sheets: @{ 名前 = @(見出しの配列, 行の配列...) } の順序付き辞書
+    param([string] $Path, $Sheets)
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $list = @()
+    foreach ($name in $Sheets.Keys) {
+        $header = $Sheets[$name][0]
+        $rows = @($Sheets[$name] | Select-Object -Skip 1)
+        $list += @{ Name = $name; Columns = @($header | ForEach-Object { @{ Header = $_; Width = 10 } }); Rows = @($rows | ForEach-Object { @{ Values = $_ } }) }
+    }
+    Export-Workbook -FilePath $Path -Sheets $list
+}
+
+# テスト用の小さな画像（40×30 の PNG）。Retake は Old と絵は同じで、データ（圧縮の仕方）だけが違う（同じ画面を撮り直したとき）
+$script:TestPng = @{
+    Old    = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAYElEQVR4nO2XMQpAIQxDE+n9r1wH4QviomALv8kidXk0pEXp7shQS6ECsHGQDEMOj22pX+vrMM1qgcNkm7ujhN9Gsp7VAv8fvBunkKVdz2qBBRZY4GvNXR35pgfAcn+nDgTjEEBUFCIpAAAAAElFTkSuQmCC'
+    New    = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAbUlEQVR4nO2XwQoAIQhEZxb//5ftEHQIYSlaXdK5RF0eYzoUVRURekKoAKQvJN2QvcYy7b/WcBhW6gK7SYyzpQ7fbcl8pS7w/WBrnFxC2wJv6XX4Jzv57rjABb4PfCxAVuPuB4493/QAmO7v1ACh5BRCnP+rmgAAAABJRU5ErkJggg=='
+    Retake = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAgUlEQVR4Ae2WSw6AMAhEHeP9r4yams5CE7GhsHC6YkEY+vgEmNlS8dYK0VNza8IA0jJojC/hQzWHef9hGWoJp7UYm4uSnzp8dA2oxgQ+2RLqyYAZ/mmcRieEUR2WauyAFOMi1DEcHVGE2gEpxuV/qLmr+8Ubg/ItCnLu+HsaZTXeAQTjEEApC71sAAAAAElFTkSuQmCC'
+    Logo   = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAlklEQVR4nO2WSw6AIAxEqfHexpPXpZt+pgWhMXRpOvMYLARi5raijiXUDZ5ZJ95KN4nf+cqMJ7lTrfE6V+BsNU6NNlvgkFFUooIT1JBQBqepuFwAd1JBkzIXyJC4iFWZxBs8DZy78cWyrcokboNCuyZy4k42Ile3Os0GhdY/TrBxiTNcIXao2X/6vK2T31wfVaVz/HPwA6K+OS+gTz8VAAAAAElFTkSuQmCC'
+}
+
+function Add-TestDrawing {
+    #     ブックの Sheet 番目のシートに図形・画像を置く（テスト用）。Items の要素（列・行は 0 から数える）:
+    #       @{ Kind = 'pic'; Name; Png（$script:TestPng のキー）; From = @(列, 行); To = @(列, 行) }
+    #       @{ Kind = 'sp'; Name; Text（省略可）; From; To }
+    #       @{ Kind = 'grpSp'; Name; From; To; Children = @( @{ Kind; Name; Text; Png; Off = @(x, y); Ext = @(cx, cy) } ) }（中の座標は 0〜1000）
+    #       Hidden = $true で非表示にする
+    param([string] $Path, $Items, [int] $Sheet = 1)
+    $media = New-Object System.Collections.Generic.List[string]
+    $script:TestShapeId = 1
+    $obj = {
+        param($it, [string] $Xfrm)
+        $script:TestShapeId++
+        $id = $script:TestShapeId
+        if ($it.Hidden) { $id = '{0}" hidden="1' -f $id }
+        switch ($it.Kind) {
+            'pic' {
+                $media.Add($it.Png)
+                '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdImg{2}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>{3}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>' -f $id, $it.Name, $media.Count, $Xfrm
+            }
+            'sp' {
+                $body = ''
+                if ($it.Text) { $body = '<xdr:txBody><a:bodyPr/><a:p><a:r><a:t>{0}</a:t></a:r></a:p></xdr:txBody>' -f $it.Text }
+                '<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr>{2}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>{3}</xdr:sp>' -f $id, $it.Name, $Xfrm, $body
+            }
+            'grpSp' {
+                $kids = (@($it.Children | ForEach-Object { & $obj $_ ('<a:xfrm><a:off x="{0}" y="{1}"/><a:ext cx="{2}" cy="{3}"/></a:xfrm>' -f $_.Off[0], $_.Off[1], $_.Ext[0], $_.Ext[1]) })) -join ''
+                '<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr><xdr:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/><a:chOff x="0" y="0"/><a:chExt cx="1000" cy="1000"/></a:xfrm></xdr:grpSpPr>{2}</xdr:grpSp>' -f $id, $it.Name, $kids
+            }
+        }
+    }
+    $anchors = foreach ($it in $Items) {
+        $body = & $obj $it '<a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>'
+        '<xdr:twoCellAnchor><xdr:from><xdr:col>{0}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{2}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{3}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>{4}<xdr:clientData/></xdr:twoCellAnchor>' -f $it.From[0], $it.From[1], $it.To[0], $it.To[1], $body
+    }
+    $head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    $drawing = $head + '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' + ($anchors -join '') + '</xdr:wsDr>'
+    $relsHead = $head + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    $drawingRels = $relsHead + ((@(for ($i = 1; $i -le $media.Count; $i++) { '<Relationship Id="rIdImg{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image{1}_{0}.png"/>' -f $i, $Sheet })) -join '') + '</Relationships>'
+    $sheetRels = $relsHead + ('<Relationship Id="rIdDrw1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing{0}.xml"/>' -f $Sheet) + '</Relationships>'
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $fs = [System.IO.File]::Open($Path, 'Open', 'ReadWrite')
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Update)
+        $put = { param([string] $Name, [byte[]] $Bytes) $e = $zip.GetEntry($Name); if ($e) { $e.Delete() }; $st = $zip.CreateEntry($Name).Open(); $st.Write($Bytes, 0, $Bytes.Length); $st.Dispose() }
+        $read = { param([string] $Name) $sr = New-Object System.IO.StreamReader($zip.GetEntry($Name).Open()); try { $sr.ReadToEnd() } finally { $sr.Dispose() } }
+        & $put ('xl/drawings/drawing{0}.xml' -f $Sheet) $utf8.GetBytes($drawing)
+        & $put ('xl/drawings/_rels/drawing{0}.xml.rels' -f $Sheet) $utf8.GetBytes($drawingRels)
+        for ($i = 0; $i -lt $media.Count; $i++) { & $put ('xl/media/image{0}_{1}.png' -f $Sheet, ($i + 1)) ([Convert]::FromBase64String($script:TestPng[$media[$i]])) }
+        & $put ('xl/worksheets/_rels/sheet{0}.xml.rels' -f $Sheet) $utf8.GetBytes($sheetRels)
+        $sheetXml = (& $read ('xl/worksheets/sheet{0}.xml' -f $Sheet)).Replace('</worksheet>', '<drawing r:id="rIdDrw1"/></worksheet>')
+        & $put ('xl/worksheets/sheet{0}.xml' -f $Sheet) $utf8.GetBytes($sheetXml)
+        $types = & $read '[Content_Types].xml'
+        if (-not $types.Contains('Extension="png"')) { $types = $types.Replace('<Default Extension="xml"', '<Default Extension="png" ContentType="image/png"/><Default Extension="xml"') }
+        $types = $types.Replace('</Types>', ('<Override PartName="/xl/drawings/drawing{0}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>' -f $Sheet))
+        & $put '[Content_Types].xml' $utf8.GetBytes($types)
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
 function Get-HostText {
     #     Write-Host の出力（情報ストリーム）も含めて文字列で受け取る
     param([scriptblock] $Body)
