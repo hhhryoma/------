@@ -145,6 +145,10 @@ New-Book (Join-Path $data '工数実績.xlsx') '10月' @('日付', '氏名', 'WB
     , @('2026/10/06', '佐藤', '1.2', '', '8')
     , @('', '', '', '定例会議', '1'))
 
+# 横展開を探す障害（B101 は SCR002 の受注日の日付形式のチェックの障害）
+@('障害番号,機能,障害内容,原因,対策', 'B101,SCR002,受注日に 2028/02/29 を入れると E0004 になる,日付形式のチェックでうるう年を考慮していなかった,日付の共通チェックを直す') |
+    Set-Content -LiteralPath (Join-Path $data '横展開の障害.csv') -Encoding UTF8
+
 # 書き換えるツール用の写し（元のサンプルは変えない）
 $copies = Join-Path $data '書き換え用'
 New-Item -ItemType Directory -Force -Path $copies | Out-Null
@@ -221,6 +225,7 @@ Invoke-Step 'Test-TestSpec（テスト仕様書）' '13_テスト仕様書.xlsx'
 Invoke-Step 'Test-TestEvidence（エビデンス）' '13c_エビデンス.xlsx' 'ケース別のエビデンスの場所のリンクで画像が開く。No.1 と No.3 に同じ画像の使い回しの警告がある。エビデンスの無いケースのリンクで、テスト仕様書の該当セルが開く' { param($o) & (& $t 'Test-TestEvidence.ps1') -Path (Join-Path $data 'テスト') -EvidencePath (Join-Path $data 'エビデンス') -OutXlsx $o }
 Invoke-Step 'New-TestSpecDraft（テスト仕様書の下書き）' '13b_テスト仕様書の下書き.xlsx' '一覧と画面ごと（SCR001〜SCR003）のシート。期待結果にメッセージの文言が入り、そのまま書き足せる（列幅・折り返し）' { param($o) & (& $t 'New-TestSpecDraft.ps1') $design -OutXlsx $o }
 Invoke-Step 'Measure-DefectRemoval（工程別の摘出）' '14_工程別の摘出.xlsx' '工程別のシートのパレート図が表示される' { param($o) & (& $t 'Measure-DefectRemoval.ps1') -BugList (Join-Path $data '障害管理表.xlsx') -Findings (Join-Path $data 'レビュー') -OutXlsx $o }
+Invoke-Step 'Find-SimilarDefects（横展開の候補）' '14b_横展開の候補.xlsx' '横展開の候補のシートに、受注日と同じ日付の項目（受注日（From）・希望納品日など）が並び、候補の箇所のリンクで画面設計書の該当行が開く。14b_横展開の依頼.txt を Copilot に貼り付けられる' { param($o) & (& $t 'Find-SimilarDefects.ps1') -BugList (Join-Path $data '横展開の障害.csv') -DesignPath $design -OutXlsx $o -OutPrompt (Join-Path $OutDir '14b_横展開の依頼.txt') }
 Invoke-Step 'Measure-ReviewEffectiveness（レビューの効き目）' '15_レビューの効き目.xlsx' '設計書別のシートのグラフが表示される' { param($o) & (& $t 'Measure-ReviewEffectiveness.ps1') -Findings (Join-Path $data 'レビュー') -BugList (Join-Path $data '障害管理表.xlsx') -DesignPath $design -AsOf '2026-10-20' -OutXlsx $o }
 Invoke-Step 'Compare-ReviewFindings（AI と人の指摘）' '16_AIと人の指摘.xlsx' '観点表への反映案のシートの B〜G 列が観点表と同じ並び' { param($o) & (& $t 'Compare-ReviewFindings.ps1') (Join-Path $data 'AIのレビュー結果.xlsx') (Join-Path $data 'レビュー') -OutXlsx $o }
 
