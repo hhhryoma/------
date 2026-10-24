@@ -38,7 +38,7 @@ $kindNames = @{ Message = 'メッセージ'; Screen = '画面'; Table = 'テー�
 # メッセージのリソース・設定のファイル（ソースと同じく、ID がどこかに書いてあれば実装にあるとみなす）
 $resourceLanguage = @{ Name = '設定'; Ext = @('.properties', '.yml', '.yaml', '.ini', '.conf', '.cfg', '.toml', '.json', '.resx'); Line = @('#', ';'); Block = $null }
 # SQL のテーブル名とみなさない名前
-$sqlIgnore = @('DUAL', 'SELECT', 'SET', 'VALUES', 'WHERE', 'LATERAL', 'UNNEST', 'TABLE', 'ONLY', 'IF', 'EXISTS', 'NOWAIT', 'WAIT', 'OF', 'SKIP')
+$sqlIgnore = @('DUAL', 'SELECT', 'SET', 'VALUES', 'WHERE', 'LATERAL', 'UNNEST', 'TABLE', 'ONLY', 'IF', 'EXISTS', 'NOWAIT', 'WAIT', 'OF', 'SKIP', 'ON')
 
 # ---------------------------------------------------------------- 設計書の ID を読む
 
@@ -158,9 +158,10 @@ foreach ($p in $SourcePath) {
 $files.Sort([System.Comparison[object]] { param($a, $b) [string]::Compare($a.Relative, $b.Relative, [System.StringComparison]::OrdinalIgnoreCase) })
 
 $tokenRx = New-Object System.Text.RegularExpressions.Regex('[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*')
-# SQL のテーブル（FROM・JOIN・UPDATE・TABLE と、INSERT・MERGE などの INTO の後ろの名前。.sql と MyBatis などの .xml のほかは、大文字の SQL の行だけ）。
-# SELECT … INTO・FETCH … INTO の後ろ（PL/SQL の変数）と、FOR UPDATE の後ろ（NOWAIT など）は見ない。INSERT の後ろのヒント（/*+ APPEND */）は飛ばす
-$sqlUpdateInto = '(?<!\bFOR\s+)UPDATE|(?<=\b(?:INSERT|MERGE|REPLACE|IGNORE)\s*(?:/\*.*?\*/\s*)?)INTO'
+# SQL のテーブル（FROM・JOIN・UPDATE・TABLE と、INSERT・MERGE などの INTO の後ろの名前。.sql と MyBatis などの .xml のほかは、大文字の SQL だけ）。
+# SELECT … INTO・FETCH … INTO の後ろ（PL/SQL の変数）と、FOR UPDATE・ON UPDATE CASCADE・ON DUPLICATE KEY UPDATE・FOR NO KEY UPDATE の後ろは見ない。
+# INSERT の後ろのヒント（/*+ APPEND */）は飛ばす
+$sqlUpdateInto = '(?<!\b(?:FOR|ON|KEY)\s+)UPDATE|(?<=\b(?:INSERT|MERGE|REPLACE|IGNORE)\s*(?:/\*.*?\*/\s*)?)INTO'
 $sqlName = '\s+(?:[A-Za-z_][A-Za-z0-9_$#]*\.)?([A-Za-z_][A-Za-z0-9_$#]*)'
 $sqlRxAny = New-Object System.Text.RegularExpressions.Regex(('\b(?:FROM|JOIN|TABLE|{0}){1}' -f $sqlUpdateInto, $sqlName), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
 $sqlRxUpper = New-Object System.Text.RegularExpressions.Regex(('\b(?:FROM|JOIN|{0}){1}' -f $sqlUpdateInto, $sqlName))
@@ -177,16 +178,19 @@ function Add-Undefined {
 
 $readErrors = 0
 foreach ($entry in $files) {
-    try { $source = Measure-SourceLines $entry.Info.FullName $entry.Language }
+    try { $source = Measure-SourceLines $entry.Info.FullName $entry.Language -CodeText }
     catch { $readErrors++; Write-Warning ("ソースを読めません: {0} : {1}" -f $entry.Info.FullName, $_.Exception.Message); continue }
     $extension = $entry.Info.Extension.ToLowerInvariant()
     $isSql = @('.sql', '.pls', '.pks', '.pkb') -contains $extension
     # .xml は、MyBatis・iBATIS の SQL のファイル（mapper・sqlMap）だけ小文字の SQL も見る（ほかの .xml の英文の from を拾わない）
     if ($extension -eq '.xml') { $isSql = @($source.CodeLines | Where-Object { $_.Text -match '<(mapper|sqlMap)\b' }).Count -gt 0 }
+    # 行の後ろのコメント（// …・/* … */・-- … など）の ID も見ない（コメントに残した古い ID を「使っている」に数えない）
+    $hits = New-Object System.Collections.Generic.List[object]
     foreach ($line in $source.CodeLines) {
         $hit = [pscustomobject]@{ File = $entry.Info.Name; Relative = $entry.Relative; Path = $entry.Info.FullName; Line = $line.No; Text = $line.Text }
+        $hits.Add($hit)
         $found = @{}
-        foreach ($m in $tokenRx.Matches($line.Text)) {
+        foreach ($m in $tokenRx.Matches($line.CodeText)) {
             $token = $m.Value
             $upper = $token.ToUpperInvariant()
             if ($found.ContainsKey($upper)) { continue }
@@ -205,17 +209,29 @@ foreach ($entry in $files) {
                 if ($columnKeys.ContainsKey($bare)) { foreach ($c in $columnKeys[$bare]) { $c.Hits.Add($hit) } }
             }
         }
-        if ($Kind -contains 'Table') {
-            $rx = $sqlRxUpper
-            if ($isSql) { $rx = $sqlRxAny }
-            $sqlText = $line.Text
+    }
+    if ($Kind -contains 'Table' -and $hits.Count -gt 0) {
+        # .sql と MyBatis などの .xml は、コメントの行を除いた行をつないで見る（FROM と次の行のテーブル名、INSERT と次の行の INTO など）。
+        # ほかのファイル（Java の文字列の SQL・設定ファイルなど）は行をまたがない（行の間に、空白でない「|」を挟む）
+        $rx = $sqlRxUpper
+        $separator = "`n|"
+        if ($isSql) { $rx = $sqlRxAny; $separator = "`n" }
+        $starts = New-Object 'System.Collections.Generic.List[int]'
+        $joined = New-Object System.Text.StringBuilder
+        foreach ($line in $source.CodeLines) {
+            $starts.Add($joined.Length)
+            $sqlText = $line.CodeText
             if ($extension -eq '.xml') { $sqlText = $xmlTagRx.Replace($sqlText, ' ') }
-            foreach ($m in $rx.Matches($sqlText)) {
-                $name = $m.Groups[1].Value
-                $upper = $name.ToUpperInvariant()
-                if ($defined['Table'].Contains($upper) -or $sqlIgnore -contains $upper -or $columnNames.Contains($upper)) { continue }
-                Add-Undefined 'Table' $name $hit
-            }
+            [void]$joined.Append($sqlText).Append($separator)
+        }
+        $at = 0
+        foreach ($m in $rx.Matches($joined.ToString())) {
+            # テーブル名のある行
+            while ($at + 1 -lt $starts.Count -and $starts[$at + 1] -le $m.Groups[1].Index) { $at++ }
+            $name = $m.Groups[1].Value
+            $upper = $name.ToUpperInvariant()
+            if ($defined['Table'].Contains($upper) -or $sqlIgnore -contains $upper -or $columnNames.Contains($upper)) { continue }
+            Add-Undefined 'Table' $name $hits[$at]
         }
     }
 }
@@ -318,10 +334,11 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 #       実装に無い（警告）: 設計書の ID がソースのどこにも無い（使っていないか、ID の書き間違い）。カラムは情報
 #       設計書に無い（警告）: ソースに、設計書の ID と同じ形（E0001 なら英字 E と数字 4 桁）の ID があるが、設計書に無い。
-#                         テーブルは、SQL の FROM・JOIN・UPDATE と、INSERT・MERGE などの INTO の後ろの名前（.sql と MyBatis などの .xml のほかは、大文字の SQL だけ）
+#                         テーブルは、SQL の FROM・JOIN・UPDATE と、INSERT・MERGE などの INTO の後ろの名前
+#                         （行をまたいでも見る。.sql と MyBatis などの .xml のほかは、大文字の SQL だけ）
 #
 #     ID は単語として探します（大文字小文字は区別しない）。テーブル・カラムは、_ を除いた名前（orderNo・TOrder など）でも見つけます。
-#     コメントだけの行（//・/* */・--・# など。言語ごとの書き方は Measure-CodeSize.ps1 と同じ）は見ません。
+#     コメント（//・/* */・--・# など。言語ごとの書き方は Measure-CodeSize.ps1 と同じ）は、コメントだけの行も、行の後ろのコメントも見ません。
 #
 # .PARAMETER DesignPath
 #     設計書のフォルダまたはファイル（メッセージ一覧・画面一覧・画面設計書・テーブル定義書。複数可）。

@@ -37,6 +37,40 @@ Test-Case 'ExcelTools: Export-Workbook は日付（datetime）を日付のセル
     Assert-Equal ([string](([datetime]'2026-11-02') - [datetime]'1899-12-30').TotalDays) ([string]$sheet.Rows[2]['A']) '日付はシリアル値（文字ではない）'
 }
 
+Test-Case 'ExcelTools: Measure-SourceLines の CodeText は、行の後ろのコメントと行の中のブロックコメントを除く（文字列の中の // や # は残す。行の数え方は変わらない）' {
+    $dir = New-TestDir
+    # コメントの行数 / ステップの行の行番号 / ステップの行の CodeText（空白は 1 つにそろえる）
+    $measure = {
+        param([string] $Name, [string[]] $Lines)
+        $path = Join-Path $dir $Name
+        [System.IO.File]::WriteAllText($path, (($Lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        $m = Measure-SourceLines $path (Get-SourceLanguage ([System.IO.Path]::GetExtension($Name))) -CodeText
+        '{0} / {1} / {2}' -f $m.Comment, (@($m.CodeLines | ForEach-Object { $_.No }) -join ','), (@($m.CodeLines | ForEach-Object { $_.CodeText -replace '\s+', ' ' }) -join ' | ')
+    }
+    Assert-Equal '1 / 1,2,3 / error("E0001"); } | String u = "http://x/#a"; int y = 2; | forward("SCR001");' (& $measure 'A.java' @(
+            'error("E0001"); } // E0002',
+            'String u = "http://x/#a"; /* E0003 */ int y = 2;',
+            '/* E0004 */ forward("SCR001"); /* E0005',
+            'E0006 */')) 'Java'
+    Assert-Equal '1 / 1,2 / SELECT ''--'' AS A FROM T_ORDER | SELECT 1 FROM DUAL;' (& $measure 'a.sql' @(
+            "SELECT '--' AS A FROM T_ORDER -- T_ORDR",
+            'SELECT 1 /* T_X */ FROM DUAL;',
+            '-- T_Y')) 'SQL'
+    Assert-Equal '1 / 1,2 / x = "#E0001" | y = ''a#b''' (& $measure 'a.py' @(
+            'x = "#E0001"  # E0002',
+            "y = 'a#b'",
+            '# E0003')) 'Python'
+    Assert-Equal '2 / 1,2,3 / MsgBox "E0001" | x = 1 : | REMARK = "it''s"' (& $measure 'A.vb' @(
+            'MsgBox "E0001" '' E0002',
+            'x = 1 : REM E0003',
+            'REMARK = "it''s"',
+            ''' E0004',
+            'REM E0005')) 'VB（REM は単語の始まりだけ）'
+    Assert-Equal '1 / 2 / echo "E0001 # x"' (& $measure 'a.sh' @(
+            '#!/bin/sh',
+            'echo "E0001 # x" # E0002')) 'シェル'
+}
+
 Test-Case 'ExcelTools: Measure-SourceLines は、文字列と行コメントの中の /* をコメントの始まりにせず、1 行の中のブロックコメントをすべて見る' {
     $dir = New-TestDir
     # コメントの行数と、ステップの行の行番号

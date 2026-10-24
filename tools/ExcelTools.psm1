@@ -1412,15 +1412,15 @@ function Read-TableDesign {
 # ---------------------------------------------------------------- ソースコードを読む（Measure-CodeSize・Test-CodeTrace）
 
 
-# 言語ごとのコメントの書き方（行コメント・ブロックコメントの開始と終了）と、ブロックコメントのある言語の文字列の囲み（Quote。中の /* や // はコメントにしない）
+# 言語ごとのコメントの書き方（行コメント・ブロックコメントの開始と終了）と、文字列の囲み（Quote。中の /* や // や # はコメントにしない）
 $script:SourceLanguages = @(
     @{ Name = 'C 系'; Ext = @('.c', '.h', '.cpp', '.hpp', '.cc', '.cs', '.java', '.js', '.jsx', '.ts', '.tsx', '.go', '.kt', '.kts', '.swift', '.scala', '.groovy', '.dart', '.rs', '.css', '.scss', '.less'); Line = @('//'); Block = @('/*', '*/'); Quote = @('"', "'", '`') }
     @{ Name = 'PHP'; Ext = @('.php'); Line = @('//', '#'); Block = @('/*', '*/'); Quote = @('"', "'") }
     @{ Name = 'SQL'; Ext = @('.sql', '.pls', '.pks', '.pkb'); Line = @('--'); Block = @('/*', '*/'); Quote = @("'", '"') }
-    @{ Name = 'VB'; Ext = @('.vb', '.vbs', '.bas', '.cls', '.frm'); Line = @("'", 'REM '); Block = $null }
-    @{ Name = 'Python'; Ext = @('.py'); Line = @('#'); Block = $null }
+    @{ Name = 'VB'; Ext = @('.vb', '.vbs', '.bas', '.cls', '.frm'); Line = @("'", 'REM '); Block = $null; Quote = @('"') }
+    @{ Name = 'Python'; Ext = @('.py'); Line = @('#'); Block = $null; Quote = @('"', "'") }
     @{ Name = 'Ruby'; Ext = @('.rb'); Line = @('#'); Block = @('=begin', '=end'); Quote = @('"', "'") }
-    @{ Name = 'シェル'; Ext = @('.sh', '.bash', '.pl'); Line = @('#'); Block = $null }
+    @{ Name = 'シェル'; Ext = @('.sh', '.bash', '.pl'); Line = @('#'); Block = $null; Quote = @('"', "'") }
     @{ Name = 'PowerShell'; Ext = @('.ps1', '.psm1', '.psd1'); Line = @('#'); Block = @('<#', '#>'); Quote = @('"', "'") }
     # HTML・XML の文の ' や " は囲みではない（Don't など）
     @{ Name = 'HTML・XML'; Ext = @('.html', '.htm', '.xml', '.xhtml', '.jsp', '.aspx', '.vue', '.cshtml'); Line = @(); Block = @('<!--', '-->') }
@@ -1440,8 +1440,10 @@ function Get-SourceLanguage {
 function Measure-SourceLines {
     #     1 ファイルの行を、空行・コメント・ステップ（コメント以外の行）に分ける。
     #     文字列（言語の Quote で囲んだもの）と行コメントの中の /* などはブロックコメントの始まりにせず、1 行の中のブロックコメントはすべて見る（閉じなければ次の行もコメント）
-    #     戻り値: @{ Lines; Blank; Comment; Steps; Code = ステップの行（前後の空白を除いた文字）の一覧; CodeLines = ステップの行の @{ No（行番号）; Text } の一覧 }
-    param([string] $FilePath, $Language)
+    #     CodeText なら、すべての行を左から見て、行の後ろのコメントと行の中のブロックコメントを除いた文字も作る（遅くなるので、要るときだけ）
+    #     戻り値: @{ Lines; Blank; Comment; Steps; Code = ステップの行（前後の空白を除いた文字）の一覧;
+    #               CodeLines = ステップの行の @{ No（行番号）; Text; CodeText（CodeText のときだけ） } の一覧 }
+    param([string] $FilePath, $Language, [switch] $CodeText)
     $text = Read-TextFile $FilePath
     $lines = $text -split "\r\n|\n|\r"
     if ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines = $lines[0..($lines.Count - 2)] }
@@ -1449,16 +1451,20 @@ function Measure-SourceLines {
     $code = New-Object System.Collections.Generic.List[string]
     $codeLines = New-Object System.Collections.Generic.List[object]
     $lineMarks = @($Language.Line)
-    # ブロックコメントのある言語: 行コメント・ブロックコメントの始まり・文字列（\ の後ろの文字は囲みの終わりにしない。閉じなければ行の終わりまで）を探す
+    # ブロックコメントか文字列の囲みのある言語: 行コメント（REM など英字のものは単語の始まりだけ）・ブロックコメントの始まり・
+    # 文字列（\ の後ろの文字は囲みの終わりにしない。閉じなければ行の終わりまで）を探す
     $open = $null; $close = $null; $markRx = $null
-    if ($Language.Block) {
-        $open = $Language.Block[0]; $close = $Language.Block[1]
+    if ($Language.Block -or $Language.Quote) {
         $alts = New-Object System.Collections.Generic.List[string]
-        if ($lineMarks.Count -gt 0) { $alts.Add(('(?<line>(?i:{0}))' -f ((@($lineMarks | ForEach-Object { [regex]::Escape($_) })) -join '|'))) }
-        $alts.Add(('(?<open>{0})' -f [regex]::Escape($open)))
+        if ($lineMarks.Count -gt 0) { $alts.Add(('(?<line>(?i:{0}))' -f ((@($lineMarks | ForEach-Object { if ($_ -match '^\w') { '(?<!\w)' + [regex]::Escape($_) } else { [regex]::Escape($_) } })) -join '|'))) }
+        if ($Language.Block) {
+            $open = $Language.Block[0]; $close = $Language.Block[1]
+            $alts.Add(('(?<open>{0})' -f [regex]::Escape($open)))
+        }
         foreach ($q in $Language.Quote) { $alts.Add(('{0}(?:[^{0}\\]|\\.)*{0}?' -f [regex]::Escape($q))) }
         $markRx = New-Object System.Text.RegularExpressions.Regex(($alts.ToArray() -join '|'))
     }
+    $keep = [bool]$CodeText
     $inBlock = $false
     $no = 0
     foreach ($raw in $lines) {
@@ -1467,14 +1473,20 @@ function Measure-SourceLines {
             # 固定形式の COBOL: 7 桁目が * か / ならコメント
             if (-not $raw.Trim()) { $blank++ }
             elseif ($raw.Length -ge 7 -and ($raw[6] -eq '*' -or $raw[6] -eq '/')) { $comment++ }
-            else { $code.Add($raw.Trim()); $codeLines.Add([pscustomobject]@{ No = $no; Text = $raw.Trim() }) }
+            else {
+                $code.Add($raw.Trim())
+                if ($keep) { $codeLines.Add([pscustomobject]@{ No = $no; Text = $raw.Trim(); CodeText = $raw.Trim() }) } else { $codeLines.Add([pscustomobject]@{ No = $no; Text = $raw.Trim() }) }
+            }
             continue
         }
         $t = $raw.Trim()
         if (-not $t) { $blank++; continue }
         $isCode = $false
-        if ($inBlock -or ($open -and $t.IndexOf($open, [System.StringComparison]::Ordinal) -ge 0)) {
-            # 左から順に、ブロックコメントの中なら終わりを、外なら行コメント・ブロックコメントの始まり・文字列を探す。コメントの外の文字（文字列も）があればステップ
+        $outside = $null
+        if ($markRx -and ($keep -or $inBlock -or ($open -and $t.IndexOf($open, [System.StringComparison]::Ordinal) -ge 0))) {
+            # 左から順に、ブロックコメントの中なら終わりを、外なら行コメント・ブロックコメントの始まり・文字列を探す。コメントの外の文字（文字列も）があればステップ。
+            # CodeText なら、コメントの外の文字をつなぐ（コメントは空白 1 つにする）
+            if ($keep) { $outside = New-Object System.Text.StringBuilder }
             $i = 0
             while ($i -lt $t.Length) {
                 if ($inBlock) {
@@ -1487,9 +1499,13 @@ function Measure-SourceLines {
                 $m = $markRx.Match($t, $i)
                 $stop = $t.Length
                 if ($m.Success) { $stop = $m.Index }
-                if (-not $isCode -and $stop -gt $i -and $t.Substring($i, $stop - $i).Trim()) { $isCode = $true }
+                if ($stop -gt $i) {
+                    if ($keep) { [void]$outside.Append($t, $i, $stop - $i) }
+                    if (-not $isCode -and $t.Substring($i, $stop - $i).Trim()) { $isCode = $true }
+                }
                 if (-not $m.Success -or $m.Groups['line'].Success) { break }
-                if ($m.Groups['open'].Success) { $inBlock = $true } else { $isCode = $true }
+                if ($m.Groups['open'].Success) { $inBlock = $true; if ($keep) { [void]$outside.Append(' ') } }
+                else { $isCode = $true; if ($keep) { [void]$outside.Append($m.Value) } }
                 $i = $m.Index + $m.Length
             }
         }
@@ -1498,7 +1514,12 @@ function Measure-SourceLines {
             $isCode = $true
             foreach ($mark in $lineMarks) { if ($t.StartsWith($mark, [System.StringComparison]::OrdinalIgnoreCase)) { $isCode = $false; break } }
         }
-        if ($isCode) { $code.Add($t); $codeLines.Add([pscustomobject]@{ No = $no; Text = $t }) } else { $comment++ }
+        if (-not $isCode) { $comment++; continue }
+        $code.Add($t)
+        if (-not $keep) { $codeLines.Add([pscustomobject]@{ No = $no; Text = $t }); continue }
+        $kept = $t
+        if ($null -ne $outside) { $kept = $outside.ToString().Trim() }
+        $codeLines.Add([pscustomobject]@{ No = $no; Text = $t; CodeText = $kept })
     }
     return [pscustomobject]@{ Lines = $lines.Count; Blank = $blank; Comment = $comment; Steps = $code.Count; Code = $code; CodeLines = $codeLines }
 }
