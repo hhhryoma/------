@@ -50,9 +50,11 @@ $commonImageCases = 4
 
 function ConvertTo-CaseKey {
     #     テストID・シート名・ファイル名・目印を比べる形。全角・半角と大文字小文字をそろえ、前に付けた「■」「No.」「ケース」「テストID:」と
-    #     空白を除き、数字の前の 0 を除く（UT-001 と UT-1、No.01 と 1 を同じにする）
+    #     空白を除き、数字の前の 0 を除く（UT-001 と UT-1、No.01 と 1 を同じにする）。
+    #     数字の後ろの丸数字（UT-001①・UT-001 ② など）は「_1」「_2」にする（全角・半角をそろえると前の数字とつながり、UT-0011 になるため）
     param([string] $Text)
-    $t = ([string]$Text).Normalize($nfkc).ToUpperInvariant().Trim()
+    $t = [regex]::Replace([string]$Text, '(?<=\d\s*)[①-⑳⑴-⒇⒈-⒛]', [System.Text.RegularExpressions.MatchEvaluator] { param($m) '_' + ($m.Value.Normalize($nfkc) -replace '\D', '') })
+    $t = $t.Normalize($nfkc).ToUpperInvariant().Trim()
     $t = $t -replace '^[■□●◆◇▼▽★☆※#【\[(]+\s*', ''
     $t = $t -replace '^(テストケース|テスト|ケース|試験|確認)?(ID|NO\.?|番号)?\s*[:.]?\s*(?=\d)', ''
     $t = $t -replace '^(テストケース|テスト|ケース|試験|確認)?(ID|NO\.?|番号)\s*:\s*', ''
@@ -133,6 +135,56 @@ foreach ($c in $cases) {
     $caseInfo.Add($info)
 }
 
+function Find-CaseCandidates {
+    #     名前（シート名・ファイル名・目印）に合うケースの候補。テストID、機能とテストID をつないだもの（SCR001_UT-001 など）、
+    #     後ろの「_2」「(2)」「②」を除いたもの（同じケースの 2 枚目）、最後の「_」・空白のあと（受注一覧_No1 など。前が機能の名前のものだけ）の順に探す。
+    #     Strict なら、テストID と、後ろの番号を除いたものだけで探し、数字だけの名前（1・01 など）は見ない
+    param([string] $Name, [switch] $Strict)
+    $key = ConvertTo-CaseKey $Name
+    if (-not $key -or ($Strict -and ([string]$Name).Normalize($nfkc).Trim() -match '^\d+$')) { return @() }
+    foreach ($k in @($key, ($key -replace '[_\-(]\d+\)?$', ''))) {
+        if (-not $k) { continue }
+        if ($byKey.ContainsKey($k)) { return $byKey[$k].ToArray() }
+        if ($byQualified.ContainsKey($k) -and -not $Strict) { return $byQualified[$k].ToArray() }
+    }
+    if ($Strict) { return @() }
+    $parts = @(([string]$Name).Normalize($nfkc).Trim() -split '[_\s]+' | Where-Object { $_ })
+    if ($parts.Count -lt 2) { return @() }
+    $tailKey = ConvertTo-CaseKey $parts[-1]
+    if (-not $byKey.ContainsKey($tailKey)) { return @() }
+    $head = ($parts[0..($parts.Count - 2)] -join '_').ToUpperInvariant()
+    return @($byKey[$tailKey] | Where-Object { @($_.Words | Where-Object { $head.Contains($_) }).Count -gt 0 })
+}
+
+function Find-PlaceCandidates {
+    #     ファイルの置き場所に合うケースの候補。フォルダの名前（ケースごとのフォルダ。UT-001\1.png など）、合わなければファイルの名前。
+    #     Strict は Find-CaseCandidates と同じ
+    param($File, [switch] $Strict)
+    $found = @(Find-CaseCandidates $File.Directory.Name -Strict:$Strict)
+    if ($found.Count -eq 0) { $found = @(Find-CaseCandidates ([System.IO.Path]::GetFileNameWithoutExtension($File.Name)) -Strict:$Strict) }
+    return $found
+}
+
+# エビデンスの置き場所にあるファイル（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）の表は、
+# テスト仕様書ではなく、エビデンスの中の表（確認した項目の一覧など）。そのケースを除き、ファイルはエビデンスとして読む
+# （-EvidencePath を省くと、テスト仕様書と同じ場所のエビデンスのブックも、テスト仕様書として読むため）。
+# 分けたテスト仕様書（数字の名前のフォルダ・受注一覧_2.xlsx など）を除かないよう、名前はテストID そのものだけを見る（Strict）
+$evidenceFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($p in @($caseInfo | ForEach-Object { $_.Case.Place.Path } | Select-Object -Unique)) {
+    if (@(Find-PlaceCandidates (Get-Item -LiteralPath $p) -Strict | Where-Object { $_.Case.Place.Path -ne $p }).Count -gt 0) { [void]$evidenceFiles.Add($p) }
+}
+if ($evidenceFiles.Count -gt 0) {
+    $isEvidence = [System.Predicate[object]] { param($i) $evidenceFiles.Contains($i.Case.Place.Path) }
+    $evidenceNames = @($caseInfo | Where-Object { $evidenceFiles.Contains($_.Case.Place.Path) } | ForEach-Object { $_.Case.Place.File })
+    [void]$caseInfo.RemoveAll($isEvidence)
+    foreach ($index in @($byKey, $byQualified)) {
+        foreach ($k in @($index.Keys)) { [void]$index[$k].RemoveAll($isEvidence); if ($index[$k].Count -eq 0) { $index.Remove($k) } }
+    }
+    # 読み取り結果からも除く（同じ名前のファイルに残すケースがあれば除かない）
+    $specNames = @($caseInfo | ForEach-Object { $_.Case.Place.File })
+    [void]$readLog.RemoveAll([System.Predicate[object]] { param($l) $evidenceNames -contains $l.File -and $specNames -notcontains $l.File })
+}
+
 # テスト仕様書の表のあるシート（ブックのパス|シート名 → そのシートのケース。行の順）。表の中の画像は、その行のケースのエビデンスにする
 $specPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 $tableSheets = @{}
@@ -140,25 +192,6 @@ foreach ($info in $caseInfo) {
     $p = $info.Case.Place
     [void]$specPaths.Add($p.Path)
     if ($p.Sheet) { Add-ToIndex $tableSheets ($p.Path + '|' + $p.Sheet) $info }
-}
-
-function Find-CaseCandidates {
-    #     名前（シート名・ファイル名・目印）に合うケースの候補。テストID、機能とテストID をつないだもの（SCR001_UT-001 など）、
-    #     後ろの「_2」「(2)」を除いたもの（同じケースの 2 枚目）、最後の「_」・空白のあと（受注一覧_No1 など。前が機能の名前のものだけ）の順に探す
-    param([string] $Name)
-    $key = ConvertTo-CaseKey $Name
-    if (-not $key) { return @() }
-    foreach ($k in @($key, ($key -replace '[_\-(]\d+\)?$', ''))) {
-        if (-not $k) { continue }
-        if ($byKey.ContainsKey($k)) { return $byKey[$k].ToArray() }
-        if ($byQualified.ContainsKey($k)) { return $byQualified[$k].ToArray() }
-    }
-    $parts = @(([string]$Name).Normalize($nfkc).Trim() -split '[_\s]+' | Where-Object { $_ })
-    if ($parts.Count -lt 2) { return @() }
-    $tailKey = ConvertTo-CaseKey $parts[-1]
-    if (-not $byKey.ContainsKey($tailKey)) { return @() }
-    $head = ($parts[0..($parts.Count - 2)] -join '_').ToUpperInvariant()
-    return @($byKey[$tailKey] | Where-Object { @($_.Words | Where-Object { $head.Contains($_) }).Count -gt 0 })
 }
 
 # ---------------------------------------------------------------- エビデンスを読む
@@ -216,14 +249,6 @@ function Set-UnitCase {
     $chosen = @(Select-Case $Candidates $Unit)
     if ($chosen.Count -eq 1) { Add-UnitCase $Unit $chosen[0] }
     else { $Unit.Candidates = $chosen }
-}
-
-function Find-PlaceCandidates {
-    #     ファイルの置き場所に合うケースの候補。フォルダの名前（ケースごとのフォルダ。UT-001\1.png など）、合わなければファイルの名前
-    param($File)
-    $found = @(Find-CaseCandidates $File.Directory.Name)
-    if ($found.Count -eq 0) { $found = @(Find-CaseCandidates ([System.IO.Path]::GetFileNameWithoutExtension($File.Name))) }
-    return $found
 }
 
 function Get-FileHashText {
@@ -659,7 +684,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 #     エビデンスとケースは、次のように結び付けます（テストID は全角・半角、No.・■ などの印、数字の前の 0 を除いて比べます）。
 #
-#       シート名・ファイル名・フォルダ名がテストID（UT-001・No.1・SCR001_UT-001・UT-001_2（2 枚目）・受注一覧_No1 など）
+#       シート名・ファイル名・フォルダ名がテストID（UT-001・No.1・SCR001_UT-001・UT-001_2 と UT-001②（2 枚目）・受注一覧_No1 など）
 #       ブックの名前がテストID なら、ブック全体がそのケースのエビデンス
 #       シートの中の目印（行のいちばん左のセルの「■UT-001」「【No.1】」「テストID: UT-001」など）から次の目印までの画像
 #       テスト仕様書の表の中に貼った画像（その行のケース）

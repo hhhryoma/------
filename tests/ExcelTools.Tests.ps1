@@ -18,6 +18,10 @@ Test-Case 'ExcelTools: Group-InOrder は、まとまりを最初に出てきた�
     Assert-Equal 0 @(@() | Group-InOrder Process).Count
 }
 
+Test-Case 'ExcelTools: Get-TestResultKind は、結果の丸（○ 記号・〇 漢数字・◯ 大きな丸）をどれも OK にする' {
+    Assert-Equal @('OK', 'OK', 'OK', 'OK', 'NG', '対象外', '保留', '未実施') @(@('OK', '○', '〇', '◯', '×', '-', '保留', '') | ForEach-Object { Get-TestResultKind $_ })
+}
+
 Test-Case 'ExcelTools: Export-Workbook は日付（datetime）を日付のセルとして書き、Search-Excel では yyyy/MM/dd で読める' {
     $path = Join-Path (New-TestDir) '日付.xlsx'
     Export-Workbook -FilePath $path -Sheets @(@{ Name = '予定'; Columns = @(@{ Header = '開始'; Width = 12 }, @{ Header = '工数'; Width = 6 }, @{ Header = 'メモ'; Width = 10 }); Rows = @(@{ Values = @([datetime]'2026-11-02', 1.5, '2026/11/03') }) })

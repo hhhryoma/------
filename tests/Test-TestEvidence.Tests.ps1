@@ -194,6 +194,57 @@ Test-Case 'Test-TestEvidence: エビデンスは、サブフォルダのもの�
     Assert-Equal @('1.png', 'UT-2.png') @(2..($units.Rows.Count) | ForEach-Object { $units.Rows[$_]['A'] })
 }
 
+Test-Case 'Test-TestEvidence: 名前の後ろの丸数字（UT-001①・UT-001②）は、UT-001_1・UT-001_2 と同じく、そのケースのエビデンスにする' {
+    $dir = New-TestDir
+    $spec = Join-Path $dir 'UT_受注一覧.xlsx'
+    New-SheetsBook $spec ([ordered]@{ 'テストケース' = @(
+            @('テストID', '確認内容', '結果'),
+            @('UT-001', '一覧が表示される', 'OK'),
+            @('UT-002', '検索できる', 'OK'),
+            @('UT-011', '削除できる', 'OK'),
+            @('UT-012', '印刷できる', 'OK')) })
+    $ev = Join-Path $dir 'エビデンス'
+    # 丸数字をそのまま数字にすると、UT-0011・UT-0012（UT-011・UT-012 と同じ）になる。空白を挟んだもの（UT-001 ③）も同じ
+    New-EvidencePng (Join-Path $ev 'UT-001①.png') 'Screen'
+    New-EvidencePng (Join-Path $ev 'UT-001②.png') 'Screen'
+    New-EvidencePng (Join-Path $ev 'UT-001 ③.png') 'Screen'
+    New-EvidencePng (Join-Path $ev 'UT-002_①.png') 'New'
+    New-EvidencePng (Join-Path $ev 'UT-011.png') 'Old'
+    New-EvidencePng (Join-Path $ev 'UT-012.png') 'Retake'
+    $out = Join-Path $dir 'check.xlsx'
+    $issues = @(& $EvidenceTool -Path $spec -EvidencePath $ev -OutXlsx $out 6>$null)
+    Assert-Equal @() (Get-IssueKeys $issues)
+    $units = Read-XlsxSheet -Path $out -Index 3
+    Assert-Equal @('UT-001 ③.png|UT-001', 'UT-001①.png|UT-001', 'UT-001②.png|UT-001', 'UT-002_①.png|UT-002', 'UT-011.png|UT-011', 'UT-012.png|UT-012') @(2..($units.Rows.Count) | ForEach-Object { '{0}|{1}' -f $units.Rows[$_]['A'], $units.Rows[$_]['F'] })
+}
+
+Test-Case 'Test-TestEvidence: ケースのフォルダのブックの表（確認した項目など）は、エビデンスの置き場所を省いても、テスト仕様書として読まない' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir 'UT_受注一覧.xlsx') ([ordered]@{ 'テストケース' = @(@('テストID', '確認内容', '結果'), @('UT-001', '一覧が表示される', 'OK'), @('UT-002', '検索できる', 'OK')) })
+    # UT-001 のフォルダのエビデンスのブック。画面のハードコピーの上に、確認した項目の表（No・確認内容・結果）がある
+    New-Item -ItemType Directory -Path (Join-Path $dir 'エビデンス/UT-001') | Out-Null
+    $book = Join-Path $dir 'エビデンス/UT-001/エビデンス.xlsx'
+    New-SheetsBook $book ([ordered]@{ '画面' = @(@('No', '確認内容', '結果'), @('1', '一覧が表示されること', 'OK')) })
+    Add-TestDrawing -Path $book -Sheet 1 -Items @(@{ Kind = 'pic'; Name = '画面'; Png = 'Screen'; From = @(0, 4); To = @(6, 14) })
+    New-EvidencePng (Join-Path $dir 'エビデンス/UT-002.png') 'Old'
+    $issues = @(& $EvidenceTool -Path $dir 6>$null)
+    Assert-Equal @() (Get-IssueKeys $issues)
+    $text = Get-HostText { & $EvidenceTool -Path $dir | Out-Null }
+    Assert-Match $text 'テストケース 2 件（実施済み 2 件）: エビデンスあり 2 件・無し 0 件・不要 0 件'
+    Assert-Match $text 'エビデンス: ブック 1・画像 1（画像 2 枚）'
+    Assert-Match $text '読み取り（テスト仕様書）: 1 ファイル・2 行'
+
+    # 分けたテスト仕様書（数字の名前のフォルダに置いたもの・名前の後ろに番号を付けて No. を続けたもの）は、どれもテスト仕様書として読む
+    $dir = New-TestDir
+    foreach ($n in @('1', '2')) {
+        New-Item -ItemType Directory -Path (Join-Path $dir $n) | Out-Null
+        New-SheetsBook (Join-Path $dir "$n/UT.xlsx") ([ordered]@{ 'ケース' = @(@('No', '確認内容', '結果'), @('1', '確認 1', 'OK'), @('2', '確認 2', 'OK')) })
+    }
+    New-SheetsBook (Join-Path $dir '受注一覧_1.xlsx') ([ordered]@{ 'ケース' = @(@('機能', 'No', '結果'), @('受注一覧', '1', 'OK'), @('受注一覧', '2', 'OK')) })
+    New-SheetsBook (Join-Path $dir '受注一覧_2.xlsx') ([ordered]@{ 'ケース' = @(@('機能', 'No', '結果'), @('受注一覧', '3', 'OK'), @('受注一覧', '4', 'OK')) })
+    Assert-Match (Get-HostText { & $EvidenceTool -Path $dir | Out-Null }) 'テストケース 8 件'
+}
+
 Test-Case 'Test-TestEvidence: Get-Help でヘルプが表示される' {
     $h = Get-Help $EvidenceTool
     Assert-Match $h.Synopsis 'エビデンス'
