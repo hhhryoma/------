@@ -62,6 +62,23 @@ Test-Case 'New-GlossaryDraft: -OutCsv の用語集は Test-ExcelTerms.ps1 の -G
     Assert-True (@($book.Links | Where-Object { $_.Target -like '*基本設計書.xlsx' -and $_.Location -eq "'概要'!A2" }).Count -gt 0) '最初の場所へのリンク'
 }
 
+Test-Case 'New-GlossaryDraft: 半角カタカナは全角にして数えて用語にせず、中黒の並びは 1 語ずつ数え、-Exclude は表記ゆれと大文字小文字の違いも除く' {
+    $dir = New-TestDir
+    $rows = @(, @('説明'))
+    foreach ($s in @('ﾊﾟｽﾜｰﾄﾞを入れる', 'ﾊﾟｽﾜｰﾄﾞの桁', 'パスワードを変える', 'ｷｰﾜｰﾄﾞで探す', 'ｷｰﾜｰﾄﾞを足す', 'ｷｰﾜｰﾄﾞを消す',
+            'ﾛｸﾞを出す', 'ﾛｸﾞを見る', 'ﾛｸﾞを消す', 'ログを出す', 'ログを見る', 'ログを消す',
+            'ユーザー・グループ・ロールを選ぶ', 'ユーザー・グループ・ロールを消す', 'ユーザー・グループの順', 'ユーザーを足す',
+            'サーバに置く', 'サーバに送る', 'サーバを止める', 'サーバーを選ぶ', 'CSV で出す', 'CSV を読む', 'csv の形')) { $rows += , @($s) }
+    New-SheetsBook (Join-Path $dir '基本設計書.xlsx') ([ordered]@{ '概要' = $rows })
+    $terms = @(& $GlossaryTool $dir -Kind Katakana 6>$null)
+    Assert-Equal @('サーバ|4|サーバー（1）', 'ユーザー|4|', 'キーワード|3|ｷｰﾜｰﾄﾞ（3）', 'グループ|3|', 'パスワード|3|ﾊﾟｽﾜｰﾄﾞ（2）') @($terms | ForEach-Object { '{0}|{1}|{2}' -f $_.Term, $_.Count, $_.Variants }) 'ﾛｸﾞ（全角で 2 文字）は数えない。ユーザー・グループ・ロールは 1 語ずつ（ロールは 2 回）'
+    $csv = Join-Path $dir '用語集.csv'
+    $null = & $GlossaryTool $dir -Kind Katakana -Exclude 'サーバー' -OutCsv $csv 6>$null
+    $lines = @([System.IO.File]::ReadAllLines($csv))
+    Assert-Equal @('"正しい表記","揺れ","備考"', '"パスワード","ﾊﾟｽﾜｰﾄﾞ","パスワード（1）・ﾊﾟｽﾜｰﾄﾞ（2）"', '"キーワード","ｷｰﾜｰﾄﾞ","ｷｰﾜｰﾄﾞ（3）"') $lines '-Exclude サーバー はサーバ（表記ゆれ）も除く。半角カタカナしか無いものは全角を用語にする'
+    Assert-Equal @() @(& $GlossaryTool $dir -Kind Abbreviation -Exclude 'csv' 6>$null | ForEach-Object { $_.Term }) '-Exclude は大文字小文字を区別しない'
+}
+
 Test-Case 'New-GlossaryDraft: -IncludeWord で Word の文書の言葉も数える' {
     $dir = New-TestDir
     New-WordDoc (Join-Path $dir '要件定義書.docx') @('ログインユーザーを確認する', 'ログインユーザの権限', 'ログインユーザーの一覧')
