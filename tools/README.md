@@ -16,6 +16,7 @@
 | [Test-ScreenNumbers.ps1](#test-screennumbersps1) | 画面レイアウトのスクリーンショットに重ねた丸数字（①・No.5 など）を、画面項目定義の No と突き合わせる。無い番号・重なった番号と、前の版と比べて No がずれたのに直していない丸数字を見つける（Excel 不要） |
 | [Test-Screenshots.ps1](#test-screenshotsps1) | 設計書に貼った画面のスクリーンショットが、元のワイヤーフレーム（Excel）より古くなっていないかを確かめる。貼り替えたあとに記録し、元の印刷範囲の中が変わると「元が更新された」と知らせる（Excel 不要。設計書は変更しない） |
 | [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
+| [Export-DesignDiagram.ps1](#export-designdiagramps1) | イベント定義の遷移先から画面遷移図を、テーブル定義書の外部キーから ER 図を作り、Mermaid（Markdown）と Excel の図形（四角と矢印）で保存する。遷移先・参照先の書き間違いも見つける（Excel 不要） |
 | [New-TestData.ps1](#new-testdataps1) | テーブル定義書から、テーブルごとの CSV と INSERT 文のテストデータを作る。主キー・外部キー・コード値と、桁数の最大・最小・NULL の行も作る（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる。Word（.docx）の設計書も段落・表の行で比べる） |
 | [Compare-SharePointVersion.ps1](#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの 2 つの版（バージョン履歴）を取り出して比べ、差分の画面を開く（版は Excel で取り出す） |
@@ -63,7 +64,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Test-CodeTrace.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`New-WbsDraft.ps1` は `Measure-DesignSize.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Export-DesignDiagram.ps1`・`New-TestData.ps1`・`Test-CodeTrace.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`New-WbsDraft.ps1` は `Measure-DesignSize.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Start-ExcelTools.ps1（画面）
 
@@ -1502,6 +1503,73 @@ m_other                       定義書にないテーブル テーブル定義�
 - DB との比較は列（型・桁数・NULL）だけで、主キー・インデックス・外部キーは比べません
 - Oracle の DROP TABLE は、テーブルが無いとエラーになります。SQL Server の `DROP TABLE IF EXISTS` は 2016 以降、コメントは `dbo` スキーマに付けます
 - 作った DDL は、実行する前に内容を確かめてください
+
+## Export-DesignDiagram.ps1
+
+設計書から**画面遷移図**と **ER 図**を作ります。Excel は不要です。
+画面遷移図は、画面設計書のイベント定義の「遷移先」から作ります。ER 図は、テーブル定義書の外部キーから作ります。図は Mermaid（Markdown）と Excel の図形（四角と矢印）で保存します。設計書を直したら作り直せるので、図と設計書の食い違いがなくなります。
+
+```powershell
+.\Export-DesignDiagram.ps1 D:\設計書 -OutMarkdown D:\図.md -OutXlsx D:\図.xlsx
+```
+
+```
+Kind     From           To         Label
+----     ----           --         -----
+画面遷移 SCR001         SCR002     新規登録
+画面遷移 SCR001         SCR003     受注番号リンク
+画面遷移 SCR002         SCR003     登録
+画面遷移 SCR002         SCR001     戻る
+…
+外部キー T_ORDER        M_CUSTOMER CUSTOMER_CD
+外部キー T_ORDER_DETAIL T_ORDER    ORDER_NO
+外部キー T_ORDER_DETAIL M_PRODUCT  PRODUCT_CD
+
+画面遷移図: 画面 3・遷移 6、ER 図: テーブル 4・外部キー 3
+```
+
+### 読むもの
+
+| 図 | 読むもの |
+| --- | --- |
+| 画面遷移図 | 画面一覧（「画面ID」の右に「画面名」の見出しがある表）の画面と、画面設計書のイベント定義の「遷移先」。遷移先には画面 ID（`SCR002`・`SCR002（受注登録）`）か画面名を書く。矢印のラベルはイベント名 |
+| ER 図 | テーブル定義書のテーブルと、カラムの外部キー（参照先のテーブル・カラム。[Export-TableDdl.ps1](#export-tableddlps1) と同じ見出しで読む） |
+
+- 遷移先の画面が画面一覧に無いとき・外部キーの参照先のテーブルがテーブル定義書に無いときは警告し、図には点線の四角で入れます（書き間違いや一覧の直し忘れ）
+- どこからも遷移してこない画面と、外部キーの関連の無いテーブルも知らせます
+
+### 図
+
+- **Mermaid**（`-OutMarkdown`）: 画面遷移図は `flowchart`、ER 図は `erDiagram` です。VS Code（Mermaid の拡張機能）・GitHub・Mermaid Live Editor などで図として見られます。ER 図のカラムは、`-Columns Key`（既定。主キーと外部キー）・`All`・`None` で選べます
+- **Excel の図形**（`-OutXlsx`）: 四角と矢印で描きます。矢印は四角に付けているので、四角を動かすと矢印も付いてきます
+  - 画面遷移図は、遷移の元から先へ左から右に並べます。両向きの遷移は、両端に矢じりのある 1 本の矢印にし、ラベルに「→ 新規登録」「← 戻る」と書きます
+  - ER 図は、参照されるテーブル（マスタなど）を左に、参照するテーブルを右に並べます。矢印は外部キーの参照先に向けます
+  - 右の列の四角は、左の列でつながる四角と同じ高さに寄せます
+
+`-OutXlsx` のシート:
+
+| シート | 内容 |
+| --- | --- |
+| 画面遷移図 | 画面の四角と遷移の矢印（図形） |
+| 画面遷移 | 遷移元・イベント・遷移先の一覧（イベント定義の行へのリンク付き） |
+| ER図 | テーブルの四角と外部キーの矢印（図形） |
+| 外部キー | テーブル・カラム・参照先の一覧（テーブル定義書の行へのリンク付き） |
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 設計書のフォルダまたはファイル（画面一覧・画面設計書・テーブル定義書。複数可） |
+| `-Kind` | 作る図（`ScreenFlow`: 画面遷移図・`ER`: ER 図）。既定は両方 |
+| `-Columns` | ER 図に書くカラム（`Key`: 主キーと外部キー（既定）・`All`: すべて・`None`: 書かない） |
+| `-OutMarkdown` | Mermaid の図を Markdown（.md）に保存する |
+| `-OutXlsx` | Excel の図形の図と一覧を保存する |
+| `-Headers` | テーブル定義書の見出しの候補の CSV（既定は `tools\ddl\テーブル定義書の見出し.csv`） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb の設計書は読まない） |
+
+### 注意
+
+- Excel の図の並びは目安です。四角は動かせるので、見やすく並べ直してください（矢印の交差は避けていません）
+- 遷移先の欄の無い遷移（処理概要の文の中だけに書いた遷移）は読みません
 
 ## New-TestData.ps1
 

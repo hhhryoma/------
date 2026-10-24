@@ -115,6 +115,14 @@
             Kinds = @{ OutFile = 'SaveFile' }; Extensions = @{ OutFile = '.sql' }
             Required = @('Path'); Output = @('OutFile', 'OutXlsx'); OutputName = 'DDL'; Open = @('OutXlsx'); Keywords = 'SQL テーブル'
         }
+        @{
+            Id = 'Diagram'; Label = '画面遷移図・ER 図を作る'; Group = '設計書を作る・直す'; Tool = 'Export-DesignDiagram.ps1'
+            Summary = 'イベント定義の遷移先から画面遷移図を、テーブル定義書の外部キーから ER 図を作ります。Excel の図形（四角と矢印）と Mermaid（Markdown）で保存し、遷移先・参照先の書き間違いも知らせます。'
+            Main = @('Path', 'Kind', 'OutXlsx', 'OutMarkdown')
+            Labels = @{ Path = '設計書のフォルダ'; Kind = '作る図（選ばなければ両方）'; OutXlsx = 'Excel の図の保存先'; OutMarkdown = 'Mermaid（Markdown）の保存先' }
+            Extensions = @{ OutMarkdown = '.md' }
+            Required = @('Path'); Output = @('OutXlsx', 'OutMarkdown'); OutputName = '画面遷移図とER図'; Open = @('OutXlsx'); Keywords = '画面遷移図 ER図 図 Mermaid 外部キー 遷移'
+        }
 
         # ---------------------------------------------------------------- 変わったところを見る
         @{
