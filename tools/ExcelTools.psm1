@@ -1888,13 +1888,22 @@ function ConvertTo-NameKey {
 }
 
 function ConvertTo-DateValue {
-    #     日付の文字（2026/10/1・2026-10-01・2026年10月1日・10/1）を日付にする（無ければ $null）。年の無い日付は AsOf の年
+    #     日付の文字（2026/10/1・2026-10-01・2026年10月1日・令和8年10月1日・R8.10.1・10/1）を日付にする（無ければ $null）。
+    #     年の無い日付は AsOf の年
     param([string] $Text, [datetime] $AsOf = (Get-Date))
     $t = ([string]$Text).Normalize($script:Nfkc).Trim()
     if (-not $t) { return $null }
     $m = [regex]::Match($t, '(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})')
     try {
         if ($m.Success) { return New-Object DateTime ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value), ([int]$m.Groups[3].Value) }
+        # 和暦（令和・平成・昭和と R・H・S。元年も）
+        $m = [regex]::Match($t, '(令和|平成|昭和|(?<![A-Za-z])[RHSrhs])\s*(元|\d{1,2})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})')
+        if ($m.Success) {
+            $base = @{ '令' = 2018; 'R' = 2018; '平' = 1988; 'H' = 1988; '昭' = 1925; 'S' = 1925 }[$m.Groups[1].Value.Substring(0, 1).ToUpperInvariant()]
+            $year = 1
+            if ($m.Groups[2].Value -ne '元') { $year = [int]$m.Groups[2].Value }
+            return New-Object DateTime ($base + $year), ([int]$m.Groups[3].Value), ([int]$m.Groups[4].Value)
+        }
         $m = [regex]::Match($t, '^(\d{1,2})\s*[/月]\s*(\d{1,2})日?$')
         if ($m.Success) { return New-Object DateTime $AsOf.Year, ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value) }
     }
@@ -2072,11 +2081,14 @@ function Update-SheetDimension {
 }
 
 function Get-NameVersion {
-    #     ファイル名・フォルダ名の版数（_v1.2・Ver1.2・第1.2版）を比べられる形（System.Version）にする。版数が無ければ $null
+    #     ファイル名・フォルダ名の版数（_v1.2・Ver1.2・第1.2版）を比べられる形（System.Version）にする。版数が無ければ $null。
+    #     「第2回」「第3章」は版数にしない
     param([string] $Name)
-    $m = [regex]::Match($Name.Normalize($script:Nfkc).ToLowerInvariant(), '(?:(?<![a-z])v(?:er)?\.?\s*|第\s*)(\d+(?:\.\d+){0,3})')
+    $m = [regex]::Match($Name.Normalize($script:Nfkc).ToLowerInvariant(), '(?<![a-z])v(?:er)?\.?\s*(\d+(?:\.\d+){0,3})|第\s*(\d+(?:\.\d+){0,3})\s*版')
     if (-not $m.Success) { return $null }
-    $parts = @($m.Groups[1].Value.Split('.') | ForEach-Object { [int]$_ })
+    $text = $m.Groups[1].Value
+    if (-not $text) { $text = $m.Groups[2].Value }
+    $parts = @($text.Split('.') | ForEach-Object { [int]$_ })
     while ($parts.Count -lt 4) { $parts += 0 }
     return New-Object System.Version($parts[0], $parts[1], $parts[2], $parts[3])
 }
@@ -2084,7 +2096,7 @@ function Get-NameVersion {
 function Get-NameVersionText {
     #     ファイル名・フォルダ名の版数の部分（v1.2・Ver1.2・第1.2版）。版数が無ければ名前（拡張子を除く）
     param([string] $Name)
-    $m = [regex]::Match($Name, '(?:(?<![A-Za-z])[vVｖＶ](?:[eE][rR])?\.?\s*|第\s*)[\d０-９]+(?:[.．][\d０-９]+){0,3}(?:版)?')
+    $m = [regex]::Match($Name, '(?<![A-Za-z])[vVｖＶ](?:[eE][rR])?\.?\s*[\d０-９]+(?:[.．][\d０-９]+){0,3}|第\s*[\d０-９]+(?:[.．][\d０-９]+){0,3}\s*版')
     if ($m.Success) { return $m.Value.Trim() }
     return [System.IO.Path]::GetFileNameWithoutExtension($Name)
 }
@@ -2092,7 +2104,7 @@ function Get-NameVersionText {
 function Get-VersionlessName {
     #     ファイル名（相対パス）から版数（_v1.0・Ver1.0・第1.0版 など）を除いた形（版数だけが違うファイルどうしを対応付けるため）
     param([string] $Name)
-    return [regex]::Replace($Name.Normalize($script:Nfkc).ToLowerInvariant(), '(?:(?<![a-z])v(?:er)?\.?\s*|第\s*)\d+(?:\.\d+)*(?:版)?', '{v}')
+    return [regex]::Replace($Name.Normalize($script:Nfkc).ToLowerInvariant(), '(?<![a-z])v(?:er)?\.?\s*\d+(?:\.\d+)*(?:版)?|第\s*\d+(?:\.\d+)*\s*版', '{v}')
 }
 
 function ConvertTo-ExcelDate {
