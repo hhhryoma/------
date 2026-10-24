@@ -13,6 +13,7 @@
 | [Replace-Excel.ps1](#replace-excelps1) | 複数の Excel の文字を一括で置換する（Excel 不要。置換する箇所を確認してから書き換える） |
 | [Test-ExcelTerms.ps1](#test-exceltermsps1) | 複数の Excel の表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を見つけ、Replace-Excel 用の置換リストを作る |
 | [Test-DesignConsistency.ps1](#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、桁数・必須の違いなど）を全件見つける。CRUD 図と影響調査も（Excel 不要） |
+| [Test-ScreenNumbers.ps1](#test-screennumbersps1) | 画面レイアウトのスクリーンショットに重ねた丸数字（①・No.5 など）を、画面項目定義の No と突き合わせる。無い番号・重なった番号と、前の版と比べて No がずれたのに直していない丸数字を見つける（Excel 不要） |
 | [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる。Word（.docx）の設計書も段落・表の行で比べる） |
 | [Compare-SharePointVersion.ps1](#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの 2 つの版（バージョン履歴）を取り出して比べ、差分の画面を開く（版は Excel で取り出す） |
@@ -56,7 +57,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Start-ExcelTools.ps1（画面）
 
@@ -1005,6 +1006,72 @@ T_ORDER.DELIVERY_TIME_KBN: 定義 1 か所・一覧 0 か所・参照 3 か所�
 - 処理概要などの文章の中の参照は、「書き方」の正規表現に一致するものだけを見つけます
 - 画面項目の「型」（テキスト・半角英数など）は、カラムのデータ型と書き方が違うので比べません
 - 未使用は、参照を探した種類（参照のルールに当てはまる設計書があったもの）だけを確かめます。カラムは、監査用の列（登録日時など）が多く挙がるため、既定では確かめません
+
+## Test-ScreenNumbers.ps1
+
+画面レイアウトに貼ったスクリーンショットの上に、図形で重ねた**丸数字（①・No.5 など）**を、画面項目定義の No と突き合わせます。
+項目を消したり番号を振り直したりしたのに、重ねた番号が古いままになっているものを見つけます。Excel は不要で、**ファイルは変更しません**。
+
+```powershell
+.\Test-ScreenNumbers.ps1 D:\設計書\画面設計書
+.\Test-ScreenNumbers.ps1 D:\設計書\v1.1 -Baseline D:\設計書\v1.0 -OutXlsx D:\画面の番号.xlsx   # 前の版と比べて、No のずれも見る
+```
+
+```
+File                                      Location           Level  Detail
+----                                      --------           -----  ------
+DD02_画面設計書_SCR002_受注登録_v1.1.xlsx 画面レイアウト!G7  警告   No 2 の番号が 2 か所にあります（楕円 2: C7、楕円 3: G7）
+DD02_画面設計書_SCR002_受注登録_v1.1.xlsx 画面レイアウト!C13 警告   重ねた番号 ④（楕円 4）が指す項目が、前の版の「支払方法」から「顧客名」に変わりました。「支払方法」は、いまは No 5 です。番号が古いままでないか確かめてください
+DD02_画面設計書_SCR002_受注登録_v1.1.xlsx 画面レイアウト!C17 エラー 重ねた番号 ⑦（楕円 7）は、画面項目定義に無い番号です（画面項目定義の No: 1〜6）
+
+1 ファイルを読みました（番号を重ねたスクリーンショットのあるシート 1・重ねた番号 6 個）
+エラー 1 件 / 警告 2 件 / 情報 0 件
+```
+
+場所（Location）は、重ねた番号の図形の中心にあるセルです。
+
+### チェック項目
+
+| 項目 | 区分 | 見つけるもの |
+| --- | --- | --- |
+| 定義に無い番号 | エラー | 重ねた番号が、画面項目定義の No に無い（項目を消した・番号を振り直したのに、番号が古いまま） |
+| 番号の重複 | 警告 | 同じスクリーンショットの上に、同じ番号が 2 つ以上ある（図形を写して数字を直し忘れたなど。わざと付けることもあるので警告） |
+| 指す項目の変化 | 警告 | `-Baseline` の前の版と比べて、同じ場所に重ねた番号が指す項目が変わった（途中に項目を足して No がずれたのに、番号を直していない。重ねた図形の文字は変わらないので、差分を見ても気づきにくい） |
+| 定義なし | 情報 | この画面の画面項目定義が見つからない・決まらないため、確かめていない |
+| 前の版なし | 情報 | `-Baseline` に同じ画面が見つからないため、指す項目の変化を確かめていない |
+
+### 読む番号
+
+- スクリーンショット（画像）の上に重ねた図形のうち、**番号だけを書いたもの**を読みます。①〜㊿・❶〜❿・⑴ などの丸数字（⑤⑥ のように並べたものも）と、丸や四角の中の `5`・`(5)`・`【5】`・`No.5`・`#5` です。
+- 説明の文も書いた吹き出し（「⑤ 銀行振込のときだけ表示」など）と、文字の無い枠・矢印は読みません。
+- グループにした図形も読みます。非表示の図形と、スクリーンショットの外の図形（凡例など）は数えません（図形の中心が画像の上にあるかで決めます）。
+- .xlsx / .xlsm の図形を読みます（.xls・.xlsb は図形を読めないため対象外です）。セルに書いた番号（方眼紙で画面を描いたレイアウト）は読みません。
+
+### 画面項目定義の探し方
+
+画面項目定義は、`No`・`項目名`・`桁数` の見出しのある表です（[New-TestSpecDraft.ps1](#new-testspecdraftps1) と同じ読み方。No の列の見出しは `No.`・`項番`・`番号` でもかまいません）。
+スクリーンショットのあるシートごとに、次の順に探します。
+
+1. 同じシートの表
+2. 同じブックの、「画面ID」か「画面名」の欄（見出しの右のセル）が同じシートの表。欄がシートに無いときは、ブックの中で 1 つだけの値を使います
+3. ほかのブックの、画面ID・画面名が同じ表。スクリーンショットのシートの名前が画面名・画面ID と同じものも対応付けます（31 文字で切れたシート名は前の部分で比べます。いくつものブックにある同じ名前のシート（「画面レイアウト」など）は、画面の名前とはみなしません）
+4. 同じブックに 1 つの画面の表しか無ければ、その表
+
+画面項目定義がスクリーンショットと別のブックにあるときは、両方を `-Path` に指定してください。
+
+### 前の版と比べる（`-Baseline`）
+
+- 画面は、版数を除いたファイル名とシート名（`…_v1.0.xlsx` と `…_v1.1.xlsx` の同じシート）、画面ID・画面名、シート名の順に対応付けます。
+- スクリーンショットの中の同じ場所（図形の大きさの半分以内）に重ねた番号どうしを比べ、指す項目（画面項目定義の項目名）が変わっていれば知らせます。⑤ を ⑥ に直して同じ項目を指しているものは、知らせません。
+- 動かした番号は、付け直したものとみなして比べません。
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 画面設計書のフォルダ・ファイル（複数可）。画面項目定義が別のブックにあれば、それも含める |
+| `-Baseline` | 前の版の画面設計書のフォルダ・ファイル（複数可）。同じ場所に重ねた番号が指す項目の変化を見る |
+| `-OutXlsx` | 指摘一覧と、番号の一覧（重ねた番号ごとに、場所・指す項目名・前の版の項目名・結果）を保存する。場所をクリックすると該当セルが開く |
 
 ## Test-Traceability.ps1
 

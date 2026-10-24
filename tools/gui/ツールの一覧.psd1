@@ -72,6 +72,13 @@
             Required = @('Path'); Output = @('OutXlsx'); OutputName = '整合性チェック'; Keywords = 'CRUD 影響調査 参照'
         }
         @{
+            Id = 'ScreenNumbers'; Label = '画面の丸数字を確かめる'; Group = '設計書を作る・直す'; Tool = 'Test-ScreenNumbers.ps1'
+            Summary = '画面レイアウトのスクリーンショットに重ねた丸数字（①・No.5 など）を、画面項目定義の No と突き合わせ、無い番号・重なった番号を見つけます。前の版を指定すると、項目を足して No がずれたのに直していない丸数字も見つけます。'
+            Main = @('Path', 'Baseline', 'OutXlsx')
+            Labels = @{ Path = '画面設計書のフォルダ'; Baseline = '前の版の画面設計書（番号のずれを見るとき）'; OutXlsx = '結果の保存先' }
+            Required = @('Path'); Output = @('OutXlsx'); OutputName = '画面の番号'; Keywords = '丸数字 番号 画面項目 スクリーンショット ワイヤーフレーム'
+        }
+        @{
             Id = 'NewDoc'; Label = '雛形から設計書を作る'; Group = '設計書を作る・直す'; Tool = 'New-DesignDocument.ps1'; Set = 'Create'
             Summary = '一覧（Excel・CSV）の行ごとに、雛形の {{名前}} の欄を埋めた設計書を作ります。'
             Main = @('Template', 'List', 'FileName', 'OutDir')
