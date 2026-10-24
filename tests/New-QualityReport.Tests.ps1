@@ -61,7 +61,7 @@ Test-Case 'New-QualityReport: 各ツールを実行し、指標ごとの実績�
     Assert-True (Test-Path -LiteralPath $report) '品質評価のブック'
     # 設計で入ったバグ B002（SCR002・詳細設計）は、SCR002 の設計書のレビューの見逃し
     Assert-Equal '1|△' $got['レビューで見逃した設計書']
-    Assert-Match $got['設計工程の摘出率'] '^0\.75\|×$' '指摘 3 件 ÷ (3 + 1)'
+    Assert-Equal '1|○' $got['設計工程の摘出率'] '指摘 3 件 ÷ (3 + 0)。B002 はレビューしていない SCR002 のバグなので入れない（レビューで見逃した設計書で知らせる）'
     foreach ($name in @('レビュー.xlsx', 'テスト.xlsx', 'テスト仕様書のチェック.xlsx', '工程別の欠陥.xlsx', 'レビューの効き目.xlsx', '網羅.xlsx', '設計書の整合性.xlsx')) {
         Assert-True (Test-Path -LiteralPath (Join-Path $out "詳細\$name")) "詳細\$name"
     }
@@ -200,6 +200,18 @@ Test-Case 'New-QualityReport: -HistoryCsv に実績を足し、前回の値・�
     $limits = @(& (Join-Path $script:ToolsDir 'New-QualityLimits.ps1') $history 6>$null)
     $l = @($limits | Where-Object { $_.Metric -eq '指摘密度' })[0]
     Assert-Equal 'ページ数|1|0.214' ('{0}|{1}|{2}' -f $l.Unit, $l.Count, $l.Mean)
+}
+
+Test-Case 'New-QualityReport: 設計工程の摘出率に、未レビューの設計書のバグを入れない（Measure-ReviewEffectiveness と同じ）' {
+    $dir = New-TestDir
+    @('設計書,指摘内容,分類,状態', 'SCR001_受注一覧,桁数が違う,誤り,完了', 'SCR001_受注一覧,型が違う,誤り,完了', 'SCR001_受注一覧,イベントの抜け,漏れ,完了', 'SCR001_受注一覧,遷移先の誤り,誤り,完了') | Set-Content -LiteralPath (Join-Path $dir 'findings.csv') -Encoding UTF8
+    @('ファイル,ページ数', 'SCR001_受注一覧.pdf,4', 'SCR002_受注登録.pdf,4') | Set-Content -LiteralPath (Join-Path $dir 'pages.csv') -Encoding UTF8
+    @('設計書,工数', 'SCR001_受注一覧,2') | Set-Content -LiteralPath (Join-Path $dir 'reviewlog.csv') -Encoding UTF8
+    @('障害番号,障害内容,設計書,混入工程,状態', 'B1,一覧のソート順,SCR001_受注一覧,詳細設計,完了', 'B2,登録の桁あふれ,SCR002_受注登録,詳細設計,完了') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $r = @(& $ReportTool -OutDir (Join-Path $dir '報告') -Findings (Join-Path $dir 'findings.csv') -BugList (Join-Path $dir 'bugs.csv') -PageCsv (Join-Path $dir 'pages.csv') -ReviewLog (Join-Path $dir 'reviewlog.csv') -AsOf '2026-10-20' 3>$null 6>$null)
+    $rate = @($r | Where-Object Name -eq '設計工程の摘出率')
+    Assert-Equal 1 $rate.Count
+    Assert-Equal 0.8 $rate[0].Value '指摘 4 件 ÷ (4 + レビューした SCR001 のバグ 1 件)。レビューしていない SCR002 のバグ B2 は入れない'
 }
 
 Test-Case 'New-QualityReport: -Config の設定ファイル（相対パス・| 区切り）で資料を指定し、コマンドの指定を優先する' {

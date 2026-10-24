@@ -74,6 +74,22 @@ if ($NoExcel) { $reviewArgs['NoExcel'] = $true }
 $docs = @(& (Join-Path $PSScriptRoot 'Measure-ReviewQuality.ps1') @reviewArgs 6>$null 3>$null)
 if ($docs.Count -eq 0) { throw 'レビューの指摘管理表から設計書を読めませんでした' }
 
+# 設計書の無い指摘（設計書の列が無いか空。Measure-ReviewQuality.ps1 はこの名前にまとめる）は、どの設計書の指摘にも数えられないので、
+# 件数と、どのファイルの指摘か（指摘管理表を見出しで読み直し、最大 3 つ）を知らせる。バグは対応付けず、ゾーンも付けない
+$noDocument = '（設計書なし）'
+$noDocFindings = ($docs | Where-Object { $_.Document -eq $noDocument } | Measure-Object -Property Findings -Sum).Sum + 0
+if ($noDocFindings -gt 0) {
+    $findingFields = @('設計書', '指摘内容', '状態', '重要度', '分類')
+    $findingCandidates = Read-HeaderCandidates (Join-Path $PSScriptRoot 'review-quality/指摘管理表の見出し.csv') $findingFields
+    $findingInputs = Get-InputFiles $Findings '指摘管理表' -NoRecurse:$NoRecurse 3>$null
+    $findingRecords = Read-HeaderRecords -Inputs $findingInputs -Candidates $findingCandidates -Fields $findingFields -Need @('指摘内容', @('設計書', '状態', '重要度', '分類')) `
+        -Key @('指摘内容') -What '指摘管理表' -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel 3>$null
+    $noDocFiles = @($findingRecords | Where-Object { -not ([string]$_.Values['設計書']).Trim() } | ForEach-Object { $_.File } | Select-Object -Unique)
+    $examples = ''
+    if ($noDocFiles.Count -gt 0) { $examples = ': ' + ((@($noDocFiles | Select-Object -First 3)) -join '・') + $(if ($noDocFiles.Count -gt 3) { ' ほか' } else { '' }) }
+    Write-Warning ('設計書の無い指摘が {0} 件あります。どの設計書の指摘にも数えないため、設計書の指摘密度が低く出ます（指摘管理表に設計書の列を足してください）{1}' -f $noDocFindings, $examples)
+}
+
 # ---------------------------------------------------------------- 設計で入ったバグ
 
 
@@ -85,31 +101,56 @@ $candidates = Read-HeaderCandidates $Headers $fields
 $readLog = New-Object System.Collections.Generic.List[object]
 $records = Read-HeaderRecords -Inputs (Get-InputFiles $BugList '障害管理表' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
     -Need @('障害内容', '混入工程', @('機能', '設計書')) -Key @('障害内容') -What '障害管理表' -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
+
+function Get-TargetName {
+    #     障害管理表の設計書・機能の欄の名前。空と同じ意味の書き方（－・なし・空白 など）は空にする
+    param([string] $Text)
+    $t = ([string]$Text).Trim()
+    if ((ConvertTo-Label $t) -match '^([-ー―‐−–—]+|なし|無し|無|空白|空欄|不明|N/?A)$') { return '' }
+    return $t
+}
+
 $bugs = New-Object System.Collections.Generic.List[object]
+# 混入工程を工程として読めないバグ（数えずに知らせる）
+$unreadPhases = @{}
+$unreadCount = 0
 foreach ($rec in $records) {
     $v = $rec.Values
     if (([string]$v['状態']) -match $excludedPattern) { continue }
-    $phase = Resolve-PhaseName $phaseList $v['混入工程']
+    $injected = ([string]$v['混入工程']).Trim()
+    $phase = Resolve-PhaseName $phaseList $injected
+    if ($injected -and -not $phase) { $unreadPhases[$injected] = $true; $unreadCount++ }
     if (-not $phase -or $designPhaseNames -notcontains $phase.Name) { continue }
-    $target = ([string]$v['設計書']).Trim()
-    if (-not $target) { $target = ([string]$v['機能']).Trim() }
-    $bugs.Add([pscustomobject]@{ Id = @(ConvertTo-BugIds $v['障害ID'])[0]; Content = ([string]$v['障害内容']).Trim(); Target = $target; Phase = $phase.Name; Document = $null; Place = $rec })
+    $docName = Get-TargetName $v['設計書']
+    $funcName = Get-TargetName $v['機能']
+    # Target は表示用（機能・設計書）
+    $target = (@(@($funcName, $docName) | Where-Object { $_ } | Select-Object -Unique)) -join '・'
+    $bugs.Add([pscustomobject]@{ Id = @(ConvertTo-BugIds $v['障害ID'])[0]; Content = ([string]$v['障害内容']).Trim(); DocName = $docName; Function = $funcName; Target = $target; Phase = $phase.Name; Document = $null; Place = $rec })
 }
+if ($unreadCount -gt 0) { Write-Warning ('混入工程を工程として読めないバグ {0} 件は数えていません（工程の CSV の別名に足してください）: {1}' -f $unreadCount, ((@($unreadPhases.Keys) | Sort-Object) -join '、')) }
 
-# バグの設計書・機能を、レビューの設計書に対応付ける（対応表で同じ機能になるもの、同じ名前、どちらかがもう一方を含む名前がただ 1 つ）
+# バグの設計書・機能を、レビューの設計書に対応付ける。設計書の欄、機能の欄の順に、対応表で同じ機能になるもの、同じ名前、
+# どちらかがもう一方を含む名前の順に探し、設計書がただ 1 つに決まったものにする。設計書の欄を含む名前で探すときは、機能も含む
+# 設計書に限る（「画面設計書」のような設計書の種類で、ほかの機能の設計書に対応付けないため）。設計書の無い指摘のまとまりには対応付けない
+$docIndexes = @(for ($i = 0; $i -lt $docs.Count; $i++) { if ($docs[$i].Document -ne $noDocument) { $i } })
 $docKeys = @($docs | ForEach-Object { ConvertTo-NameKey $_.Document })
 $docCanonical = @($docs | ForEach-Object { Resolve-FunctionName $functionNames $_.Document })
 foreach ($b in $bugs) {
-    if (-not $b.Target) { continue }
-    $canonical = Resolve-FunctionName $functionNames $b.Target
-    $hit = @()
-    if ($canonical) { $hit = @(for ($i = 0; $i -lt $docs.Count; $i++) { if ($docCanonical[$i] -eq $canonical) { $i } }) }
-    if ($hit.Count -eq 0) {
-        $key = ConvertTo-NameKey $b.Target
-        $hit = @(for ($i = 0; $i -lt $docs.Count; $i++) { if ($docKeys[$i] -eq $key) { $i } })
-        if ($hit.Count -eq 0) { $hit = @(for ($i = 0; $i -lt $docs.Count; $i++) { if ($docKeys[$i].Contains($key) -or $key.Contains($docKeys[$i])) { $i } }) }
+    foreach ($pair in @(@($b.DocName, $b.Function), @($b.Function, ''))) {
+        if (-not $pair[0] -or $b.Document) { continue }
+        $canonical = Resolve-FunctionName $functionNames $pair[0]
+        $key = ConvertTo-NameKey $pair[0]
+        $also = ConvertTo-NameKey $pair[1]
+        $hit = @()
+        if ($canonical) { $hit = @(foreach ($i in $docIndexes) { if ($docCanonical[$i] -eq $canonical) { $i } }) }
+        if ($hit.Count -ne 1) { $hit = @(foreach ($i in $docIndexes) { if ($docKeys[$i] -eq $key) { $i } }) }
+        if ($hit.Count -ne 1) {
+            $hit = @(foreach ($i in $docIndexes) {
+                    if (($docKeys[$i].Contains($key) -or $key.Contains($docKeys[$i])) -and (-not $also -or $docKeys[$i].Contains($also) -or $also.Contains($docKeys[$i]))) { $i }
+                })
+        }
+        if ($hit.Count -eq 1) { $b.Document = $docs[$hit[0]].Document }
     }
-    if ($hit.Count -eq 1) { $b.Document = $docs[$hit[0]].Document }
 }
 
 # ---------------------------------------------------------------- 設計書ごとの見逃し
@@ -126,6 +167,7 @@ foreach ($d in $docs) {
         $zone = @('', $false, '')
         if ($mine.Count -gt 0) { $zone = @('未レビュー（設計で入ったバグあり）', $true, 'レビューを実施する') }
     }
+    if ($d.Document -eq $noDocument) { $zone = @('', $false, '') }
     $bugDensity = $null
     if ($null -ne $d.Size -and $d.Size -gt 0) { $bugDensity = [math]::Round($mine.Count / $d.Size, 3) }
     $rate = $null
@@ -143,9 +185,12 @@ $results
 
 $matchedBugs = @($bugs | Where-Object { $_.Document })
 $unmatched = @($bugs | Where-Object { -not $_.Document })
-$reviewedFindings = ($results | Where-Object { $_.Reviewed -ne $false } | Measure-Object -Property Findings -Sum).Sum
+# 全体の摘出率は、未レビューの設計書（指摘もバグも）を除いて出す
+$reviewedResults = @($results | Where-Object { $_.Reviewed -ne $false })
+$reviewedFindings = ($reviewedResults | Measure-Object -Property Findings -Sum).Sum + 0
+$reviewedBugs = ($reviewedResults | Measure-Object -Property DesignBugs -Sum).Sum + 0
 $overallRate = $null
-if ($reviewedFindings + $matchedBugs.Count -gt 0) { $overallRate = [math]::Round($reviewedFindings / ($reviewedFindings + $matchedBugs.Count), 3) }
+if ($reviewedFindings + $reviewedBugs -gt 0) { $overallRate = [math]::Round($reviewedFindings / ($reviewedFindings + $reviewedBugs), 3) }
 
 if ($OutXlsx) {
     $docRows = New-Object System.Collections.Generic.List[object]
@@ -182,7 +227,7 @@ if ($OutXlsx) {
 
 Write-Host ''
 Write-Host ('設計書 {0} 件・設計で入ったバグ {1} 件（設計書に対応付けたもの {2} 件）' -f $results.Count, $bugs.Count, $matchedBugs.Count)
-if ($null -ne $overallRate) { Write-Host ('設計工程の摘出率（レビューの指摘 ÷ (指摘 + 設計で入ったバグ)）: {0:0.0}%（指摘 {1} 件・バグ {2} 件）' -f ($overallRate * 100), $reviewedFindings, $matchedBugs.Count) }
+if ($null -ne $overallRate) { Write-Host ('設計工程の摘出率（レビューの指摘 ÷ (指摘 + 設計で入ったバグ)）: {0:0.0}%（指摘 {1} 件・バグ {2} 件）' -f ($overallRate * 100), $reviewedFindings, $reviewedBugs) }
 $zoned = @($results | Where-Object { $_.Zone })
 if ($zoned.Count -gt 0) { Write-Host ('ゾーン: {0}' -f ((@($zoned | Group-InOrder Zone | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・')) }
 foreach ($r in @($results | Where-Object NeedsAction)) { Write-Host ('  要対応: {0}（{1}。バグ {2}）{3}' -f $r.Document, $r.Zone, $r.BugIds, $r.Action) }

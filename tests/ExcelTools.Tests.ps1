@@ -129,3 +129,9 @@ Test-Case 'ExcelTools: 版数は「第1.1版」を読み「第2回」は読ま�
     Assert-Equal @('2026/10/15', '2019/05/01', '2026/10/15', '2018/04/01', '2019/04/30', '2026/01/02', '2018/04/01', '2026/10/15') @($dates) '元号の合字（㋿・㍻）も、Windows PowerShell 5.1 で読む'
     Assert-True ($null -eq (ConvertTo-DateValue 'VER8.1.2')) '英字の後ろの R・H・S は和暦にしない'
 }
+
+Test-Case 'ExcelTools: Resolve-PhaseName は、「コードレビュー」のように別名に書いた名前はそのまま読み、「詳細設計レビュー」は「レビュー」を除いて読む' {
+    $phases = Read-PhaseList (Join-Path $script:ToolsDir 'test-quality/工程.csv')
+    $names = @(@('コードレビュー', '詳細設計レビュー', 'DDレビュー', '製造工程', 'UT', '設計', '') | ForEach-Object { $p = Resolve-PhaseName $phases $_; if ($p) { $p.Name } else { '（読めない）' } })
+    Assert-Equal @('製造', '詳細設計', '詳細設計', '製造', '単体テスト', '（読めない）', '（読めない）') $names
+}

@@ -64,6 +64,39 @@ Test-Case 'Measure-DefectRemoval: 混入工程 × 摘出工程から、工程ご
     Assert-True (@($leak.Links | Where-Object { $_.Location -like "'障害'!B*" }).Count -eq 3) '障害管理表の行へのリンク'
 }
 
+Test-Case 'Measure-DefectRemoval: 工程の CSV の摘出すべき工程は別名（UT・DD など）でも読み、工程として読めなければ知らせる' {
+    $dir = New-TestDir
+    @('工程,別名,摘出すべき工程',
+        '基本設計,BD,基本設計',
+        '詳細設計,DD,DD',
+        '製造,PG,UT',
+        '単体テスト,UT,単体テスト',
+        '結合テスト,IT,謎の工程') | Set-Content -LiteralPath (Join-Path $dir '工程.csv') -Encoding UTF8
+    @('障害番号,障害内容,混入工程,摘出工程,状態',
+        'B1,一覧の件数が違う,製造,単体テスト,完了',
+        'B2,排他制御の記載漏れ,詳細設計,結合テスト,完了',
+        'B3,連携の順番の誤り,結合テスト,結合テスト,完了') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $text = Get-HostText { $script:phases = @(& $DefectTool -BugList (Join-Path $dir 'bugs.csv') -Phases (Join-Path $dir '工程.csv') -WarningVariable script:defectWarnings -WarningAction SilentlyContinue) }
+    Assert-Equal @('詳細設計|1|0|1', '製造|1|1|0', '単体テスト|0|0|0', '結合テスト|1|1|0') @($script:phases | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Phase, $_.Injected, $_.FoundInTime, $_.Leaked }) '製造で入った B1 は、摘出すべき工程の UT（単体テスト）までに見つかった'
+    Assert-Match $text '設計で入り、テストで見つかった欠陥: 1 件（詳細設計 1）' '摘出すべき工程が DD（詳細設計）の詳細設計も、設計の工程'
+    Assert-True (@($script:defectWarnings | Where-Object { "$_" -match '摘出すべき工程.*謎の工程' }).Count -eq 1) ('読めない摘出すべき工程を知らせる: ' + (@($script:defectWarnings) -join ' | '))
+}
+
+Test-Case 'Measure-DefectRemoval: 設計で入り、後の工程のレビュー（詳細設計レビュー・コードレビュー）で見つかった欠陥は、テストで見つかった欠陥に数えない' {
+    $dir = New-TestDir
+    @('障害番号,障害内容,混入工程,摘出工程,状態',
+        'B1,一覧の件数が違う,製造,単体テスト,完了',
+        'B2,排他制御の記載漏れ,詳細設計,結合テスト,完了') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    @('指摘内容,工程,混入工程,分類,状態',
+        '画面遷移の誤り,詳細設計レビュー,基本設計,誤り,完了',
+        '項目の漏れ,詳細設計レビュー,基本設計,漏れ,完了',
+        'NULL の扱いが設計書に無い,コードレビュー,詳細設計,漏れ,完了') | Set-Content -LiteralPath (Join-Path $dir 'findings.csv') -Encoding UTF8
+    $text = Get-HostText { & $DefectTool -BugList (Join-Path $dir 'bugs.csv') -Findings (Join-Path $dir 'findings.csv') | Out-Null }
+    Assert-NotMatch $text '工程として読めない値' '「コードレビュー」は工程の CSV の製造の別名'
+    Assert-Match $text '摘出すべき工程までに見つかった欠陥: 1 / 5 件（20\.0%）。流出 4 件'
+    Assert-Match $text '設計で入り、テストで見つかった欠陥: 1 件（詳細設計 1）' '詳細設計レビュー・コードレビューで見つかったものは数えない'
+}
+
 Test-Case 'Measure-DefectRemoval: Get-Help でヘルプが表示される' {
     $h = Get-Help $DefectTool
     Assert-Match $h.Synopsis '混入工程'
