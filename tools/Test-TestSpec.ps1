@@ -239,9 +239,9 @@ if ($DesignPath) {
 
 
 function Test-MessageText {
-    #     テストに書いた文言が、メッセージ一覧の文言（{0} などは何かの文字）と合うか。空白と最後の「。」の違いは見ない
+    #     テストに書いた文言が、メッセージ一覧の文言（{0} などは何かの文字）と合うか。全角・半角、空白と最後の「。」の違いは見ない
     param([string] $Template, [string] $Text)
-    $strip = { param($t) ($t -replace '\s', '').TrimEnd('。') }
+    $strip = { param($t) ($t.Normalize($nfkc) -replace '\s', '').TrimEnd('。') }
     $pattern = [regex]::Escape((& $strip $Template)) -replace '\\\{\d+\}', '.+?'
     return (& $strip $Text) -match ('^' + $pattern + '$')
 }

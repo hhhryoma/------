@@ -1046,8 +1046,9 @@ $script:Nfkc = [System.Text.NormalizationForm]::FormKC
 function Read-ScreenDesign {
     #     画面設計書の画面項目定義・イベント定義と、コード定義書・メッセージ一覧を読む（Books は ConvertTo-DesignBooks の結果）。
     #     画面項目定義・イベント定義は、「画面ID」の欄のあるシートだけを読む（AnySheet を付けると、欄の無いシートも読み、Screen は空）
-    #     戻り値: @{ Items（画面項目。No は No の列の値、Input は入力のある項目、DigitsText は桁数の欄の文字）; Events（イベント）; Codes（コード区分名 → 表示名の一覧）;
-    #             Messages（メッセージID（大文字）→ @{ Text; File; Sheet; Row }） }
+    #     戻り値: @{ Items（画面項目。No は No の列の値、Input は入力のある項目、Digits は桁数（読めなければ $null）、DigitsText は桁数の欄の文字）; Events（イベント）;
+    #             Codes（コード区分名 → 表示名の一覧）; Messages（メッセージID（大文字）→ @{ Text（一覧の文言のまま）; File; Sheet; Row }）;
+    #             MessageIdPattern（メッセージID の形の正規表現。^ と $ は付けない） }
     #     画面項目・イベントの HeaderRow・Columns は、表の見出しの行と、見出し（ConvertTo-Label 済み）→ 列番号
     param($Books, [switch] $AnySheet)
     $nfkc = [System.Text.NormalizationForm]::FormKC
@@ -1056,7 +1057,8 @@ function Read-ScreenDesign {
     $codes = @{}
     $messages = @{}
     # メッセージID の形（E0001・MSG-E001・MSG_001 など。英字と数字の間を - や _ で区切ってもよい）
-    $messageIdPattern = '^[A-Z]+(?:[_\-][A-Z]+)*[_\-]?\d+$'
+    $messageIdShape = '[A-Z]+(?:[_\-][A-Z]+)*[_\-]?\d+'
+    $messageIdPattern = '^{0}$' -f $messageIdShape
     foreach ($book in $Books.Values) {
         foreach ($sheetName in $book.Sheets.Keys) {
             $grid = $book.Sheets[$sheetName]
@@ -1074,9 +1076,10 @@ function Read-ScreenDesign {
             foreach ($t in (Find-DesignTables $grid @('メッセージID', 'メッセージ') 'メッセージID')) {
                 foreach ($dr in $t.Rows) {
                     $id = ([string]$dr.Cells[$t.ColumnOf['メッセージID']]).Normalize($nfkc).Trim().ToUpperInvariant()
-                    $text = ([string]$dr.Cells[$t.ColumnOf['メッセージ']]).Normalize($nfkc).Trim()
+                    # 文言は画面に出るとおりに使うので、全角・半角をそろえない（全角の「？」を「?」にしない）
+                    $text = ([string]$dr.Cells[$t.ColumnOf['メッセージ']]).Trim()
                     # 画面設計書のメッセージ欄（ID だけを書いた列）は文言ではない
-                    if ($id -notmatch $messageIdPattern -or -not $text -or $text -match $messageIdPattern -or $messages.ContainsKey($id)) { continue }
+                    if ($id -notmatch $messageIdPattern -or -not $text -or $text.Normalize($nfkc) -match $messageIdPattern -or $messages.ContainsKey($id)) { continue }
                     $messages[$id] = [pscustomobject]@{ Text = $text; File = $book.File; Sheet = $sheetName; Row = $dr.Row }
                 }
             }
@@ -1088,17 +1091,22 @@ function Read-ScreenDesign {
             # 画面項目定義
             foreach ($t in (Find-DesignTables $grid @('項目名', '桁数') '項目名')) {
                 $cell = { param($dr, $name) if ($t.ColumnOf.ContainsKey($name)) { ([string]$dr.Cells[$t.ColumnOf[$name]]).Normalize($nfkc).Trim() } else { '' } }
+                # 初期値は期待結果などにそのまま書く文言なので、全角・半角をそろえない（「システム日付－30日」の －）
+                $rawCell = { param($dr, $name) if ($t.ColumnOf.ContainsKey($name)) { ([string]$dr.Cells[$t.ColumnOf[$name]]).Trim() } else { '' } }
                 $noCol = Find-NoColumn $t.ColumnOf
                 foreach ($dr in $t.Rows) {
                     $io = & $cell $dr '入出力'
                     $digits = & $cell $dr '桁数'
+                    # 桁数: 数が 1 つの書き方（20・全角20・20バイト・20文字）はその数、「7,2」（全体と小数の桁数）は全体の 7。範囲（10-20）や「可変」は読まない
+                    $digitCount = $null
+                    if ($digits -match '^\D*?(\d+)(?:\s*,\s*\d{1,2})?\D*$') { $digitCount = [int]$Matches[1] }
                     $no = ''
                     if ($noCol) { $no = ([string]$dr.Cells[$noCol]).Normalize($nfkc).Trim() }
                     $items.Add([pscustomobject]@{
                             Screen = $screen; ScreenName = $screenName; No = $no; Item = ([string]$dr.Cells[$t.ColumnOf['項目名']]).Trim(); ItemId = (& $cell $dr '項目ID')
                             Kind = (& $cell $dr '区分'); Io = $io; Input = (-not $t.ColumnOf.ContainsKey('入出力') -or $io -match 'I')
-                            Type = (& $cell $dr '型'); Digits = $(if ($digits -match '^\d+$') { [int]$digits } else { $null }); DigitsText = $digits
-                            Required = ((& $cell $dr '必須') -match '^(○|〇|◯|必須|要|Y|YES|1)$'); Initial = (& $cell $dr '初期値')
+                            Type = (& $cell $dr '型'); Digits = $digitCount; DigitsText = $digits
+                            Required = ((& $cell $dr '必須') -match '^(○|〇|◯|●|◎|✓|✔|必須|要|Y|YES|1)$'); Initial = (& $rawCell $dr '初期値')
                             Checks = (& $cell $dr '入力チェック'); Note = (& $cell $dr '備考')
                             File = $book.File; Path = $book.Path; Sheet = $sheetName; Row = $dr.Row; HeaderRow = $t.HeaderRow; Columns = $t.ColumnOf
                         })
@@ -1117,7 +1125,7 @@ function Read-ScreenDesign {
             }
         }
     }
-    return [pscustomobject]@{ Items = $items; Events = $events; Codes = $codes; Messages = $messages }
+    return [pscustomobject]@{ Items = $items; Events = $events; Codes = $codes; Messages = $messages; MessageIdPattern = $messageIdShape }
 }
 
 function Find-NoColumn {
