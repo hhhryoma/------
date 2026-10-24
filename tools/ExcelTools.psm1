@@ -1152,6 +1152,166 @@ function Find-DesignTables {
     return , $tables
 }
 
+# ---------------------------------------------------------------- テーブル定義書を読む（Export-TableDdl・New-TestData）
+
+
+function Read-TableHeaderCandidates {
+    #     テーブル定義書の見出しの候補の CSV（tools\ddl\テーブル定義書の見出し.csv）を読む。物理名・データ型の行が無ければ例外
+    #     戻り値: 項目 → ConvertTo-Label 済みの候補の配列（CSV に無い項目は空の配列）
+    param([string] $FilePath)
+    $candidates = @{}
+    foreach ($r in (Read-CsvFile $FilePath @('項目', '見出し') 'テーブル定義書の見出し')) {
+        $field = ([string]$r.'項目').Trim()
+        if (-not $field) { continue }
+        $candidates[$field] = @(([string]$r.'見出し') -split '\|' | ForEach-Object { ConvertTo-Label $_ } | Where-Object { $_ })
+    }
+    foreach ($f in @('物理名', 'データ型')) {
+        if (-not $candidates.ContainsKey($f) -or $candidates[$f].Count -eq 0) { throw "テーブル定義書の見出しに「$f」の行がありません: $FilePath" }
+    }
+    foreach ($f in @('テーブルID', 'テーブル名', '論理名', '桁数', '小数', '主キー', '必須', 'NULL許可', 'デフォルト', '外部キー', '備考', 'インデックス名', 'インデックスのカラム', 'ユニーク')) {
+        if (-not $candidates.ContainsKey($f)) { $candidates[$f] = @() }
+    }
+    return $candidates
+}
+
+function Read-TableDesign {
+    #     テーブル定義書のカラム定義（物理名とデータ型の見出しがそろった表）とインデックス定義を、シートごとに読む（Books は ConvertTo-DesignBooks の結果。パスの順に読む）。
+    #       Candidates: 見出しの候補（Read-TableHeaderCandidates）
+    #       OnFinding: 使わなかった表・カラム（テーブル ID が無い・ほかのシートと同じテーブル・同じカラム）を知らせるスクリプトブロック（引数: 文、場所）
+    #     戻り値: @{ Id; Name; File; Sheet; Place; Columns; Indexes } の一覧。場所（Place）は @{ File; Path; Sheet; Cell }
+    #       Columns: @{ Name; Logical; BaseType; Length; Scale; PkOrder（主キーの順。主キーでなければ $null）; NotNull; Default; FkTable; FkColumn; Note（備考）; Place; SqlType（空） }
+    #       Indexes: @{ Name; Columns; Unique; Place }
+    param($Books, [hashtable] $Candidates, [scriptblock] $OnFinding)
+    $nfkc = $script:Nfkc
+    $newPlace = { param($Book, [string] $Sheet, [int] $Row, [int] $Col) [pscustomobject]@{ File = $Book.File; Path = $Book.Path; Sheet = $Sheet; Cell = ('{0}{1}' -f (ConvertTo-ColumnName $Col), $Row) } }
+    $finding = { param([string] $Message, $Place) if ($OnFinding) { & $OnFinding $Message $Place } }
+    # 候補のうち、行の見出しにある最初のもの
+    $first = { param($Labels, [string[]] $Names) foreach ($n in $Names) { if ($Labels -contains $n) { return $n } }; return $null }
+    # シートのヘッダの値（候補のうち最初に見つかった見出しの右）
+    $sheetValue = { param($Grid, [string[]] $Names) foreach ($n in $Names) { $c = Find-LabelCell $Grid $n; if ($c -and $c.Value) { return $c } }; return $null }
+    # ○・Y・1 などの印があるか
+    $marked = {
+        param([string] $Text)
+        $t = ([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant()
+        if (-not $t) { return $false }
+        return $t -match '^(○|◯|〇|●|✓|✔|Y|YES|TRUE|1|必須|NOTNULL|NOT NULL|有|あり|要|PK|UK)$'
+    }
+    $blank = { param([string] $Text) $t = ([string]$Text).Normalize($nfkc).Trim(); return (-not $t) -or $t -match '^(-|－|ー|―|‐|×|なし|N/A)$' }
+    $cell = { param($Row, $ColumnOf, [string] $Label) if (-not $Label -or -not $ColumnOf.ContainsKey($Label)) { return '' }; return [string]$Row.Cells[$ColumnOf[$Label]] }
+
+    $tables = New-Object System.Collections.Generic.List[object]
+    $tableById = @{}
+    $bookPaths = [string[]]@($Books.Keys)
+    [Array]::Sort($bookPaths, [StringComparer]::Ordinal)
+    foreach ($bookPath in $bookPaths) {
+        $book = $Books[$bookPath]
+        foreach ($sheetName in $book.Sheets.Keys) {
+            $grid = $book.Sheets[$sheetName]
+            # カラム定義の見出し行（物理名とデータ型の見出しがそろっている行）
+            $physLabel = $null; $typeLabel = $null
+            foreach ($row in $grid.Rows) {
+                $labels = @($grid.Labels[$row].Values)
+                $p = & $first $labels $Candidates['物理名']
+                $t = & $first $labels $Candidates['データ型']
+                if ($p -and $t -and $p -ne $t) { $physLabel = $p; $typeLabel = $t; break }
+            }
+            if (-not $physLabel) { continue }
+            $colTable = @(Find-DesignTables $grid @($physLabel, $typeLabel) $physLabel)[0]
+            if (-not $colTable -or $colTable.Rows.Count -eq 0) { continue }
+            $cof = $colTable.ColumnOf
+            $label = @{}
+            foreach ($f in @('論理名', '桁数', '小数', '主キー', '必須', 'NULL許可', 'デフォルト', '外部キー', '備考')) { $label[$f] = & $first @($cof.Keys) $Candidates[$f] }
+
+            $idCell = & $sheetValue $grid $Candidates['テーブルID']
+            $headerPlace = & $newPlace $book $sheetName $colTable.HeaderRow $cof[$physLabel]
+            if ($idCell) { $tableId = $idCell.Value; $place = & $newPlace $book $sheetName $idCell.Row $idCell.Col }
+            elseif ($sheetName -match '^[A-Za-z][A-Za-z0-9_$#]*$') { $tableId = $sheetName; $place = $headerPlace }
+            else { & $finding ('テーブル ID（{0}）が見つからないため、このシートの表は使いません' -f ($Candidates['テーブルID'] -join '・')) $headerPlace; continue }
+            $tableId = $tableId.Normalize($nfkc).Trim()
+            $key = $tableId.ToUpperInvariant()
+            if ($tableById.ContainsKey($key)) {
+                $firstPlace = $tableById[$key].Place
+                & $finding ('テーブル {0} はほかのシートでも定義されているため、こちらは使いません（{1} {2}!{3}）' -f $tableId, $firstPlace.File, $firstPlace.Sheet, $firstPlace.Cell) $place
+                continue
+            }
+            $nameCell = & $sheetValue $grid $Candidates['テーブル名']
+            $tableName = ''
+            if ($nameCell) { $tableName = $nameCell.Value }
+
+            $cols = New-Object System.Collections.Generic.List[object]
+            $colNames = @{}
+            $pkSeq = 0
+            foreach ($dr in $colTable.Rows) {
+                $phys = (& $cell $dr $cof $physLabel).Normalize($nfkc).Trim()
+                $cellPlace = & $newPlace $book $sheetName $dr.Row $cof[$physLabel]
+                if ($colNames.ContainsKey($phys.ToUpperInvariant())) { & $finding ('{0} のカラム {1} が 2 回定義されています' -f $tableId, $phys) $cellPlace; continue }
+                $colNames[$phys.ToUpperInvariant()] = $true
+                # データ型（「VARCHAR(100)」のように型に桁数を書いた形も読む）
+                $typeText = (& $cell $dr $cof $typeLabel).Normalize($nfkc).Trim()
+                $n = ''; $s = ''
+                $m = [regex]::Match($typeText, '^(.+?)\s*\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)$')
+                if ($m.Success) { $typeText = $m.Groups[1].Value; $n = $m.Groups[2].Value; $s = $m.Groups[3].Value }
+                $lenText = (& $cell $dr $cof $label['桁数']).Normalize($nfkc).Trim()
+                $lm = [regex]::Match($lenText, '^(\d+)(?:\s*[,.]\s*(\d+))?$')
+                if ($lm.Success) { $n = $lm.Groups[1].Value; if ($lm.Groups[2].Success) { $s = $lm.Groups[2].Value } }
+                $scaleText = (& $cell $dr $cof $label['小数']).Normalize($nfkc).Trim()
+                if ($scaleText -match '^\d+$') { $s = $scaleText }
+                # 主キー（数字なら主キーの順番、印なら上から順）
+                $pkText = (& $cell $dr $cof $label['主キー']).Normalize($nfkc).Trim()
+                $pkOrder = $null
+                if ($pkText -match '^\d+$' -and [int]$pkText -gt 0) { $pkOrder = [int]$pkText }
+                elseif (& $marked $pkText) { $pkSeq++; $pkOrder = 1000 + $pkSeq }
+                $notNull = $false
+                if ($label['必須']) { $notNull = & $marked (& $cell $dr $cof $label['必須']) }
+                elseif ($label['NULL許可']) { $notNull = -not (& $marked (& $cell $dr $cof $label['NULL許可'])) }
+                if ($null -ne $pkOrder) { $notNull = $true }
+                $default = (& $cell $dr $cof $label['デフォルト']).Trim()
+                if (& $blank $default) { $default = '' }
+                $fkTable = ''; $fkColumn = ''
+                $fm = [regex]::Match((& $cell $dr $cof $label['外部キー']).Normalize($nfkc), '([A-Za-z_][A-Za-z0-9_$#]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_$#]*)')
+                if ($fm.Success) { $fkTable = $fm.Groups[1].Value; $fkColumn = $fm.Groups[2].Value }
+                $cols.Add([pscustomobject]@{
+                        Name = $phys; Logical = (& $cell $dr $cof $label['論理名']).Trim(); BaseType = $typeText; Length = $n; Scale = $s
+                        PkOrder = $pkOrder; NotNull = $notNull; Default = $default; FkTable = $fkTable; FkColumn = $fkColumn; Note = (& $cell $dr $cof $label['備考']).Trim()
+                        Place = $cellPlace; SqlType = ''
+                    })
+            }
+
+            # インデックス定義
+            $indexes = New-Object System.Collections.Generic.List[object]
+            $ixName = $null; $ixCols = $null
+            foreach ($row in $grid.Rows) {
+                $labels = @($grid.Labels[$row].Values)
+                $a = & $first $labels $Candidates['インデックス名']
+                $b = & $first $labels $Candidates['インデックスのカラム']
+                if ($a -and $b) { $ixName = $a; $ixCols = $b; break }
+            }
+            if ($ixName) {
+                foreach ($it in (Find-DesignTables $grid @($ixName, $ixCols) $ixName)) {
+                    $uniqueLabel = & $first @($it.ColumnOf.Keys) $Candidates['ユニーク']
+                    foreach ($dr in $it.Rows) {
+                        $names = @(((& $cell $dr $it.ColumnOf $ixCols).Normalize($nfkc) -split '[,、\s]+') | Where-Object { $_ })
+                        # 「ORDER_DATE DESC」のような並び順は前のカラムに付ける
+                        $list = New-Object System.Collections.Generic.List[string]
+                        foreach ($nm in $names) {
+                            if ($nm -match '^(?i:ASC|DESC)$' -and $list.Count -gt 0) { $list[$list.Count - 1] = '{0} {1}' -f $list[$list.Count - 1], $nm.ToUpperInvariant() } else { $list.Add($nm) }
+                        }
+                        $indexes.Add([pscustomobject]@{
+                                Name = (& $cell $dr $it.ColumnOf $ixName).Normalize($nfkc).Trim(); Columns = $list.ToArray()
+                                Unique = (& $marked (& $cell $dr $it.ColumnOf $uniqueLabel)); Place = (& $newPlace $book $sheetName $dr.Row $it.ColumnOf[$ixName])
+                            })
+                    }
+                }
+            }
+
+            $t = [pscustomobject]@{ Id = $tableId; Name = $tableName; File = $book.File; Sheet = $sheetName; Place = $place; Columns = $cols; Indexes = $indexes }
+            $tableById[$key] = $t
+            $tables.Add($t)
+        }
+    }
+    return , $tables
+}
+
 # ---------------------------------------------------------------- 表を見出しの候補で読む（テスト仕様書・障害管理表など）
 
 

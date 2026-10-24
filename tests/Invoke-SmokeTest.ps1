@@ -193,6 +193,7 @@ Invoke-Step 'Compare-Excel（版を続けて比べる・Word）' '04c_版の差�
 Invoke-Step 'Test-DesignConsistency（設計書の整合性）' '05_整合性.xlsx' '指摘一覧のリンクで設計書の該当セルが開く。CRUD のシートが読める' { param($o) & (& $t 'Test-DesignConsistency.ps1') -Path (Join-Path $fixtures 'consistency') -OutXlsx $o }
 Invoke-Step 'Test-Traceability（網羅）' '06_網羅.xlsx' '抜け・網羅・要件のシートと、場所のリンク' { param($o) & (& $t 'Test-Traceability.ps1') -DesignPath $design -TestPath (Join-Path $data 'テスト') -Requirement (Join-Path $data '要件一覧.csv') -OutXlsx $o }
 Invoke-Step 'Select-RegressionTests（再テストするケース）' '06b_再テスト.xlsx' '選んだ理由の列と、テスト仕様書の場所のリンク（該当セルが開く）' { param($o) & (& $t 'Select-RegressionTests.ps1') -Old $design -New $designV2 -TestPath (Join-Path $data 'テスト') -OutXlsx $o }
+Invoke-Step 'New-TestData（テストデータ）' '09b_テストデータ.xlsx' 'テーブルごとのシートに標準・最大・最小・NULL の行がある。09b_テストデータ フォルダの CSV を Excel で開いても文字化けしない' { param($o) & (& $t 'New-TestData.ps1') -Path $design -OutDir (Join-Path $OutDir '09b_テストデータ') -BaseDate '2026-04-01' -OutXlsx $o }
 Invoke-Step 'Measure-DesignSize（規模）' '07_規模.xlsx' '集計・規模一覧・係数表のシート' { param($o) & (& $t 'Measure-DesignSize.ps1') -Path $design -OutXlsx $o }
 Invoke-Step 'Test-ExcelEstimate（見積書の検算）' '08_見積書の検算.xlsx' '検算結果のリンクで、見積書の該当セルが開く' { param($o) & (& $t 'Test-ExcelEstimate.ps1') -Path (Join-Path $fixtures 'estimate/見積書.xlsx') -OutXlsx $o }
 Invoke-Step 'Export-TableDdl（DDL）' '09_DDL.xlsx' 'DB との差異・定義書の指摘・テーブルのシート（09_DDL.sql も作る）' { param($o) & (& $t 'Export-TableDdl.ps1') -Path $design -OutFile (Join-Path $OutDir '09_DDL.sql') -CompareCatalog (Join-Path $fixtures 'ddl/postgresql_columns.csv') -OutXlsx $o }

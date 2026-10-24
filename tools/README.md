@@ -16,6 +16,7 @@
 | [Test-ScreenNumbers.ps1](#test-screennumbersps1) | 画面レイアウトのスクリーンショットに重ねた丸数字（①・No.5 など）を、画面項目定義の No と突き合わせる。無い番号・重なった番号と、前の版と比べて No がずれたのに直していない丸数字を見つける（Excel 不要） |
 | [Test-Screenshots.ps1](#test-screenshotsps1) | 設計書に貼った画面のスクリーンショットが、元のワイヤーフレーム（Excel）より古くなっていないかを確かめる。貼り替えたあとに記録し、元の印刷範囲の中が変わると「元が更新された」と知らせる（Excel 不要。設計書は変更しない） |
 | [Export-TableDdl.ps1](#export-tableddlps1) | テーブル定義書から DDL（CREATE TABLE・コメント・インデックス・外部キー）を作り、DB の列の一覧との食い違いも確かめる（Excel 不要） |
+| [New-TestData.ps1](#new-testdataps1) | テーブル定義書から、テーブルごとの CSV と INSERT 文のテストデータを作る。主キー・外部キー・コード値と、桁数の最大・最小・NULL の行も作る（Excel 不要） |
 | [Compare-Excel.ps1](#compare-excelps1) | 2 つのブック（またはフォルダ）を比べ、セル単位の差分を一覧にする（行・列の挿入や削除・移動・シート名変更を考慮。書式や長い文字列の変わった部分も示し、新のブックに印を付けた写しや、改訂履歴の記載漏れの確認・下書きもできる。Word（.docx）の設計書も段落・表の行で比べる） |
 | [Compare-SharePointVersion.ps1](#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの 2 つの版（バージョン履歴）を取り出して比べ、差分の画面を開く（版は Excel で取り出す） |
 | [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
@@ -58,7 +59,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Start-ExcelTools.ps1（画面）
 
@@ -1419,6 +1420,72 @@ m_other                       定義書にないテーブル テーブル定義�
 - DB との比較は列（型・桁数・NULL）だけで、主キー・インデックス・外部キーは比べません
 - Oracle の DROP TABLE は、テーブルが無いとエラーになります。SQL Server の `DROP TABLE IF EXISTS` は 2016 以降、コメントは `dbo` スキーマに付けます
 - 作った DDL は、実行する前に内容を確かめてください
+
+## New-TestData.ps1
+
+テーブル定義書（Export-TableDdl.ps1 と同じ見出しで読む）から、**テストデータ**（テーブルごとの CSV と INSERT 文）を作ります。Excel は不要です。
+主キーが重ならず、外部キーは参照先の行の値になるので、作ったまま登録できます。桁数いっぱいの値・最小の値・NULL の行も作るので、境界値のテストにも使えます。
+
+```powershell
+.\New-TestData.ps1 D:\設計書 -OutDir D:\テストデータ                                        # Oracle の INSERT 文
+.\New-TestData.ps1 D:\設計書 -OutDir D:\テストデータ -Database PostgreSQL -Table 'T_ORDER*' -Rows 10
+```
+
+```
+テストデータを作りました: テーブル 4 件・行 24 件（標準 12・境界値 12）: D:\テストデータ
+コード値から作ったカラム: M_CUSTOMER.CUSTOMER_KBN・M_CUSTOMER.DELETE_FLG・M_PRODUCT.DELETE_FLG・T_ORDER.ORDER_STATUS・T_ORDER.PAYMENT_METHOD・T_ORDER.DELIVERY_TIME_KBN
+INSERT 文: D:\テストデータ\テストデータ.sql
+```
+
+```sql
+-- T_ORDER（受注）
+INSERT INTO T_ORDER (ORDER_NO, ORDER_DATE, CUSTOMER_CD, ORDER_STATUS, PAYMENT_METHOD, …) VALUES ('000000000001', DATE '2026-04-01', '00000001', '10', '1', …); -- 標準 1
+INSERT INTO T_ORDER (ORDER_NO, ORDER_DATE, CUSTOMER_CD, ORDER_STATUS, PAYMENT_METHOD, …) VALUES ('000000000002', DATE '2026-04-02', '00000002', '20', '2', …); -- 標準 2
+…
+INSERT INTO T_ORDER (ORDER_NO, ORDER_DATE, CUSTOMER_CD, ORDER_STATUS, PAYMENT_METHOD, …) VALUES ('999999999999', DATE '9999-12-31', '99999999', '90', '3', …); -- 最大
+INSERT INTO T_ORDER (ORDER_NO, ORDER_DATE, CUSTOMER_CD, ORDER_STATUS, PAYMENT_METHOD, …) VALUES ('000000000000', DATE '1900-01-01', '00000000', '10', '1', …); -- 最小
+INSERT INTO T_ORDER (ORDER_NO, ORDER_DATE, CUSTOMER_CD, ORDER_STATUS, PAYMENT_METHOD, …) VALUES ('000000000004', DATE '2026-04-04', '00000004', '10', '1', NULL, …); -- NULL
+```
+
+### 作る行
+
+| 行 | 値 |
+| --- | --- |
+| 標準（`-Rows` 件） | 主キーは番号（固定長の文字は桁数まで 0 で埋める）、文字は「論理名＋番号」（桁数に入らなければ番号）、数値は番号×100、日付は基準日（`-BaseDate`）から 1 日ずつ |
+| 最大 | 文字は桁数いっぱい（固定長は 9、可変長は全角の「あ」）、数値は桁数の最大（整数の型は型の最大）、日付は 9999-12-31 |
+| 最小 | 文字は 1 文字（固定長は桁数の 0）、数値は 0、日付は 1900-01-01 |
+| NULL | 必須でないカラムを NULL（CSV は空）にした行 |
+
+- **外部キー**: 参照先のテーブルの行の値にします。標準の行は参照先の標準の行を順に、最大・最小・NULL の行は参照先の同じ種類の行を参照します。参照先のテーブルから順に作り、INSERT 文もその順に書きます。`-Table` で選んだテーブルの参照先も作ります
+- **コード値**: `-Path` にコード定義書（コード区分名・コード値の見出しのある表）も入れると、論理名がコード区分名と同じカラムか、備考にコード区分 ID・区分名を書いたカラムは、コード値を順に使います（最大の行は最後の値、最小の行は最初の値）
+- **フラグ**: 論理名が「フラグ」で終わるか、物理名が `_FLG`・`_FLAG` で終わるカラムは 0・1
+- 主キーは、標準・最大・最小・NULL の行で重なりません。自分を参照する外部キー（親の行など）は、必須でなければ NULL です
+- バイナリ（BLOB など）は値を作りません（必須なら警告します）
+- CHECK 制約などの業務のルール（項目どうしの関係）は見ません。作ったデータは、登録の前に内容を確かめてください
+
+| 書き方 | Oracle | PostgreSQL | SQL Server | MySQL |
+| --- | --- | --- | --- | --- |
+| 日付 | `DATE '2026-04-01'` | `DATE '2026-04-01'` | `'2026-04-01'` | `'2026-04-01'` |
+| 日時 | `TIMESTAMP '2026-04-01 09:00:00'` | `TIMESTAMP '…'` | `'2026-04-01 09:00:00'` | `'2026-04-01 09:00:00'` |
+| 時刻 | `TIMESTAMP '基準日 09:00:00'` | `TIME '09:00:00'` | `'09:00:00'` | `'09:00:00'` |
+| 真偽 | `1` / `0` | `TRUE` / `FALSE` | `1` / `0` | `1` / `0` |
+| 文字 | `'…'` | `'…'` | `N'…'` | `'…'`（`\` も重ねる） |
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | テーブル定義書（とコード定義書）のフォルダ・ファイル（複数可） |
+| `-OutDir` | 保存先のフォルダ。テーブルごとの CSV（`テーブルID.csv`。1 行目はカラムの物理名）と INSERT 文（`テストデータ.sql`）を保存する |
+| `-Table` | 作るテーブル（ワイルドカード可）。参照先のテーブルも作る |
+| `-Rows` | テーブルごとの標準の行の数（既定 3） |
+| `-Database` | INSERT 文の書き方（`Oracle` / `PostgreSQL` / `SQLServer` / `MySQL`）。既定は Oracle |
+| `-BaseDate` | 標準の行の日付の基準日（既定は今日） |
+| `-NoBoundary` | 最大・最小・NULL の行を作らない |
+| `-IncludeDelete` | INSERT 文の前に、DELETE 文（参照する側のテーブルから）を書く |
+| `-Encoding` | CSV と INSERT 文の文字コード（`UTF8BOM`（既定。Excel でそのまま開ける）/ `UTF8` / `ShiftJIS`） |
+| `-OutXlsx` | 一覧（テーブル・行の数・参照先・注意）と、テーブルごとのシート（行のパターン付き）を保存する |
+| `-Headers` | テーブル定義書の見出しの候補の CSV（Export-TableDdl.ps1 と同じ） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ## New-DesignDocument.ps1
 

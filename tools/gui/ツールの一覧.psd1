@@ -193,6 +193,13 @@
             Required = @('Path'); Output = @('OutXlsx'); OutputName = 'テスト仕様書のチェック'; Keywords = 'テストケース レビュー'
         }
         @{
+            Id = 'TestData'; Label = 'テストデータを作る'; Group = 'テスト'; Tool = 'New-TestData.ps1'
+            Summary = 'テーブル定義書から、テーブルごとの CSV と INSERT 文のテストデータを作ります。主キー・外部キー・コード値を考え、桁数の最大・最小・NULL の行も作ります。'
+            Main = @('Path', 'OutDir', 'Database', 'Table', 'OutXlsx')
+            Labels = @{ Path = 'テーブル定義書（とコード定義書）のフォルダ・ファイル'; OutDir = 'テストデータの保存先のフォルダ'; Database = 'INSERT 文の DB の種類'; Table = '作るテーブル（空欄ならすべて。T_ORDER* のようにも書ける）'; OutXlsx = '一覧の保存先' }
+            Required = @('Path', 'OutDir'); Output = @('OutXlsx'); OutputName = 'テストデータの一覧'; Open = @('OutDir'); Keywords = 'テストデータ INSERT CSV SQL 境界値'
+        }
+        @{
             Id = 'Trace'; Label = '要件・設計・テストのつながりを見る'; Group = 'テスト'; Tool = 'Test-Traceability.ps1'
             Summary = '要件一覧 → 設計書 → テスト仕様書のつながりと、画面・イベント・メッセージ・IF にテストがあるか（テストの抜け）を確かめます。'
             Main = @('DesignPath', 'TestPath', 'Requirement', 'OutXlsx')
