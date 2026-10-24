@@ -234,6 +234,14 @@
             Labels = @{ Old = '旧版の設計書'; New = '新版の設計書'; TestPath = 'テスト仕様書のフォルダ'; OutXlsx = '結果の保存先' }
             Output = @('OutXlsx'); OutputName = '再テスト'; Keywords = '回帰テスト 改修 デグレ'
         }
+        @{
+            Id = 'Similar'; Label = '障害の横展開の候補を探す'; Group = 'テスト'; Tool = 'Find-SimilarDefects.ps1'
+            Summary = '障害の箇所と同じ作り（型・入力チェック・処理・カラムの型など）の箇所を設計書から集め、横展開の候補の一覧を作ります。Copilot に絞り込ませる依頼も作り、回答を入れると AI の判定を一覧に入れます。'
+            Main = @('BugList', 'DesignPath', 'Id', 'OutXlsx', 'OutPrompt', 'Answer')
+            Labels = @{ BugList = '障害管理表のファイル・フォルダ'; DesignPath = '設計書のフォルダ'; Id = '障害番号（カンマ区切り。空欄なら横展開が不要・済み以外のすべて）'; OutXlsx = '結果の保存先'; OutPrompt = 'Copilot への依頼の保存先'; Answer = 'Copilot の回答を保存したテキスト（AI の判定を入れるとき）' }
+            Kinds = @{ Answer = 'File' }; Extensions = @{ OutPrompt = '.txt' }
+            Required = @('BugList', 'DesignPath'); Output = @('OutXlsx', 'OutPrompt'); OutputName = '横展開の候補'; Keywords = '横展開 水平展開 類似 障害 バグ 不具合 Copilot AI'
+        }
 
         # ---------------------------------------------------------------- 見積もり・進捗
         @{

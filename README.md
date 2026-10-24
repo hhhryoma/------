@@ -67,6 +67,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Test-Traceability.ps1](tools/README.md#test-traceabilityps1) | 要件一覧 → 設計書 → テスト仕様書のつながりと、画面・イベント・メッセージ・IF にテストがあるか（テストの抜け）を全件確かめる | 不要 ※1 | － |
 | [Test-CodeTrace.ps1](tools/README.md#test-codetraceps1) | 設計書のメッセージ・画面・テーブルの ID とソースコードを突き合わせ、ソースで使っていない ID と、ソースにあって設計書に無い ID を見つける | 不要 ※1 | － |
 | [Select-RegressionTests.ps1](tools/README.md#select-regressiontestsps1) | 設計書の旧版と新版の差分から、再テストするテストケースを選ぶ（改修の回帰テストの範囲決め） | 不要 ※1 | － |
+| [Find-SimilarDefects.ps1](tools/README.md#find-similardefectsps1) | 障害の箇所と同じ作り（型・入力チェック・処理など）の箇所を設計書から集め、横展開の候補の一覧を作る。絞り込みは Copilot に頼める | 不要 ※1 | － |
 
 ### 管理者向け
 
