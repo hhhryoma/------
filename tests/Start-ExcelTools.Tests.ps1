@@ -60,6 +60,8 @@ Test-Case 'Start-ExcelTools: 入力欄の種類・名前・必須は、ツール
     Assert-Equal 'SaveFile' @(Get-GuiFields (Get-TestEntry 'Pdf') | Where-Object Name -eq 'LogPath')[0].Kind '「保存します」の CSV は保存先'
     Assert-Equal @('Path:Path[]*', 'Checklist:File', 'OutDir:SaveFolder*', 'Baseline:Path', 'Recheck:Path') (Get-FieldKeys @(Get-GuiFields (Get-TestEntry 'Review') | Where-Object Main)) 'AI レビューは前の版・前のレビュー結果（ファイルかフォルダ）も最初から出す'
     Assert-Equal '改訂履歴のシート名の正規表現' @(Get-GuiFields (Get-TestEntry 'Compare') | Where-Object Name -eq 'HistorySheet')[0].Label 'ヘルプからの名前（長いときは最後の「、」のあと）'
+    Assert-Equal '結果を CSV に保存します' @(Get-GuiFields (Get-TestEntry 'Search') | Where-Object Name -eq 'OutCsv')[0].Label '括弧を除いても、英数字と日本語の間の空白は残す（CSV（UTF-8・BOM 付き）に保存）'
+    Assert-Equal '設計書の一覧を Excel に保存します' (Get-GuiLabel -Help '設計書（Word を含む）の一覧を Excel（xlsx）に保存します。続きの文。' -Name 'OutXlsx') '日本語の間の括弧は詰める'
 }
 
 Test-Case 'Start-ExcelTools: 入力から引数を作る（空は渡さず、必須の欠け・数と日付の誤りを知らせ、ワイルドカードのパスは逃がす）' {
