@@ -86,6 +86,14 @@ PowerShell を使わずに、画面（ウィンドウ）から各ツールを使
 - Install-ExcelTools で入れると、スタートメニューの「Excel ツール」と、右クリックの「送る」→「Excel ツールの画面で開く」（選んだファイルを入れた状態で開く）からも開けます
 - Windows でのみ使えます（Windows PowerShell 5.1・PowerShell 7）
 
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 最初のパスの欄に入れるファイル・フォルダ（「送る」から渡される） |
+| `-Tool` | 最初に選ぶ処理（ツールの一覧の Id。`Check`・`Compare`・`Search` など）。省略時は前に使った処理 |
+| `-SettingsPath` | 入力を保存するファイル（既定は「%APPDATA%\ExcelTools\画面の設定.json」） |
+
 ## Search-Excel.ps1
 
 フォルダ配下の Excel ファイルをまとめて検索し、ヒットした **ファイル・シート・セル番地・内容** を一覧表示します。
@@ -568,6 +576,19 @@ File        Result   Detail
 - 複数シートの選択（作業グループ）を解除する
 - `-NormalView` を付けると、改ページプレビュー・ページレイアウト表示を標準表示に戻す
 
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 対象のフォルダまたはファイル（複数可・ワイルドカード可）。xlsx・xlsm・xltx・xltm が対象 |
+| `-Zoom` | そろえる倍率（%。既定 100） |
+| `-NormalView` | 改ページプレビュー・ページレイアウト表示のシートを標準表示に戻す |
+| `-KeepTimestamp` | ファイルの更新日時を、書き換える前のままにする |
+| `-BackupDir` | 書き換える前のファイルを、このフォルダにフォルダ構成ごと写しておく |
+| `-WhatIf` | 直すファイルと直す内容を表示するだけで、書き換えない |
+| `-Force` | 直す必要がないと判定したファイルも書き換える |
+| `-NoRecurse` | サブフォルダを対象にしない |
+
 ### マクロとの違い
 
 | | 体裁整えるマクロ（Book1.xlsm） | Reset-ExcelView.ps1 |
@@ -843,7 +864,7 @@ Location        Kind Detail
 
 ## Compare-SharePointVersion.ps1
 
-SharePoint（Microsoft 365）に置いた設計書の**以前の版（バージョン履歴）と今の版**を比べます。版を手で保存しなくても、版の番号を指定するだけで、[Compare-Excel.ps1 の差分の画面](#差分をブラウザーで見るouthtml)を開きます。
+SharePoint（Microsoft 365）に置いた設計書の**以前の版（バージョン履歴）と今の版**を比べます。版を手で保存しなくても、版の番号を指定するだけで、[Compare-Excel.ps1 の差分の画面](#差分をブラウザーで見る-outhtml)を開きます。
 
 ```powershell
 # OneDrive で同期しているフォルダのファイルを、版 3.0 と現在の版で比べる
@@ -971,6 +992,8 @@ DD05_メッセージ一覧.xlsx            メッセージ一覧!A22  エラー 
 | `-Exclude` | 確かめない参照の ID の正規表現（ほかのシステムのテーブルなど）。例: `'^EXT_'` |
 | `-Where` | 影響調査。指定した ID（複数可・ワイルドカード可）の定義と、参照している場所を一覧にする（下） |
 | `-OutXlsx` | 指摘一覧（該当セルへのリンク付き）、種類ごとの定義・参照の数、CRUD 図を保存する |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ### CRUD 図（`-OutXlsx` の「CRUD」シート）
 
@@ -1075,6 +1098,8 @@ DD02_画面設計書_SCR002_受注登録_v1.1.xlsx 画面レイアウト!C17 エ
 | `-Path` | 画面設計書のフォルダ・ファイル（複数可）。画面項目定義が別のブックにあれば、それも含める |
 | `-Baseline` | 前の版の画面設計書のフォルダ・ファイル（複数可）。同じ場所に重ねた番号が指す項目の変化を見る |
 | `-OutXlsx` | 指摘一覧と、番号の一覧（重ねた番号ごとに、場所・指す項目名・前の版の項目名・結果）を保存する。場所をクリックすると該当セルが開く |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb の画面項目定義は読まない。重ねた番号は .xlsx / .xlsm からだけ読む） |
 
 ## Test-Screenshots.ps1
 
@@ -1140,6 +1165,8 @@ Screen   Status         Location                                                
 | `-Record` | 貼り替えた画面を記録する |
 | `-Screen` | `-Record` で記録する画面（複数可・ワイルドカード可）。状態によらず記録する |
 | `-OutXlsx` | 画面ごとの状態（設計書のスクリーンショットへのリンク付き）と、元のシートの一覧（印刷範囲・設計書で使っているか）を保存する |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb の設計書の「画面名」の欄は読まない） |
 
 ## Test-Traceability.ps1
 
@@ -1202,6 +1229,18 @@ Kind       Scope  Id    Name           Judgement
 | 網羅 | すべての要素と、テストの数・最初のテストの場所（リンク）・判定 |
 | 要件 | （`-Requirement` のとき）要件ごとの設計書・テスト仕様書・判定（トレーサビリティマトリクス） |
 
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-DesignPath` | 設計書のフォルダまたはファイル（複数可・ワイルドカード可） |
+| `-TestPath` | テスト仕様書のフォルダまたはファイル（複数可・ワイルドカード可） |
+| `-Requirement` | 要件一覧のファイル（Excel・CSV。要件ID と要件名の見出しがある表） |
+| `-Rules` | 網羅のルールの CSV（既定は `tools\traceability\網羅のルール.csv`） |
+| `-OutXlsx` | 結果を保存する（抜け・網羅・要件） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
+
 ### 注意
 
 - テストに「出てくる」かを**文字で**確かめます。テストの内容が正しいか、十分かまでは確かめません
@@ -1244,6 +1283,17 @@ Priority Function Id Reason
 | 再テストするケース | 優先・機能・テストID・期待結果・選んだ理由・テスト仕様書の場所（該当セルへのリンク） |
 | 設計書の変更 | 変更ごとの設計書・画面・場所・名前・列・旧・新と、選んだケースの数（0 はテストが見つからない変更） |
 | 読み取り結果 | テスト仕様書をどの見出しで読んだか |
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Old` / `-New` | 旧版と新版の設計書のフォルダまたはファイル |
+| `-TestPath` | テスト仕様書のファイル・フォルダ（Excel・CSV） |
+| `-OutXlsx` | 結果を保存する（再テストするケース・設計書の変更・読み取り結果） |
+| `-Headers` | テスト仕様書の見出しの候補の CSV（既定は `tools\test-quality\見出し.csv`） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ## Export-TableDdl.ps1
 
@@ -1359,6 +1409,8 @@ m_other                       定義書にないテーブル テーブル定義�
 | `-CompareCatalog` | DB のカタログの CSV。DDL の代わりに定義書との差異を出力する |
 | `-OutXlsx` | DB との差異・定義書の指摘・テーブルの一覧を保存する（定義書の該当セルへのリンク付き） |
 | `-TypeMap` / `-Headers` | 型の対応・見出しの候補の CSV |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ### 既知の制約
 
@@ -1479,6 +1531,8 @@ DD03_テーブル定義書_v1.2.xlsx 版上げ 版数 1.1 → 1.2（表紙の版
 | `-Version` | 新しい版数（既定は最後の数を 1 つ上げる） |
 | `-Author` / `-Date` | 作成者・改訂者 / 作成日・改訂日（既定はユーザー名と今日） |
 | `-WhatIf` | 作る・書き換えるファイルを表示するだけ |
+| `-HistorySheet` | 改訂履歴のシート名の正規表現（既定は 改訂履歴・変更履歴・改版履歴・更新履歴・改訂記録） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
 
 ### 既知の制約
 
@@ -1555,6 +1609,8 @@ PV 12 / EV 8 / BAC 22 / SPI 0.67 / AC 11 / CPI 0.73
 | `-SheetNamePattern` | WBS のシート名の正規表現 |
 | `-FillTemplate` / `-OutFile` | スケジュール遅延リカバリ計画のテンプレート / 書き込んだものの保存先 |
 | `-OutXlsx` | タスク（WBS の該当行へのリンク付き）・担当者別・週次を保存する |
+| `-Headers` | WBS の見出しの CSV（項目と、見出しの候補。既定は `tools\progress\WBSの見出し.csv`） |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ### 既知の制約
 
@@ -1619,6 +1675,10 @@ WBS のタスクに対応した工数: 87.5 時間（98%） / WBS に無い作�
 | `-HoursPerDay` | 1 人日の時間（既定は 8） |
 | `-Tolerance` | 超過の見込み・完了・超過とみなす、予定を超える割合（既定は 0.1） |
 | `-OutXlsx` | タスク（WBS へのリンク付き）・担当者×週・WBS に無い作業・読み取り結果を保存する |
+| `-Holidays` | 休日の CSV（WBS の予定の進捗率の計算に使う。Measure-Progress.ps1 の `-Holidays` と同じ） |
+| `-Headers` | 工数実績の見出しの候補の CSV（既定は `tools\progress\工数実績の見出し.csv`） |
+| `-NoRecurse` | 工数実績のフォルダの、サブフォルダを読まない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ## Export-ActionItems.ps1
 
@@ -1655,12 +1715,15 @@ WBS のタスクに対応した工数: 87.5 時間（98%） / WBS に無い作�
 - 「なし」「特になし」は読みません。「お客様」「皆様」は担当にしません
 - 書き方の揺れが大きい議事録では、取り出せない・件名に担当が残るなどがあります。結果を確かめてから課題管理表に移してください
 
-### 保存するもの
+### 主なパラメーター
 
 | パラメーター | 内容 |
 | --- | --- |
+| `-Path` | 議事録のファイルまたはフォルダ（.docx・.xlsx・.xlsm・.txt・.md。複数可） |
 | `-OutXlsx` | 宿題（No・区分・件名・担当・期限・状態・起票日・会議・メモ・出典・原文。Excel の議事録は該当セルへのリンク付き）と決定事項のシート |
 | `-OutCsv` | 宿題の CSV（No・区分・件名・担当・期限・状態・起票日・会議・メモ・出典）。課題管理表に貼り付けるか、[New-WeeklyReport.ps1](#new-weeklyreportps1) の `-IssueList` に渡す |
+| `-NoRecurse` | フォルダのサブフォルダを読まない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ## New-WeeklyReport.ps1
 
@@ -1759,6 +1822,8 @@ WBS・レビューの指摘管理表・障害管理表・課題（QA）管理表
 | `-OutDir` | 報告の Excel と文章を保存するフォルダ |
 | `-HistoryCsv` | 毎週の数字を残す CSV（前回との比較・推移） |
 | `-Title` | 報告のタイトルとファイル名 |
+| `-NoRecurse` | 指摘管理表・障害管理表・課題管理表のフォルダの、サブフォルダを読まない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ## Measure-DesignSize.ps1
 
@@ -1897,6 +1962,8 @@ Kind       Name                Change   Detail                                  
 | `-Baseline` | 前の版の設計書。対象ごとの新規・変更・削除と、行の追加・変更・削除の数、変更の工数の目安を出す |
 | `-Actuals` / `-OutCoefficients` | 実績の工数の CSV / 実績の平均で作った係数表の保存先 |
 | `-OutXlsx` | 集計・規模一覧（設計書の表へのリンク付き）・使った係数表（`-Baseline` なら前の版との差も）を保存する |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は数えない） |
 
 ## Test-ExcelEstimate.ps1
 
@@ -2022,6 +2089,8 @@ git config diff.excel.textconv "powershell -NoProfile -ExecutionPolicy Bypass -F
 | `-Force` | `-OutDir` の .md が新しくても変換し直す |
 | `-CellAddress` | 行番号・セル番地を付ける |
 | `-TextConv` | git の textconv 用（1 ファイルの Markdown を UTF-8 で標準出力へ。見出しにファイル名を入れない） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は変換しない） |
 
 ## Measure-ReviewQuality.ps1
 
@@ -2154,6 +2223,8 @@ DD05_メッセージ一覧.pdf                0    0    0.00   3.00          1.5
 | `-Headers` | 指摘管理表の見出しの候補の CSV |
 | `-AsOf` | 期限切れを判定する日（既定は今日） |
 | `-OutXlsx` | 設計書別・内訳・未完了・推移（`-ReviewLog` のときはゾーン分析も）を保存する |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ## Measure-TestQuality.ps1
 
@@ -2276,6 +2347,8 @@ SCR002,受注登録|受注登録画面,DD02_画面設計書_SCR002_受注登録
 | `-RecentDays` | 直近の新規バグを数える日数（既定 7） |
 | `-AsOf` | 集計の時点（予定日を過ぎても未実施の判定。既定は今日） |
 | `-OutXlsx` | サマリー・機能別・ゾーン分析・推移・バグの内訳・食い違いを保存する |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ## New-TestSpecDraft.ps1
 
@@ -2304,6 +2377,17 @@ SCR002,受注登録|受注登録画面,DD02_画面設計書_SCR002_受注登録
 - 作った下書きは [Test-TestSpec.ps1](#test-testspecps1)・[Test-Traceability.ps1](#test-traceabilityps1)・[Measure-TestQuality.ps1](#measure-testqualityps1) でそのまま読めます。詳細設計サンプルから作った下書きは、Test-TestSpec の必須・型・境界値・コード値・メッセージの抜けが 0 件、Test-Traceability の画面・イベント・メッセージの網羅が 100% です
 - 同じ名前のファイルがあるときは上書きしません（書き足したテスト仕様書を消さないため。`-Force` で上書き）
 - 「送る」→「Excel テスト仕様書の下書き」で、設計書のフォルダを選んでも作れます
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-DesignPath` | 画面設計書と、コード定義書・メッセージ一覧のファイルかフォルダ（いっしょに渡すと、コード値とメッセージの文言を使う） |
+| `-Screen` | 下書きを作る画面 ID（ワイルドカード可・複数可。既定はすべての画面） |
+| `-OutXlsx` | 書き出すテスト仕様書の下書き（.xlsx） |
+| `-Force` | `-OutXlsx` のファイルがあっても上書きする |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読めない） |
 
 ## Test-TestSpec.ps1
 
@@ -2370,6 +2454,8 @@ Detail   : 「正しく」では、何を確かめれば合格かが分かりま
 | `-VagueWords` | あいまいな期待結果とみなす言葉 |
 | `-Headers` | 見出しの候補の CSV |
 | `-OutXlsx` | 指摘（該当セルへのリンク付き）・機能別（ケース数・異常系の割合）・読み取り結果を保存する |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ## Measure-DefectRemoval.ps1
 
@@ -2434,6 +2520,18 @@ Phase      Injected FoundInTime Leaked RemovalRate Detected FromEarlier
 | 流出 | 摘出すべき工程より後で見つかった欠陥の一覧（障害管理表・指摘管理表の該当行へのリンク付き） |
 | 読み取り結果 | ファイル・シートごとに、見出しの行・読んだ行数・どの見出しを何として読んだか・見出しが無い項目・表が見つからないファイル（[読み取り結果](#読み取り結果の確認)） |
 
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-BugList` | 障害管理表のファイルまたはフォルダ（Excel・CSV。複数可）。混入工程・摘出工程の列を読む |
+| `-Findings` | レビューの指摘管理表のファイルまたはフォルダ（Excel・CSV。複数可）。レビューした工程を摘出工程とする |
+| `-Phases` | 工程の CSV（工程・別名・摘出すべき工程。既定は `tools\test-quality\工程.csv`） |
+| `-Headers` / `-FindingHeaders` | 障害管理表・指摘管理表の見出しの候補の CSV（既定は `tools\test-quality\見出し.csv`・`tools\review-quality\指摘管理表の見出し.csv`） |
+| `-OutXlsx` | 結果を保存する（工程別・工程マトリクス・原因・流出） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
+
 ## Measure-ReviewEffectiveness.ps1
 
 設計書ごとに、**レビューの指摘**と、**設計で入ったのにテストで見つかったバグ**を並べ、**レビューで見逃した設計書**を見つけます。Excel は不要です。
@@ -2469,6 +2567,23 @@ DD02_画面設計書_SCR002_受注登録           1          2           0.10  
 - バグの機能・設計書は、機能の対応表（`-FunctionMap`）で同じ機能になる設計書、同じ名前、どちらかがもう一方を含む名前がただ 1 つの設計書に対応付けます
 - **レビューの摘出率** = レビューの指摘 ÷ (指摘 + 設計で入ったバグ)。設計書ごとと全体（未レビューの設計書を除く）で出します
 - `-OutXlsx`: 設計書別（指摘密度 × バグの密度の**散布図**付き）・設計で入ったバグ（障害管理表の該当行へのリンク付き）・読み取り結果
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Findings` | レビューの指摘管理表のファイル・フォルダ |
+| `-BugList` | 障害管理表のファイル・フォルダ（「障害内容」「混入工程」と、「機能」か「設計書」の見出しがある表） |
+| `-DesignPath` / `-SizeCsv` | 設計書のフォルダ（指摘密度の分母の規模と、設計書の一覧）、またはページ数などの CSV |
+| `-ReviewLog` | レビュー記録（渡すと、レビュー記録も指摘も無い設計書を未レビューとする） |
+| `-Limits` | 指摘密度の基準値の CSV（Measure-ReviewQuality.ps1 の `-Limits`） |
+| `-FunctionMap` | 機能の対応表の CSV（機能・別名・設計書）。障害管理表の機能を設計書に対応付ける |
+| `-Phases` / `-DesignPhases` | 工程の CSV（既定は `tools\test-quality\工程.csv`）と、設計とみなす混入工程（既定は 要件定義・基本設計・詳細設計） |
+| `-Headers` | 障害管理表の見出しの候補の CSV（既定は `tools\test-quality\見出し.csv`） |
+| `-AsOf` | 集計の時点（期限切れの判定などに使う。既定は今日） |
+| `-OutXlsx` | 結果を保存する（設計書別（散布図付き）・設計で入ったバグ・読み取り結果） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
 
 ## Compare-ReviewFindings.ps1
 
@@ -2518,6 +2633,21 @@ AI の指摘 5 件: 人と一致 2（40.0%）・AI だけ 3
 | 観点表への反映案 | 提案・観点表と同じ列（観点ID〜対象設計書）・件数・指摘の例・理由 |
 | 読み取り結果 | ファイル・シートごとに、見出しの行・読んだ行数・どの見出しを何として読んだか・見出しが無い項目・表が見つからないファイル（[読み取り結果](#読み取り結果の確認)） |
 
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-AiPath` | AI のレビュー結果のファイル・フォルダ（Invoke-DesignReview.ps1 のレビュー結果.xlsx など）。判定が OK の行は数えない |
+| `-HumanPath` | 人のレビューの指摘管理表のファイル・フォルダ（Excel・CSV） |
+| `-Checklist` | 観点表（既定は `review-checklists\詳細設計レビュー観点.xlsx`）。観点表への反映案に使う |
+| `-RowTolerance` | 場所が近いとみなす行の差（既定 2） |
+| `-MinSimilarity` | 場所が違うときに、内容が似ているとみなす度合い（0〜1。既定 0.35） |
+| `-MinAiOnly` | 判定基準を見直す案にする、観点ごとの AI だけの指摘の数（既定 2） |
+| `-Headers` | 指摘管理表の見出しの候補の CSV（既定は `tools\review-quality\指摘管理表の見出し.csv`） |
+| `-OutXlsx` | 結果を保存する（突き合わせ・観点別・設計書別・観点表への反映案・読み取り結果） |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
+
 ## Measure-CodeSize.ps1
 
 ソースコードの**ステップ数**（コメント・空行を除いた行数）を数えるステップカウンターです。Excel は不要です。
@@ -2561,8 +2691,14 @@ order        2    18       7     1    10     3       1       0
 - `.git`・`node_modules`・`bin`・`obj`・`target`・`build`・`dist` などのフォルダは数えません（`-Exclude` で変えられます）
 - 文字列の中の `/*` なども、コメントの始まりとして数えることがあります（行単位で判定する目安です）
 
-| 出力 | 内容 |
+### 主なパラメーター
+
+| パラメーター | 説明 |
 | --- | --- |
+| `-Path` | 数えるソースコードのフォルダ（またはファイル） |
+| `-Baseline` | 前の版のソースコードのフォルダ。新規・修正・削除の行数を出す |
+| `-GroupBy` / `-Depth` | まとめる単位（`Folder`（既定。`-Depth`（既定 1）階層目までのフォルダ）か `File`） |
+| `-Exclude` | 数えないフォルダの名前（既定は .git・node_modules・bin・obj・target・build・dist など） |
 | `-OutCsv` | 機能・KLOC・ステップ数・ファイル数・行数・コメント・空行（・新規・修正・削除）。UTF-8（BOM 付き）。Measure-TestQuality.ps1 の `-SizeCsv` にそのまま渡せる |
 | `-OutXlsx` | 機能別・ファイル別（言語・状態（新規・修正・変更なし・削除）付き） |
 
@@ -2604,6 +2740,15 @@ Metric   Unit     Process  Count  Mean  Low  High
 - 実績が `-MinSamples`（既定 3）件未満の組は、備考に「参考値」と書きます
 - 列の名前は「実績」「実績値」（値）、「単位」（分母）、「案件」（プロジェクト）なども読めます。数値でない値は数えません
 - 時点の列があり、同じプロジェクトの値が時点ごとにあるとき（New-QualityReport.ps1 の `-HistoryCsv` の CSV）は、最後の時点の値だけを使います
+
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 実績の CSV のファイルまたはフォルダ（複数可） |
+| `-Method` / `-Sigma` / `-Percentiles` | 基準値の求め方（上の表） |
+| `-MinSamples` | これより実績が少ない組は参考値にする（既定 3） |
+| `-OutCsv` | 基準値の CSV（指標・分母・工程・下限・上限・備考。UTF-8・BOM 付き）を保存する |
 
 ## New-QualityReport.ps1
 
@@ -2695,6 +2840,22 @@ Metric   Unit     Process  Count  Mean  Low  High
 - 全体の指摘密度・レビュー工数密度・テスト密度・バグ密度も、「指摘密度」「テスト密度」などの名前と分母（ページ数・KLOC など）で残します。プロジェクトが終わったら、この CSV を **New-QualityLimits.ps1 にそのまま渡して**、次の案件の基準値を作れます（同じプロジェクトは最後の時点の値だけを使います）
 - `-Project` を省くと、`-OutDir` のフォルダの名前をプロジェクトの名前にします
 
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Config` | 品質評価の設定ファイル（CSV）か、それを置いたフォルダ（[設定ファイル](#設定ファイル-config)） |
+| `-OutDir` | 品質評価のブックと、各ツールの詳細を保存するフォルダ |
+| `-DesignPath` / `-Findings` / `-AiReview` / `-ReviewLog` / `-TestPath` / `-BugList` / `-Requirement` | 資料（上の表） |
+| `-PageCsv` / `-SizeCsv` | 設計書のページ数の CSV（指摘密度の分母）／機能ごとの規模の CSV（テスト密度・バグ密度の分母） |
+| `-FunctionMap` | 機能の対応表の CSV（Measure-TestQuality.ps1 の `-FunctionMap`） |
+| `-ReviewLimits` / `-TestLimits` | レビュー・テストの基準値の CSV |
+| `-Criteria` | 判定（○△×）の基準の CSV（既定は `tools\quality-report\判定基準.csv`） |
+| `-HistoryCsv` / `-Project` | 実績の CSV と、そこに書くプロジェクトの名前（[実績の蓄積と前回との比較](#実績の蓄積と前回との比較-historycsv)） |
+| `-Title` | 品質評価のブックの名前（既定は「品質評価」） |
+| `-AsOf` | 評価の時点（期限切れ・予定日を過ぎても未実施の判定に使う。既定は今日） |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb は読まない） |
+
 ## Invoke-QualityAnalysis.ps1
 
 New-QualityReport.ps1 で作った品質評価のブックの、判定が **× と △ の指標**について、**定性分析（原因）と対策の下書き**を AI（Microsoft 365 Copilot など）に書かせ、品質評価のシートに書き込みます。Excel は不要です。
@@ -2726,6 +2887,7 @@ AI の下書きです。会議の前に、事実と合っているかを確か�
 | `-ImportOnly` | 保存した回答のファイルを読んで、ブックに書き込む |
 | `-Force` | 記入済みの指標も依頼に含めて書き直す |
 | `-Previous` | 前回の品質評価のブック（省略時は同じフォルダの、名前の日付が前のもののうち一番近いもの） |
+| `-NoExcel` | Excel を起動しない（品質評価のブックは .xlsx なので、通常は要らない） |
 
 ## Export-ExcelToPdf.ps1
 
@@ -2779,6 +2941,7 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 | `-OpenMode` | `Workbooks.Open` の呼び出し形式（`Auto` / `Full` / `Simple`）。既定は自動判定 |
 | `-LogPath` | 結果（ページ数を含む）を CSV（UTF-8 BOM 付き）で保存 |
 | `-WhatIf` | 実行せず対象を表示 |
+| `-Extensions` | 対象にする拡張子（既定は .xls・.xlsx・.xlsm・.xlsb） |
 
 ### シート名で対象を絞る
 
@@ -3009,6 +3172,22 @@ AI は **Microsoft 365 Copilot** を想定しています。Copilot はスクリ
 .\Invoke-DesignReview.ps1 D:\Design\詳細設計 -ImportOnly    # 回答からレビュー結果を作る
 ```
 
+### 主なパラメーター
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | レビューする設計書（Excel・Word）のフォルダまたはファイル（複数可。1 番目の引数） |
+| `-Checklist` | 観点表（xlsx または UTF-8 の csv）。既定は `review-checklists\詳細設計レビュー観点.xlsx`（[観点表](#観点表)） |
+| `-OutDir` | プロンプト・回答・レビュー結果の保存先（既定は `.\design-review`） |
+| `-MaxChars` | 1 回のプロンプトの最大文字数（既定 8000）。Copilot の入力の上限に合わせる（[入力文字数の上限と分割](#入力文字数の上限と分割)） |
+| `-PromptOnly` / `-ImportOnly` | プロンプトのファイルを作るだけにする／answers フォルダの回答から、レビュー結果だけを作り直す |
+| `-CheckOnly` | 観点表のチェックだけをする（`-Path` も渡すと、対象設計書のパターンが設計書に当たるかも確かめる） |
+| `-TextFormat` | AI に渡すテキストの形（`Rows`（既定）か `Markdown`。[設計書のテキストの形](#設計書のテキストの形-textformat)） |
+| `-SheetNameExclude` | テキストにしないシート名の正規表現（例: `表紙\|改訂履歴`）。文字数の節約に |
+| `-Glossary` | 表記ゆれ（ツールの確認）で使う用語集の CSV（Test-ExcelTerms.ps1 の `-Glossary` と同じ） |
+| `-Baseline` | 前の版の設計書のフォルダ。前の版から変わった部分だけを AI に渡す（[前の版から変わった部分だけをレビューする](#前の版から変わった部分だけをレビューする-baseline)） |
+| `-NoRecurse` | サブフォルダの設計書を対象にしない |
+
 ### レビュー結果.xlsx
 
 | シート | 内容 |
@@ -3228,6 +3407,8 @@ Copilot は 1 回に貼り付けられる文字数に上限があり、ライセ
 | `-ShortcutDir` / `-Desktop` | 画面を開くショートカット「Excel ツール」を作るフォルダ（既定はスタートメニュー）／デスクトップにも作る |
 | `-Update` | 配布元が変わっていれば、変わったファイルだけを写す |
 | `-Uninstall` | 「送る」の項目・スタートメニューの「Excel ツール」と PC に入れたツールを消す |
+| `-SendToDir` | 「送る」のショートカットを作るフォルダ（Install-SendTo.ps1 の `-SendToDir`）。既定は、ログインしている人の「送る」のフォルダ |
+| `-CheckOnly` / `-CheckHours` | `-Update` と同じだが、前の確認から `-CheckHours` 時間（既定 12）たっていなければ配布元を見ない。「送る」で使ったあとに Invoke-SendTo.ps1 が呼ぶ |
 
 ## Install-SendTo.ps1
 
