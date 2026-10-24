@@ -97,6 +97,102 @@ Test-Case 'New-DocumentRegister: -Planned の成果物の予定と、文書番�
     Assert-Match ([System.IO.File]::ReadAllText($csv)) '^﻿?No,フォルダ,ファイル,種類,文書番号,文書名,版数,作成日,更新日,作成者,最新の改訂,ページ,サイズ（KB）,ファイルの更新日時,確認'
 }
 
+Test-Case 'New-DocumentRegister: -Previous の前回の一覧と比べ、新規・版数の変化・版数を上げずに更新・名前や場所の変更・無くなったものを知らせる' {
+    $dir = New-TestDir
+    $docsDir = Join-Path $dir '納品物'
+    New-Item -ItemType Directory -Path $docsDir | Out-Null
+    New-Deliverables $docsDir
+    Get-ChildItem -LiteralPath $docsDir -File -Recurse | ForEach-Object { $_.LastWriteTime = Get-Date '2026-10-20 10:00' }
+    $prevXlsx = Join-Path $dir '成果物一覧_前回.xlsx'
+    $prevCsv = Join-Path $dir '成果物一覧_前回.csv'
+    $null = & $RegisterTool -Path $docsDir -OutXlsx $prevXlsx -OutCsv $prevCsv 6>$null
+
+    # 前回のあと: 設計書を v1.2 に上げ、議事録は版数を変えずに直し、テスト計画書は名前を変え、報告書を消し、運用手順書を足す
+    New-CoverBook (Join-Path $docsDir '設計書_v1.2.xlsx') @(@('受注管理システム', ''), @('文書名', '設計書'), @('文書番号', 'X-01'), @('版数', '1.2'), @('最終更新日', '2026/10/22')) @(@('1.1', '2026/10/15', '画面の追加', '山田'), @('1.2', '2026/10/22', '帳票の追加', '山田'))
+    (Get-Item -LiteralPath (Join-Path $docsDir '議事録_v1.0.docx')).LastWriteTime = Get-Date '2026-10-22 15:30'
+    Rename-Item -LiteralPath (Join-Path $docsDir '02_テスト/テスト計画書.xlsx') -NewName '結合テスト計画書.xlsx'
+    Remove-Item -LiteralPath (Join-Path $docsDir '報告書.pdf')
+    New-CoverBook (Join-Path $docsDir '運用手順書.xlsx') @(@('運用手順書', ''), @('文書番号', 'U-01'), @('版数', '1.0')) $null
+
+    $expected = @(
+        '02_テスト|結合テスト計画書.xlsx|名前・場所が変わった（前回: 02_テスト/テスト計画書.xlsx）',
+        '|基本設計書_v1.2.xlsx|',
+        '|設計書_v1.2.xlsx|版数 1.1→1.2',
+        '|議事録_v1.0.docx|版数を上げずに更新',
+        '|運用手順書.xlsx|新規')
+    $docs = @(& $RegisterTool -Path $docsDir -Previous $prevXlsx 6>$null)
+    Assert-Equal $expected @($docs | ForEach-Object { '{0}|{1}|{2}' -f $_.Folder, $_.File, $_.Change }) '前回の xlsx（古い版のシートの設計書_v1.0 より、成果物一覧の v1.1 と比べる）'
+    Assert-Equal '前回の一覧から版数を上げずに更新' @($docs | Where-Object { $_.File -eq '議事録_v1.0.docx' })[0].Note '「確認」にも書く'
+
+    # Excel で開き直した CSV（更新日時がシリアル値・日付だけになったもの、版数の 1.0 が数値の 1 になったもの）でも同じ
+    $lines = [System.IO.File]::ReadAllLines($prevCsv)
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '議事録') { $lines[$i] = $lines[$i].Replace(',1.0,', ',1,') }
+        if ($lines[$i] -match '基本設計書_v1\.2') { $lines[$i] = $lines[$i].Replace('2026/10/20 10:00', ([datetime]'2026-10-20 10:00').ToOADate().ToString([System.Globalization.CultureInfo]::InvariantCulture)) }
+        if ($lines[$i] -match 'テスト計画書') { $lines[$i] = $lines[$i].Replace('2026/10/20 10:00', '2026/10/20') }
+    }
+    [System.IO.File]::WriteAllLines($prevCsv, $lines, (New-Object System.Text.UTF8Encoding($true)))
+    $text = Get-HostText { $script:fromCsv = @(& $RegisterTool -Path $docsDir -Previous $prevCsv) }
+    Assert-Equal $expected @($script:fromCsv | ForEach-Object { '{0}|{1}|{2}' -f $_.Folder, $_.File, $_.Change }) '前回の CSV'
+    Assert-Match $text '前回の一覧（成果物一覧_前回\.csv。成果物 5 件）から: 新規 1・版数が変わった 1・版数を上げずに更新 1・名前・場所が変わった 1・無くなった 1'
+    Assert-Match $text '版数を上げずに更新: 議事録_v1\.0\.docx'
+    Assert-Match $text '無くなった: 報告書\.pdf'
+
+    $out = Join-Path $dir '成果物一覧.xlsx'
+    $csv = Join-Path $dir '成果物一覧.csv'
+    $null = & $RegisterTool -Path $docsDir -Previous $prevXlsx -OutXlsx $out -OutCsv $csv 6>$null
+    $book = Read-XlsxSheet -Path $out -Index 2
+    Assert-Equal @('成果物一覧', '前回からの変化', '古い版', '読み取り結果') $book.Sheets
+    Assert-Equal @(
+        '名前・場所が変わった（前回: 02_テスト/テスト計画書.xlsx）|結合テスト計画書.xlsx|1.0|1.0||',
+        '版数 1.1→1.2|設計書_v1.2.xlsx|1.1|1.2||',
+        '版数を上げずに更新|議事録_v1.0.docx|1.0|1.0|2026/10/20 10:00|2026/10/22 15:30',
+        '新規|運用手順書.xlsx||1.0||',
+        '無くなった|報告書.pdf||||') @(2..($book.Rows.Count) | ForEach-Object { $r = $book.Rows[$_]; $g = ''; $h = ''; if ($r['A'] -match '上げずに') { $g = $r['G']; $h = $r['H'] }; '{0}|{1}|{2}|{3}|{4}|{5}' -f $r['A'], $r['C'], $r['E'], $r['F'], $g, $h })
+    Assert-True (@($book.Links | Where-Object { $_.Target -like '*議事録_v1.0.docx' }).Count -eq 1) 'ファイルへのリンク（無くなったものには無い）'
+    $register = Read-XlsxSheet -Path $out -Index 1
+    Assert-Equal '前回から|確認' ('{0}|{1}' -f $register.Rows[1]['O'], $register.Rows[1]['P'])
+    Assert-Match ([System.IO.File]::ReadAllText($csv)) 'ファイルの更新日時,前回から,確認'
+}
+
+Test-Case 'New-DocumentRegister: -Findings の指摘管理表から、成果物ごとに未完了の指摘を数える（文書番号・文書名・ファイル名で突き合わせる）' {
+    $dir = New-TestDir
+    $docsDir = Join-Path $dir '納品物'
+    New-Item -ItemType Directory -Path $docsDir | Out-Null
+    New-Deliverables $docsDir
+    $findings = Join-Path $dir '指摘管理表.xlsx'
+    New-SheetsBook $findings ([ordered]@{
+            '指摘' = @(
+                , @('No', '対象成果物', '指摘内容', '対応状況', '対応期限')
+                , @('1', '設計書_v1.1.xlsx', '画面の説明が足りない', '対応中', '2026/10/20')
+                , @('2', '設計書', '用語の誤り', '完了', '')
+                , @('3', 'B-01', '表紙の版数が古い', '未対応', '2026/10/30')
+                , @('4', '議事録', '決定事項の書き漏れ', '取下げ', '')
+                , @('5', 'テスト計画書（結合テスト）', '観点が足りない', '', '')
+                , @('6', '運用手順書', '手順の抜け', '未対応', ''))
+        })
+    $docs = @(& $RegisterTool -Path $docsDir -Findings $findings -AsOf '2026-10-24' 6>$null)
+    Assert-Equal @(
+        'テスト計画書.xlsx|1|未完了の指摘 1 件',
+        '基本設計書_v1.2.xlsx|1|版数が違う（ファイル名 1.2・表紙 1.1・改訂履歴 1.2）・更新日が違う（表紙 2026/10/10・改訂履歴 2026/10/20）・未完了の指摘 1 件',
+        '報告書.pdf|0|',
+        '設計書_v1.1.xlsx|1|未完了の指摘 1 件（期限切れ 1 件）',
+        '議事録_v1.0.docx|0|') @($docs | ForEach-Object { '{0}|{1}|{2}' -f $_.File, $_.OpenFindings, $_.Note }) 'ファイル名（版数を除く）・文書番号・文書名で突き合わせる。完了と取下げは数えない'
+
+    $out = Join-Path $dir '成果物一覧.xlsx'
+    $text = Get-HostText { & $RegisterTool -Path $docsDir -Findings $findings -AsOf '2026-10-24' -OutXlsx $out | Out-Null }
+    Assert-Match $text '未完了の指摘 4 件（期限切れ 1 件）: 成果物 3 件'
+    Assert-Match $text '一覧の成果物と対応付かない指摘 1 件: 運用手順書'
+    $book = Read-XlsxSheet -Path $out -Index 2
+    Assert-Equal @('成果物一覧', '未完了の指摘', '古い版', '読み取り結果') $book.Sheets
+    Assert-Equal @(
+        '02_テスト/テスト計画書.xlsx|テスト計画書（結合テスト）|観点が足りない|',
+        '基本設計書_v1.2.xlsx|B-01|表紙の版数が古い|',
+        '設計書_v1.1.xlsx|設計書_v1.1.xlsx|画面の説明が足りない|期限切れ',
+        '（一覧に無い）|運用手順書|手順の抜け|') @(2..($book.Rows.Count) | ForEach-Object { $r = $book.Rows[$_]; '{0}|{1}|{2}|{3}' -f ([string]$r['A']).Replace('\', '/'), $r['B'], $r['C'], $r['G'] }) '成果物一覧の順。対応付かない指摘は最後'
+    Assert-True (@($book.Links | Where-Object { $_.Target -like '*指摘管理表.xlsx' -and $_.Location -eq "'指摘'!A6" }).Count -eq 1) '指摘管理表の行へのリンク'
+}
+
 Test-Case 'New-DocumentRegister: 「第N回」は版数にせず、ファイル名の版数で最新を決め、数値の版数・空欄のある改訂履歴・和暦の日付・追記した PDF を読み違えない' {
     $dir = New-TestDir
     $docsDir = Join-Path $dir '納品物'

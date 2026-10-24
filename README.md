@@ -56,7 +56,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Test-ExcelDeliverable.ps1](tools/README.md#test-exceldeliverableps1) | 提出前チェック（体裁・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・表紙と改訂履歴の版数の食い違い・スクリーンショットの縦横比の崩れや拡大しすぎ）。Word（.docx）の変更履歴・コメント・隠し文字の残りも。プロパティの個人名・ヘッダーのファイルの場所・表示の状態は `-Fix` で直せる | 不要 | 提出前チェック |
 | [Reset-ExcelView.ps1](tools/README.md#reset-excelviewps1) | 開いたときに先頭シートの A1 が表示される状態に一括で直す | 不要 | 表示を整える |
 | [Export-ExcelToPdf.ps1](tools/README.md#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える | 必要 ※2 | PDF にする |
-| [New-DocumentRegister.ps1](tools/README.md#new-documentregisterps1) | 成果物の表紙と改訂履歴から成果物一覧（文書番号・文書名・版数・更新日・最新の改訂）を作り、古い版・版数の食い違い・未提出を見つける | 不要 ※1 | － |
+| [New-DocumentRegister.ps1](tools/README.md#new-documentregisterps1) | 成果物の表紙と改訂履歴から成果物一覧（文書番号・文書名・版数・更新日・最新の改訂）を作り、古い版・版数の食い違い・未提出を見つける。前回の一覧からの変化（版数を上げずに直した文書など）と、未完了の指摘も知らせる | 不要 ※1 | － |
 
 #### テスト
 

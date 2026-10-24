@@ -5,6 +5,10 @@ param(
 
     [string] $Planned,
 
+    [string] $Previous,
+
+    [string[]] $Findings,
+
     [datetime] $AsOf = (Get-Date).Date,
 
     [switch] $AllVersions,
@@ -24,16 +28,19 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
 
-foreach ($name in @('Planned', 'OutXlsx', 'OutCsv')) {
+foreach ($name in @('Planned', 'Previous', 'OutXlsx', 'OutCsv')) {
     $v = Get-Variable -Name $name -ValueOnly
     if ($v) { Set-Variable -Name $name -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($v) }
 }
 if ($OutXlsx -and [System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw "-OutXlsx の拡張子は .xlsx にしてください: $OutXlsx" }
 if ($Planned -and -not (Test-Path -LiteralPath $Planned)) { throw "-Planned の成果物の予定が見つかりません: $Planned" }
+if ($Previous -and -not (Test-Path -LiteralPath $Previous)) { throw "-Previous の前回の成果物一覧が見つかりません: $Previous" }
 
 Update-TypeData -TypeName 'DocumentRegister.Document' -DefaultDisplayPropertySet Folder, File, DocNo, Title, Version, Updated, Note -Force -WhatIf:$false
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
+# 日付は、Windows の地域の設定（和暦など）によらず西暦で書く
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
 # 表紙の見出し（全角・半角と空白をそろえて比べる）
 $coverFields = [ordered]@{
@@ -74,11 +81,19 @@ function ConvertTo-VersionKey {
     return [regex]::Replace($Version, '(\.0)+$', '')
 }
 
+function Get-FileNameVersion {
+    #     ファイル名の版数（設計書_v1.1.xlsx・設計書 Ver1.1.xlsx・設計書 第1.1版.xlsx の「1.1」。「第2回」は版数にしない。無ければ空）
+    param([string] $FileName)
+    $m = [regex]::Match([System.IO.Path]::GetFileNameWithoutExtension($FileName).Normalize($nfkc), '(?i)(?<![a-z])v(?:er)?\.?\s*(\d+(?:\.\d+)*)|第\s*(\d+(?:\.\d+)*)\s*版')
+    if (-not $m.Success) { return '' }
+    return (ConvertTo-VersionText ($m.Groups[1].Value + $m.Groups[2].Value))
+}
+
 function ConvertTo-DateText {
     #     日付の文字を「2026/10/01」の形にする（読めなければそのまま）
     param([string] $Text)
     $d = ConvertTo-DateValue $Text $AsOf
-    if ($d) { return $d.ToString('yyyy/MM/dd') }
+    if ($d) { return $d.ToString('yyyy/MM/dd', $invariant) }
     return ([string]$Text).Trim()
 }
 
@@ -248,7 +263,7 @@ foreach ($p in $Path) {
         else { $root = $item.DirectoryName }
         foreach ($f in $list) {
             if ($f.Name -match $skipPattern) { continue }
-            if (@($OutXlsx, $OutCsv, $Planned) | Where-Object { $_ -and [string]::Equals($_, $f.FullName, [System.StringComparison]::OrdinalIgnoreCase) }) { continue }
+            if (@($OutXlsx, $OutCsv, $Planned, $Previous) | Where-Object { $_ -and [string]::Equals($_, $f.FullName, [System.StringComparison]::OrdinalIgnoreCase) }) { continue }
             if (-not $seen.Add($f.FullName)) { continue }
             $rel = $f.FullName.Substring($root.Length).TrimStart('\', '/')
             $files.Add([pscustomobject]@{ Info = $f; Relative = $rel })
@@ -285,11 +300,11 @@ foreach ($entry in $fileArray) {
         Key = (Get-VersionlessName $entry.Relative); Order = (Get-NameVersion $f.Name); NameVersion = ''
         DocNo = ''; Title = ''; Version = ''; Created = ''; Updated = ''; Author = ''; System = ''; History = $null; Pages = ''
         Notes = (New-Object System.Collections.Generic.List[string]); Latest = $true; LatestFile = ''; Planned = ''; Note = ''
+        Change = ''; OpenFindings = 0; OverdueFindings = 0
     }
     # 版数はファイル名、無ければフォルダ名（v1.0\設計書.xlsx など）
     if ($null -eq $doc.Order) { $doc.Order = Get-NameVersion $entry.Relative }
-    $nm = [regex]::Match([System.IO.Path]::GetFileNameWithoutExtension($f.Name).Normalize($nfkc), '(?i)(?<![a-z])v(?:er)?\.?\s*(\d+(?:\.\d+)*)|第\s*(\d+(?:\.\d+)*)\s*版')
-    if ($nm.Success) { $doc.NameVersion = ConvertTo-VersionText ($nm.Groups[1].Value + $nm.Groups[2].Value) }
+    $doc.NameVersion = Get-FileNameVersion $f.Name
     $cover = @{}
     try {
         if ($kind -eq 'Excel') {
@@ -350,10 +365,11 @@ foreach ($g in @($docs | Group-InOrder Key)) {
 # ---------------------------------------------------------------- 成果物の予定と突き合わせる
 
 
+$labels = { param([string[]] $Names) @($Names | ForEach-Object { ConvertTo-Label $_ }) }
+$docNoKey = { param([string] $Text) (ConvertTo-Label $Text).ToUpperInvariant() }
 $plannedRows = New-Object System.Collections.Generic.List[object]
 $readLog = New-Object System.Collections.Generic.List[object]
 if ($Planned) {
-    $labels = { param([string[]] $Names) @($Names | ForEach-Object { ConvertTo-Label $_ }) }
     $candidates = @{
         '成果物'   = & $labels @('成果物', '成果物名', '文書名', 'ドキュメント名', '資料名', '納品物', '納品物名', 'ファイル名', '名称')
         '文書番号' = & $labels @('文書番号', '文書No', '管理番号', '資料番号', 'ドキュメント番号')
@@ -384,9 +400,195 @@ if ($Planned) {
             if ($due -and $due -lt $AsOf) { $state = '未提出（予定日を過ぎています）' }
         }
         foreach ($d in $matched) { $d.Planned = $name }
-        $plannedRows.Add([pscustomobject]@{ Name = $name; DocNo = $docNo; Due = $(if ($due) { $due.ToString('yyyy/MM/dd') } else { ([string]$rec.Values['予定日']).Trim() }); Owner = ([string]$rec.Values['担当']).Trim(); State = $state; Docs = $matched; Place = $rec })
+        $plannedRows.Add([pscustomobject]@{ Name = $name; DocNo = $docNo; Due = $(if ($due) { $due.ToString('yyyy/MM/dd', $invariant) } else { ([string]$rec.Values['予定日']).Trim() }); Owner = ([string]$rec.Values['担当']).Trim(); State = $state; Docs = $matched; Place = $rec })
     }
     foreach ($d in $current) { if (-not $d.Planned) { $d.Notes.Add('予定に無い') } }
+}
+
+# ---------------------------------------------------------------- 前回の成果物一覧と比べる
+
+
+function Get-DocVersion {
+    #     比べる版数（表紙・改訂履歴・ファイル名の版数のうち、いちばん大きいもの。無ければ空）
+    param([string] $Cover, [string] $History, [string] $FileName)
+    $best = ''
+    $bestOrder = $null
+    foreach ($v in @((ConvertTo-VersionText $Cover), (ConvertTo-VersionText $History), (Get-FileNameVersion $FileName))) {
+        if (-not $v) { continue }
+        $order = $null
+        try { $order = Get-NameVersion ('v' + $v) } catch { }
+        if (-not $best -or $order -gt $bestOrder) { $best = $v; $bestOrder = $order }
+    }
+    return $best
+}
+
+function ConvertTo-ModifiedTime {
+    #     前回の一覧の「ファイルの更新日時」（2026/10/01 09:30。Excel で開き直した 2026/10/1 9:30・シリアル値も）。
+    #     Format は比べる形（時刻の無いものは日付だけで比べる）。読めなければ $null
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($nfkc).Trim()
+    if (-not $t) { return $null }
+    try {
+        $m = [regex]::Match($t, '^(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})日?(?:\s+(\d{1,2}):(\d{2}))?')
+        if ($m.Success) {
+            $value = New-Object DateTime ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value), ([int]$m.Groups[3].Value)
+            if (-not $m.Groups[4].Success) { return [pscustomobject]@{ Value = $value; Format = 'yyyy/MM/dd' } }
+            return [pscustomobject]@{ Value = $value.AddHours([int]$m.Groups[4].Value).AddMinutes([int]$m.Groups[5].Value); Format = 'yyyy/MM/dd HH:mm' }
+        }
+        $n = 0.0
+        if ([double]::TryParse($t, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$n) -and $n -ge 1 -and $n -lt 2958466) {
+            # シリアル値は分に丸める
+            $minutes = [long][math]::Round([DateTime]::FromOADate($n).Ticks / 600000000.0)
+            $format = $(if ($n -ne [math]::Floor($n)) { 'yyyy/MM/dd HH:mm' } else { 'yyyy/MM/dd' })
+            return [pscustomobject]@{ Value = (New-Object DateTime ($minutes * [long]600000000)); Format = $format }
+        }
+    }
+    catch { }
+    return $null
+}
+
+$changeRows = New-Object System.Collections.Generic.List[object]
+$previousCount = 0
+if ($Previous) {
+    $fields = @('ファイル', 'フォルダ', '文書番号', '文書名', '版数', '最新の改訂', '更新日時')
+    $candidates = @{
+        'ファイル' = & $labels @('ファイル', 'ファイル名'); 'フォルダ' = & $labels @('フォルダ'); '文書番号' = & $labels @('文書番号'); '文書名' = & $labels @('文書名')
+        '版数' = & $labels @('版数'); '最新の改訂' = & $labels @('最新の改訂'); '更新日時' = & $labels @('ファイルの更新日時')
+    }
+    # 成果物一覧と古い版のシートを読み、同じ文書（版数だけが違うファイル）は版数の大きいものを前回の版とする
+    $records = Read-HeaderRecords -Inputs (Get-InputFiles @($Previous) '前回の成果物一覧') -Candidates $candidates -Fields $fields `
+        -Need @('ファイル', '更新日時') -Key @('ファイル') -What '前回の成果物一覧' -NoExcel:$NoExcel -ReadLog $readLog
+    if ($records.Count -eq 0) { Write-Warning "前回の成果物一覧に、ファイルとファイルの更新日時の見出しのある表がありません: $Previous" }
+    $before = [ordered]@{}
+    foreach ($rec in $records) {
+        $v = $rec.Values
+        $file = ([string]$v['ファイル']).Trim()
+        if (-not $file) { continue }
+        $folder = ([string]$v['フォルダ']).Trim()
+        $relative = $file
+        if ($folder) { $relative = ($folder + '/' + $file).Replace('\', '/') }
+        $p = [pscustomobject]@{
+            Folder = $folder; File = $file; Relative = $relative; DocNo = ([string]$v['文書番号']).Trim(); Title = ([string]$v['文書名']).Trim()
+            Version = (Get-DocVersion $v['版数'] $v['最新の改訂'] $file); Modified = (ConvertTo-ModifiedTime $v['更新日時']); Order = (Get-NameVersion $file)
+        }
+        $k = Get-VersionlessName $relative
+        if (-not $before.Contains($k) -or ($p.Order -and $p.Order -gt $before[$k].Order)) { $before[$k] = $p }
+    }
+    $previousCount = $before.Count
+
+    # 同じ場所・名前（版数を除く）のもの。無ければ、文書番号が前回と今回で 1 つずつだけのもの（名前・場所を変えた文書）
+    $current = @($docs | Where-Object { $_.Latest })
+    $pairs = @{}
+    $used = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($d in $current) {
+        $k = Get-VersionlessName $d.Relative.Replace('\', '/')
+        if ($before.Contains($k)) { $pairs[$d.Relative] = $before[$k]; [void]$used.Add($k) }
+    }
+    foreach ($d in $current) {
+        if ($pairs.ContainsKey($d.Relative) -or -not $d.DocNo) { continue }
+        $no = & $docNoKey $d.DocNo
+        $same = @($before.Keys | Where-Object { -not $used.Contains($_) -and $before[$_].DocNo -and (& $docNoKey $before[$_].DocNo) -eq $no })
+        $others = @($current | Where-Object { -not $pairs.ContainsKey($_.Relative) -and $_.DocNo -and (& $docNoKey $_.DocNo) -eq $no })
+        if ($same.Count -eq 1 -and $others.Count -eq 1) { $pairs[$d.Relative] = $before[$same[0]]; [void]$used.Add($same[0]) }
+    }
+
+    foreach ($d in $current) {
+        $version = Get-DocVersion $d.Version $(if ($d.History) { $d.History.Version } else { '' }) $d.File
+        $p = $pairs[$d.Relative]
+        if (-not $p) {
+            $d.Change = '新規'
+            $changeRows.Add([pscustomobject]@{ Change = $d.Change; Doc = $d; Previous = $null; Version = $version })
+            continue
+        }
+        $parts = New-Object System.Collections.Generic.List[string]
+        if ((Get-VersionlessName $p.Relative) -ne (Get-VersionlessName $d.Relative.Replace('\', '/'))) { $parts.Add(('名前・場所が変わった（前回: {0}）' -f $p.Relative)) }
+        if ($p.Version -and $version -and (ConvertTo-VersionKey $p.Version) -ne (ConvertTo-VersionKey $version)) {
+            $parts.Add(('版数 {0}→{1}' -f $p.Version, $version))
+            $lower = $false
+            try { $lower = (Get-NameVersion ('v' + $version)) -lt (Get-NameVersion ('v' + $p.Version)) } catch { }
+            if ($lower) { $d.Notes.Add(('版数が前回（{0}）より小さい' -f $p.Version)) }
+        }
+        elseif ($p.Modified -and $d.Modified.ToString($p.Modified.Format, $invariant) -ne $p.Modified.Value.ToString($p.Modified.Format, $invariant)) {
+            # 版数のある文書を、版数を変えずに直した（版数の無いファイルは「更新」だけ）
+            if ($p.Version -and $version) { $parts.Add('版数を上げずに更新'); $d.Notes.Add('前回の一覧から版数を上げずに更新') }
+            else { $parts.Add('更新') }
+        }
+        $d.Change = $parts -join '・'
+        if ($d.Change) { $changeRows.Add([pscustomobject]@{ Change = $d.Change; Doc = $d; Previous = $p; Version = $version }) }
+    }
+    foreach ($k in $before.Keys) {
+        if (-not $used.Contains($k)) { $changeRows.Add([pscustomobject]@{ Change = '無くなった'; Doc = $null; Previous = $before[$k]; Version = '' }) }
+    }
+}
+
+# ---------------------------------------------------------------- 指摘管理表の未完了の指摘
+
+
+function ConvertTo-NameKey {
+    #     成果物の名前を比べる形（フォルダ・拡張子・版数を除き、全角・半角と空白をそろえる）
+    param([string] $Name)
+    $n = ([string]$Name).Trim().Split(@('\', '/'))[-1]
+    if ($n -match '(?i)\.(xlsx|xlsm|xls|xlsb|docx|docm|doc|pdf|pptx|ppt)$') { $n = [System.IO.Path]::GetFileNameWithoutExtension($n) }
+    $n = [regex]::Replace($n.Normalize($nfkc), '[_\-\s]*(?:(?<![A-Za-z])[vV](?:[eE][rR])?\.?\s*\d+(?:\.\d+)*版?|第\s*\d+(?:\.\d+)*\s*版)', '')
+    return (ConvertTo-Label $n).ToUpperInvariant()
+}
+
+$openFindings = New-Object System.Collections.Generic.List[object]
+if ($Findings) {
+    # 対応が終わった・指摘として数えない状態（Measure-ReviewQuality.ps1 と同じ）
+    $closedPattern = '完了|済|クローズ|close|done|対応不要|不要|対処なし'
+    $excludedPattern = '取下げ|取り下げ|取消|却下|対象外|重複|誤指摘'
+    $fields = @('設計書', '指摘内容', '重要度', '状態', '対応要否', '期限', '完了日', '対応者')
+    $candidates = Read-HeaderCandidates (Join-Path $PSScriptRoot 'review-quality/指摘管理表の見出し.csv') $fields
+    $skip = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in @($OutXlsx, $OutCsv, $Previous, $Planned)) { if ($p) { [void]$skip.Add($p) } }
+    $records = Read-HeaderRecords -Inputs (Get-InputFiles $Findings '指摘管理表' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
+        -Need @('指摘内容', '設計書') -Key @('指摘内容') -What '指摘管理表' -Skip $skip -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
+    if ($records.Count -eq 0) { Write-Warning '指摘管理表が見つかりませんでした（指摘内容と、設計書（対象成果物）の見出しがある表を探します）' }
+
+    # 文書番号・文書名・ファイル名（版数と拡張子を除く）→ 成果物
+    $index = @{}
+    $order = @{}
+    foreach ($d in @($docs | Where-Object { $_.Latest })) {
+        $order[$d.Relative] = $order.Count
+        foreach ($k in @((ConvertTo-NameKey $d.File), (ConvertTo-NameKey $d.Title), $(if ($d.DocNo) { & $docNoKey $d.DocNo }))) {
+            if (-not $k) { continue }
+            if (-not $index.ContainsKey($k)) { $index[$k] = New-Object System.Collections.Generic.List[object] }
+            if (-not $index[$k].Contains($d)) { $index[$k].Add($d) }
+        }
+    }
+    foreach ($rec in $records) {
+        $v = $rec.Values
+        $content = ([string]$v['指摘内容']).Trim()
+        if (-not $content) { continue }
+        $status = ([string]$v['状態']).Trim()
+        if ($status -match $excludedPattern) { continue }
+        $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
+        if (($status -match $closedPattern) -or (([string]$v['対応要否']).Trim() -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)) { continue }
+        $name = ([string]$v['設計書']).Trim()
+        $matched = New-Object System.Collections.Generic.List[object]
+        foreach ($k in @((ConvertTo-NameKey $name), (& $docNoKey $name))) {
+            if (-not $k -or -not $index.ContainsKey($k)) { continue }
+            foreach ($d in $index[$k]) { if (-not $matched.Contains($d)) { $matched.Add($d) } }
+        }
+        $due = ConvertTo-DateValue $v['期限'] $AsOf
+        $overdue = [bool]($due -and $due -lt $AsOf)
+        foreach ($d in $matched) { $d.OpenFindings++; if ($overdue) { $d.OverdueFindings++ } }
+        $first = [int]::MaxValue
+        foreach ($d in $matched) { if ($order[$d.Relative] -lt $first) { $first = $order[$d.Relative] } }
+        $openFindings.Add([pscustomobject]@{
+                Document = $name; Content = $content; Severity = ([string]$v['重要度']).Trim(); Status = $status; Owner = ([string]$v['対応者']).Trim()
+                Due = $due; Overdue = $overdue; Docs = $matched.ToArray(); Order = $first; Seq = $openFindings.Count; Place = $rec
+            })
+    }
+    # 成果物一覧の順（対応付かない指摘は最後）
+    $openFindings.Sort([System.Comparison[object]] { param($a, $b) $c = $a.Order.CompareTo($b.Order); if ($c -eq 0) { $c = $a.Seq.CompareTo($b.Seq) }; $c })
+    foreach ($d in $docs) {
+        if ($d.OpenFindings -eq 0) { continue }
+        $note = '未完了の指摘 {0} 件' -f $d.OpenFindings
+        if ($d.OverdueFindings -gt 0) { $note += '（期限切れ {0} 件）' -f $d.OverdueFindings }
+        $d.Notes.Add($note)
+    }
 }
 
 # ---------------------------------------------------------------- 結果
@@ -401,14 +603,21 @@ foreach ($d in $listed) {
 }
 $listed
 
-$headers = @('No', 'フォルダ', 'ファイル', '種類', '文書番号', '文書名', '版数', '作成日', '更新日', '作成者', '最新の改訂', 'ページ', 'サイズ（KB）', 'ファイルの更新日時', '確認')
+# 「前回から」の列は -Previous のときだけ（いつもの一覧の列は変えない）
+$headers = @('No', 'フォルダ', 'ファイル', '種類', '文書番号', '文書名', '版数', '作成日', '更新日', '作成者', '最新の改訂', 'ページ', 'サイズ（KB）', 'ファイルの更新日時')
+$widths = @(5, 18, 34, 7, 14, 24, 7, 11, 11, 12, 34, 6, 9, 16)
+if ($Previous) { $headers += '前回から'; $widths += 22 }
+$headers += '確認'
+$widths += 40
 $registerRows = New-Object System.Collections.Generic.List[object]
 $no = 0
 foreach ($d in $listed) {
     $no++
     $history = ''
     if ($d.History) { $history = (@($d.History.Version, $d.History.Date, $d.History.Content, $d.History.Author) | Where-Object { $_ }) -join ' ' }
-    $registerRows.Add([pscustomobject]@{ Doc = $d; Values = @([double]$no, $d.Folder, $d.File, $d.Kind, $d.DocNo, $d.Title, $d.Version, $d.Created, $d.Updated, $d.Author, $history, $d.Pages, [double]$d.Size, $d.Modified.ToString('yyyy/MM/dd HH:mm'), $d.Note) })
+    $values = @([double]$no, $d.Folder, $d.File, $d.Kind, $d.DocNo, $d.Title, $d.Version, $d.Created, $d.Updated, $d.Author, $history, $d.Pages, [double]$d.Size, $d.Modified.ToString('yyyy/MM/dd HH:mm', $invariant))
+    if ($Previous) { $values += $d.Change }
+    $registerRows.Add([pscustomobject]@{ Doc = $d; Values = @($values + $d.Note) })
 }
 
 if ($OutCsv) {
@@ -420,7 +629,6 @@ if ($OutCsv) {
 }
 
 if ($OutXlsx) {
-    $widths = @(5, 18, 34, 7, 14, 24, 7, 11, 11, 12, 34, 6, 9, 16, 40)
     $columns = @(for ($i = 0; $i -lt $headers.Count; $i++) { @{ Header = $headers[$i]; Width = $widths[$i] } })
     $sheets = New-Object System.Collections.Generic.List[object]
     $sheets.Add(@{ Name = '成果物一覧'; Columns = $columns; Rows = @($registerRows | ForEach-Object { @{ Values = $_.Values; Link = @{ Column = 2; Path = $_.Doc.Path } } }) })
@@ -435,10 +643,38 @@ if ($OutXlsx) {
         foreach ($d in @($docs | Where-Object { $_.Latest -and -not $_.Planned })) { $rows.Add(@{ Values = @('', $d.DocNo, '', '', '予定に無い', $d.Relative, $d.Version); Link = @{ Column = 5; Path = $d.Path } }) }
         $sheets.Add(@{ Name = '予定との突き合わせ'; Columns = @(@{ Header = '成果物（予定）'; Width = 30 }, @{ Header = '文書番号'; Width = 14 }, @{ Header = '予定日'; Width = 11 }, @{ Header = '担当'; Width = 10 }, @{ Header = '状態'; Width = 26 }, @{ Header = 'ファイル'; Width = 50 }, @{ Header = '版数'; Width = 7 }); Rows = $rows })
     }
-    if (-not $AllVersions -and $old.Count -gt 0) {
-        $sheets.Add(@{ Name = '古い版'; Columns = @(@{ Header = 'フォルダ'; Width = 18 }, @{ Header = 'ファイル'; Width = 34 }, @{ Header = '版数'; Width = 7 }, @{ Header = 'ファイルの更新日時'; Width = 16 }, @{ Header = '最新の版'; Width = 40 }); Rows = @($old | ForEach-Object { @{ Values = @($_.Folder, $_.File, $_.Version, $_.Modified.ToString('yyyy/MM/dd HH:mm'), $_.LatestFile); Link = @{ Column = 1; Path = $_.Path } } }) })
+    if ($Previous) {
+        $rows = New-Object System.Collections.Generic.List[object]
+        foreach ($c in $changeRows) {
+            $p = $c.Previous
+            $modified = ''
+            if ($p -and $p.Modified) { $modified = $p.Modified.Value.ToString($p.Modified.Format, $invariant) }
+            if ($c.Doc) {
+                $d = $c.Doc
+                $rows.Add(@{ Values = @($c.Change, $d.Folder, $d.File, $d.Title, $(if ($p) { $p.Version } else { '' }), $c.Version, $modified, $d.Modified.ToString('yyyy/MM/dd HH:mm', $invariant)); Link = @{ Column = 2; Path = $d.Path } })
+            }
+            else { $rows.Add(@{ Values = @($c.Change, $p.Folder, $p.File, $p.Title, $p.Version, '', $modified, '') }) }
+        }
+        $sheets.Add(@{ Name = '前回からの変化'; Columns = @(@{ Header = '変化'; Width = 30 }, @{ Header = 'フォルダ'; Width = 18 }, @{ Header = 'ファイル'; Width = 34 }, @{ Header = '文書名'; Width = 24 }, @{ Header = '前回の版数'; Width = 9 }, @{ Header = '今回の版数'; Width = 9 }, @{ Header = '前回の更新日時'; Width = 16 }, @{ Header = '今回の更新日時'; Width = 16 }); Rows = $rows })
     }
-    if ($Planned) { $sheets.Add((New-ReadLogSheet $readLog)) }
+    if ($Findings) {
+        $rows = New-Object System.Collections.Generic.List[object]
+        foreach ($f in $openFindings) {
+            $place = $f.Place
+            if ($place.Sheet) { $where = '{0} {1}!A{2}' -f $place.File, $place.Sheet, $place.Row } else { $where = '{0} {1} 行目' -f $place.File, $place.Row }
+            $files = '（一覧に無い）'
+            if ($f.Docs.Count -gt 0) { $files = (@($f.Docs | ForEach-Object { $_.Relative })) -join '・' }
+            $row = @{ Values = @($files, $f.Document, $f.Content, $f.Severity, $f.Status, $(if ($f.Due) { $f.Due.ToString('yyyy/MM/dd', $invariant) } else { '' }), $(if ($f.Overdue) { '期限切れ' } else { '' }), $f.Owner, $where) }
+            $row.Link = @{ Column = 8; Path = $place.Path }
+            if ($place.Sheet) { $row.Link.Location = "'{0}'!A{1}" -f $place.Sheet.Replace("'", "''"), $place.Row }
+            $rows.Add($row)
+        }
+        $sheets.Add(@{ Name = '未完了の指摘'; Columns = @(@{ Header = 'ファイル'; Width = 34 }, @{ Header = '設計書（指摘管理表）'; Width = 24 }, @{ Header = '指摘内容'; Width = 50 }, @{ Header = '重要度'; Width = 8 }, @{ Header = '状態'; Width = 10 }, @{ Header = '期限'; Width = 11 }, @{ Header = '期限切れ'; Width = 9 }, @{ Header = '対応者'; Width = 10 }, @{ Header = '指摘管理表の場所'; Width = 34 }); Rows = $rows })
+    }
+    if (-not $AllVersions -and $old.Count -gt 0) {
+        $sheets.Add(@{ Name = '古い版'; Columns = @(@{ Header = 'フォルダ'; Width = 18 }, @{ Header = 'ファイル'; Width = 34 }, @{ Header = '版数'; Width = 7 }, @{ Header = 'ファイルの更新日時'; Width = 16 }, @{ Header = '最新の版'; Width = 40 }); Rows = @($old | ForEach-Object { @{ Values = @($_.Folder, $_.File, $_.Version, $_.Modified.ToString('yyyy/MM/dd HH:mm', $invariant), $_.LatestFile); Link = @{ Column = 1; Path = $_.Path } } }) })
+    }
+    if ($Planned -or $Previous -or $Findings) { $sheets.Add((New-ReadLogSheet $readLog)) }
     try { Export-Workbook -FilePath $OutXlsx -Sheets $sheets.ToArray() }
     catch {
         Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
@@ -457,6 +693,30 @@ if ($Planned) {
     Write-Host ('予定 {0} 件: 提出済み {1}・未提出 {2}（予定日を過ぎたもの {3}）。予定に無い成果物 {4} 件' -f $plannedRows.Count, ($plannedRows.Count - $missing.Count), $missing.Count, $overdue.Count, @($docs | Where-Object { $_.Latest -and -not $_.Planned }).Count)
     foreach ($m in $missing) { Write-Host ('  {0}: {1}' -f $m.State, $m.Name) }
 }
+if ($Previous) {
+    $counts = [ordered]@{
+        '新規'               = @($changeRows | Where-Object { $_.Change -eq '新規' }).Count
+        '版数が変わった'     = @($changeRows | Where-Object { $_.Change -match '版数 ' }).Count
+        '版数を上げずに更新' = @($changeRows | Where-Object { $_.Change -match '版数を上げずに更新' }).Count
+        '更新'               = @($changeRows | Where-Object { $_.Change -match '(^|・)更新$' }).Count
+        '名前・場所が変わった' = @($changeRows | Where-Object { $_.Change -match '名前・場所' }).Count
+        '無くなった'         = @($changeRows | Where-Object { $_.Change -eq '無くなった' }).Count
+    }
+    $summary = @($counts.Keys | Where-Object { $counts[$_] -gt 0 } | ForEach-Object { '{0} {1}' -f $_, $counts[$_] })
+    if ($summary.Count -eq 0) { $summary = @('変わったものはありません') }
+    Write-Host ('前回の一覧（{0}。成果物 {1} 件）から: {2}' -f [System.IO.Path]::GetFileName($Previous), $previousCount, ($summary -join '・'))
+    foreach ($c in @($changeRows | Where-Object { $_.Change -match '版数を上げずに更新|無くなった' })) {
+        $name = $(if ($c.Doc) { $c.Doc.Relative } else { $c.Previous.Relative })
+        Write-Host ('  {0}: {1}' -f $(if ($c.Doc) { '版数を上げずに更新' } else { '無くなった' }), $name)
+    }
+}
+if ($Findings) {
+    $overdueCount = @($openFindings | Where-Object { $_.Overdue }).Count
+    $unmatched = @($openFindings | Where-Object { $_.Docs.Count -eq 0 })
+    $withFindings = @($docs | Where-Object { $_.OpenFindings -gt 0 }).Count
+    Write-Host ('未完了の指摘 {0} 件（期限切れ {1} 件）: 成果物 {2} 件' -f $openFindings.Count, $overdueCount, $withFindings)
+    if ($unmatched.Count -gt 0) { Write-Host ('  一覧の成果物と対応付かない指摘 {0} 件: {1}' -f $unmatched.Count, ((@($unmatched | ForEach-Object { if ($_.Document) { $_.Document } else { '（設計書なし）' } } | Select-Object -Unique)) -join '・')) }
+}
 if ($OutCsv) { Write-Host "一覧を保存しました: $OutCsv" }
 if ($OutXlsx) { Write-Host "一覧を保存しました: $OutXlsx" }
 
@@ -471,6 +731,8 @@ if ($OutXlsx) { Write-Host "一覧を保存しました: $OutXlsx" }
 #       更新日が違う: 表紙の更新日と、改訂履歴の最後の行の日付が違う
 #       古い版: 版数だけが違う同じ文書（設計書_v1.0.xlsx と設計書_v1.1.xlsx など）の古いもの（一覧には最新だけを載せる）
 #       予定に無い・未提出: -Planned の成果物の予定と突き合わせる
+#       版数を上げずに更新: -Previous の前回の成果物一覧から、ファイルは更新されたのに版数が同じ
+#       未完了の指摘: -Findings の指摘管理表で、対応の終わっていない指摘の数
 #
 #     表紙は「表紙」という名前のシート（無ければ最初のシート）、Word は本文の表と「見出し：値」の段落です。
 #     見出し（文書番号・文書名・版数・作成日・最終更新日・作成者・システム名）の右の値を読みます。
@@ -483,8 +745,18 @@ if ($OutXlsx) { Write-Host "一覧を保存しました: $OutXlsx" }
 #     成果物の予定（Excel か CSV。成果物名・文書名・ファイル名のどれかの見出しと、あれば文書番号・予定日・担当の見出しがある表）。
 #     文書番号か名前で成果物と突き合わせ、未提出（予定日を過ぎたもの）と、予定に無い成果物を知らせます。
 #
+# .PARAMETER Previous
+#     前回の成果物一覧（このツールの -OutXlsx か -OutCsv で保存したもの）。版数を除いた場所と名前で今回の成果物と突き合わせ、
+#     前回からの変化（新規・版数 1.0→1.1・版数を上げずに更新・更新・名前・場所が変わった・無くなった）を書きます。
+#     名前や場所を変えた文書は、文書番号で突き合わせます。更新は、版数の無いファイル（PDF など）が更新されたものです。
+#
+# .PARAMETER Findings
+#     指摘管理表（Excel か CSV。ファイルかフォルダ。複数可）。対応の終わっていない指摘を、設計書（対象成果物）の列の
+#     文書番号・文書名・ファイル名（版数と拡張子を除く）で成果物と突き合わせ、数を「確認」に書きます。
+#     見出しと、対応が終わった・数えない状態（完了・済・対応不要・取下げなど）は Measure-ReviewQuality.ps1 と同じです。
+#
 # .PARAMETER AsOf
-#     予定日を過ぎたかを決める基準日。既定は今日。
+#     予定日と、指摘の期限を過ぎたかを決める基準日。既定は今日。
 #
 # .PARAMETER AllVersions
 #     古い版も一覧に載せます（「確認」に古い版と最新のファイルを書きます）。
@@ -493,10 +765,10 @@ if ($OutXlsx) { Write-Host "一覧を保存しました: $OutXlsx" }
 #     改訂履歴のシート名の正規表現。既定は「改訂履歴|変更履歴|改版履歴|更新履歴|改訂記録」。
 #
 # .PARAMETER OutXlsx
-#     一覧を xlsx に保存します（成果物一覧（ファイルへのリンク付き）・予定との突き合わせ・古い版）。
+#     一覧を xlsx に保存します（成果物一覧（ファイルへのリンク付き）・予定との突き合わせ・前回からの変化・未完了の指摘・古い版）。
 #
 # .PARAMETER OutCsv
-#     一覧を CSV（UTF-8・BOM 付き）に保存します。社内の様式に貼るとき用です。
+#     一覧を CSV（UTF-8・BOM 付き）に保存します。社内の様式に貼るとき用です。-Previous のときは「前回から」の列も足します。
 #
 # .PARAMETER NoRecurse
 #     フォルダを指定したとき、サブフォルダを見ません。
@@ -506,6 +778,10 @@ if ($OutXlsx) { Write-Host "一覧を保存しました: $OutXlsx" }
 #
 # .EXAMPLE
 #     .\New-DocumentRegister.ps1 D:\納品物 -Planned D:\成果物の予定.xlsx -OutXlsx D:\成果物一覧.xlsx
+#
+# .EXAMPLE
+#     .\New-DocumentRegister.ps1 D:\納品物 -Previous D:\成果物一覧_前回.xlsx -Findings D:\レビュー -OutXlsx D:\成果物一覧.xlsx
+#     前回の提出からの変化（版数を上げずに直した文書・無くなった文書）と、未完了の指摘のある成果物を知らせます。
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm / .docx は Excel・Word 不要。同じフォルダに ExcelTools.psm1 と Search-Excel.ps1 が必要です。
