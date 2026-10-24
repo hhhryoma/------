@@ -17,6 +17,43 @@ function Read-DrawingXml {
     finally { $pkg.Zip.Dispose() }
 }
 
+function New-EventDoc {
+    #     イベント定義だけの画面設計書。Events: @(@(イベントID, イベント名, 遷移先)...)
+    param([string] $Path, [string] $Id, [string] $Name, $Events)
+    $rows = @(, @('イベントID', 'イベント名', '遷移先'))
+    foreach ($e in $Events) { $rows += , @($e[0], $e[1], $e[2]) }
+    New-SheetsBook $Path ([ordered]@{ 'イベント定義' = @(, @('画面ID', $Id, '画面名', $Name)) + $rows })
+}
+
+function New-ColumnBook {
+    #     テーブルごとのシートのテーブル定義書。Tables: テーブルID → @{ Name; Cols = @(@(物理名, データ型, PK, 外部キー, 論理名)...) }
+    param([string] $Path, $Tables)
+    $sheets = [ordered]@{}
+    foreach ($k in $Tables.Keys) {
+        $rows = @(, @('物理名', 'データ型', 'PK', '外部キー', '論理名'))
+        foreach ($c in $Tables[$k].Cols) { $rows += , @($c[0], $c[1], $c[2], $c[3], $c[4]) }
+        $sheets[$k] = @(, @('テーブルID', $k, 'テーブル名', $Tables[$k].Name, '')) + $rows
+    }
+    New-SheetsBook $Path $sheets
+}
+
+function Get-DrawingShapes {
+    #     描画の図形の名前・左上の列・文字・矢じり（四角・文字・矢印）
+    param($Xml)
+    $ns = New-Object System.Xml.XmlNamespaceManager($Xml.NameTable)
+    $ns.AddNamespace('xdr', 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing')
+    $ns.AddNamespace('a', 'http://schemas.openxmlformats.org/drawingml/2006/main')
+    foreach ($anchor in $Xml.SelectNodes('//xdr:twoCellAnchor', $ns)) {
+        $sp = $anchor.SelectSingleNode('xdr:sp|xdr:cxnSp', $ns)
+        $kind = 'Box'
+        if ($sp.LocalName -eq 'cxnSp') { $kind = 'Arrow' } elseif ($sp.SelectSingleNode('xdr:nvSpPr/xdr:cNvSpPr[@txBox="1"]', $ns)) { $kind = 'Text' }
+        [pscustomobject]@{
+            Kind = $kind; Name = $sp.SelectSingleNode('*/xdr:cNvPr', $ns).GetAttribute('name'); Col = [int]$anchor.SelectSingleNode('xdr:from/xdr:col', $ns).InnerText
+            Text = (@($sp.SelectNodes('.//a:t', $ns) | ForEach-Object { $_.InnerText }) -join '/'); BothHeads = ($null -ne $sp.SelectSingleNode('xdr:spPr/a:ln/a:headEnd', $ns))
+        }
+    }
+}
+
 Test-Case 'Export-DesignDiagram: イベント定義の遷移先から画面遷移を、テーブル定義書の外部キーからテーブルの関連を読む' {
     $edges = @(& $DiagramTool $designDir 6>$null)
     Assert-Equal @(
@@ -102,6 +139,52 @@ Test-Case 'Export-DesignDiagram: 画面一覧に無い遷移先・テーブル�
     Assert-Match $text '(?m)^    class SCR009 missing$'
     Assert-Match $text '> - SCR002 の登録（EV06）の遷移先「SCR009」が、画面一覧にありません'
     Assert-Match $text '\| M_ITEM \| （テーブル定義書に無い） \|'
+}
+
+Test-Case 'Export-DesignDiagram: 名前の無いイベント・全角の画面 ID・「なし」の遷移先・同じ画面への遷移を正しく描く' {
+    $dir = New-TestDir
+    $design = Join-Path $dir '設計書'
+    New-Item -ItemType Directory -Path $design | Out-Null
+    New-SheetsBook (Join-Path $design 'DD01_画面一覧.xlsx') ([ordered]@{ '画面一覧' = @(@('No', '画面ID', '画面名'), @('1', 'SCR001', 'メニュー'), @('2', 'SCR002', '一覧'), @('3', 'SCR003', '詳細')) })
+    New-EventDoc (Join-Path $design 'DD02_SCR001.xlsx') 'ＳＣＲ００１' 'メニュー' @(@('EV01', '', 'SCR002'), @('EV02', '詳細', 'SCR003'), @('EV03', '再表示', 'SCR001'), @('EV04', 'ヘルプ', 'なし'))
+    New-EventDoc (Join-Path $design 'DD02_SCR003.xlsx') 'SCR003' '詳細' @(, @('EV01', '戻る', 'SCR001'))
+    $md = Join-Path $dir '図.md'
+    $out = Join-Path $dir '図.xlsx'
+    $warnings = @()
+    $text = Get-HostText { $script:flow = @(& $DiagramTool $design -Kind ScreenFlow -OutMarkdown $md -OutXlsx $out -WarningVariable warnings -WarningAction SilentlyContinue) }
+    Assert-Equal @('SCR001|SCR001|再表示', 'SCR001|SCR002|', 'SCR001|SCR003|詳細', 'SCR003|SCR001|戻る') @($script:flow | ForEach-Object { '{0}|{1}|{2}' -f $_.From, $_.To, $_.Label } | Sort-Object) '全角の画面 ID（ＳＣＲ００１）は画面一覧の SCR001 と同じ画面'
+    Assert-Equal 0 @($warnings).Count '「なし」の遷移先を警告しない'
+    Assert-Match $text '画面遷移図: 画面 3・遷移 4'
+    $mermaid = [System.IO.File]::ReadAllText($md)
+    Assert-Match $mermaid '(?m)^    SCR001 --> SCR002$' '名前の無いイベントはラベル無しの矢印（-->|""| は Mermaid が読めない）'
+    Assert-Match $mermaid '(?m)^    SCR001 -->\|"再表示"\| SCR001$'
+
+    $shapes = @(Get-DrawingShapes (Read-DrawingXml $out 1))
+    Assert-Equal @('SCR001-SCR002|False', 'SCR001-SCR003|True') @($shapes | Where-Object Kind -eq 'Arrow' | ForEach-Object { '{0}|{1}' -f $_.Name, $_.BothHeads } | Sort-Object) 'ラベルの無い遷移も向き（SCR001 → SCR002）を保つ'
+    Assert-True (@($shapes | Where-Object { $_.Kind -eq 'Text' -and $_.Text -eq '↻ 再表示' }).Count -eq 1) ('同じ画面への遷移は四角の下に書く: ' + (@($shapes | Where-Object Kind -eq 'Text' | ForEach-Object { $_.Text }) -join ' | '))
+}
+
+Test-Case 'Export-DesignDiagram: 互いに参照するテーブル（循環）があっても ER 図を左から並べ、日本語のテーブル ID は Mermaid の別名にする' {
+    $dir = New-TestDir
+    New-ColumnBook (Join-Path $dir 'DD03_テーブル定義書.xlsx') ([ordered]@{
+            'M_DEPT'  = @{ Name = '部署'; Cols = @(@('DEPT_ID', 'CHAR', '1', '', '部署ID'), @('MANAGER_ID', 'CHAR', '', 'M_EMP.EMP_ID', '部長')) }
+            'M_EMP'   = @{ Name = '社員'; Cols = @(@('EMP_ID', 'CHAR', '1', '', '社員ID'), @('DEPT_ID', 'CHAR', '', 'M_DEPT.DEPT_ID', '部署'), @('BOSS_ID', 'CHAR', '', 'M_EMP.EMP_ID', '上司')) }
+            'T_ORDER' = @{ Name = '受注'; Cols = @(@('ORDER_NO', 'CHAR', '1', '', '受注番号'), @('EMP_ID', 'CHAR', '', 'M_EMP.EMP_ID', '担当')) }
+            '顧客'    = @{ Name = '顧客'; Cols = @(, @('CUSTOMER_CD', 'CHAR', '1', '', '顧客コード')) }
+            '商品'    = @{ Name = '商品'; Cols = @(, @('PRODUCT_CD', 'CHAR', '1', '', '商品コード')) }
+        })
+    $md = Join-Path $dir '図.md'
+    $out = Join-Path $dir '図.xlsx'
+    $null = & $DiagramTool $dir -Kind ER -OutMarkdown $md -OutXlsx $out 6>$null
+    $shapes = @(Get-DrawingShapes (Read-DrawingXml $out 1))
+    $boxes = @($shapes | Where-Object Kind -eq 'Box')
+    Assert-Equal 5 $boxes.Count
+    Assert-Equal 3 @($boxes | ForEach-Object { $_.Col } | Sort-Object -Unique).Count ('部署・顧客・商品 → 社員 → 受注 の 3 列: ' + (@($boxes | ForEach-Object { '{0}={1}' -f $_.Name, $_.Col }) -join ' '))
+    Assert-True (@($boxes | Where-Object { $_.Col -gt 100 }).Count -eq 0) '循環で右へ押し出さない'
+    Assert-True (@($shapes | Where-Object { $_.Kind -eq 'Text' -and $_.Text -eq '↻ BOSS_ID' }).Count -eq 1) '同じテーブルへの外部キー'
+    $mermaid = [System.IO.File]::ReadAllText($md)
+    Assert-Match $mermaid '(?m)^    n1\["顧客"\] \{$' '日本語のテーブル ID は別名で書く（同じ ID「__」にして 1 つにまとまらない）'
+    Assert-Match $mermaid '(?m)^    n2\["商品"\] \{$'
 }
 
 Test-Case 'Export-DesignDiagram: Get-Help でヘルプが表示される' {

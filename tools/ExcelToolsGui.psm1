@@ -71,7 +71,10 @@ function Get-GuiLabel {
     #     ヘルプの最初の文から、入力欄の名前を作る（括弧の中を除き、長ければ最後の「、」のあと）
     param([string] $Help, [string] $Name)
     $text = Get-GuiFirstSentence $Help
-    do { $before = $text; $text = [regex]::Replace($text, '（[^（）]*）|\([^()]*\)', '') } while ($text -ne $before)
+    $mark = [string][char]1
+    do { $before = $text; $text = [regex]::Replace($text, '（[^（）]*）|\([^()]*\)', $mark) } while ($text -ne $before)
+    #     括弧を除いたところは、英数字のとなりなら空白にする（CSV（UTF-8・BOM 付き）に → CSV に）
+    $text = [regex]::Replace($text, '(?<=[!-~])\x01+|\x01+(?=[!-~])', ' ').Replace($mark, '')
     $text = [regex]::Replace($text, '\s+', ' ').Trim()
     if (-not $text) { return $Name }
     if ($text.Length -gt 30 -and $text.LastIndexOf('、') -gt 0) {

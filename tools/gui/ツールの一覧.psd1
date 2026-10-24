@@ -65,6 +65,14 @@
             Output = @('OutXlsx'); OutputName = '表記ゆれ'; Keywords = '用語 表記'
         }
         @{
+            Id = 'Glossary'; Label = '用語集の下書きを作る'; Group = '設計書を作る・直す'; Tool = 'New-GlossaryDraft.ps1'
+            Summary = '設計書からカタカナ語・略語・よく出る用語を数え、用語集の下書きを作ります。表記ゆれのある用語は、「表記ゆれを見つける」の用語集（CSV）にもします。'
+            Main = @('Path', 'IncludeWord', 'OutXlsx', 'OutCsv')
+            Labels = @{ Path = '設計書のフォルダ・ファイル'; IncludeWord = 'Word の文書も読む'; OutXlsx = '用語集の下書きの保存先'; OutCsv = '表記ゆれの用語集の保存先（CSV）' }
+            Required = @('Path'); Defaults = @{ IncludeWord = $true }
+            Output = @('OutXlsx'); OutputName = '用語集の下書き'; Keywords = '用語集 用語 表記ゆれ カタカナ 略語'
+        }
+        @{
             Id = 'Consistency'; Label = '設計書の整合性チェック'; Group = '設計書を作る・直す'; Tool = 'Test-DesignConsistency.ps1'
             Summary = '設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面など）を見つけます。CRUD 図も作ります。影響調査では、ID を使っている場所の一覧を作ります。'
             Main = @('Path', 'Where', 'OutXlsx')
@@ -256,7 +264,7 @@
             Id = 'Size'; Label = '規模を見積もる'; Group = '見積もり・進捗'; Tool = 'Measure-DesignSize.ps1'
             Summary = '設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出します。前の版を指定すると、変更の規模も出します。'
             Main = @('Path', 'Baseline', 'OutXlsx')
-            Labels = @{ Path = '設計書のフォルダ'; Baseline = '前の版の設計書（変更の規模を見るとき）'; OutXlsx = '結果の保存先' }
+            Labels = @{ Path = '設計書のフォルダ'; Baseline = '前の版の設計書（変更の規模を見るとき）'; OutXlsx = '結果の保存先'; OutCoefficients = '実績で直した係数表の保存先（CSV）' }
             Required = @('Path'); Output = @('OutXlsx'); OutputName = '規模'; Keywords = '見積もり FP 工数'
         }
         @{

@@ -1211,6 +1211,7 @@ function Find-LabelValue {
 function Find-DesignTables {
     #     見出し（ConvertTo-Label 済み）がすべてそろっている行を探し、その下で KeyHeader の列に値のある行を返す。
     #     「■」で始まる行（次の節）までを 1 つの表とみなす。KeyHeader が無い表では最初の見出しの列を使う
+    #     見出しと同じ行（印刷のページごとにくり返した見出し）は、表の続きとみなして飛ばす
     #     Grid は ConvertTo-DesignBooks のシート
     #     戻り値: @{ HeaderRow; ColumnOf = 見出し → 列番号; Rows = @(@{ Row; Cells = 列番号 → 文字 }) } の一覧
     param($Grid, [string[]] $Headers, [string] $KeyHeader)
@@ -1232,6 +1233,9 @@ function Find-DesignTables {
             $section = $false
             foreach ($v in $r.Values) { if ($v.TrimStart().StartsWith('■')) { $section = $true; break } }
             if ($section) { break }
+            $repeated = $true
+            foreach ($hdr in $Headers) { if ($Grid.Labels[$rows[$j]][$colOf[$hdr]] -ne $hdr) { $repeated = $false; break } }
+            if ($repeated) { continue }
             if ($r.ContainsKey($keyCol) -and $r[$keyCol].Trim()) { $dataRows.Add([pscustomobject]@{ Row = $rows[$j]; Cells = $r }) }
         }
         $tables.Add([pscustomobject]@{ HeaderRow = $rows[$i]; ColumnOf = $colOf; Rows = $dataRows })
@@ -1265,7 +1269,7 @@ function Read-TableHeaderCandidates {
 function Read-TableDesign {
     #     テーブル定義書のカラム定義（物理名とデータ型の見出しがそろった表）とインデックス定義を、シートごとに読む（Books は ConvertTo-DesignBooks の結果。パスの順に読む）。
     #       Candidates: 見出しの候補（Read-TableHeaderCandidates）
-    #       OnFinding: 使わなかった表・カラム（テーブル ID が無い・ほかのシートと同じテーブル・同じカラム）を知らせるスクリプトブロック（引数: 文、場所）
+    #       OnFinding: 使わなかった表・カラム（テーブル ID が無い・ほかのシートと同じテーブル・同じシートの 2 つ目からの表・同じカラム）を知らせるスクリプトブロック（引数: 文、場所）
     #     戻り値: @{ Id; Name; File; Sheet; Place; Columns; Indexes } の一覧。場所（Place）は @{ File; Path; Sheet; Cell }
     #       Columns: @{ Name; Logical; BaseType; Length; Scale; PkOrder（主キーの順。主キーでなければ $null）; NotNull; Default; FkTable; FkColumn; Note（備考）; Place; SqlType（空） }
     #       Indexes: @{ Name; Columns; Unique; Place }
@@ -1304,8 +1308,10 @@ function Read-TableDesign {
                 if ($p -and $t -and $p -ne $t) { $physLabel = $p; $typeLabel = $t; break }
             }
             if (-not $physLabel) { continue }
-            $colTable = @(Find-DesignTables $grid @($physLabel, $typeLabel) $physLabel)[0]
-            if (-not $colTable -or $colTable.Rows.Count -eq 0) { continue }
+            # 1 シートに 1 テーブルとして、カラムのある最初の表を使う（「■」の行のあとの表は、テーブルが決まってから使わないことを知らせる）
+            $colTables = @(foreach ($found in (Find-DesignTables $grid @($physLabel, $typeLabel) $physLabel)) { if ($found.Rows.Count -gt 0) { $found } })
+            if ($colTables.Count -eq 0) { continue }
+            $colTable = $colTables[0]
             $cof = $colTable.ColumnOf
             $label = @{}
             foreach ($f in @('論理名', '桁数', '小数', '主キー', '必須', 'NULL許可', 'デフォルト', '外部キー', '備考')) { $label[$f] = & $first @($cof.Keys) $Candidates[$f] }
@@ -1321,6 +1327,9 @@ function Read-TableDesign {
                 $firstPlace = $tableById[$key].Place
                 & $finding ('テーブル {0} はほかのシートでも定義されているため、こちらは使いません（{1} {2}!{3}）' -f $tableId, $firstPlace.File, $firstPlace.Sheet, $firstPlace.Cell) $place
                 continue
+            }
+            foreach ($other in @($colTables | Select-Object -Skip 1)) {
+                & $finding ('1 つのシートにカラム定義の表が 2 つ以上あるため、この表は使いません（テーブル {0} には最初の表を使います）' -f $tableId) (& $newPlace $book $sheetName $other.HeaderRow $other.ColumnOf[$physLabel])
             }
             $nameCell = & $sheetValue $grid $Candidates['テーブル名']
             $tableName = ''
