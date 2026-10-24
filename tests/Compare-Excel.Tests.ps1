@@ -695,31 +695,6 @@ Test-Case 'Compare-Excel: 表記だけの変更と、版数・更新日・改訂
     Assert-Match $text '除いた差分: 表記のみ 1 件・版情報 3 件'
 }
 
-function New-WordDoc {
-    #     段落と表だけの最小の Word 文書を作る。Body: 文字は段落、配列の配列は表（行ごとのセル）
-    param([string] $Path, [object[]] $Body)
-    $esc = { param($t) [System.Security.SecurityElement]::Escape($t) }
-    $p = { param($t) '<w:p><w:r><w:t xml:space="preserve">' + (& $esc $t) + '</w:t></w:r></w:p>' }
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($b in $Body) {
-        if ($b -is [string]) { [void]$sb.Append((& $p $b)); continue }
-        [void]$sb.Append('<w:tbl>')
-        foreach ($row in $b) { [void]$sb.Append('<w:tr>' + ((@($row | ForEach-Object { '<w:tc>' + (& $p $_) + '</w:tc>' })) -join '') + '</w:tr>') }
-        [void]$sb.Append('</w:tbl>')
-    }
-    $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + $sb.ToString() + '</w:body></w:document>'
-    $dir = Split-Path -Parent $Path
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-    $fs = [System.IO.File]::Create($Path)
-    try {
-        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
-        $sw = New-Object System.IO.StreamWriter($zip.CreateEntry('word/document.xml').Open(), (New-Object System.Text.UTF8Encoding($false)))
-        $sw.Write($xml); $sw.Dispose()
-        $zip.Dispose()
-    }
-    finally { $fs.Dispose() }
-}
-
 Test-Case 'Compare-Excel: Word（.docx）の段落と表の行を、行の挿入を考えて比べ、HTML では折り返して見せる' {
     $dir = New-TestDir
     New-WordDoc (Join-Path $dir 'v1/画面仕様書.docx') @('1. 概要', '受注を登録する画面である。受注番号は自動で採番する。', @(@('項目', '桁数'), @('受注番号', '10'), @('受注日', '8')), 'ＡＢＣ　の補足', '以上')

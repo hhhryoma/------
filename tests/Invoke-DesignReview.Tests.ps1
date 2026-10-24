@@ -368,6 +368,42 @@ Test-Case 'Invoke-DesignReview: -Baseline で、前の版から変わった行�
     Assert-Throws { & $Review -OutDir $out -ImportOnly -Baseline $old 6>$null } '依頼を作るとき'
 }
 
+Test-Case 'Invoke-DesignReview: Word の設計書（.docx）を段落・表の行の形で渡し、「本文!段落 n」の場所の指摘を取り込む' {
+    $dir = New-TestDir
+    $design = Join-Path $dir '設計書'
+    New-WordDoc (Join-Path $design 'BD01_基本設計書_受注管理.docx') @('1. 概要', '受注を登録する画面である。受注番号は TBD とする。', @(@('項目', '桁数'), @('受注番号', '10'), @('受注日', '8')), '以上')
+    $csv = Join-Path $dir '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効,確かめ方,ツールの確認',
+        'W01,記述,目的が書かれている,画面を使う目的が書かれている,中,*基本設計書*,○,,',
+        'W02,記述,桁数の単位が分かる,桁数が文字数かバイト数か書かれている,高,*基本設計書*,○,,',
+        'W03,記述,未確定事項が残っていない,TBD などが残っていない,高,*基本設計書*,○,ツール,残っている文言') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $out = Join-Path $dir 'review'
+    $null = & $Review -Path $design -Checklist $csv -OutDir $out -PromptOnly 6>$null 3>$null
+    $p = [System.IO.File]::ReadAllText((Join-Path $out 'prompts/R001.txt'))
+    Assert-Match $p '\n- Word の設計書は、各行が「段落 12\| 文」「表 1 の 3 行目\| セル \| セル」の形です。'
+    Assert-Match $p '【設計書】BD01_基本設計書_受注管理\.docx\n### シート: 本文\n段落 1\| 1\. 概要\n段落 2\| 受注を登録する画面である。受注番号は TBD とする。\n'
+    Assert-Match $p '\n表 1 の 2 行目\| 受注番号 \| 10\n'
+
+    Write-Answer $out 'R001' @'
+W01 | NG | 本文!段落2 | 受注を登録する画面である | 使う目的が書かれていない | 背景が無い
+W02 | NG | 本文!段落 1 | 受注番号 | 桁数の単位が分からない | 文字数かバイト数か
+'@
+    $null = & $Review -OutDir $out -Checklist $csv -ImportOnly 6>$null 3>$null
+    $f = Read-XlsxSheet -Path (Join-Path $out 'レビュー結果.xlsx') -Index 1
+    Assert-Equal @(
+        'AI|W02|本文!段落 2|受注番号|場所を直した',
+        'ツール（残っている文言）|W03|本文!段落 2||',
+        'AI|W01|本文!段落 2|受注を登録する画面である|一致') @(2..4 | ForEach-Object { $r = $f.Rows[$_]; '{0}|{1}|{2}|{3}|{4}' -f $r['C'], $r['E'], $r['I'], $r['J'], $r['K'] }) '「段落2」は「段落 2」にそろえる'
+    Assert-Equal 3 $f.Links.Count
+    Assert-Equal 0 @($f.Links | Where-Object { $_.Location }).Count 'Word の文書へのリンクは開くだけ'
+
+    # 前の版があっても、Word の文書は全体を渡す
+    $old = Join-Path $dir '前の版'
+    New-WordDoc (Join-Path $old 'BD01_基本設計書_受注管理.docx') @('1. 概要', '受注を登録する画面である。', '以上')
+    $text = Get-HostText { & $Review -Path $design -Checklist $csv -OutDir (Join-Path $dir 'review2') -PromptOnly -Baseline $old }
+    Assert-Match $text '前の版と比べた設計書: Word（全体） 1'
+}
+
 Test-Case 'Invoke-DesignReview: 設計書・観点が変わった依頼の古い回答は退避する' {
     $dir = New-TestDir
     $null = & $Review -Path $designDir -OutDir $dir -PromptOnly 6>$null
