@@ -415,7 +415,7 @@ Test-Case 'Invoke-DesignReview: 設計書・観点が変わった依頼の古い
     Assert-True (-not (Test-Path (Join-Path $dir 'answers/R001.txt'))) '古い回答は使わない'
 }
 
-Test-Case 'Invoke-DesignReview: 対話モードでやり直し・中断・再開ができる' {
+Test-Case 'Invoke-DesignReview: 対話モード（-AnswerMode Enter）でやり直し・中断・再開ができる' {
     $dir = New-TestDir
     # クリップボードと入力をテスト用に差し替える（ツールからは関数が優先して見える）。
     # 関数内の $script: はツール側のスコープを指すので、状態はハッシュテーブルで持つ
@@ -430,16 +430,41 @@ Test-Case 'Invoke-DesignReview: 対話モードでやり直し・中断・再開
         return (($ids | ForEach-Object { "$_ | OK | - | - | -" }) -join "`n")
     }
 
-    $out = Get-HostText { & $Review -Path $designDir -OutDir $dir }
+    $out = Get-HostText { & $Review -Path $designDir -OutDir $dir -AnswerMode Enter }
     Assert-Match $out 'クリップボードの内容が依頼のまま'
     Assert-Match $out '読み取れませんでした'
     Assert-Match $out '中断しました'
     Assert-Equal 3 @(Get-ChildItem -LiteralPath (Join-Path $dir 'answers') -Filter 'R*.txt').Count '中断までに 3 件回答'
 
     $state.Step = 100
-    $out = Get-HostText { & $Review -Path $designDir -OutDir $dir }
+    $out = Get-HostText { & $Review -Path $designDir -OutDir $dir -AnswerMode Enter }
     Assert-Match $out '未回答の依頼 7 件'
     Assert-Match $out '依頼 10 件中 10 件回答済み'
+}
+
+Test-Case 'Invoke-DesignReview: -AnswerMode Watch では、回答をコピーすると Enter を押さなくても取り込んで次の依頼に進む' {
+    $dir = New-TestDir
+    # クリップボードと待ち時間をテスト用に差し替える。依頼ごとに、2 回は依頼のまま（改行が CRLF になったものも）、
+    # 3 回目は回答でない文、4 回目に回答を返す
+    $state = @{ Clip = ''; Polls = 0; Sleeps = 0 }
+    function Set-Clipboard { param($Value) $state.Clip = $Value; $state.Polls = 0 }
+    function Start-Sleep { param($Milliseconds) $state.Sleeps++ }
+    function Get-Clipboard {
+        param([switch] $Raw)
+        $state.Polls++
+        if ($state.Polls -gt 10) { throw '回答を取り込まずに見張り続けています' }
+        if ($state.Polls -eq 1) { return $state.Clip }
+        if ($state.Polls -eq 2) { return $state.Clip.Replace("`n", "`r`n") }
+        if ($state.Polls -eq 3) { return 'うまく回答できませんでした' }
+        $ids = [regex]::Matches($state.Clip, '(?m)^([A-Z]\d{2}) \| ') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+        return (($ids | ForEach-Object { "$_ | OK | - | - | - | -" }) -join "`n")
+    }
+    $out = Get-HostText { & $Review -Path $designDir -OutDir $dir -AnswerMode Watch }
+    Assert-Match $out '回答をコピー（回答の下のコピー ボタン）すると、自動で取り込んで次の依頼に進みます'
+    Assert-Match $out 'コピーした内容から「観点ID \| 判定 \| \.\.\.」の行を読み取れませんでした'
+    Assert-Equal 10 @(Get-ChildItem -LiteralPath (Join-Path $dir 'answers') -Filter 'R*.txt').Count 'すべて取り込む'
+    Assert-Match $out '依頼 10 件中 10 件回答済み'
+    Assert-Equal 30 $state.Sleeps '取り込むまでは待ってから見直す'
 }
 
 Test-Case 'Invoke-DesignReview: Get-Help でヘルプが表示される' {

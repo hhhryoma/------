@@ -242,7 +242,7 @@ foreach ($s in $steps) {
 }
 $manual = @(
     @('Copilot（品質評価の定性分析）', ('PowerShell で .\tools\Invoke-QualityAnalysis.ps1 "{0}" -Force を実行 → 依頼が Copilot に貼り付けられる → 回答をコピーして Enter → ブックの定性分析・対策の列に入る' -f (Join-Path $reportDir '品質評価_20261020.xlsx'))),
-    @('Copilot（AI レビュー）', ('PowerShell で .\tools\Invoke-DesignReview.ps1 "{0}" -OutDir "{1}" を実行 → 依頼を Copilot に貼り付け、回答をコピーして Enter → レビュー結果.xlsx ができる' -f (Join-Path $design "$scr2.xlsx"), (Join-Path $OutDir '18_AIレビュー'))),
+    @('Copilot（AI レビュー）', ('PowerShell で .\tools\Invoke-DesignReview.ps1 "{0}" -OutDir "{1}" を実行 → 依頼を Copilot に貼り付け、回答をコピーすると Enter を押さなくても次の依頼に進む → レビュー結果.xlsx ができる' -f (Join-Path $design "$scr2.xlsx"), (Join-Path $OutDir '18_AIレビュー'))),
     @('「送る」', '.\tools\Install-SendTo.ps1 を実行し、エクスプローラーで 17_品質評価 のフォルダを右クリック →「送る」→「Excel 品質評価の定性分析」'),
     @('画面（Start-ExcelTools）', ('tools\Start-ExcelTools.cmd をダブルクリック → 左の「提出前チェック」を選ぶ → 「{0}」のフォルダを画面にドラッグ＆ドロップ → 「実行」→ 記録の欄に進み具合が出て、結果の Excel が開く。「表示を整える」は「試しに実行」で書き換える箇所が出る。閉じて開き直すと、前の入力が出る' -f $versions)),
     @('画面の見た目と操作（Start-ExcelTools）', ('① 表示の倍率（設定 → ディスプレイ → 拡大縮小）が 125%・150% の PC で、文字がにじまず、入力欄やボタンが切れていない（にじむ・切れるときは、倍率と画面の写しを書き留める） ② 左上の「やりたいことを探す」に「差分」と入れて Enter → 差分の処理が選ばれ、入力欄に移る（実行はしない） ③「PDF にする」の「Excel のフォルダ」に「{0}」、「PDF の保存先のフォルダ」に「{1}」を入れて実行し、途中で画面を閉じる →「中止して閉じますか」で はい → 少し待って閉じ、タスク マネージャーに EXCEL.EXE が残らない ④ 名前に半角の [ ] を含む Excel（例: 設計書[旧].xlsx）を「提出前チェック」に入れて実行 →「見つかりません」にならない' -f $design, (Join-Path $OutDir '20_PDF_中止'))),

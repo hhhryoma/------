@@ -23,6 +23,9 @@ param(
     [ValidateSet('Rows', 'Markdown')]
     [string] $TextFormat = 'Rows',
 
+    [ValidateSet('Auto', 'Watch', 'Enter')]
+    [string] $AnswerMode = 'Auto',
+
     [switch] $NoRecurse
 )
 
@@ -1454,47 +1457,113 @@ foreach ($p in $points) { $pointById[$p.Id] = $p }
 
 # ---- 対話モード: クリップボード経由で Copilot とやり取りする
 
+function Test-KeyInput {
+    #     キーの入力を読めるか（コンソールの画面か。PowerShell ISE や、入力をリダイレクトしたときは読めない）
+    try { $null = [Console]::KeyAvailable; return $true } catch { return $false }
+}
+
+function Read-WatchKey {
+    #     押されたキー（s・q・enter）。押されていない・読めないときは空
+    try {
+        while ([Console]::KeyAvailable) {
+            $k = [Console]::ReadKey($true)
+            if ($k.Key -eq [ConsoleKey]::Enter) { return 'enter' }
+            $c = ([string]$k.KeyChar).ToLowerInvariant()
+            if ($c -eq 's' -or $c -eq 'q') { return $c }
+        }
+    }
+    catch { }
+    return ''
+}
+
+function Test-PromptText {
+    #     クリップボードの内容が、空か依頼（プロンプト）のままか（改行の違いは見ない）
+    param([string] $Text, [string] $Prompt)
+    if (-not $Text -or -not $Text.Trim()) { return $true }
+    return ($Text.Replace("`r", '').Trim() -eq $Prompt.Replace("`r", '').Trim()) -or $Text.Contains('【回答形式】')
+}
+
+function Import-Answer {
+    #     回答を読み取って answers に保存し、件数を知らせる。読み取れなければ $false
+    param($Request, [string] $Answer)
+    $entries = ConvertFrom-Answer -Text $Answer -PointIds $Request.PointIds -Quote:$quoteFormat
+    if ($entries.Count -eq 0) { return $false }
+    [System.IO.File]::WriteAllText((Join-Path $answerDir "$($Request.Id).txt"), $Answer, $utf8Bom)
+    $answered = @($entries | ForEach-Object { $_.PointId } | Sort-Object -Unique)
+    $missing = @($Request.PointIds | Where-Object { $answered -notcontains $_ })
+    Write-Host ("  取り込みました: NG {0} 件 / 要確認 {1} 件 / OK {2} 観点" -f @($entries | Where-Object Verdict -eq 'NG').Count, @($entries | Where-Object Verdict -eq '要確認').Count, @($entries | Where-Object Verdict -eq 'OK').Count)
+    if ($missing.Count -gt 0) {
+        Write-Warning ("回答に無い観点があります: {0}（結果では「未回答」になります。やり直す場合は answers\{1}.txt を消して再実行）" -f ($missing -join ', '), $Request.Id)
+    }
+    return $true
+}
+
+function Wait-Answer {
+    #     クリップボードを見張り、回答がコピーされたら取り込む（Enter は要らない）。
+    #     戻り値: 取り込んだら空、s・q キーを押したらその文字
+    param($Request, [string] $Prompt)
+    $last = $Prompt
+    while ($true) {
+        $key = Read-WatchKey
+        if ($key -eq 's' -or $key -eq 'q') { return $key }
+        $answer = [string](Get-Clipboard -Raw)
+        if ($answer -ne $last -and -not (Test-PromptText $answer $Prompt)) {
+            $last = $answer
+            if (Import-Answer $Request $answer) { return '' }
+            Write-Warning 'コピーした内容から「観点ID | 判定 | ...」の行を読み取れませんでした。回答全体をコピーし直すか、Copilot に「回答形式どおりに出し直して」と依頼してください（s キー = スキップ / q キー = 中断）。'
+        }
+        elseif ($key -eq 'enter') {
+            Write-Warning 'クリップボードの内容が依頼のままです。Copilot の回答をコピーしてください。'
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 if (-not $PromptOnly -and -not $ImportOnly) {
     if (-not (Get-Command Set-Clipboard -ErrorAction SilentlyContinue)) {
         throw 'この環境ではクリップボードが使えません。-PromptOnly で依頼ファイルを作り、回答を answers フォルダに保存してから -ImportOnly を実行してください。'
     }
+    # クリップボードを見張るか（Auto は、キーを読める画面なら見張る。読めない画面では s・q を押せないため、Enter で知らせる形にする）
+    $watch = $AnswerMode -eq 'Watch' -or ($AnswerMode -eq 'Auto' -and (Test-KeyInput))
 
     $pending = @($requests | Where-Object { -not (Test-Path -LiteralPath (Join-Path $answerDir "$($_.Id).txt")) })
     Write-Host ''
     Write-Host ("未回答の依頼 {0} 件を順に処理します。" -f $pending.Count)
-    Write-Host '手順: Copilot に貼り付けて送信 → 回答をコピー（回答の下のコピー ボタン）→ ここで Enter'
-    Write-Host '      s = この依頼をスキップ / q = 中断（回答済みの分は保存され、次回は続きから）'
+    if ($watch) {
+        Write-Host '手順: Copilot に貼り付けて送信 → 回答をコピー（回答の下のコピー ボタン）すると、自動で取り込んで次の依頼に進みます'
+        Write-Host '      s キー = この依頼をスキップ / q キー = 中断（回答済みの分は保存され、次回は続きから）'
+    }
+    else {
+        Write-Host '手順: Copilot に貼り付けて送信 → 回答をコピー（回答の下のコピー ボタン）→ ここで Enter'
+        Write-Host '      s = この依頼をスキップ / q = 中断（回答済みの分は保存され、次回は続きから）'
+    }
 
     $i = 0
     foreach ($r in $pending) {
         $i++
         $prompt = [System.IO.File]::ReadAllText((Join-Path $promptDir "$($r.Id).txt"))
-        while ($true) {
+        $header = "[{0}/{1}] {2}  {3}（{4}）観点 {5}  {6} 文字 → クリップボードにコピーしました" -f $i, $pending.Count, $r.Id, $r.Relative, $r.Part, ($r.PointIds -join ','), $r.Chars
+        if ($watch) {
             Set-Clipboard -Value $prompt
             Write-Host ''
-            Write-Host ("[{0}/{1}] {2}  {3}（{4}）観点 {5}  {6} 文字 → クリップボードにコピーしました" -f $i, $pending.Count, $r.Id, $r.Relative, $r.Part, ($r.PointIds -join ','), $r.Chars) -ForegroundColor Cyan
-            $key = Read-Host '回答をコピーしたら Enter'
-            if ($key -eq 'q') { break }
-            if ($key -eq 's') { break }
-
-            $answer = Get-Clipboard -Raw
-            if (-not $answer -or $answer -eq $prompt) {
-                Write-Warning 'クリップボードの内容が依頼のままです。Copilot の回答をコピーしてから Enter を押してください。'
-                continue
-            }
-            $entries = ConvertFrom-Answer -Text $answer -PointIds $r.PointIds -Quote:$quoteFormat
-            if ($entries.Count -eq 0) {
+            Write-Host $header -ForegroundColor Cyan
+            $key = Wait-Answer $r $prompt
+        }
+        else {
+            while ($true) {
+                Set-Clipboard -Value $prompt
+                Write-Host ''
+                Write-Host $header -ForegroundColor Cyan
+                $key = Read-Host '回答をコピーしたら Enter'
+                if ($key -eq 'q' -or $key -eq 's') { break }
+                $answer = [string](Get-Clipboard -Raw)
+                if (Test-PromptText $answer $prompt) {
+                    Write-Warning 'クリップボードの内容が依頼のままです。Copilot の回答をコピーしてから Enter を押してください。'
+                    continue
+                }
+                if (Import-Answer $r $answer) { break }
                 Write-Warning '回答から「観点ID | 判定 | ...」の行を読み取れませんでした。回答全体をコピーし直すか、Copilot に「回答形式どおりに出し直して」と依頼してください。'
-                continue
             }
-            [System.IO.File]::WriteAllText((Join-Path $answerDir "$($r.Id).txt"), $answer, $utf8Bom)
-            $answered = @($entries | ForEach-Object { $_.PointId } | Sort-Object -Unique)
-            $missing = @($r.PointIds | Where-Object { $answered -notcontains $_ })
-            Write-Host ("  取り込みました: NG {0} 件 / 要確認 {1} 件 / OK {2} 観点" -f @($entries | Where-Object Verdict -eq 'NG').Count, @($entries | Where-Object Verdict -eq '要確認').Count, @($entries | Where-Object Verdict -eq 'OK').Count)
-            if ($missing.Count -gt 0) {
-                Write-Warning ("回答に無い観点があります: {0}（結果では「未回答」になります。やり直す場合は answers\{1}.txt を消して再実行）" -f ($missing -join ', '), $r.Id)
-            }
-            break
         }
         if ($key -eq 'q') { Write-Host '中断しました。'; break }
     }
@@ -1742,7 +1811,7 @@ Write-Host "レビュー結果: $reportPath"
 #        Copilot に貼り付けるプロンプトを作ります。入力文字数の上限（-MaxChars）を超える設計書は
 #        シート単位で分割します。
 #     2. 対話モード（既定）では、プロンプトをクリップボードに入れて待ちます。Copilot に貼り付けて送信し、
-#        回答をコピーして Enter を押すと、回答を読み取って保存し、次の依頼に進みます。
+#        回答をコピーすると、回答を読み取って保存し、次の依頼に進みます（Enter は要りません。-AnswerMode）。
 #     3. 全回答から「レビュー結果.xlsx」（指摘一覧・観点消化状況・依頼一覧）を作ります。
 #        指摘の場所は、クリックすると設計書の該当セルが開くリンクになります。
 #        AI には指摘ごとに場所のセルの文字（引用）も書かせ、設計書と突き合わせます。場所が違えば引用のあるセルに直し、
@@ -1806,6 +1875,12 @@ Write-Host "レビュー結果: $reportPath"
 #     AI には前の版から変わった行（★。前の版の値を「旧: …」で添える）と、その節の見出しの行だけを渡します。
 #     変わっていない設計書は AI に依頼しません（観点消化状況は「変更なし」）。版数・更新日・改訂履歴だけの変更は除きます。
 #     ツールの確認は、変わっていない設計書も含めて行います。
+#
+# .PARAMETER AnswerMode
+#     対話モードで回答を受け取る方法。
+#       Auto（既定） キーを読める画面（PowerShell のコンソール）では Watch、読めない画面（PowerShell ISE など）では Enter
+#       Watch        クリップボードを見張り、回答がコピーされたら取り込んで次の依頼に進む。s キーでスキップ、q キーで中断
+#       Enter        回答をコピーして Enter を押す（s・q を入れて Enter でスキップ・中断）
 #
 # .PARAMETER TextFormat
 #     設計書を AI に渡すときのテキストの形。Rows（既定）は「行番号| 列:値 | 列:値」の行の形、Markdown は
