@@ -179,8 +179,22 @@ function Get-IntegerMax {
     return '2147483647'
 }
 
+function Get-FitNumber {
+    #     番号 N を、桁に入る 1 から Capacity までにする（入らない番号は 1 から数え直す。NUMBER(4,3) の 10 行目は 1）
+    param([long] $N, [long] $Capacity)
+    if ($Capacity -le 0 -or $N -le $Capacity) { return $N }
+    return (($N - 1) % $Capacity) + 1
+}
+
+function Get-DigitsCapacity {
+    #     Digits 桁に入るいちばん大きい数（9・99・999…）
+    param([int] $Digits)
+    return [long]([math]::Pow(10, [math]::Min($Digits, 18))) - 1
+}
+
 function Get-NewValue {
-    #     カラムの値（参照先のテーブルを見ない値）。Kind: Normal（標準）・Max（最大）・Min（最小）・Null（NULL の行）。Seq: 標準の行の番号
+    #     カラムの値（参照先のテーブルを見ない値）。Kind: Normal（標準）・Max（最大）・Min（最小）・Null（NULL の行）。Seq: 標準の行の番号。
+    #     番号が桁に入らないとき（NUMBER(4,3) の 10 行目・CHAR(1) の主キーの 10 行目など）は、1 から数え直す
     param($Column, [string] $Kind, [int] $Seq)
     $vk = Get-ValueKind $Column
     $len = 0
@@ -210,13 +224,13 @@ function Get-NewValue {
             if ($scale -gt 0) { $fraction = '.' + ('9' * $scale) }
             if ($Kind -eq 'Max') { if ($intDigits -eq 0) { return '0.' + ('9' * $len).PadLeft($scale, '0') }; return ('9' * $intDigits) + $fraction }
             if ($Kind -eq 'Min') { return '0' }
-            if ($intDigits -eq 0) { return '0.' + ([string]$n).PadLeft($scale, '0') }
-            $v = $n
-            if (-not $isPk -and ([string]($n * 100)).Length -le $intDigits) { $v = $n * 100 }
+            if ($intDigits -eq 0) { return '0.' + ([string](Get-FitNumber $n (Get-DigitsCapacity $len))).PadLeft($scale, '0') }
+            $v = Get-FitNumber $n (Get-DigitsCapacity $intDigits)
+            if (-not $isPk -and ([string]($v * 100)).Length -le $intDigits) { $v = $v * 100 }
             if ($scale -gt 0 -and -not $isPk) { return '{0}.{1}' -f $v, '5'.PadRight($scale, '0') }
             return [string]$v
         }
-        'Integer' { if ($Kind -eq 'Max') { return Get-IntegerMax $Column }; if ($Kind -eq 'Min') { return '0' }; return [string]$n }
+        'Integer' { if ($Kind -eq 'Max') { return Get-IntegerMax $Column }; if ($Kind -eq 'Min') { return '0' }; return [string](Get-FitNumber $n ([long](Get-IntegerMax $Column))) }
         'Float' { if ($Kind -eq 'Max') { return '99999999.99' }; if ($Kind -eq 'Min') { return '0' }; return '{0}.5' -f $n }
         'Date' { if ($Kind -eq 'Max') { return '9999-12-31' }; if ($Kind -eq 'Min') { return '1900-01-01' }; return $BaseDate.AddDays($n - 1).ToString('yyyy-MM-dd', $invariant) }
         'Timestamp' { if ($Kind -eq 'Max') { return '9999-12-31 23:59:59' }; if ($Kind -eq 'Min') { return '1900-01-01 00:00:00' }; return $BaseDate.AddDays($n - 1).AddHours(9).ToString('yyyy-MM-dd HH:mm:ss', $invariant) }
@@ -230,7 +244,7 @@ function Get-NewValue {
     if ($isPk) {
         if ($Kind -eq 'Max') { if ($vk -eq 'Char') { return '9' * $width } else { return 'Z' * $width } }
         if ($Kind -eq 'Min') { if ($vk -eq 'Char') { return '0' * $width } else { return '0' } }
-        $digits = [string]$n
+        $digits = [string](Get-FitNumber $n (Get-DigitsCapacity $width))
         if ($vk -eq 'Char' -and $len -gt 0) { return $digits.PadLeft($len, '0') }
         return $digits.PadLeft([math]::Min($width, 6), '0')
     }
@@ -294,6 +308,21 @@ foreach ($t in $ordered) {
             if ($target.Values.Contains($fk)) { $values[$key] = $target.Values[$fk] }
         }
         $rowsOfTable.Add([pscustomobject]@{ Pattern = $k.Pattern; Kind = $k.Kind; Seq = $k.Seq; Values = $values })
+    }
+    # 主キーが重なる行（桁数の少ない主キーで、番号を 1 から数え直したものなど）
+    $pkNames = @($t.Columns | Where-Object { $null -ne $_.PkOrder } | ForEach-Object { $_.Name.ToUpperInvariant() })
+    if ($pkNames.Count -gt 0) {
+        $firstOf = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $same = New-Object System.Collections.Generic.List[string]
+        foreach ($r in $rowsOfTable) {
+            $key = (@($pkNames | ForEach-Object { [string]$r.Values[$_] })) -join "`t"
+            if ($firstOf.ContainsKey($key)) { $same.Add(('{0} と {1}' -f $firstOf[$key], $r.Pattern)) } else { $firstOf[$key] = $r.Pattern }
+        }
+        if ($same.Count -gt 0) {
+            $list = (@($same | Select-Object -First 3)) -join '・'
+            if ($same.Count -gt 3) { $list += (' ほか {0} 行' -f ($same.Count - 3)) }
+            $tableNotes.Add(('主キー（{0}）が重なる行があります（{1}）。主キーの桁数に入らない番号は 1 から数え直すため、-Rows を減らすか、主キーの桁数を確かめてください' -f ($pkNames -join '・'), $list))
+        }
     }
     $generated[$t.Id.ToUpperInvariant()] = $rowsOfTable
     $notes[$t.Id.ToUpperInvariant()] = $tableNotes
