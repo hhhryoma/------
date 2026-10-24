@@ -184,7 +184,7 @@ Write-Host ''
 Write-Host ('設計書 {0} 件・設計で入ったバグ {1} 件（設計書に対応付けたもの {2} 件）' -f $results.Count, $bugs.Count, $matchedBugs.Count)
 if ($null -ne $overallRate) { Write-Host ('設計工程の摘出率（レビューの指摘 ÷ (指摘 + 設計で入ったバグ)）: {0:0.0}%（指摘 {1} 件・バグ {2} 件）' -f ($overallRate * 100), $reviewedFindings, $matchedBugs.Count) }
 $zoned = @($results | Where-Object { $_.Zone })
-if ($zoned.Count -gt 0) { Write-Host ('ゾーン: {0}' -f ((@($zoned | Group-Object Zone | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・')) }
+if ($zoned.Count -gt 0) { Write-Host ('ゾーン: {0}' -f ((@($zoned | Group-InOrder Zone | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・')) }
 foreach ($r in @($results | Where-Object NeedsAction)) { Write-Host ('  要対応: {0}（{1}。バグ {2}）{3}' -f $r.Document, $r.Zone, $r.BugIds, $r.Action) }
 if ($unmatched.Count -gt 0) { Write-Host ('設計書に対応付けられなかったバグ: {0}（-FunctionMap の対応表に機能と設計書を書くと対応付きます）' -f ((@($unmatched | ForEach-Object { '{0}（{1}）' -f $_.Id, $_.Target })) -join '・')) }
 Write-ReadLogSummary $readLog

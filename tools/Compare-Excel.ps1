@@ -2933,7 +2933,7 @@ if ($OutHistory) {
 }
 
 Write-Host ''
-$states = $summary | Group-Object State | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
+$states = $summary | Group-InOrder State | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
 $line = "{0} ファイル: {1} / 差分 {2} 件" -f $summary.Count, ($states -join ' / '), $script:Diffs.Count
 $tagged = @(@('表記', '表記のみ'), @('版情報', '版情報') | ForEach-Object { $n = @($script:Diffs | Where-Object Tag -eq $_[0]).Count; if ($n -gt 0) { '{0} {1} 件' -f $_[1], $n } })
 if ($tagged.Count -gt 0) { $line += '（うち ' + ($tagged -join '・') + '）' }

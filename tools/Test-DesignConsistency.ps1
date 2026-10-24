@@ -420,7 +420,7 @@ if ($Where) {
         }
     }
     Write-Host ''
-    foreach ($g in @($sortedUsages | Group-Object Target)) {
+    foreach ($g in @($sortedUsages | Group-InOrder Target)) {
         $count = { param($kind) @($g.Group | Where-Object Usage -eq $kind).Count }
         Write-Host ('{0}: 定義 {1} か所・一覧 {2} か所・参照 {3} か所（{4} ファイル）' -f $g.Name, (& $count '定義'), (& $count '一覧'), (& $count '参照'), @($g.Group | ForEach-Object { $_.Path } | Select-Object -Unique).Count)
     }
@@ -676,7 +676,7 @@ foreach ($k in $unchecked.Keys) {
 }
 
 # 組み合わせの違い: 「元」のある参照（画面の遷移先など）を、書かれている設計書どうしで比べる
-foreach ($g in @($ruleList | Where-Object { $_.Section -eq '参照' -and $_.From -and $_.Found } | Group-Object Kind)) {
+foreach ($g in @($ruleList | Where-Object { $_.Section -eq '参照' -and $_.From -and $_.Found } | Group-InOrder Kind)) {
     $rs = @($g.Group)
     if ($rs.Count -lt 2) { continue }
     $reported = @{}

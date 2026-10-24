@@ -428,7 +428,7 @@ try {
             $rate = [math]::Round($covered / $group.Count, 3)
             Add-Metric '網羅' ('テストのある{0}の割合' -f $kind) ([double]$rate) ('{0} / {1} 件' -f $covered, $group.Count) $file
         }
-        if ($gaps.Count -gt 0) { Add-Action '網羅' ('テストの無い要素 {0} 件' -f $gaps.Count) ((@($gaps | Group-Object Kind | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・') 'テストケースを追加する（詳細\網羅.xlsx の抜けのシート）' }
+        if ($gaps.Count -gt 0) { Add-Action '網羅' ('テストの無い要素 {0} 件' -f $gaps.Count) ((@($gaps | Group-InOrder Kind | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・') 'テストケースを追加する（詳細\網羅.xlsx の抜けのシート）' }
     }
 
     # ---------------------------------------------------------------- 設計書の整合性

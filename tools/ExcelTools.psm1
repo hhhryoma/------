@@ -68,6 +68,37 @@ function Read-TextFile {
     catch { return [System.Text.Encoding]::GetEncoding(932).GetString($bytes) }
 }
 
+function Group-InOrder {
+    #     Group-Object と同じく値ごとにまとめ（大文字小文字は区別しない）、まとまりを最初に出てきた順に返す。
+    #     Group-Object のまとまりの並びは、Windows PowerShell 5.1 では出てきた順、PowerShell 7 では値の順と違うため、
+    #     並びが結果に出るところ（同じ数のときに選ぶもの・表や件数の並び）は、これでまとめて版によらずそろえる。
+    #     Property: プロパティ名か、値を返すスクリプトブロック（$_ が要素）
+    #     戻り値: @{ Name; Count; Group; Index（最初に出てきた順。0 始まり） } の並び
+    param(
+        [Parameter(Mandatory = $true, Position = 0)] $Property,
+        [Parameter(ValueFromPipeline = $true)] $InputObject
+    )
+    begin {
+        $map = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $order = New-Object System.Collections.Generic.List[object]
+    }
+    process {
+        if ($Property -is [scriptblock]) { $key = [string](ForEach-Object -InputObject $InputObject -Process $Property) }
+        else { $key = [string]$InputObject.$Property }
+        if (-not $map.ContainsKey($key)) {
+            $map[$key] = New-Object System.Collections.Generic.List[object]
+            $order.Add($key)
+        }
+        $map[$key].Add($InputObject)
+    }
+    end {
+        for ($i = 0; $i -lt $order.Count; $i++) {
+            $items = $map[$order[$i]]
+            [pscustomobject]@{ Name = $order[$i]; Count = $items.Count; Group = $items.ToArray(); Index = $i }
+        }
+    }
+}
+
 # ---------------------------------------------------------------- 読み取り（xlsx / xlsm の ZIP パッケージ）
 
 function Open-ZipPackage {
@@ -1379,7 +1410,7 @@ function New-ReadLogSheet {
 function Write-ReadLogSummary {
     #     読み取り結果の要約を表示する（表が見つからないファイルと、見出しが無い項目）
     param($ReadLog)
-    foreach ($g in @($ReadLog | Group-Object What)) {
+    foreach ($g in @($ReadLog | Group-InOrder What)) {
         $tables = @($g.Group | Where-Object { -not $_.Note })
         $files = @($tables | ForEach-Object { $_.File } | Select-Object -Unique)
         $notFound = @($g.Group | Where-Object { $_.Note } | ForEach-Object { $_.File } | Select-Object -Unique)

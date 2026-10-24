@@ -129,7 +129,7 @@ foreach ($c in $cases) {
 
 
 $functions = New-Object System.Collections.Generic.List[object]
-foreach ($g in @($cases | Group-Object Key)) {
+foreach ($g in @($cases | Group-InOrder Key)) {
     $group = @($g.Group)
     $first = $group[0]
     $hasKind = [bool]$first.Place.Labels['区分']

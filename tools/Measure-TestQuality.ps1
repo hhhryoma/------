@@ -300,9 +300,9 @@ foreach ($k in $functions.Keys) {
     $executed = @($counted | Where-Object { $_.Kind -eq 'OK' -or $_.Kind -eq 'NG' }).Count
     $size = $null; $unit = ''
     if ($fn.SizeKey) { $size = $sizes[$fn.SizeKey].Size; $unit = $sizes[$fn.SizeKey].Unit }
-    # 基準値に使う工程は、ケースの多い工程（同じ数なら先に出てきた工程。Windows PowerShell 5.1 の Sort-Object は同じ値の順番を保たないため並べ替えない）
+    # 基準値に使う工程は、ケースの多い工程（同じ数なら先に出てきた工程。Group-Object は PowerShell 7 では工程の名前の順に並べるため、出てきた順のまま並べる Group-InOrder でまとめる）
     $process = ''; $most = 0
-    foreach ($g in @($fn.Cases | Where-Object { $_.Process } | Group-Object Process)) { if ($g.Count -gt $most) { $most = $g.Count; $process = $g.Name } }
+    foreach ($g in @($fn.Cases | Where-Object { $_.Process } | Group-InOrder Process)) { if ($g.Count -gt $most) { $most = $g.Count; $process = $g.Name } }
     $testDensity = $null; $bugDensity = $null; $testJudgement = ''; $bugJudgement = ''; $zone = $null
     if ($null -ne $size -and $size -gt 0) {
         $testDensity = [math]::Round($counted.Count / $size, 3)

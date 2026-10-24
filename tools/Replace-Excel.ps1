@@ -803,7 +803,7 @@ if ($OutXlsx) {
 }
 
 Write-Host ''
-$counts = $results | Group-Object Result | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
+$counts = $results | Group-InOrder Result | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
 Write-Host ("{0} ファイルを調べました: {1}" -f $files.Count, ($counts -join ' / '))
 if ($BackupDir -and @($results | Where-Object Result -eq '置換').Count -gt 0) { Write-Host "置換前のファイル: $BackupDir" }
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }

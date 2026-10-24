@@ -96,7 +96,7 @@ else {
 $results
 Write-Host ''
 if ($results.Count -eq 0) { Write-Host 'ショートカットはありませんでした。' }
-else { Write-Host ('{0}: {1}' -f $SendToDir, (($results | Group-Object Status | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }) -join ' / ')) }
+else { Write-Host ('{0}: {1}' -f $SendToDir, (($results | Group-InOrder Status | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }) -join ' / ')) }
 
 # .SYNOPSIS
 #     エクスプローラーの右クリック →「送る」メニューに、各ツールを登録します（Excel 不要）。

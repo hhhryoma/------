@@ -177,6 +177,21 @@ Test-Case 'Measure-ReviewQuality: 指標の列が無い基準値（以前の形�
     Assert-Match $warn 'レビュー工数密度の行がありません'
 }
 
+Test-Case 'Measure-ReviewQuality: 指摘の数が同じ工程は、先に出てきた工程の基準値を使う（PowerShell の版によらない）' {
+    $dir = New-TestDir
+    $csv = New-Findings $dir
+    # 先に出てくる「詳細設計」は、名前の順では「基本設計」のあと
+    New-FindingBook (Join-Path $dir '工程別.xlsx') '指摘' @('No', '対象成果物', '指摘内容', '工程', '対応状況') @(
+        @('1', 'DD02_画面設計書_SCR001_受注一覧', '桁数が違う', '詳細設計', '完了'),
+        @('2', 'DD02_画面設計書_SCR001_受注一覧', 'イベントが足りない', '基本設計', '完了'))
+    $limits = Join-Path $dir 'limits.csv'
+    @('指標,分母,工程,下限,上限', '指摘密度,ページ数,詳細設計,0.1,0.3', '指摘密度,ページ数,基本設計,1.0,2.0') | Set-Content -LiteralPath $limits -Encoding UTF8
+    $r = @(& $QualityTool -Path (Join-Path $dir '工程別.xlsx') -SizeCsv $csv -Limits $limits -AsOf '2026-10-20' 6>$null 3>$null)
+    $dd02 = @($r | Where-Object { $_.Document -like 'DD02*' })[0]
+    Assert-Equal '詳細設計|0.5' ('{0}|{1}' -f $dd02.Process, $dd02.Density)
+    Assert-Match $dd02.Judgement '^多い' '詳細設計の基準値（0.1〜0.3）と比べる'
+}
+
 Test-Case 'Measure-ReviewQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityTool
     Assert-Match $h.Synopsis '指摘'
