@@ -264,7 +264,7 @@
             Id = 'Size'; Label = '規模を見積もる'; Group = '見積もり・進捗'; Tool = 'Measure-DesignSize.ps1'
             Summary = '設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出します。前の版を指定すると、変更の規模も出します。'
             Main = @('Path', 'Baseline', 'OutXlsx')
-            Labels = @{ Path = '設計書のフォルダ'; Baseline = '前の版の設計書（変更の規模を見るとき）'; OutXlsx = '結果の保存先' }
+            Labels = @{ Path = '設計書のフォルダ'; Baseline = '前の版の設計書（変更の規模を見るとき）'; OutXlsx = '結果の保存先'; OutCoefficients = '実績で直した係数表の保存先（CSV）' }
             Required = @('Path'); Output = @('OutXlsx'); OutputName = '規模'; Keywords = '見積もり FP 工数'
         }
         @{
