@@ -201,6 +201,31 @@ function Set-CellValues {
     Save-ZipPackage -FilePath $File -Changes $changes
 }
 
+function New-WordDoc {
+    #     段落と表だけの最小の Word 文書を作る。Body: 文字は段落、配列の配列は表（行ごとのセル）
+    param([string] $Path, [object[]] $Body)
+    $esc = { param($t) [System.Security.SecurityElement]::Escape($t) }
+    $p = { param($t) '<w:p><w:r><w:t xml:space="preserve">' + (& $esc $t) + '</w:t></w:r></w:p>' }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($b in $Body) {
+        if ($b -is [string]) { [void]$sb.Append((& $p $b)); continue }
+        [void]$sb.Append('<w:tbl>')
+        foreach ($row in $b) { [void]$sb.Append('<w:tr>' + ((@($row | ForEach-Object { '<w:tc>' + (& $p $_) + '</w:tc>' })) -join '') + '</w:tr>') }
+        [void]$sb.Append('</w:tbl>')
+    }
+    $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + $sb.ToString() + '</w:body></w:document>'
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $fs = [System.IO.File]::Create($Path)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        $sw = New-Object System.IO.StreamWriter($zip.CreateEntry('word/document.xml').Open(), (New-Object System.Text.UTF8Encoding($false)))
+        $sw.Write($xml); $sw.Dispose()
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
 function New-SheetsBook {
     #     複数シートのブックを作る（テスト用）。Sheets: @{ 名前 = @(見出しの配列, 行の配列...) } の順序付き辞書
     param([string] $Path, $Sheets)

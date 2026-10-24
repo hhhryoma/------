@@ -67,9 +67,14 @@ $severityOrder = @{ '高' = 0; '中' = 1; '低' = 2 }
 # ---------------------------------------------------------------- 設計書のテキスト化
 
 
+function Test-WordPath {
+    param([string] $FilePath)
+    return @('.docx', '.docm') -contains [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
+}
+
 function Get-ExcelCells {
     #     Search-Excel.ps1 で全セル（値・コメント・図形・シート名）を読み出す。
-    #     ブックの並び順（シート順、行優先）のまま返る。
+    #     ブックの並び順（シート順、行優先）のまま返る。Word の文書は、段落・表の行・テキストボックス・コメント（シートの列は本文・脚注などの部分）
     param([string] $FilePath)
 
     $warnings = $null
@@ -77,6 +82,7 @@ function Get-ExcelCells {
         Pattern = '\S'
         Path    = [System.Management.Automation.WildcardPattern]::Escape($FilePath)
         Target  = @('Value', 'Comment', 'Shape', 'SheetName')
+        IncludeWord = $true
     }
     if ($SheetNameExclude) { $searchArgs['SheetNameExclude'] = $SheetNameExclude }
 
@@ -92,6 +98,7 @@ function ConvertTo-DesignText {
     #     返り値: シート名 → テキスト の順序付き辞書
     param($Cells)
 
+    if (@($Cells).Count -gt 0 -and (Test-WordPath @($Cells)[0].Path)) { return ConvertTo-WordText $Cells }
     if ($TextFormat -eq 'Markdown') { return ConvertTo-DesignMarkdown $Cells }
 
     $sheets = [ordered]@{}
@@ -153,6 +160,26 @@ function ConvertTo-DesignText {
     return $result
 }
 
+function ConvertTo-WordText {
+    #     Word の設計書を、段落・表の行ごとに「段落 12| 文」「表 1 の 3 行目| セル | セル」の形のテキストにする。
+    #     テキストボックスは「テキストボックス 1| 文」、コメントは「コメント（段落 3）: 文」。
+    #     返り値: 部分（本文・脚注など。シートの代わり）→ テキスト の順序付き辞書
+    param($Cells)
+    $parts = [ordered]@{}
+    foreach ($c in $Cells) {
+        if ($c.Kind -eq 'シート名') { continue }
+        if (-not $parts.Contains($c.Sheet)) {
+            $parts[$c.Sheet] = New-Object System.Text.StringBuilder
+            [void]$parts[$c.Sheet].Append("### シート: $($c.Sheet)").Append("`n")
+        }
+        if ($c.Kind -eq 'コメント') { [void]$parts[$c.Sheet].Append(('コメント（{0}）: {1}' -f $c.Cell, $c.Text)).Append("`n") }
+        else { [void]$parts[$c.Sheet].Append(('{0}| {1}' -f $c.Cell, $c.Text)).Append("`n") }
+    }
+    $result = [ordered]@{}
+    foreach ($k in $parts.Keys) { $result[$k] = $parts[$k].ToString() }
+    return $result
+}
+
 function ConvertTo-DesignMarkdown {
     #     -TextFormat Markdown: Export-ExcelToMarkdown と同じ形（表・「■」の小見出し・箇条書き）にする。
     #     AI がセル番地を引用できるよう、表に行番号と列（K:桁数）、箇条書きにセル番地を付ける。
@@ -209,7 +236,7 @@ function Find-BaselineFiles {
         $found = @($item)
         if ($item.PSIsContainer) { $found = @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue) }
         foreach ($o in $found) {
-            if (@('.xlsx', '.xlsm', '.xls') -notcontains $o.Extension.ToLowerInvariant() -or $o.Name.StartsWith('~$')) { continue }
+            if (@('.xlsx', '.xlsm', '.xls', '.docx', '.docm') -notcontains $o.Extension.ToLowerInvariant() -or $o.Name.StartsWith('~$')) { continue }
             $k = Get-VersionlessName $o.Name
             if (-not $old.ContainsKey($k)) { $old[$k] = $o.FullName }
         }
@@ -606,7 +633,7 @@ function Get-DesignFiles {
                 $found = @($item)
             }
             foreach ($f in $found) {
-                if (@('.xlsx', '.xlsm', '.xls') -notcontains $f.Extension.ToLowerInvariant()) { continue }
+                if (@('.xlsx', '.xlsm', '.xls', '.docx', '.docm') -notcontains $f.Extension.ToLowerInvariant()) { continue }
                 if ($f.Name.StartsWith('~$')) { continue }
                 if ($f.FullName.StartsWith($OutDir, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
                 if ([string]::Equals($f.FullName, $Checklist, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
@@ -915,6 +942,7 @@ function Invoke-ToolChecks {
             }
             elseif ($src -eq '表記ゆれ') {
                 $termArgs = @{ Path = $paths }
+                if (@($paths | Where-Object { Test-WordPath $_ }).Count -gt 0) { $termArgs['IncludeWord'] = $true }
                 if ($Glossary) { $termArgs['Glossary'] = $Glossary }
                 foreach ($v in @(& (Join-Path $PSScriptRoot 'Test-ExcelTerms.ps1') @termArgs 6>$null 3>$null)) {
                     # 揺れの表記ごと・ファイルごとに 1 件（場所は最初に出てくるセル）
@@ -968,6 +996,8 @@ V01 | NG | 画面項目定義!G12 | （空欄） | 桁数が記入されてい�
 V02 | NG | イベント定義!J9 | 検索ボタン押下 | 「押下」と「クリック」が混在している | 用語をそろえる
 V03 | OK | - | - | - | -
 '@
+# Word の設計書（や参照資料）を渡すときに足す、場所の書き方
+$wordRule = '- Word の設計書は、各行が「段落 12| 文」「表 1 の 3 行目| セル | セル」の形です。場所は「本文!段落 12」「本文!表 1 の 3 行目」のように書いてください。'
 # 回答の形（引用の列があるか）。依頼の一覧に残し、-ImportOnly で前の形の依頼を読むときに使う
 $answerFormat = '引用付き'
 # プロンプトの改行は OS によらず LF にそろえる。AppendLine や CRLF のスクリプトファイルのままだと
@@ -979,10 +1009,13 @@ if ($TextFormat -eq 'Markdown') {
 }
 
 function New-PromptText {
-    param($Points, [string] $FileName, [string] $Body, [string] $PartNote, [string] $RefText)
+    #     Word: 設計書か参照資料に Word の文書があるとき（場所の書き方を足す）
+    param($Points, [string] $FileName, [string] $Body, [string] $PartNote, [string] $RefText, [switch] $Word)
 
     $sb = New-Object System.Text.StringBuilder
-    [void]$sb.Append($promptHeader).Append("`n")
+    $header = $promptHeader
+    if ($Word) { $header = $header.Replace("`n- 設計書に書かれていないことを", "`n" + $wordRule + "`n- 設計書に書かれていないことを") }
+    [void]$sb.Append($header).Append("`n")
     [void]$sb.Append("`n")
     [void]$sb.Append('【レビュー観点】').Append("`n")
     [void]$sb.Append('観点ID | 観点 | 判定基準').Append("`n")
@@ -1103,6 +1136,13 @@ function Resolve-Location {
     param([string] $Location, [string[]] $SheetNames)
 
     if (-not $Location) { return $null }
+    # Word の設計書の「本文!段落 12」「本文!表 1 の 3 行目」「本文!テキストボックス 1」（空白の有無と全角の数字はそろえる）
+    $w = [regex]::Match($Location.Normalize($nfkc), '^\s*(?<sheet>[^!]+?)\s*!\s*(?<cell>(?:段落|表|テキストボックス)\s*\d.*?)\s*$')
+    if ($w.Success -and $SheetNames -contains $w.Groups['sheet'].Value) {
+        $cell = $w.Groups['cell'].Value -replace '\s', ''
+        $cell = $cell -replace '^段落(\d+)$', '段落 $1' -replace '^表(\d+)の(\d+)行目$', '表 $1 の $2 行目' -replace '^テキストボックス(\d+)$', 'テキストボックス $1'
+        return [pscustomobject]@{ Sheet = $w.Groups['sheet'].Value; Cell = $cell }
+    }
     $m = [regex]::Match($Location, "^\s*'?(?<sheet>[^!']+?)'?\s*[!！]\s*\`$?(?<col>[A-Za-z]{1,3})\`$?(?<row>\d+)")
     if ($m.Success) {
         $sheet = $m.Groups['sheet'].Value.Trim()
@@ -1130,14 +1170,17 @@ function Read-QuoteCells {
     #     戻り値: シート名 → セル番地 → @{ Cell; Col; Row; Text; Key（ConvertTo-QuoteKey の形） }
     param([string] $FilePath)
     $sheets = @{}
-    $hits = @(& $searchScript -Pattern '\S' -Path ([System.Management.Automation.WildcardPattern]::Escape($FilePath)) -Target Value, Comment, Shape 6>$null 3>$null)
+    $hits = @(& $searchScript -Pattern '\S' -Path ([System.Management.Automation.WildcardPattern]::Escape($FilePath)) -Target Value, Comment, Shape -IncludeWord 6>$null 3>$null)
+    $seq = 0
     foreach ($h in $hits) {
+        $seq++
         if (-not $sheets.ContainsKey($h.Sheet)) { $sheets[$h.Sheet] = @{} }
         $cells = $sheets[$h.Sheet]
         $cell = [string]$h.Cell
         if ($cells.ContainsKey($cell)) { $cells[$cell].Text += [string]$h.Text; continue }
+        # Word の段落などは、文書の中の順番を行の代わりにする
         $m = [regex]::Match($cell, '^([A-Z]+)(\d+)$')
-        $col = 0; $row = 0
+        $col = 0; $row = $seq
         if ($m.Success) { $col = Get-ColumnIndex $m.Groups[1].Value; $row = [int]$m.Groups[2].Value }
         $cells[$cell] = [pscustomobject]@{ Cell = $cell; Col = $col; Row = $row; Text = [string]$h.Text; Key = '' }
     }
@@ -1163,7 +1206,8 @@ function Resolve-Quote {
     $origin = @(0, 0)
     if ($Location) {
         $m = [regex]::Match($Location.Cell, '^([A-Z]+)(\d+)$')
-        if ($m.Success) { $origin = @((Get-ColumnIndex $m.Groups[1].Value), [int]$m.Groups[2].Value) }
+        if ($here) { $origin = @($here.Col, $here.Row) }
+        elseif ($m.Success) { $origin = @((Get-ColumnIndex $m.Groups[1].Value), [int]$m.Groups[2].Value) }
         # 行を引用したとき（同じ行のセルをつなげた文字にある）
         if ($q.Length -ge 2 -and $Cells.ContainsKey($Location.Sheet)) {
             $line = (@($Cells[$Location.Sheet].Values | Where-Object { $_.Row -eq $origin[1] } | Sort-Object Col | ForEach-Object { $_.Key }) -join '')
@@ -1243,9 +1287,11 @@ function New-ReviewRequests {
         # 収まらない場合は、参照資料が同じ観点ごとに分ける（参照資料の要らない観点は設計書だけで依頼する）
         $groups = [ordered]@{}
         $allRefs = @($targetPoints | ForEach-Object { $_.Refs } | Sort-Object -Unique)
+        # 設計書か参照資料が Word なら、プロンプトに Word の場所の書き方を足す
+        $word = (Test-WordPath $f.Path) -or @($files | Where-Object { $_.Path -ne $f.Path -and (Test-WordPath $_.Path) -and (Test-NameLike $_.Name $allRefs) }).Count -gt 0
         $allRefText = ''
         if ($allRefs.Count -gt 0) { $allRefText = & $getRefText $allRefs }
-        $allFixed = (New-PromptText -Points $targetPoints -FileName $f.Name -Body '' -PartNote $diffNote -RefText $allRefText).Length
+        $allFixed = (New-PromptText -Points $targetPoints -FileName $f.Name -Body '' -PartNote $diffNote -RefText $allRefText -Word:$word).Length
         if ($allFixed + $docLength -le $MaxChars) {
             $groups['*'] = [pscustomobject]@{ Points = $targetPoints; RefText = $allRefText }
         }
@@ -1265,7 +1311,7 @@ function New-ReviewRequests {
             $gp = $groups[$key].Points
             $refText = $groups[$key].RefText
 
-            $fixedLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote ($diffNote + '（9/9 の一部。他の部分は別途確認するため、この部分だけで判定してください）') -RefText $refText).Length
+            $fixedLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote ($diffNote + '（9/9 の一部。他の部分は別途確認するため、この部分だけで判定してください）') -RefText $refText -Word:$word).Length
             $budget = $MaxChars - $fixedLen
             if ($budget -lt 1000) {
                 Write-Warning ("{0}: 観点と参照資料だけで {1} 文字あり、-MaxChars {2} に収まりません。-MaxChars を増やすか、参照設計書を絞ってください（観点 {3}）" -f $f.Relative, $fixedLen, $MaxChars, (($gp | ForEach-Object { $_.Id }) -join ', '))
@@ -1273,7 +1319,7 @@ function New-ReviewRequests {
             }
 
             # 1 回に収まるなら分けない（分けたときの「n/m の一部」の注記の分を見込んで、収まるのに分けてしまわないよう）
-            $wholeLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote $diffNote -RefText $refText).Length + $docLength
+            $wholeLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote $diffNote -RefText $refText -Word:$word).Length + $docLength
             if ($wholeLen -le $MaxChars) { $chunks = Split-SheetTexts -SheetTexts $sheetTexts -Budget ([int]::MaxValue) }
             else { $chunks = Split-SheetTexts -SheetTexts $sheetTexts -Budget $budget }
             for ($i = 0; $i -lt $chunks.Count; $i++) {
@@ -1282,7 +1328,7 @@ function New-ReviewRequests {
                     $partNote += '（{0}/{1} の一部。他の部分は別途確認するため、この部分だけで判定してください）' -f ($i + 1), $chunks.Count
                 }
                 $no++
-                $prompt = New-PromptText -Points $gp -FileName $f.Name -Body $chunks[$i] -PartNote $partNote -RefText $refText
+                $prompt = New-PromptText -Points $gp -FileName $f.Name -Body $chunks[$i] -PartNote $partNote -RefText $refText -Word:$word
                 $requests.Add([pscustomobject]@{
                     Id         = 'R{0:000}' -f $no
                     File       = $f.Path
@@ -1309,7 +1355,7 @@ $checklistData = Read-Checklist -FilePath $Checklist
 $designFiles = $null
 if ($Path) {
     $designFiles = Get-DesignFiles
-    if ($designFiles.Count -eq 0 -and -not $CheckOnly) { throw '設計書（.xlsx / .xlsm / .xls）が見つかりません。' }
+    if ($designFiles.Count -eq 0 -and -not $CheckOnly) { throw '設計書（.xlsx / .xlsm / .xls / .docx / .docm）が見つかりません。' }
 }
 $hasError = Show-ChecklistIssues -List $checklistData -Issues (Test-Checklist -List $checklistData -Files $designFiles)
 if ($CheckOnly) { return }
@@ -1345,7 +1391,11 @@ else {
         $compareScript = Join-Path $PSScriptRoot 'Compare-Excel.ps1'
         foreach ($f in $designFiles) {
             $diffState = '新規'; $diffText = $null; $oldPath = ''
-            if ($pairs.ContainsKey($f.Path)) {
+            if ($pairs.ContainsKey($f.Path) -and (Test-WordPath $f.Path)) {
+                # Word の文書は、変わった部分だけにせず全体を渡す
+                $diffState = 'Word（全体）'; $oldPath = $pairs[$f.Path]
+            }
+            elseif ($pairs.ContainsKey($f.Path)) {
                 $oldPath = $pairs[$f.Path]
                 # 版数・更新日・改訂履歴だけの変更は、レビューしない
                 $diffs = @(& $compareScript -Old $oldPath -New $f.Path -Ignore 版情報 6>$null 3>$null | Where-Object { @('書式', '画像', 'ファイル', '改訂履歴') -notcontains $_.Kind })
@@ -1591,8 +1641,13 @@ foreach ($f in $sorted) {
         $quoteCounts[$check]++
     }
     if ($location -and -not $loc -and -not $note) { $note = '場所のシート名・セル番地を設計書で確認してください' }
+    if ($loc -and (Test-WordPath $f.Request.File)) { $location = '{0}!{1}' -f $loc.Sheet, $loc.Cell }
     $row = @{ Values = @($n, $f.Entry.Verdict, $f.Source, $p.Severity, $p.Id, $p.Category, $p.Point, $f.Request.Relative, $location, $quote, $check, $f.Entry.Finding, $f.Entry.Reason, $f.Request.Id, '', '', '', '', $note) }
-    if ($loc) {
+    if ($loc -and (Test-WordPath $f.Request.File)) {
+        # Word の文書は開くだけ（セルの場所が無い）
+        $row.Link = @{ Column = 8; Path = $f.Request.File; Location = '' }
+    }
+    elseif ($loc) {
         $row.Link = @{ Column = 8; Path = $f.Request.File; Location = "'{0}'!{1}" -f $loc.Sheet.Replace("'", "''"), $loc.Cell }
     }
     elseif ($f.Source -ne 'AI') {
@@ -1630,7 +1685,7 @@ foreach ($cv in @($coverage.Values | Sort-Object @{ e = { $fileOrder[$_.File] } 
     if ($cv.Missing -and $verdict -eq 'OK') { $verdict = '未回答' }
     # 依頼の無い設計書（ツールだけで確かめた設計書）は、ファイルを開くだけ
     $location = ''
-    if ($firstSheet.ContainsKey($cv.File)) { $location = "'{0}'!A1" -f $firstSheet[$cv.File].Replace("'", "''") }
+    if ($firstSheet.ContainsKey($cv.File) -and -not (Test-WordPath $cv.File)) { $location = "'{0}'!A1" -f $firstSheet[$cv.File].Replace("'", "''") }
     $statusRows.Add(@{ Values = @($cv.Relative, $p.Id, $p.Category, $p.Point, $p.Severity, $verdict, $ng, ($cv.Requests -join ', ')); Link = @{ Column = 0; Path = $cv.File; Location = $location } })
 }
 
@@ -1716,7 +1771,7 @@ Write-Host "レビュー結果: $reportPath"
 #     設計書の読み取りには同じフォルダの Search-Excel.ps1 を使います（Excel 不要）。
 #
 # .PARAMETER Path
-#     レビューする設計書のフォルダまたはファイル（複数指定可）。
+#     レビューする設計書のフォルダまたはファイル（複数指定可）。Excel（.xlsx / .xlsm / .xls）と Word（.docx / .docm）の設計書を読みます。
 #
 # .PARAMETER Checklist
 #     観点表（xlsx または UTF-8 の csv）。省略時は review-checklists\詳細設計レビュー観点.xlsx。
