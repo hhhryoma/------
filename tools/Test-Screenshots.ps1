@@ -370,7 +370,7 @@ if ($Record) {
     }
     # -WhatIf のときは、記録を書かず、状態も記録の前のまま出す
     if ($targets.Count -gt 0 -and $PSCmdlet.ShouldProcess($RecordFile, ('スクリーンショットの記録を書く（{0}）' -f (@($targets | ForEach-Object { $_.Name }) -join '・')))) {
-        $now = Get-Date -Format 'yyyy/MM/dd HH:mm'
+        $now = (Get-Date).ToString('yyyy/MM/dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
         foreach ($s in $targets) {
             $row = [pscustomobject][ordered]@{
                 '画面' = $s.Name; '元のファイル' = $s.Wire.File; '元のシート' = $s.Wire.Sheet; '元の内容' = $s.Wire.Look

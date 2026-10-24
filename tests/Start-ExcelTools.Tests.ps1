@@ -94,6 +94,8 @@ Test-Case 'Start-ExcelTools: 入力から引数を作る（空は渡さず、必
     Assert-Equal @('Tolerance') $r.ErrorFields
     Assert-Equal '7.5' ([string]$r.Arguments['HoursPerDay']) '全角の数字も読む'
     Assert-True ($r.Arguments['AsOf'] -is [datetime] -and $r.Arguments['AsOf'].Day -eq 20) '日付の引数には日付を渡す'
+    $wareki = Invoke-InWareki { ConvertTo-GuiArguments $effort (Get-GuiFields $effort) @{ Path = @('a.xlsx'); AsOf = '2026/10/20' } }
+    Assert-Equal '2026-10-20' $wareki.Arguments['AsOf'].ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) '和暦の設定でも、入れた日付は西暦として読む'
 
     $consistency = Get-TestEntry 'Consistency'
     $r = ConvertTo-GuiArguments $consistency (Get-GuiFields $consistency) @{ Path = @('x'); Where = 'T_ORDER, E0001、C005' }
@@ -116,6 +118,7 @@ Test-Case 'Start-ExcelTools: 結果の既定の保存先（名前_日時。同�
 
     $arguments = [ordered]@{ Old = "D:\旧'版"; New = 'D:\新'; KeyColumn = [string[]]@('物理名', '項目ID'); NoRecurse = $true; AsOf = (Get-Date '2026-10-20'); MinBugs = 5 }
     Assert-Equal "& 'C:\tools\Compare-Excel.ps1' -Old 'D:\旧''版' -New 'D:\新' -KeyColumn '物理名', '項目ID' -NoRecurse -AsOf [datetime]'2026-10-20' -MinBugs 5" (Format-GuiCommandLine 'C:\tools\Compare-Excel.ps1' $arguments)
+    Assert-Equal "[datetime]'2026-10-20'" (Invoke-InWareki { ConvertTo-GuiLiteral ([datetime]'2026-10-20') }) '和暦の設定でも、日付は西暦で書く'
 
     # フォルダに保存する処理の結果: 実行を始めてから書いた Excel を、文字や古いファイルより先にする
     $results = Join-Path $dir '報告'

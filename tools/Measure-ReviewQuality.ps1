@@ -42,6 +42,8 @@ if ($DesignPath -and $SizeCsv) { throw '-DesignPath と -SizeCsv は、どちら
 Update-TypeData -TypeName 'ReviewQuality.Document' -DefaultDisplayPropertySet Document, Findings, Open, Overdue, Density, Judgement -Force -WhatIf:$false
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
+# 日付は、Windows の地域の設定（和暦など）によらず西暦で書く
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
 # 対応が終わった・指摘として数えない状態
 $closedPattern = '完了|済|クローズ|close|done|対応不要|不要|対処なし'
@@ -561,7 +563,7 @@ if ($OutXlsx) {
     $openRows = New-Object System.Collections.Generic.List[object]
     foreach ($f in @($findings | Where-Object { -not $_.Closed } | Sort-Object @{ e = { -not $_.Overdue } }, @{ e = { if ($_.Due) { $_.Due } else { [datetime]::MaxValue } } })) {
         $due = ''
-        if ($f.Due) { $due = $f.Due.ToString('yyyy/MM/dd') }
+        if ($f.Due) { $due = $f.Due.ToString('yyyy/MM/dd', $invariant) }
         $overdue = ''
         if ($f.Overdue) { $overdue = '期限切れ' }
         $row = @{ Values = @($f.Document, $f.Content, $f.Severity, $f.Category, $f.Owner, $due, $overdue, $f.Status, ('{0} {1}' -f $f.Place.File, $f.Place.Cell).Trim()) }
@@ -569,7 +571,7 @@ if ($OutXlsx) {
         $openRows.Add($row)
     }
     $trendRows = New-Object System.Collections.Generic.List[object]
-    foreach ($t in $trend) { $trendRows.Add(@{ Values = @($t.Date.ToString('yyyy/MM/dd'), [double]$t.Opened, [double]$t.Closed, [double]$t.TotalOpened, [double]$t.TotalClosed, [double]$t.Remaining) }) }
+    foreach ($t in $trend) { $trendRows.Add(@{ Values = @($t.Date.ToString('yyyy/MM/dd', $invariant), [double]$t.Opened, [double]$t.Closed, [double]$t.TotalOpened, [double]$t.TotalClosed, [double]$t.Remaining) }) }
     try {
         # グラフ: 指摘の起票・完了の累計と未完了（推移）、レビュー工数密度 × 指摘密度（設計書別。-ReviewLog のとき、両方ある設計書を最大 50）
         $trendCharts = @(@{ Type = 'Line'; Title = '指摘の起票・完了（累計）と未完了'; Category = 0; Series = @(@{ Column = 3 }, @{ Column = 4 }, @{ Column = 5 }); YTitle = '指摘' })
@@ -601,7 +603,7 @@ if ($OutXlsx) {
 Write-Host ''
 $open = @($findings | Where-Object { -not $_.Closed }).Count
 $overdue = @($findings | Where-Object Overdue).Count
-Write-Host ('指摘 {0} 件（未完了 {1} 件・うち期限切れ {2} 件。取下げなどで数えなかったもの {3} 件）/ 設計書 {4} 件（{5} 時点）' -f $findings.Count, $open, $overdue, $excluded, $results.Count, $AsOf.ToString('yyyy/MM/dd'))
+Write-Host ('指摘 {0} 件（未完了 {1} 件・うち期限切れ {2} 件。取下げなどで数えなかったもの {3} 件）/ 設計書 {4} 件（{5} 時点）' -f $findings.Count, $open, $overdue, $excluded, $results.Count, $AsOf.ToString('yyyy/MM/dd', $invariant))
 foreach ($p in @(@('重要度', 'Severity'), @('分類', 'Category'))) {
     $text = Format-Breakdown $findings $p[1]
     if ($text) { Write-Host ('{0}: {1}' -f $p[0], $text) }

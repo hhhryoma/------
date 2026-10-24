@@ -76,6 +76,17 @@ Test-Case 'Measure-Progress: -FillTemplate で遅延タスクと週ごとの完�
     Assert-Equal 5 $sheet.Rows.Count '見出しと 4 件'
 }
 
+Test-Case 'Measure-Progress: 和暦の設定（ja-JP の JapaneseCalendar）でも、日付は西暦で書く' {
+    $dir = New-TestDir
+    $f = New-Wbs $dir
+    $out = Join-Path $dir '進捗.xlsx'
+    $text = Invoke-InWareki { Get-HostText { & $ProgressTool -Path $f.Wbs -AsOf '2026-10-14' -Holidays $f.Holidays -OutXlsx $out | Out-Null } }
+    Assert-Match $text 'タスク 4 件（2026/10/14 時点'
+    $book = Read-XlsxSheet -Path $out -Index 1
+    Assert-True (@($book.Rows.Values | ForEach-Object { $_.Values } | Where-Object { "$_" -match '^0?8/10/' }).Count -eq 0) '和暦の年（08/10/14）にしない'
+    Assert-True (@($book.Rows.Values | ForEach-Object { $_.Values } | Where-Object { "$_" -match '^2026/10/' }).Count -gt 0) 'タスクのシートの予定の日付'
+}
+
 Test-Case 'Measure-Progress: Get-Help でヘルプが表示される' {
     $h = Get-Help $ProgressTool
     Assert-Match $h.Synopsis 'WBS'

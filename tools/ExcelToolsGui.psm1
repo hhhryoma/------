@@ -67,6 +67,17 @@ function Get-GuiFirstSentence {
     return $Help.Trim()
 }
 
+function ConvertTo-GuiDate {
+    #     日付の文字を日付にする（Windows の地域の設定が和暦でも、2026/10/23 は西暦として読む）。読めなければ $null
+    param([string] $Text)
+    $culture = [System.Globalization.CultureInfo]::CurrentCulture.Clone()
+    try { $culture.DateTimeFormat.Calendar = New-Object System.Globalization.GregorianCalendar }
+    catch { $culture = [System.Globalization.CultureInfo]::InvariantCulture }
+    $d = [datetime]::MinValue
+    if ([datetime]::TryParse($Text, $culture, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { return $d }
+    return $null
+}
+
 function Get-GuiLabel {
     #     ヘルプの最初の文から、入力欄の名前を作る（括弧の中を除き、長ければ最後の「、」のあと）
     param([string] $Help, [string] $Name)
@@ -227,11 +238,11 @@ function ConvertTo-GuiArguments {
             'Date' {
                 $d = $v
                 if ($d -isnot [datetime]) {
-                    $parsed = [datetime]::MinValue
-                    if (-not [datetime]::TryParse([string]$d, [ref]$parsed)) { $errors.Add(('「{0}」は日付で入れてください（例: 2026/10/23）' -f $f.Label)); continue }
+                    $parsed = ConvertTo-GuiDate ([string]$d)
+                    if (-not $parsed) { $errors.Add(('「{0}」は日付で入れてください（例: 2026/10/23）' -f $f.Label)); continue }
                     $d = $parsed
                 }
-                if ($f.Type -eq [datetime]) { $arguments[$f.Name] = $d.Date } else { $arguments[$f.Name] = $d.ToString('yyyy-MM-dd') }
+                if ($f.Type -eq [datetime]) { $arguments[$f.Name] = $d.Date } else { $arguments[$f.Name] = $d.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
             }
             'Number' {
                 $element = $f.Type
@@ -266,7 +277,7 @@ function Get-GuiDefaultOutputs {
     #     結果の欄（ツールの一覧の Output）のうち空のものに入れるパス（名前_日時.拡張子。同じ名前があれば連番）。戻り値: 引数の名前 → パス
     param($Entry, $Fields, [hashtable] $Values, [string] $Dir = (Get-GuiResultDir), [datetime] $Now = (Get-Date))
     $result = @{}
-    $stamp = $Now.ToString('yyyyMMdd_HHmmss')
+    $stamp = $Now.ToString('yyyyMMdd_HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
     foreach ($name in $Entry.Output) {
         if (-not (Test-GuiEmpty $Values[$name])) { continue }
         $f = @($Fields | Where-Object Name -eq $name)[0]
@@ -328,7 +339,7 @@ function ConvertTo-GuiLiteral {
     param($Value)
     if ($null -eq $Value) { return '$null' }
     if ($Value -is [bool]) { if ($Value) { return '$true' } else { return '$false' } }
-    if ($Value -is [datetime]) { return "[datetime]'{0}'" -f $Value.ToString('yyyy-MM-dd') }
+    if ($Value -is [datetime]) { return "[datetime]'{0}'" -f $Value.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
     if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) { return ([string]::Format([System.Globalization.CultureInfo]::InvariantCulture, '{0}', $Value)) }
     if ($Value -is [array]) { return '@(' + ((@($Value | ForEach-Object { ConvertTo-GuiLiteral $_ })) -join ', ') + ')' }
     return "'" + ([string]$Value).Replace("'", "''") + "'"
@@ -1164,9 +1175,10 @@ function Set-GuiControlValue {
     switch ($f.Kind) {
         'Switch' { $c.Checked = [bool]$Value }
         'Date' {
-            $d = [datetime]::MinValue
+            $d = $null
+            if ($Value -and $Value -isnot [datetime]) { $d = ConvertTo-GuiDate ([string]$Value) }
             if ($Value -is [datetime]) { $c.Value = $Value; $c.Checked = $true }
-            elseif ($Value -and [datetime]::TryParse([string]$Value, [ref]$d)) { $c.Value = $d; $c.Checked = $true }
+            elseif ($d) { $c.Value = $d; $c.Checked = $true }
             else { $c.Checked = $false }
         }
         'Choice' {

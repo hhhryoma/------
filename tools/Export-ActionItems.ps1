@@ -386,7 +386,7 @@ $decisions = @($results | Where-Object { $_.Kind -eq '決定事項' })
 function Format-DateCell {
     param($Date)
     if ($null -eq $Date) { return '' }
-    return $Date.ToString('yyyy/MM/dd')
+    return $Date.ToString('yyyy/MM/dd', [System.Globalization.CultureInfo]::InvariantCulture)
 }
 function Format-PlaceText {
     param($Place)

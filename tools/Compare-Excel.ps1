@@ -2128,7 +2128,7 @@ function Export-DiffHtml {
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append('{"old":'); Add-JsonText $sb $oldItem.FullName
     [void]$sb.Append(',"new":'); Add-JsonText $sb $newItem.FullName
-    [void]$sb.Append(',"created":'); Add-JsonText $sb (Get-Date -Format 'yyyy/MM/dd HH:mm')
+    [void]$sb.Append(',"created":'); Add-JsonText $sb (Get-Date).ToString('yyyy/MM/dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
     [void]$sb.Append(',"files":[')
     $imageNeeds = New-Object System.Collections.Generic.List[object]
     $diffsByFile = @{}

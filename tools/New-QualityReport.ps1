@@ -44,6 +44,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
+# 日付は、Windows の地域の設定（和暦など）によらず西暦で書く
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
 $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
 
 # 設定ファイル（-Config）の値は、コマンドで指定しなかったパラメーターにだけ使う
@@ -56,7 +58,7 @@ if (-not $Findings -and -not $TestPath -and -not $DesignPath) { throw '-Findings
 $OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
 $detailDir = Join-Path $OutDir '詳細'
 New-Item -ItemType Directory -Force -Path $detailDir | Out-Null
-$reportPath = Join-Path $OutDir ('{0}_{1}.xlsx' -f $Title, $AsOf.ToString('yyyyMMdd'))
+$reportPath = Join-Path $OutDir ('{0}_{1}.xlsx' -f $Title, $AsOf.ToString('yyyyMMdd', $invariant))
 if (-not $Criteria) { $Criteria = Join-Path $PSScriptRoot 'quality-report/判定基準.csv' }
 $Criteria = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Criteria)
 if ($HistoryCsv) { $HistoryCsv = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($HistoryCsv) }
@@ -456,7 +458,7 @@ finally {
 # ---------------------------------------------------------------- 実績の CSV（前回との比較と、推移）
 
 
-$dateText = $AsOf.ToString('yyyy/MM/dd')
+$dateText = $AsOf.ToString('yyyy/MM/dd', $invariant)
 $history = New-Object System.Collections.Generic.List[object]
 $previous = @{}; $previousDate = $null
 $historyDates = @()
@@ -496,7 +498,7 @@ $metricColumns += @(@{ Header = '判定'; Width = 6 }, @{ Header = '判定の考
 $actionRows = New-Object System.Collections.Generic.List[object]
 foreach ($a in $actions) { $actionRows.Add(@{ Values = @($a.Area, $a.Target, $a.Content, $a.Action, '', '') }) }
 $scope = New-Object System.Collections.Generic.List[object]
-foreach ($pair in @(@('時点', $AsOf.ToString('yyyy/MM/dd')), @('設計書', ($DesignPath -join '、')), @('レビューの指摘管理表', ($Findings -join '、')), @('レビュー記録', ($ReviewLog -join '、')), @('テスト仕様書', ($TestPath -join '、')), @('障害管理表', ($BugList -join '、')), @('要件一覧', ($Requirement -join '、')), @('実行したツール', ($ran -join '、')), @('失敗したツール', ($failed -join '、')))) {
+foreach ($pair in @(@('時点', $AsOf.ToString('yyyy/MM/dd', $invariant)), @('設計書', ($DesignPath -join '、')), @('レビューの指摘管理表', ($Findings -join '、')), @('レビュー記録', ($ReviewLog -join '、')), @('テスト仕様書', ($TestPath -join '、')), @('障害管理表', ($BugList -join '、')), @('要件一覧', ($Requirement -join '、')), @('実行したツール', ($ran -join '、')), @('失敗したツール', ($failed -join '、')))) {
     if ($pair[1]) { $scope.Add(@{ Values = $pair }) }
 }
 $reportSheets = @(
