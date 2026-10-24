@@ -214,6 +214,13 @@
             Output = @('OutXlsx'); OutputName = '網羅'; Keywords = 'トレーサビリティ 網羅 抜け'
         }
         @{
+            Id = 'CodeTrace'; Label = '設計書とソースの ID を突き合わせる'; Group = 'テスト'; Tool = 'Test-CodeTrace.ps1'
+            Summary = '設計書のメッセージ・画面・テーブルの ID がソースコードのどこにあるかを探し、ソースで使っていない ID と、ソースで使っているのに設計書に無い ID（書き間違い・設計書の直し忘れ）を見つけます。'
+            Main = @('DesignPath', 'SourcePath', 'OutXlsx')
+            Labels = @{ DesignPath = '設計書のフォルダ'; SourcePath = 'ソースコードのフォルダ'; OutXlsx = '結果の保存先' }
+            Required = @('DesignPath', 'SourcePath'); Output = @('OutXlsx'); OutputName = '設計とソースの突き合わせ'; Keywords = 'ソース 実装 製造 メッセージ ID 未使用 トレーサビリティ'
+        }
+        @{
             Id = 'Regression'; Label = '再テストするケースを選ぶ'; Group = 'テスト'; Tool = 'Select-RegressionTests.ps1'
             Summary = '設計書の旧版と新版の差分から、再テストするテストケースを選びます（改修の回帰テストの範囲決め）。'
             Main = @('Old', 'New', 'TestPath', 'OutXlsx')

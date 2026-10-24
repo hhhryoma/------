@@ -1,0 +1,82 @@
+﻿#     Test-CodeTrace.ps1 のテスト。設計書は docs\design-sample、ソースはテストの中で作る
+
+$TraceTool = Join-Path $script:ToolsDir 'Test-CodeTrace.ps1'
+$designDir = Join-Path $script:RepoRoot 'docs/design-sample'
+
+function New-SourceTree {
+    #     ソースのフォルダ（Java・SQL・MyBatis・メッセージのリソース。コメントの行と、見ないフォルダの中のファイルも）
+    param([string] $Dir)
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $write = { param($rel, [string[]] $lines) $p = Join-Path $Dir $rel; $d = Split-Path -Parent $p; if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d | Out-Null }; [System.IO.File]::WriteAllText($p, (($lines -join "`n") + "`n"), $utf8) }
+    & $write 'src/OrderList.java' @(
+        'package sample;',
+        '// E0003 はもう使わない',
+        '/* SCR003 の画面は',
+        '   別のクラス */',
+        'public class OrderList {',
+        '    static final String SCREEN = "SCR001";',
+        '    void search() {',
+        '        if (orderNo == null) { error("E0001"); }',
+        '        error("E0099");',
+        '        String sql = "SELECT * FROM T_ORDER o JOIN T_ORDR x ON o.ORDER_NO = x.ORDER_NO";',
+        '        String note = "copy from source";',
+        '    }',
+        '}')
+    & $write 'src/messages.properties' @('E0001={0}は必須入力です。', 'E0002={0}は{1}文字以内で入力してください。', '# E0004 は使わない')
+    & $write 'src/sql/order.sql' @('select d.order_no, p.product_name', '  from t_order_detail d', '  join m_product p on p.product_cd = d.product_cd;', '-- from m_customer', 'select extract(year from order_date) from t_order;')
+    & $write 'src/OrderMapper.xml' @('<mapper namespace="sample.OrderMapper">', '  <select id="history">select * from t_order_hist where order_no = #{orderNo}</select>', '</mapper>')
+    & $write 'src/config/app.xml' @('<app>', '  <description>copy from source</description>', '</app>')
+    & $write 'src/node_modules/lib/a.js' @('var x = "E0005";')
+}
+
+Test-Case 'Test-CodeTrace: 設計書のメッセージ・画面・テーブルの ID がソースに無いものと、ソースにあって設計書に無いものを見つける（コメントの行は見ない）' {
+    $dir = New-TestDir
+    New-SourceTree $dir
+    $issues = @(& $TraceTool -DesignPath $designDir -SourcePath (Join-Path $dir 'src') 6>$null)
+    $keys = @($issues | ForEach-Object { '{0}|{1}|{2}' -f $_.Item, $_.Kind, $_.Id })
+    Assert-Equal 20 $keys.Count ($keys -join "`n")
+    Assert-Equal @('実装に無い|メッセージ|E0003', '実装に無い|メッセージ|E0004', '実装に無い|メッセージ|E0005') @($keys | Select-Object -First 3) 'コメントの行（// /* # --）と、見ないフォルダ（node_modules）の ID は数えない'
+    Assert-True ($keys -notcontains '実装に無い|メッセージ|E0002') 'メッセージのリソース（.properties）にある'
+    Assert-True ($keys -contains '実装に無い|画面|SCR003') 'ブロックコメントの中の画面 ID は数えない'
+    Assert-True ($keys -notcontains '実装に無い|画面|SCR001')
+    Assert-True ($keys -contains '実装に無い|テーブル|M_CUSTOMER') '.sql のコメントの行（-- from m_customer）'
+    Assert-Equal @('設計書に無い|メッセージ|E0099', '設計書に無い|テーブル|T_ORDR', '設計書に無い|テーブル|t_order_hist') @($keys | Select-Object -Last 3) '.sql と MyBatis の .xml は小文字の SQL も見る。ほかのファイルの小文字の from（copy from source）と、FROM の後ろのカラム名（extract(year from order_date)）はテーブルにしない'
+    $e0099 = @($issues | Where-Object Id -eq 'E0099')[0]
+    Assert-Equal 'ソースのメッセージ ID E0099（OrderList.java 9 行目）が、メッセージ一覧にありません' ($e0099.Detail -replace '\\', '/' -replace 'src/', '')
+    Assert-Equal '警告' $e0099.Level
+
+    $text = Get-HostText { & $TraceTool -DesignPath $designDir -SourcePath (Join-Path $dir 'src') | Out-Null }
+    Assert-Match $text 'ソース 5 ファイルで、設計書の ID が見つかったもの: メッセージ 2/16・画面 1/3・テーブル 3/4'
+    Assert-Match $text '設計書に無い ID: メッセージ 1・テーブル 2'
+}
+
+Test-Case 'Test-CodeTrace: -Kind Column で、カラムの物理名を ORM の名前（orderNo など）でも探し、見つからないカラムを情報で知らせる' {
+    $dir = New-TestDir
+    New-SourceTree $dir
+    $issues = @(& $TraceTool -DesignPath (Join-Path $designDir 'DD03_テーブル定義書.xlsx') -SourcePath (Join-Path $dir 'src') -Kind Column 6>$null)
+    $ids = @($issues | ForEach-Object { $_.Id })
+    Assert-True ($ids -notcontains 'T_ORDER.ORDER_NO') 'orderNo（Java）と ORDER_NO（SQL）'
+    Assert-True ($ids -notcontains 'M_PRODUCT.PRODUCT_NAME') 'product_name（.sql）'
+    Assert-True ($ids -contains 'T_ORDER.TOTAL_AMOUNT')
+    Assert-Equal @('情報') @($issues | ForEach-Object { $_.Level } | Select-Object -Unique)
+}
+
+Test-Case 'Test-CodeTrace: -OutXlsx に指摘と、ID ごとのソースの箇所の対応表を保存する' {
+    $dir = New-TestDir
+    New-SourceTree $dir
+    $out = Join-Path $dir 'trace.xlsx'
+    $null = & $TraceTool -DesignPath $designDir -SourcePath (Join-Path $dir 'src') -OutXlsx $out 6>$null
+    $book = Read-XlsxSheet -Path $out -Index 1
+    Assert-Equal @('指摘', '対応表') $book.Sheets
+    Assert-True (@($book.Links | Where-Object { $_.Target -like '*DD05_*.xlsx' -and $_.Location -like "'メッセージ一覧'!A*" }).Count -gt 0) '設計書の行へのリンク'
+    $trace = Read-XlsxSheet -Path $out -Index 2
+    $row = @(2..($trace.Rows.Count) | Where-Object { $trace.Rows[$_]['B'] -eq 'E0001' })[0]
+    Assert-Equal 'メッセージ|E0001|2|2' ('{0}|{1}|{2}|{3}' -f $trace.Rows[$row]['A'], $trace.Rows[$row]['B'], $trace.Rows[$row]['E'], $trace.Rows[$row]['F']) 'Java とメッセージのリソースの 2 か所'
+    Assert-Equal 'messages.properties 1 行目 ほか 1 か所' $trace.Rows[$row]['G'] 'ソースのフォルダからの相対パスの順で、最初の箇所'
+}
+
+Test-Case 'Test-CodeTrace: Get-Help でヘルプが表示される' {
+    $h = Get-Help $TraceTool
+    Assert-Match $h.Synopsis 'ソースコード'
+    Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
+}
