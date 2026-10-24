@@ -326,6 +326,48 @@ Test-Case 'Invoke-DesignReview: 回答の引用を設計書のセルと突き合
     Assert-Equal '「新規登録ボタン押下」||' ('{0}|{1}|{2}' -f $f.Rows[$c03]['L'], $f.Rows[$c03]['J'], $f.Rows[$c03]['K']) '4 列目を指摘内容として読む'
 }
 
+Test-Case 'Invoke-DesignReview: -Baseline で、前の版から変わった行だけを AI に渡し、変わっていない設計書は依頼しない' {
+    $dir = New-TestDir
+    $old = Join-Path $dir 'v1.0'
+    $new = Join-Path $dir 'v1.1'
+    New-Item -ItemType Directory -Path $old, $new | Out-Null
+    Copy-Item -Path (Join-Path $designDir '*.xlsx') -Destination $old
+    Copy-Item -Path (Join-Path $designDir '*.xlsx') -Destination $new
+    $scr2 = Join-Path $new 'DD02_画面設計書_SCR002_受注登録.xlsx'
+    # 版数だけの変更（表紙）はレビューしない
+    Set-CellValues $scr2 '表紙' @{ X23 = '1.1' }
+    # 桁数を変え、初期値を消し、行を足す。処理概要を変える
+    Set-CellValues $scr2 '画面項目定義' @{ AB12 = '400'; AF11 = $null; A25 = '20'; C25 = 'ポイント利用'; I25 = 'usePoint'; P25 = 'チェックボックス'; U25 = 'I'; X25 = '－' }
+    Set-CellValues $scr2 'イベント定義' @{ P12 = '入力内容を破棄せずに、受注一覧画面へ遷移する。' }
+    $out = Join-Path $dir 'review'
+    $text = Get-HostText { & $Review -Path $new -Baseline $old -OutDir $out -PromptOnly }
+    Assert-Match $text '前の版と比べた設計書: 変更あり 1・変更なし 7'
+    $m = Get-Manifest $out
+    Assert-Equal @('DD02_画面設計書_SCR002_受注登録.xlsx') @($m.Requests | ForEach-Object { $_.Relative } | Select-Object -Unique) '変わっていない設計書は依頼しない'
+    $p = [System.IO.File]::ReadAllText((Join-Path $out 'prompts/R001.txt'))
+    Assert-Match $p '【設計書】DD02_画面設計書_SCR002_受注登録\.xlsx（前の版から変わった部分だけです。★の付いた行'
+    Assert-Match $p '\n### シート: 画面項目定義（前の版から変わった行だけ）\n4\| A:■ 画面項目定義\n5\| A:No \| C:項目名 [^\n]*\n★11\| ' '節の見出しと表の見出しの行も入れる'
+    Assert-Match $p '\n★11\| A:6 \| C:配送時間帯 [^\n]*\| AB:2 \| AF:（削除。旧: 指定なし） \| AS:' '消した値'
+    Assert-Match $p '\n★12\| A:7 \| C:備考 [^\n]*\| AB:400（旧: 500） \|' '変えた値'
+    Assert-Match $p '\n★25\| A:20 \| C:ポイント利用 \| I:usePoint' '足した行'
+    Assert-Match $p '\n★12\| A:EV07 [^\n]*（旧: 入力内容を破棄し、受注一覧画面へ遷移する。）'
+    # 設計書の部分（参照資料より前）
+    $design = $p.Substring(0, $p.IndexOf('【参照資料】'))
+    Assert-NotMatch $design '### シート: 表紙' '版数だけの変更'
+    Assert-NotMatch $design '\n6\| A:1 \| C:受注日' '変わっていない行'
+    Assert-Match $p '【参照資料】DD05_メッセージ一覧\.xlsx' '参照資料は全体'
+
+    # 変わっていない設計書の AI の観点は「変更なし」。ツールの確認は、変わっていない設計書もする
+    $null = & $Review -OutDir $out -ImportOnly 6>$null 3>$null
+    $s = Read-XlsxSheet -Path (Join-Path $out 'レビュー結果.xlsx') -Index 2
+    $rows = @($s.Rows.Keys | Where-Object { $_ -gt 1 } | ForEach-Object { $r = $s.Rows[$_]; '{0}|{1}|{2}|{3}' -f $r['A'], $r['B'], $r['F'], $r['H'] })
+    Assert-True ($rows -contains 'DD03_テーブル定義書.xlsx|T03|変更なし|変更なし') 'AI だけの観点'
+    Assert-True ($rows -contains 'DD03_テーブル定義書.xlsx|T01|OK|ツール') 'ツールだけの観点'
+    Assert-True ($rows -contains 'DD01_画面一覧.xlsx|L01|OK|ツール, 変更なし') '両方の観点は、ツールの判定'
+    Assert-True ($rows -contains 'DD02_画面設計書_SCR002_受注登録.xlsx|S05|未回答|R001') '変わった設計書は依頼する'
+    Assert-Throws { & $Review -OutDir $out -ImportOnly -Baseline $old 6>$null } '依頼を作るとき'
+}
+
 Test-Case 'Invoke-DesignReview: 設計書・観点が変わった依頼の古い回答は退避する' {
     $dir = New-TestDir
     $null = & $Review -Path $designDir -OutDir $dir -PromptOnly 6>$null
