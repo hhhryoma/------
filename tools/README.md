@@ -39,6 +39,7 @@
 | --- | --- |
 | [Measure-DesignSize.ps1](#measure-designsizeps1) | 設計書から画面・テーブル・IF などの規模を数え、係数表で工数の目安と FP（NESMA）を出す。前の版との変更の規模や、実績の工数からの係数表づくりも（Excel 不要） |
 | [Test-ExcelEstimate.ps1](#test-excelestimateps1) | 見積書の計算のミスになりやすい箇所（合計の範囲漏れ・手入力の合計・周りと違う数式・文字列の数値・換算や単価の食い違い）を見つける（Excel 不要） |
+| [New-WbsDraft.ps1](#new-wbsdraftps1) | 設計書の規模の見積もり（Measure-DesignSize）の工数を工程に配分し、担当者と予定日（土日・休日を除く）を決めた WBS の下書きを、Measure-Progress などがそのまま読める形で作る（Excel 不要） |
 | [Measure-Progress.ps1](#measure-progressps1) | WBS から子のタスクごとの遅れ（営業日）・状態と PV／EV／SPI を出し、遅延タスクと週ごとの完了数をスケジュール遅延リカバリ計画のテンプレートに書き込む（Excel 不要） |
 | [Measure-Effort.ps1](#measure-effortps1) | 日報・工数実績表（日付・担当・WBS 番号かタスク・工数）を、タスク・担当者×週ごとに集計し、WBS の予定工数と比べて予定超過・超過の見込みのタスクと CPI を出す。WBS に無い作業（会議など）の工数も出す（Excel 不要） |
 | [Export-ActionItems.ps1](#export-actionitemsps1) | 議事録（Word・Excel・テキスト・Markdown）から、宿題・ToDo の節や【宿題】の印、担当・期限の表を読み、宿題（担当・期限付き）と決定事項を一覧にする。CSV は課題管理表の形で、週次報告の `-IssueList` に渡せる（Excel・Word 不要） |
@@ -63,7 +64,7 @@
 
 **`tools` フォルダはまとめて配置してください。** 各スクリプトは同じフォルダの `ExcelTools.psm1`（Excel ファイルを読み書きする共通部品）を使います。
 `New-DesignDocument.ps1` は `Search-Excel.ps1` と `Replace-Excel.ps1` も使います。`Start-ExcelTools.ps1` は `ExcelToolsGui.psm1`・`gui\ツールの一覧.psd1` と各ツールを使います。
-`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Find-SimilarDefects.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Test-CodeTrace.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
+`Test-ExcelDeliverable.ps1`・`Test-ExcelTerms.ps1`・`Measure-Progress.ps1`・`Measure-ReviewQuality.ps1`・`Measure-TestQuality.ps1`・`Test-TestSpec.ps1`・`Test-TestEvidence.ps1`・`Measure-DefectRemoval.ps1`・`Compare-ReviewFindings.ps1`・`Find-SimilarDefects.ps1`・`Test-DesignConsistency.ps1`・`Test-ScreenNumbers.ps1`・`Test-Screenshots.ps1`・`Test-Traceability.ps1`・`Invoke-QualityAnalysis.ps1`・`Export-TableDdl.ps1`・`New-TestData.ps1`・`Test-CodeTrace.ps1`・`Measure-DesignSize.ps1`・`Reset-ExcelView.ps1`・`Compare-Excel.ps1`・`Export-ExcelToMarkdown.ps1`・`Invoke-DesignReview.ps1`・`New-DocumentRegister.ps1` は `Search-Excel.ps1` も使い、`Reset-ExcelView.ps1` は `Test-ExcelDeliverable.ps1` も使います。`Select-RegressionTests.ps1`・`Compare-SharePointVersion.ps1` は `Compare-Excel.ps1` を、`New-WeeklyReport.ps1`・`Measure-Effort.ps1` は `Measure-Progress.ps1` と `Search-Excel.ps1` を、`New-WbsDraft.ps1` は `Measure-DesignSize.ps1` と `Search-Excel.ps1` を、`Export-ActionItems.ps1` は `Search-Excel.ps1` を、`New-TestSpecDraft.ps1` は `Search-Excel.ps1` を、`Invoke-SendTo.ps1` は各ツールと `Install-ExcelTools.ps1`（更新の確認）を、`Install-ExcelTools.ps1` は `Install-SendTo.ps1` を、`Measure-ReviewEffectiveness.ps1` は `Measure-ReviewQuality.ps1` を、`New-QualityReport.ps1` は品質の各ツールを呼び出します。
 
 ## Start-ExcelTools.ps1（画面）
 
@@ -2207,6 +2208,82 @@ Kind       Name                Change   Detail                                  
 | `-OutXlsx` | 集計・規模一覧（設計書の表へのリンク付き）・使った係数表（`-Baseline` なら前の版との差も）を保存する |
 | `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
 | `-NoExcel` | Excel を起動しない（.xls / .xlsb は数えない） |
+
+## New-WbsDraft.ps1
+
+設計書の**規模の見積もり**（[Measure-DesignSize.ps1](#measure-designsizeps1)）から、**WBS の下書き**を作ります。Excel は不要です。
+機能（画面・テーブル・IF など）ごとの工数を工程（詳細設計・レビュー・製造・単体テスト）に配分し、担当者と予定日を決めます。出力の WBS は、[Measure-Progress.ps1](#measure-progressps1)・[Measure-Effort.ps1](#measure-effortps1)・[New-WeeklyReport.ps1](#new-weeklyreportps1) がそのまま読めます。
+
+```powershell
+.\New-WbsDraft.ps1 D:\設計書 -Start 2026-11-02 -Members 山田, 佐藤 -Holidays .\syukujitsu.csv -OutXlsx D:\PJ\WBS.xlsx | Format-Table
+# 改修: 新規・変更の機能だけを、変更の工数で
+.\New-WbsDraft.ps1 D:\設計書_v1.1 -Baseline D:\設計書_v1.0 -Start 2026-12-01 -GroupBy Function -OutXlsx D:\PJ\改修のWBS.xlsx
+```
+
+```
+Wbs  Task                                Member StartDate  EndDate    Days
+---  ----                                ------ ---------  -------    ----
+1    詳細設計                                   2026/11/02 2026/11/06 5.89
+1.1  SCR001 受注一覧（詳細設計）         山田   2026/11/02 2026/11/04 1.25
+1.2  SCR002 受注登録（詳細設計）         佐藤   2026/11/02 2026/11/04 1.25
+1.3  SCR003 受注詳細（詳細設計）         山田   2026/11/04 2026/11/05 1.25
+1.4  M_CUSTOMER 顧客マスタ（詳細設計）   佐藤   2026/11/04 2026/11/04 0.18
+…
+4    単体テスト                                 2026/11/12 2026/11/17 5.1
+
+機能 10・工程 4・タスク 32。予定工数 合計 20.1 人日
+担当者 2 人: 山田 10 人日（2026/11/02〜2026/11/16）・佐藤 10.1 人日（2026/11/02〜2026/11/17）
+完了予定: 2026/11/17（2026/11/02 から 11 営業日）
+```
+
+（2026/11/03 の文化の日を `-Holidays` で休日にした例です）
+
+### 作り方
+
+1. 設計書の規模を Measure-DesignSize.ps1 で数え、機能ごとの工数（人日）を出します（係数表・規模の数え方は `-Coefficients`・`-Rules` で変えられます）
+2. 機能の工数を、**工程の配分**（`tools\wbs\工程の配分.csv`）の工程に分けます。その種類に当てはまる工程の配分の合計で割るので、機能の工数の合計は変わりません（丸めの残りは最後の工程に入れます）
+3. **担当者**: 工数の大きい機能から、その時点で工数の合計がいちばん少ない担当者に割り当てます。機能の工程は、すべて同じ担当者です
+4. **予定日**: 担当者ごとにタスクを順に並べ、1 人日 = 1 営業日として、開始日から土日と `-Holidays` の休日を除いて決めます。0.5 人日のタスクが続くときは、同じ日に 2 つ入ります
+5. **WBS 番号**: `-GroupBy Phase`（既定）は工程 → 機能、`-GroupBy Function` は機能 → 工程の順です。上の階層の行は、下のタスクの工数の合計と、最初の開始日・最後の終了日です
+
+```csv
+工程,配分,種類
+詳細設計,25,
+詳細設計レビュー,5,
+製造,40,画面|帳票|バッチ|IF|テーブル
+単体テスト,30,画面|帳票|バッチ|IF
+```
+
+- 種類が空の工程は、すべての種類に当てはめます。種類は Measure-DesignSize.ps1 の種類（規模の数え方の CSV の種類）です
+- 工程の名前・配分は、社内の標準に合わせて直し、`-Phases` で指定してください
+
+`-OutXlsx` のシート:
+
+| シート | 内容 |
+| --- | --- |
+| WBS | WBS番号・タスク名・担当者・予定開始・予定終了（日付のセル）・予定工数・実績開始・実績終了・進捗率・実績工数（空欄）・見積もりの根拠（種類・難易度・規模） |
+| 担当者別 | 担当者ごとのタスクの数・工数の合計・最初の日・最後の日・営業日 |
+| 規模 | 機能ごとの種類・見積もりの根拠・工数・担当者 |
+
+| パラメーター | 説明 |
+| --- | --- |
+| `-Path` | 設計書のフォルダまたはファイル（規模を数える。複数可） |
+| `-Start` | 開始日（既定は今日。土日・休日なら次の営業日から） |
+| `-Members` | 担当者の名前（複数可・カンマ区切り可）。省略すると担当者の決まっていない 1 人で日程を決める |
+| `-GroupBy` | WBS の上の階層（`Phase`: 工程ごと（既定）/ `Function`: 機能ごと） |
+| `-Baseline` | 前の版の設計書。新規と変更の機能だけを、変更の工数で WBS にする（改修） |
+| `-Phases` | 工程の配分の CSV（既定は `tools\wbs\工程の配分.csv`） |
+| `-Holidays` | 休日の CSV（1 列目が日付。内閣府の「国民の祝日」の CSV をそのまま使える。Measure-Progress.ps1 と同じ） |
+| `-Coefficients` / `-Rules` | 係数表・規模の数え方の CSV（Measure-DesignSize.ps1 と同じ） |
+| `-OutXlsx` | WBS・担当者別・規模を保存する |
+| `-OutCsv` | WBS を CSV（UTF-8・BOM 付き）に保存する |
+| `-NoRecurse` | フォルダを指定したとき、サブフォルダを見ない |
+| `-NoExcel` | Excel を起動しない（.xls / .xlsb の設計書は読まない） |
+
+### 注意
+
+- 下書きです。タスクの順番の制約（レビューのあとに製造など）・担当者の得意な機能・会議などの共通のタスクは、作ったあとに直してください
+- 担当者ごとに順に並べるだけなので、工程をまたいだ待ち合わせ（全機能の詳細設計が終わってから製造に入るなど）はしません
 
 ## Test-ExcelEstimate.ps1
 
