@@ -109,6 +109,7 @@ Test-Case 'Invoke-DesignReview: プロンプトにセル番地付きの設計書
     Assert-Match $p '\n6\| A:1 \| C:受注番号 \| I:orderNo'
     Assert-Match $p '【参照資料】DD05_メッセージ一覧\.xlsx'
     Assert-Match $p '1～3行目の帳票ヘッダは前のシートと同じため省略'
+    Assert-Match $p '\n観点ID \| 判定 \| 場所 \| 引用 \| 指摘内容 \| 根拠\n'
     # 改行は OS によらず LF（Windows で CR の分だけ文字数が増え、分割数が変わるのを防ぐ）
     Assert-True (-not $p.Contains("`r")) 'プロンプトに CR が含まれています'
 }
@@ -156,7 +157,8 @@ Test-Case 'Invoke-DesignReview: 3 形式の回答を取り込んでレビュー�
     Assert-Equal 'NG' $f.Rows[2]['B'] '**NG** は NG'
     Assert-Equal 9 $f.Links.Count '存在しないシートの場所にはリンクを付けない'
     Assert-True (@($f.Links | Where-Object { $_.Location -eq "'M_CUSTOMER'!A1" }).Count -eq 1) 'シート名だけの場所は A1'
-    Assert-Match $f.Rows[6]['Q'] '場所のシート名・セル番地を設計書で確認'
+    Assert-Match $f.Rows[6]['S'] '場所のシート名・セル番地を設計書で確認'
+    Assert-Equal '引用なし' $f.Rows[2]['K'] '引用の列の無い回答（5 列）も読む'
 
     $s = Read-XlsxSheet -Path $report -Index 2
     $verdicts = @($s.Rows.Keys | Where-Object { $_ -gt 1 } | ForEach-Object { $s.Rows[$_]['F'] })
@@ -208,7 +210,7 @@ Test-Case 'Invoke-DesignReview: 確かめ方がツールの観点は AI に依�
         'ツール（主キー）|T01|DD03_テーブル定義書.xlsx|T_ORDER!AC12',
         'ツール（カラムの型・桁数）|T02|DD03_テーブル定義書.xlsx|T_ORDER!X15',
         'ツール（カラムの型・桁数）|T02|DD03_テーブル定義書.xlsx|T_ORDER!AA20') @(2..15 | ForEach-Object { $r = $f.Rows[$_]; '{0}|{1}|{2}|{3}' -f $r['C'], $r['E'], $r['H'], $r['I'] })
-    $details = @(2..15 | ForEach-Object { $f.Rows[$_]['J'] })
+    $details = @(2..15 | ForEach-Object { $f.Rows[$_]['L'] })
     foreach ($expected in @(
             '表紙の版数（1.1）と、改訂履歴の最後の版数（1.0）が違います',
             '「ログインユーザ」は「ログインユーザー」の表記ゆれです（長音（ー）。このファイルで 1 か所）',
@@ -223,8 +225,9 @@ Test-Case 'Invoke-DesignReview: 確かめ方がツールの観点は AI に依�
             'T_ORDER.TOTAL_AMOUNT（NUMERIC）の小数の桁数が空欄です')) {
         Assert-True ($details -contains $expected) ("指摘がありません: {0}`n実際: {1}" -f $expected, ($details -join "`n"))
     }
-    Assert-Equal '機械のチェック（版数）' $f.Rows[3]['K']
-    Assert-Equal 'ツール' $f.Rows[3]['L'] '依頼No'
+    Assert-Equal '機械のチェック（版数）' $f.Rows[3]['M']
+    Assert-Equal 'ツール' $f.Rows[3]['N'] '依頼No'
+    Assert-Equal '' ([string]$f.Rows[3]['K']) 'ツールの指摘は引用を確かめない'
     Assert-True (@($f.Links | Where-Object { $_.Location -eq "'T_ORDER'!AA20" }).Count -eq 1) 'ツールの指摘の場所へのリンク'
 
     $s = Read-XlsxSheet -Path (Join-Path $out 'レビュー結果.xlsx') -Index 2
@@ -278,6 +281,49 @@ Test-Case 'Invoke-DesignReview: 観点表の確かめ方・ツールの確認の
     Assert-Match $out '\[警告\] 7行目 V06 確かめ方が「AI」のため、「ツールの確認」は使いません'
     Assert-NotMatch $out 'V07' 'ツールだけの観点の判定基準は AI に渡さないので、あいまいな言葉を調べない'
     Assert-Throws { & $Review -Path $designDir -Checklist $csv -OutDir (New-TestDir) -PromptOnly 6>$null 3>$null } '観点表にエラー'
+}
+
+Test-Case 'Invoke-DesignReview: 回答の引用を設計書のセルと突き合わせ、場所が違えば引用のあるセルに直し、見つからない引用を知らせる' {
+    $dir = New-TestDir
+    $null = & $Review -Path $designDir -OutDir $dir -PromptOnly 6>$null
+    # R002 は SCR001（受注一覧）
+    Write-Answer $dir 'R002' @'
+| 観点ID | 判定 | 場所 | 引用 | 指摘内容 | 根拠 |
+|---|---|---|---|---|---|
+| C01 | OK | - | - | - | - |
+| C02 | NG | イベント定義!P11 | 採番単位が不明 | 解釈が分かれる |
+| C03 | NG | イベント定義!J9 | 「新規登録ボタン押下」 | 「押下」と「クリック」が混在 | 用語の統一 |
+| S01 | NG | 画面項目定義!AB11 | （空欄） | 受注ステータスの桁数が空欄 | 入力項目には桁数が必要 |
+| S05 | NG | 画面概要!I8 | 受注を削除する | 削除の確認が無い | 更新系 |
+| S06 | 要確認 | イベント定義!P7 | 検索条件を初期表示の状態に戻し | クリア時の動きが不明 | 異常時の記載 |
+| S08 | NG | 存在しないシート!A1 | 前回と同じ検索条件で | 使用テーブルの記載が無い | テスト |
+| S10 | NG | 画面項目定義!AK6 | （空欄） | メッセージが無い | テスト |
+'@
+    $text = Get-HostText { & $Review -OutDir $dir -ImportOnly }
+    Assert-Match $text 'AI の指摘の引用: 引用なし 1・一致 2・見つからない 2・場所を直した 2'
+    $f = Read-XlsxSheet -Path (Join-Path $dir 'レビュー結果.xlsx') -Index 1
+    Assert-Equal '場所|引用|引用の確認|指摘内容' ((@('I', 'J', 'K', 'L') | ForEach-Object { $f.Rows[1][$_] }) -join '|')
+    $rows = @{}
+    foreach ($r in @($f.Rows.Keys | Where-Object { $_ -gt 1 })) { if ($f.Rows[$r]['C'] -eq 'AI') { $rows[$f.Rows[$r]['E']] = $f.Rows[$r] } }
+    $show = { param($id) '{0}|{1}|{2}|{3}' -f $rows[$id]['I'], $rows[$id]['J'], $rows[$id]['K'], $rows[$id]['S'] }
+    Assert-Equal 'イベント定義!J9|新規登録ボタン押下|一致|' (& $show 'C03') '「」は外して比べる'
+    Assert-Equal '画面項目定義!AB11|（空欄）|一致|' (& $show 'S01') '空欄のセルの指摘'
+    Assert-Equal 'イベント定義!P8|検索条件を初期表示の状態に戻し|場所を直した|AI の場所: イベント定義!P7（引用のあるセルに直しました）' (& $show 'S06') '近くの行'
+    Assert-Equal 'イベント定義!P11|前回と同じ検索条件で|場所を直した|AI の場所: 存在しないシート!A1（引用のあるセルに直しました）' (& $show 'S08') '無いシート'
+    Assert-Equal '画面概要!I8|受注を削除する|見つからない|引用が設計書に見つかりません（AI の誤った指摘かもしれません）' (& $show 'S05')
+    Assert-Equal '画面項目定義!AK6|（空欄）|見つからない|場所のセルは空欄ではありません（半角英数（E0003））' (& $show 'S10')
+    Assert-Equal 'イベント定義!P11||引用なし|' (& $show 'C02') '引用の列の無い行'
+    Assert-True (@($f.Links | Where-Object { $_.Location -eq "'イベント定義'!P8" }).Count -eq 1) '直した場所へのリンク'
+
+    # 前の形の依頼（依頼の一覧に回答の形が無い）は、引用の列を読まない
+    $manifestPath = Join-Path $dir 'requests.json'
+    $m = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $m.PSObject.Properties.Remove('AnswerFormat')
+    [System.IO.File]::WriteAllText($manifestPath, ($m | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($true)))
+    $null = & $Review -OutDir $dir -ImportOnly 6>$null 3>$null
+    $f = Read-XlsxSheet -Path (Join-Path $dir 'レビュー結果.xlsx') -Index 1
+    $c03 = @($f.Rows.Keys | Where-Object { $_ -gt 1 -and $f.Rows[$_]['E'] -eq 'C03' })[0]
+    Assert-Equal '「新規登録ボタン押下」||' ('{0}|{1}|{2}' -f $f.Rows[$c03]['L'], $f.Rows[$c03]['J'], $f.Rows[$c03]['K']) '4 列目を指摘内容として読む'
 }
 
 Test-Case 'Invoke-DesignReview: 設計書・観点が変わった依頼の古い回答は退避する' {
