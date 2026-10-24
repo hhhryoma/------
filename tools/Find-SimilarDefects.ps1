@@ -154,14 +154,14 @@ foreach ($t in $tables) {
         $parts = New-Object System.Collections.Generic.List[string]
         if ($c.Logical) { $parts.Add('論理名 ' + $c.Logical) }
         $parts.Add('型 ' + $c.BaseType)
-        if ($null -ne $c.Length) { $parts.Add('桁数 ' + $c.Length) }
+        if ($c.Length) { $parts.Add('桁数 ' + $c.Length) }
         if ($c.NotNull) { $parts.Add('NOT NULL') }
         $fk = ''
         if ($c.FkTable) { $fk = ('{0}.{1}' -f $c.FkTable, $c.FkColumn).TrimEnd('.'); $parts.Add('外部キー ' + $fk) }
         if ($c.Note) { $parts.Add('備考 ' + (Get-ShortText $c.Note 60)) }
         $elements.Add([pscustomobject]@{
                 Kind = 'カラム'; Owner = $t.Id; Name = $c.Name; Key = ([string]$c.Name).ToUpperInvariant(); Label = ('{0}.{1}（{2}）' -f $t.Id, $c.Name, $c.Logical)
-                Type = ([string]$c.BaseType).ToUpperInvariant(); Digits = $c.Length; Required = [bool]$c.NotNull; Input = $true; Io = ''; Note = ([string]$c.Note).Normalize($nfkc).Trim()
+                Type = ([string]$c.BaseType).ToUpperInvariant(); Digits = $(if ($c.Length) { $c.Length } else { $null }); Required = [bool]$c.NotNull; Input = $true; Io = ''; Note = ([string]$c.Note).Normalize($nfkc).Trim()
                 CheckKinds = @(); Messages = @(); Codes = @(); Fk = $fk; Logical = ([string]$c.Logical).Normalize($nfkc).Trim()
                 Words = (Get-Words ('{0} {1}' -f $c.Logical, $c.Note)); Text = ('{0} {1}' -f $c.Logical, $c.Note).Normalize($nfkc); Detail = ($parts -join '・')
                 File = $c.Place.File; Path = $c.Place.Path; Sheet = $c.Place.Sheet; Row = [int]([regex]::Match($c.Place.Cell, '\d+$').Value); Seq = $elements.Count
@@ -225,9 +225,11 @@ function Find-BugScreen {
     foreach ($text in @($Bug.Function, ('{0} {1} {2}' -f $Bug.Content, $Bug.Cause, $Bug.Measure))) {
         $label = (ConvertTo-Label $text).ToUpperInvariant()
         if (-not $label) { continue }
+        # 画面 ID は空白を残した文から探す（「画面ID SCR002」の ID と SCR002 をつなげない）
+        $upper = $text.Normalize($nfkc).ToUpperInvariant()
         $first = $null; $at = [int]::MaxValue
         foreach ($sid in $screenIds) {
-            $m = [regex]::Match($label, ('(?<![A-Z0-9]){0}(?![0-9])' -f [regex]::Escape($sid.ToUpperInvariant())))
+            $m = [regex]::Match($upper, ('(?<![A-Z0-9]){0}(?![0-9])' -f [regex]::Escape($sid.ToUpperInvariant())))
             if ($m.Success -and $m.Index -lt $at) { $first = $sid; $at = $m.Index }
         }
         if ($first) { return $first }
@@ -240,19 +242,28 @@ function Find-BugScreen {
     return $null
 }
 
+# カラムの物理名ごとのまとまりと、文から物理名を探す正規表現（障害ごとに作り直さない）
+$columnGroups = New-Object System.Collections.Generic.List[object]
+foreach ($group in @($elements | Where-Object { $_.Kind -eq 'カラム' -and $_.Key.Length -ge 3 } | Group-InOrder Key)) {
+    $pattern = New-Object System.Text.RegularExpressions.Regex(('(?<![A-Z0-9_]){0}(?![A-Z0-9_])' -f [regex]::Escape($group.Name)), 'IgnoreCase')
+    $columnGroups.Add([pscustomobject]@{ Name = $group.Name; Group = $group.Group; Pattern = $pattern })
+}
+
 function Find-Anchors {
     #     障害の箇所（障害内容・原因・対策に名前の出てくる項目・イベント・カラムと、それらに無いメッセージ ID）
     param($Bug)
     $anchors = New-Object System.Collections.Generic.List[object]
     $text = ConvertTo-Label ('{0} {1} {2}' -f $Bug.Content, $Bug.Cause, $Bug.Measure)
-    # 画面名・画面 ID は項目名として探さない（「受注一覧画面」の「受注一覧」は、一覧の項目ではない）
-    foreach ($name in (Sort-ByLength @($screenNames.Keys) { param($x) $x })) { $text = $text.Replace($name, '|') }
+    # 画面 ID・画面名は項目名として探さない（「受注一覧画面」の「受注一覧」は、一覧の項目ではない）
     foreach ($sid in $screenIds) { $text = [regex]::Replace($text, ('(?<![A-Za-z0-9]){0}(?![0-9])' -f [regex]::Escape($sid)), '|', 'IgnoreCase') }
-    # 項目・イベントの名前（長い名前から。見つけた名前は文から除き、中の短い名前を見つけないようにする）
+    # 項目・イベントの名前と画面名（長い名前から。同じ長さなら画面名から。見つけた名前は文から除き、中の短い名前を見つけないようにする。
+    # 画面名を含む長い名前（画面「ログイン」の「ログインID」）は、項目・イベントの名前として見つける）
     $pool = @($elements | Where-Object { $_.Kind -ne 'カラム' -and $_.Key.Length -ge 2 -and (-not $Bug.Screen -or $_.Owner -eq $Bug.Screen) })
-    foreach ($group in (Sort-ByLength @($pool | Group-InOrder Key) { param($x) $x.Name })) {
+    $names = @($screenNames.Keys | ForEach-Object { [pscustomobject]@{ Name = $_; Group = $null } }) + @($pool | Group-InOrder Key)
+    foreach ($group in (Sort-ByLength $names { param($x) $x.Name })) {
         if (-not $text.Contains($group.Name)) { continue }
         $text = $text.Replace($group.Name, '|')
+        if ($null -eq $group.Group) { continue }   # 画面名
         $events = @($group.Group | Where-Object Kind -eq 'イベント')
         if ($events.Count -gt 0) {
             # 画面が分からないときは、1 つの画面にしかない 4 文字以上のイベント名だけ（「登録でエラー」の「登録」は、ふつうの言葉のことが多い）
@@ -263,11 +274,11 @@ function Find-Anchors {
         if ($items.Count -eq 0) { $items = @($group.Group) }
         $anchors.Add($items[0])
     }
-    # カラムの物理名（T_ORDER.ORDER_DATE・ORDER_DATE）
-    $upper = (ConvertTo-Label ('{0} {1} {2}' -f $Bug.Content, $Bug.Cause, $Bug.Measure)).ToUpperInvariant()
-    foreach ($group in @($elements | Where-Object { $_.Kind -eq 'カラム' -and $_.Key.Length -ge 3 } | Group-InOrder Key)) {
-        if ($upper -notmatch ('(?<![A-Z0-9_]){0}(?![A-Z0-9_])' -f [regex]::Escape($group.Name))) { continue }
-        $columns = @($group.Group | Where-Object { $upper -match ('(?<![A-Z0-9_]){0}\.{1}(?![A-Z0-9_])' -f [regex]::Escape($_.Owner.ToUpperInvariant()), [regex]::Escape($group.Name)) })
+    # カラムの物理名（T_ORDER.ORDER_DATE・ORDER_DATE）。空白は残す（「SET TOTAL_AMOUNT」「メッセージID E0006」の言葉どうしをつなげない）
+    $upper = ('{0} {1} {2}' -f $Bug.Content, $Bug.Cause, $Bug.Measure).Normalize($nfkc).ToUpperInvariant()
+    foreach ($group in $columnGroups) {
+        if (-not $group.Pattern.IsMatch($upper)) { continue }
+        $columns = @($group.Group | Where-Object { $upper -match ('(?<![A-Z0-9_]){0}\s*\.\s*{1}(?![A-Z0-9_])' -f [regex]::Escape($_.Owner.ToUpperInvariant()), [regex]::Escape($group.Name)) })
         if ($columns.Count -eq 0) { $columns = @($group.Group) }
         $anchors.Add($columns[0])
     }
