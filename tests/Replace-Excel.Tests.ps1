@@ -232,6 +232,17 @@ Test-Case 'Replace-Excel: 一致しなければ何も変えず、不正な正規
     Assert-Throws { & $ReplaceExcel -Pattern '(' -Replacement 'x' -Path $file -Force 6>$null } '正規表現として不正'
 }
 
+Test-Case 'Replace-Excel: 置換後の文字と大文字・小文字だけが違う語も置換する（置換後の文字の一部は、大文字・小文字が違っても置換しない）' {
+    $file = Join-Path (New-TestDir) 'case.xlsx'
+    New-SheetsBook $file ([ordered]@{ 'S' = @(@('項目'), @('Javascriptで実装'), @('JAVASCRIPT'), @('JavaScript'), @('DOCUMENT')) })
+    $opt = @{ Pattern = 'Javascript'; Replacement = 'JavaScript'; Path = $file; SimpleMatch = $true; Force = $true }
+    $r = Invoke-Replace $opt
+    Assert-Equal @('S!A2|Javascriptで実装 → JavaScriptで実装', 'S!A3|JAVASCRIPT → JavaScript') @($r | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Change } | Sort-Object)
+    Assert-Equal 0 (Invoke-Replace $opt).Count '2 回目は置換する箇所がない'
+    $r = Invoke-Replace @{ Pattern = 'Doc'; Replacement = 'Document'; Path = $file; SimpleMatch = $true; Force = $true }
+    Assert-Equal 0 $r.Count '「DOCUMENT」の「DOC」は置換しない（「DocumentUMENT」にしない）'
+}
+
 Test-Case 'Replace-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $ReplaceExcel
     Assert-Match $h.Synopsis '置換'

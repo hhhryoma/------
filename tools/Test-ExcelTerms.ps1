@@ -36,9 +36,12 @@ if ($NoAuto -and -not $Glossary) { throw '-NoAuto を付ける場合は、用語
 Update-TypeData -TypeName 'ExcelTerms.Variant' -DefaultDisplayPropertySet Preferred, Variant, Count, PreferredCount, Kind -Force -WhatIf:$false
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
-# 自動で見つける語: カタカナ（半角カタカナを含む）の語と、英字を含む英数字の語
+# 自動で見つける語: カタカナ（半角カタカナを含む）の語と、英字を含む英数字の語。
+# 置換リスト（-OutCsv）では、前後にこの文字（カタカナは全角・半角とも）が続かない箇所だけを置換する
+$kanaChars = '[ァ-ヴーｦ-ﾟ]'
+$alnumChars = '[A-Za-z0-9Ａ-Ｚａ-ｚ０-９]'
 $kanaRx = New-Object System.Text.RegularExpressions.Regex('[ァ-ヴー]+|[ｦ-ﾟ]+')
-$alnumRx = New-Object System.Text.RegularExpressions.Regex('[A-Za-z0-9Ａ-Ｚａ-ｚ０-９]+')
+$alnumRx = New-Object System.Text.RegularExpressions.Regex($alnumChars + '+')
 
 # ---------------------------------------------------------------- 用語集
 
@@ -92,18 +95,34 @@ $glossaryHits = @{}            # 用語集の行の番号 → 見つかった揺
 $autoGroups = New-OrdinalTable  # 正規化した語 → 見つかった表記
 foreach ($h in $hits) {
     $text = $h.Text
+    $preferredAt = $null  # 正しい表記 → この文字の中の一致（Found）と、数えた揺れの一致（Variants）。正しい表記があるときだけ作る
     for ($ei = 0; $ei -lt $entries.Count; $ei++) {
         $e = $entries[$ei]
         $protected = @($e.Protect.Matches($text))
+        if ($protected.Count -gt 0) {
+            if ($null -eq $preferredAt) { $preferredAt = New-OrdinalTable }
+            if (-not $preferredAt.ContainsKey($e.Preferred)) { $preferredAt[$e.Preferred] = @{ Found = $protected; Variants = New-Object System.Collections.Generic.List[object] } }
+        }
         foreach ($m in $e.Rx.Matches($text)) {
             $inside = $false
             foreach ($p in $protected) { if ($m.Index -ge $p.Index -and $m.Index + $m.Length -le $p.Index + $p.Length) { $inside = $true; break } }
             if ($inside) { continue }
             & $addOccurrence $glossaryOcc $m.Value $h
+            if ($protected.Count -gt 0) { $preferredAt[$e.Preferred].Variants.Add($m) }
             if (-not $glossaryHits.ContainsKey($ei)) { $glossaryHits[$ei] = New-OrdinalTable }
             $glossaryHits[$ei][$m.Value] = $true
         }
-        foreach ($p in $protected) { & $addOccurrence $glossaryOcc $e.Preferred $h }
+    }
+    # 正しい表記は、同じ正しい表記の行が複数あっても 1 回だけ数える。数えた揺れの一部になっている箇所
+    # （正しい表記「サーバ」・揺れ「サーバー」のときの、「サーバー」の中の「サーバ」）は数えない
+    if ($null -ne $preferredAt) {
+        foreach ($pf in $preferredAt.Keys) {
+            foreach ($p in $preferredAt[$pf].Found) {
+                $inside = $false
+                foreach ($m in $preferredAt[$pf].Variants) { if ($p.Index -ge $m.Index -and $p.Index + $p.Length -le $m.Index + $m.Length) { $inside = $true; break } }
+                if (-not $inside) { & $addOccurrence $glossaryOcc $pf $h }
+            }
+        }
     }
     if ($NoAuto) { continue }
     # カタカナの語は、全角・半角と長音（ー）の違いを無視した形でまとめる（長音を除いて 2 文字以上の語だけ）
@@ -152,13 +171,16 @@ for ($ei = 0; $ei -lt $entries.Count; $ei++) {
 foreach ($key in $autoGroups.Keys) {
     $forms = @($autoGroups[$key].Keys)
     if ($forms.Count -lt 2) { continue }
-    # 推奨: 用語集の正しい表記があればそれ。無ければ多く使われている表記で、同じ数なら、カタカナは長い方（長音のある方）、
-    #       英数字は半角の方。半角カタカナは推奨にしない
+    # 推奨: 用語集の正しい表記があればそれ。無ければ、全角の英数字と半角カタカナを除いた表記のうち多く使われている表記で、
+    #       同じ数なら長い方（長音のある方）。全角の英数字・半角カタカナしか無ければ、半角・全角にした表記ごとに件数を合わせて比べる
     $preferred = @($forms | Where-Object { $glossaryPreferred.ContainsKey($_) })[0]
     if (-not $preferred) {
-        $candidates = @($forms | Where-Object { $_ -ceq $_.Normalize($nfkc) })
-        if ($candidates.Count -eq 0) { $candidates = @($forms[0].Normalize($nfkc)) }
-        $preferred = @($candidates | Sort-Object @{ e = { & $count $autoOcc $_ }; Descending = $true }, @{ e = { $_.Length }; Descending = $true })[0]
+        $scores = New-OrdinalTable
+        foreach ($f in $forms) { if ($f -ceq $f.Normalize($nfkc)) { $scores[$f] = & $count $autoOcc $f } }
+        if ($scores.Count -eq 0) {
+            foreach ($f in $forms) { $n = $f.Normalize($nfkc); $scores[$n] = [int]$scores[$n] + (& $count $autoOcc $f) }
+        }
+        $preferred = @($scores.Keys | Sort-Object @{ e = { $scores[$_] }; Descending = $true }, @{ e = { $_.Length }; Descending = $true }, @{ e = { $_ } })[0]
     }
     foreach ($f in $forms) {
         if ($f -ceq $preferred -or $reported.ContainsKey($f)) { continue }
@@ -167,15 +189,29 @@ foreach ($key in $autoGroups.Keys) {
         & $newResult $autoOcc $preferred $f $kind
     }
 }
-$sorted = @($results | Sort-Object @{ e = { $_.Kind -ne '用語集' } }, @{ e = { $_.Count }; Descending = $true }, Preferred)
+$sorted = @($results | Sort-Object @{ e = { $_.Kind -ne '用語集' } }, @{ e = { $_.Count }; Descending = $true }, Preferred, Variant -CaseSensitive)
 $sorted
 
 if ($OutCsv) {
-    # Replace-Excel.ps1 -ListPath にそのまま渡せる置換リスト（UTF-8・BOM 付き。Excel で開いて直してから使える）
+    # Replace-Excel.ps1 -ListPath にそのまま渡せる置換リスト（UTF-8・BOM 付き。Excel で開いて直してから使える）。
+    # 置換は上の行から順に行うので、長い表記から並べる（短い表記で、長い表記の一部を先に書き換えない）。
+    # 自動の検出の揺れは、見つけたときと同じ語の単位で置換する正規表現の行にする（「モニタ」→「モニター」で
+    # 「モニタリング」を「モニターリング」にしない）。用語集の揺れは、そのままの文字の行
     $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add('置換前,置換後,種類,件数,例')
+    $lines.Add('置換前,置換後,正規表現,種類,件数,例')
     $q = { param($t) '"' + ([string]$t).Replace('"', '""') + '"' }
-    foreach ($r in $sorted) { $lines.Add((@((& $q $r.Variant), (& $q $r.Preferred), (& $q $r.Kind), $r.Count, (& $q $r.Examples)) -join ',')) }
+    foreach ($r in @($sorted | Sort-Object @{ e = { $_.Variant.Length }; Descending = $true }, @{ e = { $_.Kind -ne '用語集' } }, @{ e = { $_.Count }; Descending = $true }, Preferred, Variant -CaseSensitive)) {
+        $find = $r.Variant
+        $isRegex = ''
+        if ($r.Kind -ne '用語集') {
+            $chars = $kanaChars; $caseOption = ''
+            # 英数字の語は大文字・小文字の違う語（ＩＤ と ｉｄ）を別の語として見つけるので、置換でも大文字・小文字を区別する
+            if ($alnumRx.IsMatch($r.Variant)) { $chars = $alnumChars; $caseOption = '(?-i)' }
+            $find = '{2}(?<!{0}){1}(?!{0})' -f $chars, [regex]::Escape($r.Variant), $caseOption
+            $isRegex = '○'
+        }
+        $lines.Add((@((& $q $find), (& $q $r.Preferred), $isRegex, (& $q $r.Kind), $r.Count, (& $q $r.Examples)) -join ','))
+    }
     [System.IO.File]::WriteAllText($OutCsv, ($lines -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($true)))
 }
 
@@ -258,7 +294,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     Excel を起動しません（.xls / .xlsb は調べられなくなります）。
 #
 # .PARAMETER OutCsv
-#     置換リスト（置換前・置換後・種類・件数・例）を CSV に保存します。Replace-Excel.ps1 -ListPath で使えます。
+#     置換リスト（置換前・置換後・正規表現・種類・件数・例）を CSV に保存します。Replace-Excel.ps1 -ListPath で使えます。
+#     長い表記の行から並べ、自動で見つけた揺れは、見つけた語だけを置換する正規表現の行にします（「モニタリング」の「モニタ」は置換しない）。
 #
 # .PARAMETER OutXlsx
 #     結果を xlsx に保存します（表記ゆれの一覧と、出現箇所へのリンク付きの一覧）。
