@@ -338,6 +338,20 @@ function Get-HostText {
     return ((& $Body 6>&1 3>&1 | ForEach-Object { "$_" }) -join "`n")
 }
 
+function Invoke-InDashDate {
+    #     Windows の地域の設定で、日付の区切りを「-」、時刻の区切りを「.」にして実行する（短い日付の形式を yyyy-MM-dd にしたときなど）。終わったら元に戻す
+    param([scriptblock] $Body)
+    $culture = New-Object System.Globalization.CultureInfo('ja-JP')
+    $culture.DateTimeFormat.DateSeparator = '-'
+    $culture.DateTimeFormat.TimeSeparator = '.'
+    $saved = [System.Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        & $Body
+    }
+    finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $saved }
+}
+
 function Invoke-InWareki {
     #     Windows の地域の設定を和暦（ja-JP の JapaneseCalendar）にして実行する。終わったら元に戻す
     param([scriptblock] $Body)
