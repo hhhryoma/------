@@ -87,9 +87,10 @@ function Format-Short {
 }
 
 function Format-Day {
+    #     日付を「10/23」の形にする（地域の設定で日付の区切りを「-」などにしていても「/」）
     param($Date)
     if ($null -eq $Date) { return '' }
-    return $Date.ToString('M/d')
+    return $Date.ToString('M/d', $invariant)
 }
 
 # ---------------------------------------------------------------- 担当者
@@ -426,7 +427,6 @@ foreach ($k in $givenKinds) {
     Add-Metric $k.Kind '期限切れ' ([double]@($list | Where-Object Overdue).Count)
 }
 
-$invariant = [System.Globalization.CultureInfo]::InvariantCulture
 $dateText = $AsOf.ToString('yyyy/MM/dd', $invariant)
 $history = New-Object System.Collections.Generic.List[object]
 $previousDate = $null

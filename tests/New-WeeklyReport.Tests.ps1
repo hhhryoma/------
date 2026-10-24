@@ -199,6 +199,14 @@ Test-Case 'New-WeeklyReport: 和暦の設定（ja-JP の JapaneseCalendar）で�
     Assert-Equal '-Since（2026/10/20）が -AsOf（2026/10/14）より後です' $message
 }
 
+Test-Case 'New-WeeklyReport: 地域の設定で日付の区切りを「-」にしていても、報告の日付は 10/23 の形で書く' {
+    $dir = New-TestDir
+    $p = New-WeeklyProject $dir
+    $text = Invoke-InDashDate { Get-HostText { & $WeeklyReport -Wbs $p.Wbs -Findings $p.Findings -BugList $p.Bugs -AsOf '2026-10-23' -OutDir (Join-Path $dir '週次報告') | Out-Null } }
+    Assert-Match $text '予定終了 10/23・見込 10/28'
+    Assert-Match $text '・来週（10/24～10/30）の予定: 3 件'
+}
+
 Test-Case 'New-WeeklyReport: Get-Help でヘルプが表示される' {
     $h = Get-Help $WeeklyReport
     Assert-Match $h.Synopsis '週次報告'

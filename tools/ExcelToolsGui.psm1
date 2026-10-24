@@ -78,6 +78,12 @@ function ConvertTo-GuiDate {
     return $null
 }
 
+function Format-GuiTime {
+    #     時刻を「09:05:03」の形にする（地域の設定で時刻の区切りを変えていても「:」）
+    param([datetime] $Time)
+    return $Time.ToString('HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Get-GuiLabel {
     #     ヘルプの最初の文から、入力欄の名前を作る（括弧の中を除き、長ければ最後の「、」のあと）
     param([string] $Help, [string] $Name)
@@ -1444,7 +1450,7 @@ function Invoke-GuiRun {
     Write-GuiLog ''
     $mode = ''
     if ($whatIf) { $mode = '（試しに実行。ファイルは書き換えません）' }
-    Write-GuiLog ('■ {0}{1}　{2}' -f $entry.Label, $mode, (Get-Date).ToString('HH:mm:ss')) 'Blue'
+    Write-GuiLog ('■ {0}{1}　{2}' -f $entry.Label, $mode, (Format-GuiTime (Get-Date))) 'Blue'
     Write-GuiLog (Format-GuiCommandLine $entry.ToolPath $arguments) 'Gray'
     if ($entry.Console) {
         $consoleScript = New-GuiConsoleScript $entry.ToolPath $arguments $entry.Label
