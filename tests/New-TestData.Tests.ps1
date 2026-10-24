@@ -110,6 +110,26 @@ Test-Case 'New-TestData: 整数部の無い数値（NUMBER(3,3)・NUMERIC(4,4) �
     Assert-Match @(Get-SqlLines $out '^INSERT INTO M_TAX ')[3] "VALUES \('99', 0\.999, 0\.9999, 0\.0099\); -- 最大$"
 }
 
+Test-Case 'New-TestData: 番号が桁に入らないとき（NUMBER(4,3) の 10 行目・CHAR(1) の主キーの 10 行目）は 1 から数え直し、主キーが重なれば注意を出す' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir 'テーブル定義書.xlsx') ([ordered]@{
+            'M_KBN' = @(
+                @('論理名', '物理名', 'データ型', '桁数', '小数', 'PK', '必須'),
+                @('区分', 'KBN', 'CHAR', '1', '', '1', '○'),
+                @('税率', 'TAX_RATE', 'NUMBER', '4', '3', '', '○'),
+                @('順序', 'SORT_NO', 'NUMBER', '1', '', '', '○'),
+                @('件数', 'CNT', 'TINYINT', '', '', '', '○'))
+        })
+    $out = Join-Path $dir 'data'
+    $warnings = @(& $DataTool -Path $dir -OutDir $out -BaseDate '2026-04-01' -Rows 12 -NoBoundary 6>$null 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
+    $rows = @(Read-DataCsv $out 'M_KBN')
+    Assert-Equal '1,2,3,4,5,6,7,8,9,1,2,3' ((@($rows | ForEach-Object { $_.KBN })) -join ',') 'CHAR(1) の主キー'
+    Assert-Equal '1.500,2.500,3.500,4.500,5.500,6.500,7.500,8.500,9.500,1.500,2.500,3.500' ((@($rows | ForEach-Object { $_.TAX_RATE })) -join ',') 'NUMBER(4,3) の整数部は 1 桁'
+    Assert-Equal '1,2,3,4,5,6,7,8,9,1,2,3' ((@($rows | ForEach-Object { $_.SORT_NO })) -join ',') 'NUMBER(1)'
+    Assert-Equal '1,2,3,4,5,6,7,8,9,10,11,12' ((@($rows | ForEach-Object { $_.CNT })) -join ',') 'TINYINT（127 まで）は数え直さない'
+    Assert-Equal @('M_KBN: 主キー（KBN）が重なる行があります（標準 1 と 標準 10・標準 2 と 標準 11・標準 3 と 標準 12）。主キーの桁数に入らない番号は 1 から数え直すため、-Rows を減らすか、主キーの桁数を確かめてください') $warnings
+}
+
 Test-Case 'New-TestData: 和暦の設定（ja-JP の JapaneseCalendar）でも、日付・日時は西暦で書く' {
     $dir = New-TestDir
     New-ItemTableBook (Join-Path $dir 'テーブル定義書.xlsx')
