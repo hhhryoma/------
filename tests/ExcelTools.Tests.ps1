@@ -28,6 +28,12 @@ Test-Case 'ExcelTools: Get-TestResultKind は、チェックの印（✓・☑�
     Assert-Equal @('未実施', '未実施', '未実施') @(@('未完了', '未済', 'XX') | ForEach-Object { Get-TestResultKind $_ }) '「未」で始まるもの・X だけでないもの'
 }
 
+Test-Case 'ExcelTools: Test-ClosedStatus は、完了・済を含んでも「未完了」「未済」「未解決」「完了予定」「完了待ち」「差し戻し」「not done」は終わったものにしない' {
+    $pattern = '完了|済|クローズ|close|done|解決|対応不要'
+    Assert-Equal @($true, $true, $true, $true, $true, $true) @(@('完了', '済', '対応済み', '解決', 'Closed', 'done') | ForEach-Object { Test-ClosedStatus $_ $pattern }) '終わったもの'
+    Assert-Equal @($false, $false, $false, $false, $false, $false, $false, $false, $false, $false) @(@('未完了', '未済', '未解決', '完了予定', '完了待ち', '対応済（差し戻し）', 'Not done', 'reopen', '対応中', '') | ForEach-Object { Test-ClosedStatus $_ $pattern }) '終わっていないもの'
+}
+
 Test-Case 'ExcelTools: Get-LeafName は、\ と（拡張子で終わる名前の）/ でフォルダを除き、「外部I/F設計書」の / は残す（PowerShell 5.1 と 7 で同じ）' {
     Assert-Equal @('基本設計書.xlsx', '基本設計書.xlsx', '基本設計書', '外部I/F設計書', '外部I/F設計書 v1.10', '') @(@('D:\納品物\基本設計書.xlsx', '設計書/基本設計書.xlsx', ' sub\基本設計書 ', '外部I/F設計書', '外部I/F設計書 v1.10', '') | ForEach-Object { Get-LeafName $_ })
     Assert-Equal (ConvertTo-NameKey '基本設計書') (ConvertTo-NameKey 'D:\納品物\基本設計書.xlsx') 'フォルダと拡張子を除く'

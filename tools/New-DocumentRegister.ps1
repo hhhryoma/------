@@ -617,7 +617,7 @@ if ($Findings) {
         $status = ([string]$v['状態']).Trim()
         if ($status -match $excludedPattern) { continue }
         $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
-        if (($status -match $closedPattern) -or (([string]$v['対応要否']).Trim() -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)) { continue }
+        if ((Test-ClosedStatus $status $closedPattern) -or (([string]$v['対応要否']).Trim() -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)) { continue }
         $name = ([string]$v['設計書']).Trim()
         $matched = New-Object System.Collections.Generic.List[object]
         # フォルダの付いた対象（結合テスト/テスト仕様書.xlsx・D:\納品物\…）は、まず成果物の場所と突き合わせる（ほかのフォルダの同じ名前に数えない）

@@ -181,6 +181,14 @@ Test-Case 'Measure-TestQuality: ケースの数が同じ工程は、先に出て
     Assert-Equal 'SCR001|結合テスト|2|基準内' ('{0}|{1}|{2}|{3}' -f $r[0].Function, $r[0].Process, $r[0].TestDensity, $r[0].TestJudgement) '結合テストの基準値（1〜3）と比べる'
 }
 
+Test-Case 'Measure-TestQuality: 障害の状態の「未完了」「未解決」「完了予定」は、完了・解決を含んでも未完了に数える' {
+    $dir = New-TestDir
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'SCR201'; Header = @('項番', 'テスト項目', '実施日', '判定'); Rows = @(, @('1', '確認', '2026/11/01', 'OK')) })
+    @('No,件名,起票日,状態', '1,障害 1,2026/11/01,完了', '2,障害 2,2026/11/01,未完了', '3,障害 3,2026/11/02,未解決', '4,障害 4,2026/11/02,完了予定', '5,障害 5,2026/11/03,解決') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $text = Get-HostText { & $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'bugs.csv') -AsOf '2026-11-06' 3>$null | Out-Null }
+    Assert-Match $text 'バグ 5 件（未完了 3 件'
+}
+
 Test-Case 'Measure-TestQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestQualityTool
     Assert-Match $h.Synopsis 'テスト'
