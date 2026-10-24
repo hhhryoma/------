@@ -211,7 +211,7 @@ if ($files.Count -gt 0) {
     }
 }
 foreach ($c in $csvFiles) {
-    $data = Read-CsvFile $c.FullName @() 'WBS'
+    $data = Read-InputCsv $c.FullName 'WBS'
     if ($data.Count -eq 0) { continue }
     $names = @($data[0].PSObject.Properties | ForEach-Object { $_.Name })
     $map = @{}

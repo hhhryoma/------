@@ -319,6 +319,21 @@ Test-Case 'New-DocumentRegister: -Previous の前回の一覧に読めないフ�
     Assert-Equal 1 @($warnings | Where-Object { $_ -match '^前回の一覧の 1 行で、ファイルの更新日時を読めません（08/10/20 10:00 など）' }).Count ($warnings -join "`n")
 }
 
+Test-Case 'New-DocumentRegister: -Findings のフォルダに読めない CSV（見出しが重なったもの）があっても、知らせてほかのファイルを読む' {
+    $dir = New-TestDir
+    $docsDir = Join-Path $dir '納品物'
+    New-CoverBook (Join-Path $docsDir '設計書_v1.1.xlsx') @(@('受注管理システム', ''), @('文書名', '設計書'), @('文書番号', 'X-01'), @('版数', '1.1')) $null
+    $review = Join-Path $dir 'レビュー'
+    New-Item -ItemType Directory -Path $review | Out-Null
+    @('No,対象成果物,指摘内容,対応状況', '1,設計書,画面の説明が足りない,対応中') | Set-Content -LiteralPath (Join-Path $review '指摘管理表.csv') -Encoding UTF8
+    @('日付,内容,日付', '2026/10/01,レビュー,2026/10/02') | Set-Content -LiteralPath (Join-Path $review 'レビュー記録.csv') -Encoding UTF8
+    $out = @(& $RegisterTool -Path $docsDir -Findings $review -AsOf '2026-10-24' 6>$null 3>&1)
+    $warnings = @($out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
+    $docs = @($out | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] })
+    Assert-Equal '設計書_v1.1.xlsx|1' ('{0}|{1}' -f $docs[0].File, $docs[0].OpenFindings)
+    Assert-Equal 1 @($warnings | Where-Object { $_ -match '^レビュー記録\.csv: CSV を読めません' }).Count ($warnings -join "`n")
+}
+
 Test-Case 'New-DocumentRegister: -Findings の状態の「未完了」「未済」は、完了・済を含んでも未完了の指摘に数える' {
     $dir = New-TestDir
     $docsDir = Join-Path $dir '納品物'

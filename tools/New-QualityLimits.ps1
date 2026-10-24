@@ -46,7 +46,7 @@ foreach ($p in $Path) {
         $files = @($item)
         if ($item.PSIsContainer) { $files = @(Get-ChildItem -LiteralPath $item.FullName -File -Filter '*.csv' -Recurse) }
         foreach ($f in $files) {
-            $rows = Read-CsvFile $f.FullName @() '実績の CSV'
+            $rows = Read-InputCsv $f.FullName '実績の CSV'
             if ($rows.Count -eq 0) { continue }
             $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
             $col = @{}

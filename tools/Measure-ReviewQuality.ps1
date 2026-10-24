@@ -189,7 +189,7 @@ if ($excelFiles.Count -gt 0) {
     }
 }
 foreach ($c in $csvFiles) {
-    $rows = Read-CsvFile $c.FullName @() '指摘管理表'
+    $rows = Read-InputCsv $c.FullName '指摘管理表' $readLog $fields
     if ($rows.Count -eq 0) { continue }
     $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
     $map = @{}
@@ -345,7 +345,7 @@ if ($ReviewLog) {
         }
     }
     foreach ($c in $logCsv) {
-        $rows = Read-CsvFile $c.FullName @() 'レビュー記録'
+        $rows = Read-InputCsv $c.FullName 'レビュー記録' $readLog $logFields
         if ($rows.Count -eq 0) { continue }
         $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
         $map = @{}
