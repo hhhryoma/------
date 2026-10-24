@@ -1055,6 +1055,8 @@ function Read-ScreenDesign {
     $events = New-Object System.Collections.Generic.List[object]
     $codes = @{}
     $messages = @{}
+    # メッセージID の形（E0001・MSG-E001・MSG_001 など。英字と数字の間を - や _ で区切ってもよい）
+    $messageIdPattern = '^[A-Z]+(?:[_\-][A-Z]+)*[_\-]?\d+$'
     foreach ($book in $Books.Values) {
         foreach ($sheetName in $book.Sheets.Keys) {
             $grid = $book.Sheets[$sheetName]
@@ -1074,7 +1076,7 @@ function Read-ScreenDesign {
                     $id = ([string]$dr.Cells[$t.ColumnOf['メッセージID']]).Normalize($nfkc).Trim().ToUpperInvariant()
                     $text = ([string]$dr.Cells[$t.ColumnOf['メッセージ']]).Normalize($nfkc).Trim()
                     # 画面設計書のメッセージ欄（ID だけを書いた列）は文言ではない
-                    if ($id -notmatch '^[A-Z]+\d+$' -or -not $text -or $text -match '^[A-Za-z]+\d+$' -or $messages.ContainsKey($id)) { continue }
+                    if ($id -notmatch $messageIdPattern -or -not $text -or $text -match $messageIdPattern -or $messages.ContainsKey($id)) { continue }
                     $messages[$id] = [pscustomobject]@{ Text = $text; File = $book.File; Sheet = $sheetName; Row = $dr.Row }
                 }
             }
@@ -1401,16 +1403,17 @@ function Read-TableDesign {
 # ---------------------------------------------------------------- ソースコードを読む（Measure-CodeSize・Test-CodeTrace）
 
 
-# 言語ごとのコメントの書き方（行コメント・ブロックコメントの開始と終了）
+# 言語ごとのコメントの書き方（行コメント・ブロックコメントの開始と終了）と、ブロックコメントのある言語の文字列の囲み（Quote。中の /* や // はコメントにしない）
 $script:SourceLanguages = @(
-    @{ Name = 'C 系'; Ext = @('.c', '.h', '.cpp', '.hpp', '.cc', '.cs', '.java', '.js', '.jsx', '.ts', '.tsx', '.go', '.kt', '.kts', '.swift', '.scala', '.groovy', '.dart', '.rs', '.css', '.scss', '.less'); Line = @('//'); Block = @('/*', '*/') }
-    @{ Name = 'PHP'; Ext = @('.php'); Line = @('//', '#'); Block = @('/*', '*/') }
-    @{ Name = 'SQL'; Ext = @('.sql', '.pls', '.pks', '.pkb'); Line = @('--'); Block = @('/*', '*/') }
+    @{ Name = 'C 系'; Ext = @('.c', '.h', '.cpp', '.hpp', '.cc', '.cs', '.java', '.js', '.jsx', '.ts', '.tsx', '.go', '.kt', '.kts', '.swift', '.scala', '.groovy', '.dart', '.rs', '.css', '.scss', '.less'); Line = @('//'); Block = @('/*', '*/'); Quote = @('"', "'", '`') }
+    @{ Name = 'PHP'; Ext = @('.php'); Line = @('//', '#'); Block = @('/*', '*/'); Quote = @('"', "'") }
+    @{ Name = 'SQL'; Ext = @('.sql', '.pls', '.pks', '.pkb'); Line = @('--'); Block = @('/*', '*/'); Quote = @("'", '"') }
     @{ Name = 'VB'; Ext = @('.vb', '.vbs', '.bas', '.cls', '.frm'); Line = @("'", 'REM '); Block = $null }
     @{ Name = 'Python'; Ext = @('.py'); Line = @('#'); Block = $null }
-    @{ Name = 'Ruby'; Ext = @('.rb'); Line = @('#'); Block = @('=begin', '=end') }
+    @{ Name = 'Ruby'; Ext = @('.rb'); Line = @('#'); Block = @('=begin', '=end'); Quote = @('"', "'") }
     @{ Name = 'シェル'; Ext = @('.sh', '.bash', '.pl'); Line = @('#'); Block = $null }
-    @{ Name = 'PowerShell'; Ext = @('.ps1', '.psm1', '.psd1'); Line = @('#'); Block = @('<#', '#>') }
+    @{ Name = 'PowerShell'; Ext = @('.ps1', '.psm1', '.psd1'); Line = @('#'); Block = @('<#', '#>'); Quote = @('"', "'") }
+    # HTML・XML の文の ' や " は囲みではない（Don't など）
     @{ Name = 'HTML・XML'; Ext = @('.html', '.htm', '.xml', '.xhtml', '.jsp', '.aspx', '.vue', '.cshtml'); Line = @(); Block = @('<!--', '-->') }
     @{ Name = 'COBOL'; Ext = @('.cob', '.cbl', '.cpy'); Line = @(); Block = $null; Cobol = $true }
 )
@@ -1418,7 +1421,7 @@ $script:SourceLanguageOf = @{}
 foreach ($l in $script:SourceLanguages) { foreach ($e in $l.Ext) { $script:SourceLanguageOf[$e] = $l } }
 
 function Get-SourceLanguage {
-    #     拡張子（.java など）の言語（Name・Ext・Line（行コメント）・Block（ブロックコメントの開始と終了）・Cobol）。ソースの拡張子でなければ $null
+    #     拡張子（.java など）の言語（Name・Ext・Line（行コメント）・Block（ブロックコメントの開始と終了）・Quote（文字列の囲み）・Cobol）。ソースの拡張子でなければ $null
     param([string] $Extension)
     $key = ([string]$Extension).ToLowerInvariant()
     if ($script:SourceLanguageOf.ContainsKey($key)) { return $script:SourceLanguageOf[$key] }
@@ -1427,6 +1430,7 @@ function Get-SourceLanguage {
 
 function Measure-SourceLines {
     #     1 ファイルの行を、空行・コメント・ステップ（コメント以外の行）に分ける。
+    #     文字列（言語の Quote で囲んだもの）と行コメントの中の /* などはブロックコメントの始まりにせず、1 行の中のブロックコメントはすべて見る（閉じなければ次の行もコメント）
     #     戻り値: @{ Lines; Blank; Comment; Steps; Code = ステップの行（前後の空白を除いた文字）の一覧; CodeLines = ステップの行の @{ No（行番号）; Text } の一覧 }
     param([string] $FilePath, $Language)
     $text = Read-TextFile $FilePath
@@ -1435,6 +1439,17 @@ function Measure-SourceLines {
     $blank = 0; $comment = 0
     $code = New-Object System.Collections.Generic.List[string]
     $codeLines = New-Object System.Collections.Generic.List[object]
+    $lineMarks = @($Language.Line)
+    # ブロックコメントのある言語: 行コメント・ブロックコメントの始まり・文字列（\ の後ろの文字は囲みの終わりにしない。閉じなければ行の終わりまで）を探す
+    $open = $null; $close = $null; $markRx = $null
+    if ($Language.Block) {
+        $open = $Language.Block[0]; $close = $Language.Block[1]
+        $alts = New-Object System.Collections.Generic.List[string]
+        if ($lineMarks.Count -gt 0) { $alts.Add(('(?<line>(?i:{0}))' -f ((@($lineMarks | ForEach-Object { [regex]::Escape($_) })) -join '|'))) }
+        $alts.Add(('(?<open>{0})' -f [regex]::Escape($open)))
+        foreach ($q in $Language.Quote) { $alts.Add(('{0}(?:[^{0}\\]|\\.)*{0}?' -f [regex]::Escape($q))) }
+        $markRx = New-Object System.Text.RegularExpressions.Regex(($alts.ToArray() -join '|'))
+    }
     $inBlock = $false
     $no = 0
     foreach ($raw in $lines) {
@@ -1449,32 +1464,30 @@ function Measure-SourceLines {
         $t = $raw.Trim()
         if (-not $t) { $blank++; continue }
         $isCode = $false
-        $rest = $t
-        while ($rest) {
-            if ($inBlock) {
-                $end = $rest.IndexOf($Language.Block[1])
-                if ($end -lt 0) { $rest = ''; break }
-                $inBlock = $false
-                $rest = $rest.Substring($end + $Language.Block[1].Length).Trim()
-                continue
-            }
-            if (@($Language.Line | Where-Object { $rest.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { break }
-            if ($Language.Block -and $rest.StartsWith($Language.Block[0])) {
-                $inBlock = $true
-                $rest = $rest.Substring($Language.Block[0].Length)
-                continue
-            }
-            # コメント以外の文字がある（行の後ろのコメントは数えない）
-            $isCode = $true
-            if ($Language.Block) {
-                $start = $rest.IndexOf($Language.Block[0])
-                if ($start -ge 0) {
-                    # 行の途中から始まるブロックコメントが、この行で閉じなければ次の行もコメント
-                    $after = $rest.Substring($start + $Language.Block[0].Length)
-                    if ($after.IndexOf($Language.Block[1]) -lt 0) { $inBlock = $true }
+        if ($inBlock -or ($open -and $t.IndexOf($open, [System.StringComparison]::Ordinal) -ge 0)) {
+            # 左から順に、ブロックコメントの中なら終わりを、外なら行コメント・ブロックコメントの始まり・文字列を探す。コメントの外の文字（文字列も）があればステップ
+            $i = 0
+            while ($i -lt $t.Length) {
+                if ($inBlock) {
+                    $end = $t.IndexOf($close, $i, [System.StringComparison]::Ordinal)
+                    if ($end -lt 0) { break }
+                    $inBlock = $false
+                    $i = $end + $close.Length
+                    continue
                 }
+                $m = $markRx.Match($t, $i)
+                $stop = $t.Length
+                if ($m.Success) { $stop = $m.Index }
+                if (-not $isCode -and $stop -gt $i -and $t.Substring($i, $stop - $i).Trim()) { $isCode = $true }
+                if (-not $m.Success -or $m.Groups['line'].Success) { break }
+                if ($m.Groups['open'].Success) { $inBlock = $true } else { $isCode = $true }
+                $i = $m.Index + $m.Length
             }
-            break
+        }
+        else {
+            # 行コメントで始まらなければステップ（行の後ろのコメントは数えない）
+            $isCode = $true
+            foreach ($mark in $lineMarks) { if ($t.StartsWith($mark, [System.StringComparison]::OrdinalIgnoreCase)) { $isCode = $false; break } }
         }
         if ($isCode) { $code.Add($t); $codeLines.Add([pscustomobject]@{ No = $no; Text = $t }) } else { $comment++ }
     }

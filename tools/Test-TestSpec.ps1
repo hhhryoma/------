@@ -247,8 +247,8 @@ function Test-MessageText {
 }
 
 if ($messages.Count -gt 0) {
-    # メッセージ一覧の ID の形（E0001 なら E と 4 桁）だけを探す（画面 ID・要件 ID などを拾わないように）
-    $shapes = @($messages.Keys | ForEach-Object { $m = [regex]::Match($_, '^([A-Z]+)(\d+)$'); '{0}\d{{{1}}}' -f $m.Groups[1].Value, $m.Groups[2].Value.Length } | Sort-Object -Unique)
+    # メッセージ一覧の ID の形（E0001 なら E と 4 桁、MSG-E001 なら MSG-E と 3 桁）だけを探す（画面 ID・要件 ID などを拾わないように）
+    $shapes = @($messages.Keys | ForEach-Object { $m = [regex]::Match($_, '^(\D+)(\d+)$'); '{0}\d{{{1}}}' -f [regex]::Escape($m.Groups[1].Value), $m.Groups[2].Value.Length } | Sort-Object -Unique)
     $idRx = New-Object System.Text.RegularExpressions.Regex(('(?<![A-Za-z0-9])(?:{0})(?![0-9])' -f ($shapes -join '|')), 'IgnoreCase')
     foreach ($c in $cases) {
         $field = ''
