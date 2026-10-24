@@ -1891,7 +1891,8 @@ function ConvertTo-DateValue {
     #     日付の文字（2026/10/1・2026-10-01・2026年10月1日・令和8年10月1日・R8.10.1・10/1）を日付にする（無ければ $null）。
     #     年の無い日付は AsOf の年
     param([string] $Text, [datetime] $AsOf = (Get-Date))
-    $t = ([string]$Text).Normalize($script:Nfkc).Trim()
+    # 元号の合字（㋿・㍻・㍼）は、Windows PowerShell 5.1 の NFKC では分けられないことがあるので先に置き換える
+    $t = ([string]$Text).Replace('㋿', '令和').Replace('㍻', '平成').Replace('㍼', '昭和').Normalize($script:Nfkc).Trim()
     if (-not $t) { return $null }
     $m = [regex]::Match($t, '(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})')
     try {
