@@ -31,6 +31,44 @@ Test-Case 'ExcelTools: Export-Workbook は日付（datetime）を日付のセル
     Assert-Equal ([string](([datetime]'2026-11-02') - [datetime]'1899-12-30').TotalDays) ([string]$sheet.Rows[2]['A']) '日付はシリアル値（文字ではない）'
 }
 
+Test-Case 'ExcelTools: Measure-SourceLines は、文字列と行コメントの中の /* をコメントの始まりにせず、1 行の中のブロックコメントをすべて見る' {
+    $dir = New-TestDir
+    # コメントの行数と、ステップの行の行番号
+    $measure = {
+        param([string] $Name, [string[]] $Lines)
+        $path = Join-Path $dir $Name
+        [System.IO.File]::WriteAllText($path, (($Lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        $m = Measure-SourceLines $path (Get-SourceLanguage ([System.IO.Path]::GetExtension($Name)))
+        '{0}|{1}' -f $m.Comment, (@($m.CodeLines | ForEach-Object { $_.No }) -join ',')
+    }
+    Assert-Equal '3|1,2,3,4,5,7,10,11' (& $measure 'WebConfig.java' @(
+            'class WebConfig {',
+            '    void a() { registry.addMapping("/api/**"); }',
+            '    String glob = "**/*.java"; char q = ''"''; String s = "\"/*";',
+            '    void b() { route(path); } // e.g. /api/*',
+            '    int x = 1; /* a */ int y = 2; /* old:',
+            '    error("E0003");',
+            '    */ int z = 3; /* 1 */ /* 2 */',
+            '    /* a */ /* b',
+            '    c */ // d',
+            '    void f() { error("E0001"); }',
+            '}')) '文字列・文字・行コメントの中の /* は見ない。コードの後ろの 2 つ目のブロックコメントは次の行まで続く'
+    Assert-Equal '1|1,2,3' (& $measure 'order.sql' @(
+            "SELECT '/*' AS A, '--' AS B FROM DUAL; -- /* old",
+            'SELECT 1 FROM DUAL;',
+            '/* a */ SELECT 2 FROM DUAL; /* b',
+            'c */')) 'SQL の文字列と -- の後ろ'
+    Assert-Equal '2|1,4' (& $measure 'index.html' @(
+            '<p>Don''t stop</p> <!-- a --> <p>5" screen</p> <!-- old:',
+            '<p>old</p>',
+            '-->',
+            '<p>new</p>')) 'HTML の文の '' と " は文字列の囲みではない'
+    Assert-Equal '0|1,2,3' (& $measure 'Open.ps1' @(
+            '$open = ''<#''',
+            'Write-Host "x" # <# old',
+            'Write-Host "y"')) 'PowerShell の文字列と # の後ろの <#'
+}
+
 Test-Case 'ExcelTools: 版数は「第1.1版」を読み「第2回」は読まない。日付は和暦（令和・平成・R・H・元年）も読む' {
     Assert-Equal '1.1.0.0||2.0.0.0' ('{0}|{1}|{2}' -f (Get-NameVersion '設計書_第1.1版.xlsx'), (Get-NameVersion '定例会議事録_第2回.docx'), (Get-NameVersion 'Ver2.0'))
     Assert-Equal @('議事録_第1回.docx', '議事録_第2回.docx', '設計書_{v}.xlsx', '設計書_{v}.xlsx') @(@('議事録_第1回.docx', '議事録_第2回.docx', '設計書_第1.0版.xlsx', '設計書_v1.1.xlsx') | ForEach-Object { Get-VersionlessName $_ }) '「第N回」は版数として除かない'

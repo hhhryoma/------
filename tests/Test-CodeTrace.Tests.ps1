@@ -75,6 +75,72 @@ Test-Case 'Test-CodeTrace: -OutXlsx に指摘と、ID ごとのソースの箇�
     Assert-Equal 'messages.properties 1 行目 ほか 1 か所' $trace.Rows[$row]['G'] 'ソースのフォルダからの相対パスの順で、最初の箇所'
 }
 
+Test-Case 'Test-CodeTrace: 文字列の中の /*（"/api/**" など）と行コメントの中の /* でコメントを始めず、行の途中から始まるブロックコメントの中の ID は数えない' {
+    $dir = New-TestDir
+    $src = Join-Path $dir 'src'
+    $null = New-Item -ItemType Directory -Path $src
+    [System.IO.File]::WriteAllText((Join-Path $src 'WebConfig.java'), ((@(
+                'public class WebConfig {',
+                '    void addCorsMappings(CorsRegistry registry) { registry.addMapping("/api/**"); }',
+                '    void search() {',
+                '        if (orderNo == null) { error("E0001"); }',
+                '        forward("SCR001"); // e.g. /api/*',
+                '        String sql = "SELECT * FROM T_ORDER";',
+                '        int x = 1; /* a */ int y = 2; /* old:',
+                '        error("E0003");',
+                '        */',
+                '    }',
+                '}') -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    $issues = @(& $TraceTool -DesignPath $designDir -SourcePath $src 6>$null)
+    $missing = @($issues | Where-Object Item -eq '実装に無い' | ForEach-Object { $_.Id })
+    Assert-Equal '' (@($missing | Where-Object { @('E0001', 'SCR001', 'T_ORDER') -contains $_ }) -join ', ') '"/api/**" と // e.g. /api/* の後ろの行の ID'
+    Assert-True ($missing -contains 'E0003') 'int y = 2; /* old: から次の行に続くブロックコメントの中の E0003'
+}
+
+Test-Case 'Test-CodeTrace: SELECT … INTO の変数・FOR UPDATE NOWAIT・MyBatis のタグ（<update id=…>）を SQL のテーブルにしない' {
+    $dir = New-TestDir
+    $src = Join-Path $dir 'src'
+    $null = New-Item -ItemType Directory -Path $src
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText((Join-Path $src 'OrderMapper.xml'), ((@(
+                '<mapper namespace="sample.OrderMapper">',
+                '  <update id="updateStatus">',
+                '    UPDATE T_ORDER SET ORDER_STATUS = #{status} WHERE ORDER_NO = #{orderNo}',
+                '  </update>',
+                '  <insert id="addHistory">INSERT INTO T_ORDER_HIST SELECT * FROM T_ORDER</insert>',
+                '  <select id="countLarge"><![CDATA[ SELECT COUNT(*) FROM T_ORDER_BIG WHERE TOTAL_AMOUNT > 100 ]]></select>',
+                '</mapper>') -join "`n") + "`n"), $utf8)
+    [System.IO.File]::WriteAllText((Join-Path $src 'order_pkg.pkb'), ((@(
+                'CREATE OR REPLACE PACKAGE BODY order_pkg AS',
+                '  PROCEDURE cancel(p_no IN VARCHAR2) IS',
+                '    v_count NUMBER;',
+                '  BEGIN',
+                '    SELECT COUNT(*) INTO v_count FROM T_ORDER WHERE ORDER_NO = p_no;',
+                '    SELECT * INTO r_order FROM T_ORDER WHERE ORDER_NO = p_no FOR UPDATE NOWAIT;',
+                '    SELECT ORDER_NO',
+                '      INTO v_no',
+                '      FROM T_ORDER WHERE ORDER_NO = p_no FOR UPDATE OF ORDER_STATUS SKIP LOCKED;',
+                '    INSERT /*+ APPEND */ INTO T_ORDER_LOG (ORDER_NO) VALUES (p_no);',
+                '    MERGE INTO T_ORDER_SUM s USING T_ORDER o ON (s.ORDER_NO = o.ORDER_NO)',
+                '      WHEN MATCHED THEN UPDATE SET s.CNT = s.CNT + 1;',
+                '    UPDATE T_ORDR SET ORDER_STATUS = ''90'' WHERE ORDER_NO = p_no;',
+                '  END;',
+                'END order_pkg;') -join "`n") + "`n"), $utf8)
+    $issues = @(& $TraceTool -DesignPath (Join-Path $designDir 'DD03_テーブル定義書.xlsx') -SourcePath $src -Kind Table 6>$null)
+    Assert-Equal @('T_ORDER_HIST', 'T_ORDER_BIG', 'T_ORDER_LOG', 'T_ORDER_SUM', 'T_ORDR') @($issues | Where-Object Item -eq '設計書に無い' | ForEach-Object { $_.Id }) 'INSERT・MERGE の INTO（ヒントの後ろも）・UPDATE の後ろと、CDATA の中の SQL のテーブルは見る'
+}
+
+Test-Case 'Test-CodeTrace: - や _ で区切ったメッセージ ID（MSG-E001・MSG_E002）も突き合わせる' {
+    $dir = New-TestDir
+    $design = Join-Path $dir 'design'
+    $src = Join-Path $dir 'src'
+    $null = New-Item -ItemType Directory -Path $design, $src
+    New-SheetsBook (Join-Path $design 'メッセージ一覧.xlsx') ([ordered]@{ 'メッセージ一覧' = @(@('メッセージID', 'メッセージ'), @('MSG-E001', '必須です。'), @('MSG_E002', '桁数が多すぎます。'), @('E0003', '形式が違います。')) })
+    [System.IO.File]::WriteAllText((Join-Path $src 'A.java'), "class A {`n  void f() { error(`"MSG-E001`"); error(`"MSG_E002`"); error(`"MSG-E099`"); }`n}`n", (New-Object System.Text.UTF8Encoding($false)))
+    $issues = @(& $TraceTool -DesignPath $design -SourcePath $src -Kind Message 6>$null)
+    Assert-Equal @('実装に無い|E0003', '設計書に無い|MSG-E099') @($issues | ForEach-Object { '{0}|{1}' -f $_.Item, $_.Id })
+}
+
 Test-Case 'Test-CodeTrace: Get-Help でヘルプが表示される' {
     $h = Get-Help $TraceTool
     Assert-Match $h.Synopsis 'ソースコード'

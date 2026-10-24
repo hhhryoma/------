@@ -99,6 +99,20 @@ Test-Case 'Test-TestSpec: -DesignPath のメッセージ一覧に無いメッセ
         'メッセージIDが一覧に無い|テストケース!G4|メッセージ ID E9999 がメッセージ一覧にありません（誤記か、一覧への追加漏れ）') @($issues | ForEach-Object { '{0}|{1}|{2}' -f $_.Item, $_.Location, $_.Detail })
 }
 
+Test-Case 'Test-TestSpec: -DesignPath のメッセージ一覧の、- や _ で区切ったメッセージ ID（MSG-E001 など）も確かめる' {
+    $dir = New-TestDir
+    $design = Join-Path $dir 'design'
+    $null = New-Item -ItemType Directory -Path $design
+    New-SheetsBook (Join-Path $design 'メッセージ一覧.xlsx') ([ordered]@{ 'メッセージ一覧' = @(@('メッセージID', 'メッセージ'), @('MSG-E001', '{0}は必須入力です。'), @('E0003', '形式が違います。')) })
+    $rows = @(
+        @('1', 'SCR002', '異常', '', '受注日を未入力で登録する', '', 'MSG-E001「受注日は必須入力です。」が表示される', 'OK'),
+        @('2', '', '異常', '', '数量に 0 を入れて登録する', '', 'MSG-E099 が表示される', 'OK'))
+    $path = Join-Path $dir 'UT_受注登録.xlsx'
+    New-SpecBook $path @('No', '機能', '区分', '前提条件', '手順', '入力値', '期待結果', '結果') $rows
+    $issues = @(& $TestSpecTool -Path $path -DesignPath $design 6>$null | Where-Object { $_.Item -match 'メッセージ' })
+    Assert-Equal @('メッセージIDが一覧に無い|テストケース!G3|メッセージ ID MSG-E099 がメッセージ一覧にありません（誤記か、一覧への追加漏れ）') @($issues | ForEach-Object { '{0}|{1}|{2}' -f $_.Item, $_.Location, $_.Detail })
+}
+
 Test-Case 'Test-TestSpec: -DesignPath の項目名と違う書き方（顧客CD・受注日付など）を、項目名の揺れとして知らせる' {
     $dir = New-TestDir
     $rows = @(

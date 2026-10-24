@@ -38,7 +38,7 @@ $kindNames = @{ Message = 'メッセージ'; Screen = '画面'; Table = 'テー�
 # メッセージのリソース・設定のファイル（ソースと同じく、ID がどこかに書いてあれば実装にあるとみなす）
 $resourceLanguage = @{ Name = '設定'; Ext = @('.properties', '.yml', '.yaml', '.ini', '.conf', '.cfg', '.toml', '.json', '.resx'); Line = @('#', ';'); Block = $null }
 # SQL のテーブル名とみなさない名前
-$sqlIgnore = @('DUAL', 'SELECT', 'SET', 'VALUES', 'WHERE', 'LATERAL', 'UNNEST', 'TABLE', 'ONLY', 'IF', 'EXISTS')
+$sqlIgnore = @('DUAL', 'SELECT', 'SET', 'VALUES', 'WHERE', 'LATERAL', 'UNNEST', 'TABLE', 'ONLY', 'IF', 'EXISTS', 'NOWAIT', 'WAIT', 'OF', 'SKIP')
 
 # ---------------------------------------------------------------- 設計書の ID を読む
 
@@ -105,12 +105,12 @@ if ($Kind -contains 'Table' -or $Kind -contains 'Column') {
 }
 foreach ($k in $Kind) { if ($defined[$k].Count -eq 0) { Write-Warning ('設計書に{0}の ID が見つかりません: {1}' -f $kindNames[$k], ($DesignPath -join ', ')) } }
 
-# ID の形（E0001 → 英字 E と数字 4 桁）。ソースにある同じ形の ID で、設計書に無いものを見つけるため
+# ID の形（E0001 → 英字 E と数字 4 桁、MSG-E001 → MSG-E と数字 3 桁）。ソースにある同じ形の ID で、設計書に無いものを見つけるため
 function Get-IdShapes {
     param($Ids)
     $shapes = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($id in $Ids) {
-        $m = [regex]::Match($id, '^([A-Za-z]+[_\-]?)(\d+)$')
+        $m = [regex]::Match($id, '^([A-Za-z]+(?:[_\-][A-Za-z]+)*[_\-]?)(\d+)$')
         if ($m.Success) { [void]$shapes.Add(('^{0}\d{{{1}}}$' -f [regex]::Escape($m.Groups[1].Value.ToUpperInvariant()), $m.Groups[2].Value.Length)) }
     }
     if ($shapes.Count -eq 0) { return $null }
@@ -158,9 +158,14 @@ foreach ($p in $SourcePath) {
 $files.Sort([System.Comparison[object]] { param($a, $b) [string]::Compare($a.Relative, $b.Relative, [System.StringComparison]::OrdinalIgnoreCase) })
 
 $tokenRx = New-Object System.Text.RegularExpressions.Regex('[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*')
-# SQL のテーブル（FROM・JOIN・INTO・UPDATE・TABLE の後ろの名前。.sql と MyBatis などの .xml のほかは、大文字の SQL の行だけ）
-$sqlRxAny = New-Object System.Text.RegularExpressions.Regex('\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:[A-Za-z_][A-Za-z0-9_$#]*\.)?([A-Za-z_][A-Za-z0-9_$#]*)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-$sqlRxUpper = New-Object System.Text.RegularExpressions.Regex('\b(?:FROM|JOIN|INTO|UPDATE)\s+(?:[A-Za-z_][A-Za-z0-9_$#]*\.)?([A-Za-z_][A-Za-z0-9_$#]*)')
+# SQL のテーブル（FROM・JOIN・UPDATE・TABLE と、INSERT・MERGE などの INTO の後ろの名前。.sql と MyBatis などの .xml のほかは、大文字の SQL の行だけ）。
+# SELECT … INTO・FETCH … INTO の後ろ（PL/SQL の変数）と、FOR UPDATE の後ろ（NOWAIT など）は見ない。INSERT の後ろのヒント（/*+ APPEND */）は飛ばす
+$sqlUpdateInto = '(?<!\bFOR\s+)UPDATE|(?<=\b(?:INSERT|MERGE|REPLACE|IGNORE)\s*(?:/\*.*?\*/\s*)?)INTO'
+$sqlName = '\s+(?:[A-Za-z_][A-Za-z0-9_$#]*\.)?([A-Za-z_][A-Za-z0-9_$#]*)'
+$sqlRxAny = New-Object System.Text.RegularExpressions.Regex(('\b(?:FROM|JOIN|TABLE|{0}){1}' -f $sqlUpdateInto, $sqlName), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+$sqlRxUpper = New-Object System.Text.RegularExpressions.Regex(('\b(?:FROM|JOIN|{0}){1}' -f $sqlUpdateInto, $sqlName))
+# .xml のタグ（MyBatis の <update id="…"> の update を SQL にしない。CDATA の中の SQL は見る。次の行に続くタグは行の終わりまで）
+$xmlTagRx = New-Object System.Text.RegularExpressions.Regex('<!\[CDATA\[|\]\]>|<[/?!]?[A-Za-z_][^>]*>?')
 $undefined = @{}   # 種類 → ID（大文字）→ @{ Id; Hits }
 foreach ($k in $kindNames.Keys) { $undefined[$k] = [ordered]@{} }
 function Add-Undefined {
@@ -203,7 +208,9 @@ foreach ($entry in $files) {
         if ($Kind -contains 'Table') {
             $rx = $sqlRxUpper
             if ($isSql) { $rx = $sqlRxAny }
-            foreach ($m in $rx.Matches($line.Text)) {
+            $sqlText = $line.Text
+            if ($extension -eq '.xml') { $sqlText = $xmlTagRx.Replace($sqlText, ' ') }
+            foreach ($m in $rx.Matches($sqlText)) {
                 $name = $m.Groups[1].Value
                 $upper = $name.ToUpperInvariant()
                 if ($defined['Table'].Contains($upper) -or $sqlIgnore -contains $upper -or $columnNames.Contains($upper)) { continue }
@@ -303,7 +310,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .DESCRIPTION
 #     設計書から次の ID を読み、ソースコード（とメッセージのリソースなどの設定ファイル）のどこに書いてあるかを探します。
 #
-#       メッセージ: メッセージ一覧のメッセージ ID（E0001 など）
+#       メッセージ: メッセージ一覧のメッセージ ID（E0001・MSG-E001 など）
 #       画面: 画面一覧の画面 ID と、画面設計書のヘッダの画面 ID
 #       テーブル・カラム: テーブル定義書のテーブル ID とカラムの物理名（Export-TableDdl.ps1 と同じ見出しで読む）
 #
@@ -311,7 +318,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 #       実装に無い（警告）: 設計書の ID がソースのどこにも無い（使っていないか、ID の書き間違い）。カラムは情報
 #       設計書に無い（警告）: ソースに、設計書の ID と同じ形（E0001 なら英字 E と数字 4 桁）の ID があるが、設計書に無い。
-#                         テーブルは、SQL の FROM・JOIN・INTO・UPDATE の後ろの名前（.sql と MyBatis などの .xml のほかは、大文字の SQL だけ）
+#                         テーブルは、SQL の FROM・JOIN・UPDATE と、INSERT・MERGE などの INTO の後ろの名前（.sql と MyBatis などの .xml のほかは、大文字の SQL だけ）
 #
 #     ID は単語として探します（大文字小文字は区別しない）。テーブル・カラムは、_ を除いた名前（orderNo・TOrder など）でも見つけます。
 #     コメントだけの行（//・/* */・--・# など。言語ごとの書き方は Measure-CodeSize.ps1 と同じ）は見ません。
