@@ -1590,6 +1590,8 @@ function Merge-Renumbering {
             Old = '{0}～{1}' -f $first.Old, $last.Old; New = '{0}～{1}' -f $first.New, $last.New
             Detail = '連番の振り直し: {0}～{1} → {2}～{3}（{4} 個）' -f $first.Old, $last.Old, $first.New, $last.New, $run.Count
             Path = $first.Path; OldPath = $first.OldPath; Segments = $null; NewCell = $range; OldCell = $oldRange
+            # ほかの差分と同じく分類（Set-DiffTags が付ける。改訂履歴のシートなら版情報）と図形の欄を持つ
+            Tag = ''; Shape = $null
         }
         $summary.PSObject.TypeNames.Insert(0, 'CompareExcel.Diff')
         $summaryAt[(@($run | Sort-Object Index)[0].Index)] = $summary
