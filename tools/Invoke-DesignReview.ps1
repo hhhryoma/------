@@ -1359,7 +1359,9 @@ else {
             $f | Add-Member -NotePropertyName DiffText -NotePropertyValue $diffText -Force
             $f | Add-Member -NotePropertyName Baseline -NotePropertyValue $oldPath -Force
         }
-        $byState = @($designFiles | Group-Object Diff | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
+        # Group-Object の並びは PowerShell の版で違うので、決まった順に並べる
+        $stateOrder = @('変更あり', '変更なし', '新規')
+        $byState = @($designFiles | Group-Object Diff | Sort-Object { $i = [array]::IndexOf($stateOrder, $_.Name); if ($i -lt 0) { $stateOrder.Count } else { $i } }, Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
         Write-Host ("  前の版と比べた設計書: {0}（変更なしの設計書は AI に依頼しません）" -f ($byState -join '・'))
         if ($TextFormat -eq 'Markdown') { Write-Warning '前の版から変わった部分は、行の形（-TextFormat Rows）で渡します（Markdown は、新しい設計書と参照資料に使います）' }
     }
