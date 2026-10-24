@@ -201,6 +201,8 @@ $script:TestPng = @{
     New    = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAbUlEQVR4nO2XwQoAIQhEZxb//5ftEHQIYSlaXdK5RF0eYzoUVRURekKoAKQvJN2QvcYy7b/WcBhW6gK7SYyzpQ7fbcl8pS7w/WBrnFxC2wJv6XX4Jzv57rjABb4PfCxAVuPuB4493/QAmO7v1ACh5BRCnP+rmgAAAABJRU5ErkJggg=='
     Retake = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAgUlEQVR4Ae2WSw6AMAhEHeP9r4yams5CE7GhsHC6YkEY+vgEmNlS8dYK0VNza8IA0jJojC/hQzWHef9hGWoJp7UYm4uSnzp8dA2oxgQ+2RLqyYAZ/mmcRieEUR2WauyAFOMi1DEcHVGE2gEpxuV/qLmr+8Ubg/ItCnLu+HsaZTXeAQTjEEApC71sAAAAAElFTkSuQmCC'
     Logo   = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAeCAIAAADRv8uKAAAAlklEQVR4nO2WSw6AIAxEqfHexpPXpZt+pgWhMXRpOvMYLARi5raijiXUDZ5ZJ95KN4nf+cqMJ7lTrfE6V+BsNU6NNlvgkFFUooIT1JBQBqepuFwAd1JBkzIXyJC4iFWZxBs8DZy78cWyrcokboNCuyZy4k42Ile3Os0GhdY/TrBxiTNcIXao2X/6vK2T31wfVaVz/HPwA6K+OS+gTz8VAAAAAElFTkSuQmCC'
+    # 400×300 の灰色の画像（スクリーンショットの代わり）
+    Screen = 'iVBORw0KGgoAAAANSUhEUgAAAZAAAAEsCAAAAADI3LoeAAABsUlEQVR42u3RAQ0AAAjDsEvDvxok4IJA0klYUzpVLAAiIEAEBIiAABEQIAIiIEAEBIiAABEQIAIiIEAE5D1I61RAgAgIEAEBIiBABASIgAgIEAEBIiBABASIgAgIEAEBIiBABASIgAgIEAEBIiBABASIgAgIEAEBIiBABASIgAgIEAEBIiBABASIgAgIEAEBIiBABASIgAgIEAEBIiBABASIgAgIEAEBIiBABASIgAgIEAEBIiBABASIgAAREAEBIiBABASIgAAREAEBIiBABASIgAAREAEBIiBABASIgAAREAEBIiBABASIgAAREAEBIiBABASIgAAREAEBIiBABASIgAAREAEBIiBABASIgAAREAEBIiBABASIgAAREAEBIiBABASIgAARECAWABEQIAICRECACAgQAREQIAICRECACAgQAREQIAICRECACAgQAREQIAICRECACAgQAREQIAICRECACAgQAREQIAICRECACAgQAREQIAICRECACAgQAREQIAICRECACAgQAREQIAICRECACAgQAREQIAICRECACAgQAQEiIAICRECACAgQrTYc8MQ056+ClAAAAABJRU5ErkJggg=='
 }
 
 function Add-TestDrawing {
@@ -208,7 +210,8 @@ function Add-TestDrawing {
     #       @{ Kind = 'pic'; Name; Png（$script:TestPng のキー）; From = @(列, 行); To = @(列, 行) }
     #       @{ Kind = 'sp'; Name; Text（省略可）; From; To }
     #       @{ Kind = 'grpSp'; Name; From; To; Children = @( @{ Kind; Name; Text; Png; Off = @(x, y); Ext = @(cx, cy) } ) }（中の座標は 0〜1000）
-    #       Hidden = $true で非表示にする
+    #       Hidden = $true で非表示にする。シートに置いたものは Ext = @(幅, 高さ)（ピクセル）で表示の大きさ（xfrm）を書く
+    #       画像は Crop = @(左, 上, 右, 下)（1/1000 %）でトリミングする
     param([string] $Path, $Items, [int] $Sheet = 1)
     $media = New-Object System.Collections.Generic.List[string]
     $script:TestShapeId = 1
@@ -220,7 +223,9 @@ function Add-TestDrawing {
         switch ($it.Kind) {
             'pic' {
                 $media.Add($it.Png)
-                '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdImg{2}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>{3}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>' -f $id, $it.Name, $media.Count, $Xfrm
+                $crop = ''
+                if ($it.Crop) { $crop = '<a:srcRect l="{0}" t="{1}" r="{2}" b="{3}"/>' -f $it.Crop[0], $it.Crop[1], $it.Crop[2], $it.Crop[3] }
+                '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdImg{2}"/>{4}<a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>{3}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>' -f $id, $it.Name, $media.Count, $Xfrm, $crop
             }
             'sp' {
                 $body = ''
@@ -234,7 +239,9 @@ function Add-TestDrawing {
         }
     }
     $anchors = foreach ($it in $Items) {
-        $body = & $obj $it '<a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>'
+        $ext = @(0, 0)
+        if ($it.Ext) { $ext = @(($it.Ext[0] * 9525), ($it.Ext[1] * 9525)) }
+        $body = & $obj $it ('<a:xfrm><a:off x="0" y="0"/><a:ext cx="{0}" cy="{1}"/></a:xfrm>' -f $ext[0], $ext[1])
         '<xdr:twoCellAnchor><xdr:from><xdr:col>{0}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{2}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{3}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>{4}<xdr:clientData/></xdr:twoCellAnchor>' -f $it.From[0], $it.From[1], $it.To[0], $it.To[1], $body
     }
     $head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -258,6 +265,24 @@ function Add-TestDrawing {
         if (-not $types.Contains('Extension="png"')) { $types = $types.Replace('<Default Extension="xml"', '<Default Extension="png" ContentType="image/png"/><Default Extension="xml"') }
         $types = $types.Replace('</Types>', ('<Override PartName="/xl/drawings/drawing{0}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>' -f $Sheet))
         & $put '[Content_Types].xml' $utf8.GetBytes($types)
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
+function Edit-ZipText {
+    #     xlsx の中の 1 つのパーツの文字を書き換える（テスト用）
+    param([string] $Path, [string] $Name, [scriptblock] $Change)
+    $fs = [System.IO.File]::Open($Path, 'Open', 'ReadWrite')
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Update)
+        $entry = $zip.GetEntry($Name)
+        $sr = New-Object System.IO.StreamReader($entry.Open())
+        $text = $sr.ReadToEnd(); $sr.Dispose()
+        $text = & $Change $text
+        $entry.Delete()
+        $sw = New-Object System.IO.StreamWriter($zip.CreateEntry($Name).Open(), (New-Object System.Text.UTF8Encoding($false)))
+        $sw.Write($text); $sw.Dispose()
         $zip.Dispose()
     }
     finally { $fs.Dispose() }

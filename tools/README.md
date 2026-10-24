@@ -19,7 +19,7 @@
 | [Compare-SharePointVersion.ps1](#compare-sharepointversionps1) | SharePoint（Microsoft 365）のファイルの 2 つの版（バージョン履歴）を取り出して比べ、差分の画面を開く（版は Excel で取り出す） |
 | [Export-ExcelToMarkdown.ps1](#export-exceltomarkdownps1) | Excel を Markdown のテキストにする（表は Markdown の表に）。`git diff` で Excel の変更を文字の差分で見る設定、AI への入力、全文検索に（Excel 不要） |
 | [Invoke-DesignReview.ps1](#invoke-designreviewps1) | Excel の設計書を観点表に沿って AI（Microsoft 365 Copilot）にレビューさせ、指摘一覧にまとめる |
-| [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違いをまとめて確認する（プロパティの個人名など、機械で直せるものは `-Fix` で直す）。Word（.docx）の変更履歴・コメント・隠し文字の残りも見つける |
+| [Test-ExcelDeliverable.ps1](#test-exceldeliverableps1) | 社外へ提出する前に、体裁の崩れ・消し忘れ・情報漏れ・壊れた箇所・印刷のはみ出し・版数の食い違い・スクリーンショットの縦横比や拡大をまとめて確認する（プロパティの個人名など、機械で直せるものは `-Fix` で直す）。Word（.docx）の変更履歴・コメント・隠し文字の残りも見つける |
 | [Reset-ExcelView.ps1](#reset-excelviewps1) | 開いたときに先頭シートの A1 が倍率 100% で表示される状態に、一括で直す（Excel 不要） |
 | [Export-ExcelToPdf.ps1](#export-exceltopdfps1) | フォルダ配下の Excel を PDF に一括出力し、ページ数を数える |
 | [New-TestSpecDraft.ps1](#new-testspecdraftps1) | 画面設計書（画面項目定義・イベント定義）とコード定義書・メッセージ一覧から、必須・桁数の境界・型・入力チェック・コード値・イベントのテストケースの下書きを、メッセージの文言付きで作る（Excel 不要） |
@@ -461,6 +461,8 @@ File      Location  Level  Detail
 | 版数 | 警告 | 表紙の版数と改訂履歴の最後の版数が違う、表紙の更新日と改訂履歴の最後の改訂日が違う、ファイル名の版数（`_v1.1`・`_第1.1版`）が違う、改訂履歴の版数が前の行より小さい |
 | 印刷 | 警告 | 印刷すると**横が 1 ページに収まらない**、**印刷範囲の外にデータがある**、ヘッダー／フッターにファイルの場所（`&Z`）が印刷される（情報漏れ）や TODO が残っている（消し忘れ） |
 | 印刷 | 情報 | 用紙のサイズ・向きがシートによって違う |
+| 画像 | 警告 | 画像（スクリーンショット）の**縦横比の崩れ**（元の画像と 3% より違う。トリミングした分は除いて比べる）、元の大きさの **150% 以上への拡大**（印刷・PDF で文字が粗くなる）、**印刷範囲からのはみ出し**（印刷範囲を設定したシート） |
+| 画像 | 情報 | スクリーンショット（200×150 ピクセル以上の画像）の縮尺がシートによって違う（いちばん大きいものと小さいものが 15% より違う。並べたときに文字の大きさがそろわない） |
 | マクロ | 情報 | VBA を含むブック |
 | ファイル | 情報 | パスワード付き・xls / xlsb（中身を読めないためチェックしていない） |
 
@@ -504,7 +506,7 @@ Word の設計書・仕様書も、Word を使わずにチェックします（�
 | パラメーター | 説明 |
 | --- | --- |
 | `-Path` | チェックするフォルダまたはファイル（複数・ワイルドカード可） |
-| `-Check` | 項目を絞る。`View`（体裁）`Hidden`（非表示）`Comment` `Word`（文言）`Property` `Link` `Error` `Macro` `Print`（印刷）`Version`（版数） |
+| `-Check` | 項目を絞る。`View`（体裁）`Hidden`（非表示）`Comment` `Word`（文言）`Property` `Link` `Error` `Macro` `Print`（印刷）`Version`（版数）`Picture`（画像） |
 | `-Words` | 消し忘れとして探す文言（正規表現）。既定は TODO / TBD / FIXME / 要確認 / 未定 / 検討中 / 仮置き / （仮） / XXX / ○○ / ×× |
 | `-AllowedNames` | プロパティに残っていてもよい名前（正規表現。例: 自社名） |
 | `-Zoom` | 期待する倍率（既定 100） |

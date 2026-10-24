@@ -3,8 +3,8 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string[]] $Path,
 
-    [ValidateSet('View', 'Hidden', 'Comment', 'Revision', 'Word', 'Property', 'Link', 'Error', 'Macro', 'Print', 'Version')]
-    [string[]] $Check = @('View', 'Hidden', 'Comment', 'Revision', 'Word', 'Property', 'Link', 'Error', 'Macro', 'Print', 'Version'),
+    [ValidateSet('View', 'Hidden', 'Comment', 'Revision', 'Word', 'Property', 'Link', 'Error', 'Macro', 'Print', 'Version', 'Picture')]
+    [string[]] $Check = @('View', 'Hidden', 'Comment', 'Revision', 'Word', 'Property', 'Link', 'Error', 'Macro', 'Print', 'Version', 'Picture'),
 
     [string] $Words = 'TODO|TBD|FIXME|要確認|未定|検討中|仮置き|（仮）|\(仮\)|XXX|○○|××',
 
@@ -266,25 +266,6 @@ function Get-PrintAreas {
     return , $areas
 }
 
-function Get-MaxDigitWidth {
-    #     列の幅（文字数）をピクセルにするための、標準フォントの数字 1 文字の幅（ピクセル）の目安。
-    #     日本語のフォント（游ゴシック・ＭＳ Ｐゴシックなど）は 11 ポイントで 8、欧文のフォント（Calibri など）は 7
-    param($Package, [string] $StylesPart)
-    $doc = $null
-    if ($StylesPart) { $doc = Read-PartXml -Package $Package -PartName $StylesPart }
-    if ($null -eq $doc) { return 7 }
-    $font = $doc.SelectSingleNode("//*[local-name()='fonts']/*[local-name()='font']")
-    if ($null -eq $font) { return 7 }
-    $name = ''; $size = 11.0
-    $n = $font.SelectSingleNode("*[local-name()='name']")
-    if ($n) { $name = $n.GetAttribute('val') }
-    $z = $font.SelectSingleNode("*[local-name()='sz']")
-    if ($z) { [void][double]::TryParse($z.GetAttribute('val'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$size) }
-    $base = 7
-    if ($name -match '[^\x00-\x7F]|Yu Gothic|Meiryo|MS P?Gothic|MS P?Mincho') { $base = 8 }
-    return [math]::Max(4, [math]::Round($base * $size / 11))
-}
-
 function Test-PrintSetup {
     #     印刷の設定をチェックする（表示されているワークシートで、値のあるセルがあるものだけ）
     param($Sheets, [int] $Mdw)
@@ -364,6 +345,89 @@ function Test-PrintSetup {
             }
         }
     }
+}
+
+# ---------------------------------------------------------------- 画像（スクリーンショット）の見た目
+
+
+function Test-Pictures {
+    #     表示されているワークシートの画像（スクリーンショット）の縦横比・拡大・印刷範囲からのはみ出しと、
+    #     シートによる縮尺の違いを確かめる
+    param($Package, $Sheets, [int] $Mdw)
+    $images = @{}
+    $scales = New-Object System.Collections.Generic.List[object]
+    foreach ($s in $Sheets) {
+        if ($null -eq $s.Rel -or -not $s.IsWorksheet -or $s.State -ne 'visible') { continue }
+        $items = Read-SheetDrawingItems $Package $s.Rel.Target $images
+        # 非表示の画像と、非表示のグループの中の画像は印刷されないので見ない
+        $hiddenGroups = @($items | Where-Object { $_.Hidden -and $_.Kind -eq 'grpSp' } | ForEach-Object { $_.Path + '/' })
+        $pictures = @($items | Where-Object { $it = $_; $it.Kind -eq 'pic' -and -not $it.Hidden -and @($hiddenGroups | Where-Object { $it.Path.StartsWith($_) }).Count -eq 0 })
+        if ($pictures.Count -eq 0) { continue }
+        $geometry = $null
+        if ($s.PrintAreas.Count -gt 0) {
+            $doc = Read-PartXml -Package $Package -PartName $s.Rel.Target
+            if ($doc) { $geometry = Get-SheetGeometry $doc $Mdw; Set-DrawingBounds $pictures $geometry }
+        }
+        foreach ($p in $pictures) {
+            $label = '画像「{0}」' -f $p.Name
+            # 元の画像の大きさ（トリミングした分を除く）と、貼った大きさ（ピクセル）
+            $srcW = [double]$p.Width; $srcH = [double]$p.Height
+            if ($p.Crop) { $srcW *= 1 - $p.Crop.L - $p.Crop.R; $srcH *= 1 - $p.Crop.T - $p.Crop.B }
+            if ($srcW -ge 1 -and $srcH -ge 1 -and $p.Size) {
+                $w = $p.Size.W / 9525; $h = $p.Size.H / 9525
+                $ratio = ($w / $h) / ($srcW / $srcH)
+                if ([math]::Abs($ratio - 1) -gt 0.03) {
+                    if ($ratio -gt 1) { $how = '横に {0:0}% 伸びています' -f (($ratio - 1) * 100) } else { $how = '縦に {0:0}% 伸びています' -f ((1 / $ratio - 1) * 100) }
+                    Add-Issue '警告' '画像' '縦横比' ('{0}の縦横比が、元の画像と違います（{1}）。縦横比を元に戻してください' -f $label, $how) -Sheet $s.Name -Cell $p.Cell
+                }
+                $scale = [math]::Max($w / $srcW, $h / $srcH)
+                if ($scale -ge 1.5) {
+                    Add-Issue '警告' '画像' '拡大' ('{0}を元の大きさの {1:0}% に拡大して貼っています。印刷・PDF で文字が粗くなるので、元の大きさ（100%）以下にしてください' -f $label, ($scale * 100)) -Sheet $s.Name -Cell $p.Cell
+                }
+                # 小さい画像（ロゴ・アイコンなど）は、スクリーンショットの縮尺の比べ方から外す
+                if ($srcW -ge 200 -and $srcH -ge 150) { $scales.Add([pscustomobject]@{ Sheet = $s.Name; Scale = $w / $srcW }) }
+            }
+            if ($geometry) { Test-PictureInPrintArea $p $s $geometry $label }
+        }
+    }
+    # 縮尺がシートによって違う（5% 刻みでまとめ、いちばん大きいものと小さいものが 15% より離れているとき）
+    if ($scales.Count -ge 2) {
+        $max = ($scales | Measure-Object Scale -Maximum).Maximum
+        $min = ($scales | Measure-Object Scale -Minimum).Minimum
+        if ($min -gt 0 -and $max / $min -gt 1.15) {
+            $parts = @($scales | Group-Object { [int]([math]::Round($_.Scale * 20) * 5) } | Sort-Object { [int]$_.Name } -Descending | ForEach-Object {
+                    '{0}%: {1}' -f $_.Name, (@($_.Group | ForEach-Object { $_.Sheet } | Select-Object -Unique) -join '・') })
+            Add-Issue '情報' '画像' '縮尺' ('スクリーンショットの縮尺がシートによって違います（{0}）。並べたときに文字の大きさがそろいません（撮った画面の拡大率が違うときは、そのままでかまいません）' -f ($parts -join ' / '))
+        }
+    }
+}
+
+function Test-PictureInPrintArea {
+    #     画像が印刷範囲（どれか 1 つ）に収まっているか。セルに合わせて置いた画像はセルの番地で、それ以外は位置（ピクセル）で比べる
+    param($Picture, $Sheet, $Geometry, [string] $Label)
+    $a = $Picture.Anchor
+    $cellBased = -not $Picture.Group -and $a.PSObject.Properties['R2']
+    $b = $Picture.Bounds
+    $overlap = $false
+    foreach ($area in $Sheet.PrintAreas) {
+        if ($cellBased) {
+            $inside = $a.C1 -ge $area.C0 -and $a.R1 -ge $area.R0 -and
+                ($a.C2 -le $area.C1 -or ($a.C2 -eq $area.C1 + 1 -and $a.EX -eq 0)) -and ($a.R2 -le $area.R1 -or ($a.R2 -eq $area.R1 + 1 -and $a.EY -eq 0))
+        }
+        $p0 = Get-SheetPoint $Geometry $area.C0 $area.R0
+        $p1 = Get-SheetPoint $Geometry ($area.C1 + 1) ($area.R1 + 1)
+        if (-not $cellBased) {
+            # 列の幅は目安なので、少しのはみ出しは収まっているとみなす
+            $tol = 4
+            $inside = $b.X -ge $p0[0] - $tol -and $b.Y -ge $p0[1] - $tol -and $b.X + $b.W -le $p1[0] + $tol -and $b.Y + $b.H -le $p1[1] + $tol
+        }
+        if ($inside) { return }
+        if ($b.X -lt $p1[0] -and $b.X + $b.W -gt $p0[0] -and $b.Y -lt $p1[1] -and $b.Y + $b.H -gt $p0[1]) { $overlap = $true }
+    }
+    $range = @($Sheet.PrintAreas | ForEach-Object { '{0}{1}:{2}{3}' -f (ConvertTo-ColumnName $_.C0), $_.R0, (ConvertTo-ColumnName $_.C1), $_.R1 }) -join '、'
+    if ($overlap) { $detail = '{0}の一部が、印刷範囲（{1}）からはみ出しています。はみ出した部分は印刷されません' -f $Label, $range }
+    else { $detail = '{0}が印刷範囲（{1}）の外にあり、印刷されません' -f $Label, $range }
+    Add-Issue '警告' '画像' '印刷範囲の外' $detail -Sheet $Sheet.Name -Cell $Picture.Cell
 }
 
 function ConvertTo-VersionText {
@@ -656,10 +720,9 @@ function Test-Workbook {
             }
         }
 
-        if ($checkSet['Print']) {
-            $stylesPart = @($wbRels | Where-Object { $_.Kind -eq 'styles' } | ForEach-Object { $_.Target })[0]
-            Test-PrintSetup -Sheets $sheets -Mdw (Get-MaxDigitWidth $pkg $stylesPart)
-        }
+        $stylesPart = @($wbRels | Where-Object { $_.Kind -eq 'styles' } | ForEach-Object { $_.Target })[0]
+        if ($checkSet['Print']) { Test-PrintSetup -Sheets $sheets -Mdw (Get-MaxDigitWidth $pkg $stylesPart) }
+        if ($checkSet['Picture']) { Test-Pictures -Package $pkg -Sheets $sheets -Mdw (Get-MaxDigitWidth $pkg $stylesPart) }
 
         # ---- ブック全体
         if ($checkSet['Link']) {
@@ -1132,6 +1195,8 @@ if ($Fix) {
 #       版数       表紙の版数・更新日と、改訂履歴の最後の行・ファイル名の版数の食い違い、改訂履歴の版数の逆戻り
 #       印刷       印刷すると横がはみ出す、印刷範囲の外のデータ、ヘッダー／フッターのファイルの場所（&Z）や TODO、
 #                  用紙のサイズ・向きがシートによって違う（情報）
+#       画像       画像（スクリーンショット）の縦横比の崩れ、元の大きさの 150% 以上への拡大（印刷で粗くなる）、
+#                  印刷範囲からのはみ出し、スクリーンショットの縮尺がシートによって違う（情報）
 #       マクロ     VBA を含むブック（情報）
 #
 #     Word（.docx / .docm）は、Word を使わずに次の項目をチェックします（場所は「本文!段落 12」「本文!表 1 の 2 行目」のように示します）。
@@ -1153,7 +1218,7 @@ if ($Fix) {
 # .PARAMETER Check
 #     チェックする項目。View（体裁）/ Hidden（非表示・隠し文字）/ Comment（コメント・蛍光ペン）/ Revision（Word の変更履歴）/
 #     Word（残っている文言）/ Property（プロパティ）/ Link（外部リンク・名前の定義・テンプレートの場所）/ Error（エラー値）/
-#     Macro（マクロ）/ Print（印刷）/ Version（表紙と改訂履歴の版数）。既定はすべて。
+#     Macro（マクロ）/ Print（印刷）/ Version（表紙と改訂履歴の版数）/ Picture（画像）。既定はすべて。
 #
 # .PARAMETER Words
 #     消し忘れとして探す文言の正規表現（大文字小文字は区別しません）。
