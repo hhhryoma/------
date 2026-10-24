@@ -167,6 +167,20 @@ Test-Case 'Measure-TestQuality: -DesignPath では画面・IF などだけを機
     Assert-Equal '17|規模' ('{0}|{1}' -f @($r | Where-Object Function -eq 'SCR001')[0].Size, @($r | Where-Object Function -eq 'SCR001')[0].Unit)
 }
 
+Test-Case 'Measure-TestQuality: ケースの数が同じ工程は、先に出てきた工程の基準値を使う（PowerShell の版によらない）' {
+    $dir = New-TestDir
+    # 先に出てくる「結合テスト」は、名前の順では「単体テスト」のあと
+    New-SheetBook (Join-Path $dir 'IT_受注.xlsx') @(@{ Name = 'テストケース'; Header = @('No', '機能', '確認内容', '工程', '結果'); Rows = @(
+                @('1', 'SCR001', '確認 1', '結合テスト', 'OK'),
+                @('2', 'SCR001', '確認 2', '単体テスト', 'OK')) })
+    $size = Join-Path $dir 'kloc.csv'
+    @('機能,KLOC', 'SCR001,1.0') | Set-Content -LiteralPath $size -Encoding UTF8
+    $limits = Join-Path $dir 'limits.csv'
+    @('指標,分母,工程,下限,上限', 'テスト密度,KLOC,結合テスト,1,3', 'テスト密度,KLOC,単体テスト,100,200') | Set-Content -LiteralPath $limits -Encoding UTF8
+    $r = @(& $TestQualityTool -Path (Join-Path $dir 'IT_受注.xlsx') -SizeCsv $size -Limits $limits -AsOf '2026-10-25' 6>$null 3>$null | Where-Object { $_.PSObject.TypeNames -contains 'TestQuality.Function' })
+    Assert-Equal 'SCR001|結合テスト|2|基準内' ('{0}|{1}|{2}|{3}' -f $r[0].Function, $r[0].Process, $r[0].TestDensity, $r[0].TestJudgement) '結合テストの基準値（1〜3）と比べる'
+}
+
 Test-Case 'Measure-TestQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestQualityTool
     Assert-Match $h.Synopsis 'テスト'

@@ -271,7 +271,7 @@ Write-Progress -Activity '表示の状態を直しています' -Completed
 
 $results
 Write-Host ''
-$counts = $results | Group-Object Result | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
+$counts = $results | Group-InOrder Result | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
 Write-Host ("{0} ファイル: {1}" -f $files.Count, ($counts -join ' / '))
 if ($BackupDir -and @($results | Where-Object Result -eq '修正').Count -gt 0) { Write-Host "修正前のファイル: $BackupDir" }
 

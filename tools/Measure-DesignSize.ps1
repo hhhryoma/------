@@ -242,7 +242,7 @@ $kinds = @($ruleList | ForEach-Object { $_.Kind } | Select-Object -Unique)
 foreach ($k in $kinds) {
     $ofKind = @($results | Where-Object Kind -eq $k)
     if ($ofKind.Count -eq 0) { continue }
-    foreach ($g in ($ofKind | Group-Object Level)) {
+    foreach ($g in ($ofKind | Group-InOrder Level)) {
         $sizeSum = ($g.Group | Measure-Object Size -Sum).Sum
         $daySum = ($g.Group | Where-Object { $null -ne $_.Days } | Measure-Object Days -Sum).Sum
         $kindTotals.Add([pscustomobject]@{ Kind = $k; Level = $g.Name; Count = $g.Count; Size = $sizeSum; Days = $daySum })

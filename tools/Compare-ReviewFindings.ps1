@@ -346,7 +346,7 @@ if ($byPoint.Count -gt 0) {
     if ($low.Count -gt 0) { Write-Host ('一致率の低い観点: {0}' -f ((@($low | ForEach-Object { '{0} {1}/{2}' -f $_.PointId, $_.Matched, $_.Ai })) -join '・')) }
 }
 if ($proposals.Count -gt 0) {
-    $byKind = @($proposals | Group-Object Kind | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
+    $byKind = @($proposals | Group-InOrder Kind | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })
     Write-Host ('観点表への反映案: {0}' -f ($byKind -join '・'))
 }
 Write-ReadLogSummary $readLog

@@ -343,14 +343,15 @@ function Test-Sheet {
 function Add-MixedIssue {
     #     ブック全体で、同じ目的の値（換算の日数・端数処理の関数・単価）が混在していれば 1 件にまとめて指摘する
     param($Entries, [string] $Level, [string] $Item, [string] $Format)
-    $groups = @($Entries | Group-Object Value)
+    # 同じ数の値は、先に出てきた順（Index）に並べる
+    $groups = @($Entries | Group-InOrder Value)
     if ($groups.Count -lt 2) { return }
-    $parts = @($groups | Sort-Object Count -Descending | ForEach-Object {
+    $parts = @($groups | Sort-Object @{ e = { $_.Count }; Descending = $true }, Index | ForEach-Object {
         $more = ''
         if ($_.Count -gt 1) { $more = ' ほか {0} か所' -f ($_.Count - 1) }
         '{0}: {1}{2}' -f $_.Name, $_.Group[0].Where, $more
     })
-    $minor = @($groups | Sort-Object Count)[0].Group[0]
+    $minor = @($groups | Sort-Object Count, Index)[0].Group[0]
     Add-Issue $Level $Item ($Format -f ($parts -join ' / ')) $minor.Sheet $minor.Cell
 }
 
