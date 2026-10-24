@@ -20,6 +20,8 @@ param(
 
     [string] $Baseline,
 
+    [string] $Recheck,
+
     [ValidateSet('Rows', 'Markdown')]
     [string] $TextFormat = 'Rows',
 
@@ -55,6 +57,18 @@ if ($Glossary) {
     if (-not (Test-Path -LiteralPath $Glossary)) { throw "用語集が見つかりません: $Glossary" }
 }
 if ($Baseline -and ($ImportOnly -or $CheckOnly)) { throw '-Baseline は、依頼を作るとき（-ImportOnly・-CheckOnly 以外）に指定してください。' }
+if ($Recheck -and ($ImportOnly -or $CheckOnly)) { throw '-Recheck は、依頼を作るとき（-ImportOnly・-CheckOnly 以外）に指定してください。' }
+if ($Recheck -and $Baseline) { throw '-Recheck と -Baseline は同時に指定できません（再確認では、指摘のあったシートの全体を渡します）。' }
+if ($Recheck) {
+    $Recheck = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Recheck)
+    # フォルダを指定したら、その中のレビュー結果
+    if (Test-Path -LiteralPath $Recheck -PathType Container) { $Recheck = Join-Path $Recheck 'レビュー結果.xlsx' }
+    if (-not (Test-Path -LiteralPath $Recheck -PathType Leaf)) { throw "前のレビュー結果が見つかりません: $Recheck" }
+    # 前のレビューのフォルダに出力すると、前の指摘一覧（人が書いた対応要否など）を再確認の結果で上書きしてしまう
+    if ([string]::Equals([System.IO.Path]::GetFullPath($Recheck), [System.IO.Path]::GetFullPath((Join-Path $OutDir 'レビュー結果.xlsx')), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "-Recheck の前のレビュー結果と同じフォルダには出力できません（前の指摘一覧を上書きしてしまいます）。-OutDir に別のフォルダを指定してください: $OutDir"
+    }
+}
 if ($Baseline -and @(Get-PathItem $Baseline).Count -eq 0) { throw "前の版の設計書が見つかりません: $Baseline" }
 $promptDir = Join-Path $OutDir 'prompts'
 $answerDir = Join-Path $OutDir 'answers'
@@ -1245,12 +1259,11 @@ function Get-FindingKey {
     return (@($Source, $PointId, $Document, $Location, $Finding) | ForEach-Object { ([string]$_).Replace('↵', '') -replace '\s', '' }) -join '|'
 }
 
-function Read-PreviousResponses {
-    #     前のレビュー結果（指摘一覧）の、人が書く列を読む。
-    #     戻り値: 指摘のキー（Get-FindingKey）→ 値（列名 → 文字）の待ち行列（同じキーが複数あれば上から順）
+function Read-FindingSheet {
+    #     レビュー結果の指摘一覧を、1 行ずつ 見出し → 文字 の辞書にする（判定元の列の無い、前の版のツールのレビュー結果は、どれも AI の指摘）
     param([string] $FilePath)
-    $result = @{}
-    if (-not (Test-Path -LiteralPath $FilePath)) { return $result }
+    $list = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $FilePath)) { return , $list }
     $rows = @{}
     foreach ($h in @(& $searchScript -Pattern '\S' -Path ([System.Management.Automation.WildcardPattern]::Escape($FilePath)) -Target Value -SheetNamePattern '^指摘一覧$' 6>$null 3>$null)) {
         $m = [regex]::Match([string]$h.Cell, '^([A-Z]+)(\d+)$')
@@ -1259,18 +1272,27 @@ function Read-PreviousResponses {
         if (-not $rows.ContainsKey($r)) { $rows[$r] = @{} }
         $rows[$r][$m.Groups[1].Value] = ([string]$h.Text).Replace('↵', "`n")
     }
-    if (-not $rows.ContainsKey(1)) { return $result }
-    $col = @{}
-    foreach ($c in $rows[1].Keys) { $col[$rows[1][$c]] = $c }
+    if (-not $rows.ContainsKey(1)) { return , $list }
+    $header = $rows[1]
     foreach ($r in @($rows.Keys | Where-Object { $_ -gt 1 } | Sort-Object)) {
-        $get = { param([string] $Name) if ($col.ContainsKey($Name) -and $rows[$r].ContainsKey($col[$Name])) { $rows[$r][$col[$Name]] } else { '' } }
+        $o = @{}
+        foreach ($c in $rows[$r].Keys) { if ($header.ContainsKey($c)) { $o[$header[$c]] = $rows[$r][$c] } }
+        if (@($header.Values) -notcontains '判定元') { $o['判定元'] = 'AI' }
+        $list.Add($o)
+    }
+    return , $list
+}
+
+function Read-PreviousResponses {
+    #     前のレビュー結果（指摘一覧）の、人が書く列を読む。
+    #     戻り値: 指摘のキー（Get-FindingKey）→ 値（列名 → 文字）の待ち行列（同じキーが複数あれば上から順）
+    param([string] $FilePath)
+    $result = @{}
+    foreach ($row in (Read-FindingSheet $FilePath)) {
         $values = @{}
-        foreach ($name in $responseColumns) { $v = & $get $name; if ($v) { $values[$name] = $v } }
+        foreach ($name in $responseColumns) { if ($row[$name]) { $values[$name] = $row[$name] } }
         if ($values.Count -eq 0) { continue }
-        # 判定元の列の無い、前の版のツールのレビュー結果は、どれも AI の指摘
-        $source = & $get '判定元'
-        if (-not $col.ContainsKey('判定元')) { $source = 'AI' }
-        $key = Get-FindingKey $source (& $get '観点ID') (& $get '設計書') (& $get '場所') (& $get '指摘内容')
+        $key = Get-FindingKey $row['判定元'] $row['観点ID'] $row['設計書'] $row['場所'] $row['指摘内容']
         if (-not $result.ContainsKey($key)) { $result[$key] = New-Object System.Collections.Generic.Queue[object] }
         $result[$key].Enqueue($values)
     }
@@ -1284,6 +1306,157 @@ function Get-ResponseKind {
     if ($t -match '^(要|必要|対応要|対応する|する|あり|有|○|〇|◯|Y|YES|1)$') { return '要' }
     if ($t -match '^(不要|対応不要|対応しない|しない|なし|無|×|✕|N|NO|0|対象外|取下げ|取り下げ|誤指摘|重複)$') { return '不要' }
     return ''
+}
+
+# ---------------------------------------------------------------- 再確認（-Recheck: 前のレビューの指摘が直ったか）
+
+
+$recheckHeader = @'
+あなたはシステム開発の設計レビュー担当です。下の【前回の指摘】は、前の版の設計書へのレビューの指摘です。
+直したあとの【設計書】を見て、指摘ごとに直っているかを判定し、【回答形式】どおりに結果を出力してください。
+
+【ルール】
+- 判定は 解消／未解消／要確認 のどれかです。
+  - 解消：指摘された問題が直っている。場所・引用は「-」とする。
+  - 未解消：問題が残っている。残っている場所と引用を書く。
+  - 要確認：設計書の記載だけでは判断できない。理由を書く。
+- 【前回の指摘】のすべてについて、必ず 1 行ずつ出力してください。前回の指摘に無い、新しい問題は書かないでください。
+- 場所は「シート名!セル番地」で書いてください。設計書の各行は「行番号| 列:値」の形で、例えば「12| K:必須」なら K12 です。
+- 引用には、場所のセルに書かれている文字をそのまま写してください（長いときは先頭の 30 文字）。空欄のセルを指摘するときは「（空欄）」と書きます。
+- 回答形式の行以外（前置き、まとめ、表の見出し）は出力しないでください。
+
+【回答形式】1 行に 1 件、区切りは半角の「|」
+指摘No | 判定 | 場所 | 引用 | 説明
+（例）
+12 | 解消 | - | - | 桁数が記入された
+15 | 未解消 | 画面項目定義!AB14 | （空欄） | 桁数がまだ空欄のまま
+'@
+$recheckHeader = $recheckHeader.Replace("`r`n", "`n")
+
+function Read-PreviousFindings {
+    #     前のレビュー結果（-Recheck）の、NG・要確認の指摘（対応要否が不要のものは除く）
+    #     戻り値: @(@{ No; Source（判定元）; Rule（ツールの確認の名前）; PointId; Point; Document（設計書）; Location; Finding })
+    param([string] $FilePath)
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($row in (Read-FindingSheet $FilePath)) {
+        if (@('NG', '要確認') -notcontains ([string]$row['判定']).Trim()) { continue }
+        if ((Get-ResponseKind $row['対応要否']) -eq '不要') { continue }
+        $source = ([string]$row['判定元']).Trim()
+        $rule = ''
+        $m = [regex]::Match($source, '^ツール（(.+)）$')
+        if ($m.Success) { $rule = $m.Groups[1].Value }
+        $list.Add([pscustomobject]@{
+                No = ([string]$row['No']).Trim(); Source = $source; Rule = $rule; PointId = [string]$row['観点ID']; Point = [string]$row['観点']
+                Document = [string]$row['設計書']; Location = [string]$row['場所']; Finding = [string]$row['指摘内容']
+            })
+    }
+    return , $list
+}
+
+function Find-CurrentFile {
+    #     前の指摘の設計書（相対パス）に当たる、今の設計書（版数を除いたファイル名で対応付ける）。無ければ $null
+    param([string] $Document, $Files)
+    $key = Get-VersionlessName ([System.IO.Path]::GetFileName($Document))
+    return @($Files | Where-Object { (Get-VersionlessName $_.Name) -eq $key })[0]
+}
+
+function New-RecheckRequests {
+    #     前の指摘（AI の指摘）を、設計書ごとに、指摘のあったシートの全体と一緒に依頼にする（入りきらなければ行で分け、指摘はその行のある部分に入れる）
+    param($Findings, $Files)
+    $requests = New-Object System.Collections.Generic.List[object]
+    $no = 0
+    foreach ($f in $Files) {
+        $mine = @($Findings | Where-Object { $_.Source -eq 'AI' -and $_.Target -eq $f.Path })
+        if ($mine.Count -eq 0) { continue }
+        Write-Host ("  テキスト化: {0}" -f $f.Relative)
+        $all = ConvertTo-DesignText -Cells (Get-ExcelCells -FilePath $f.Path)
+        # 指摘のシート（シートの分からない指摘があれば全シート）
+        $wanted = @{}
+        foreach ($x in $mine) {
+            $loc = Resolve-Location -Location $x.Location -SheetNames @($all.Keys)
+            $x | Add-Member -NotePropertyName Sheet -NotePropertyValue $(if ($loc) { $loc.Sheet } else { '' }) -Force
+            $x | Add-Member -NotePropertyName Row -NotePropertyValue $(if ($loc -and $loc.Cell -match '^[A-Z]+(\d+)$') { [int]$Matches[1] } else { 0 }) -Force
+            if ($loc) { $wanted[$loc.Sheet] = $true } else { foreach ($k in $all.Keys) { $wanted[$k] = $true } }
+        }
+        $texts = [ordered]@{}
+        foreach ($k in $all.Keys) { if ($wanted.ContainsKey($k)) { $texts[$k] = $all[$k] } }
+        $word = Test-WordPath $f.Path
+        $listText = { param($xs) ("【前回の指摘】`n指摘No | 観点 | 場所（前の版） | 指摘内容`n" + ((@($xs | ForEach-Object { '{0} | {1} | {2} | {3}' -f $_.No, ($_.Point -replace '\s+', ' '), $_.Location, ($_.Finding -replace '\s+', ' ') })) -join "`n") + "`n") }
+        $build = {
+            param($xs, [string] $Body, [string] $PartNote)
+            $h = $recheckHeader
+            if ($word) { $h = $h.Replace("`n- 引用には", "`n" + $wordRule + "`n- 引用には") }
+            $h + "`n`n" + (& $listText $xs) + "`n【設計書】" + $f.Name + $PartNote + "`n" + $Body
+        }
+        $docLength = 0
+        foreach ($t in $texts.Values) { $docLength += $t.Length }
+        $fixedLen = (& $build $mine '' '（9/9 の一部。この部分に無い指摘は要確認にしてください）').Length
+        $budget = [math]::Max(1000, $MaxChars - $fixedLen)
+        if ((& $build $mine '' '').Length + $docLength -le $MaxChars) { $chunks = Split-SheetTexts -SheetTexts $texts -Budget ([int]::MaxValue) }
+        else { $chunks = Split-SheetTexts -SheetTexts $texts -Budget $budget }
+        # 部分ごとの、シート → 行（その部分にある行）
+        $parts = @()
+        foreach ($c in $chunks) {
+            $rows = @{}; $sheet = ''
+            foreach ($line in ($c -split "`n")) {
+                $hm = [regex]::Match($line, '^### シート: (.+?)(?:（続き）)?$')
+                if ($hm.Success) { $sheet = $hm.Groups[1].Value; if (-not $rows.ContainsKey($sheet)) { $rows[$sheet] = @{} }; continue }
+                $rm = [regex]::Match($line, '^(\d+)\|')
+                if ($rm.Success -and $sheet) { $rows[$sheet][[int]$rm.Groups[1].Value] = $true }
+            }
+            $parts += , $rows
+        }
+        $assigned = @{}
+        foreach ($x in $mine) {
+            $at = -1
+            for ($i = 0; $i -lt $parts.Count; $i++) {
+                if (-not $x.Sheet -or -not $parts[$i].ContainsKey($x.Sheet)) { continue }
+                if ($at -lt 0) { $at = $i }
+                if ($x.Row -gt 0 -and $parts[$i][$x.Sheet].ContainsKey($x.Row)) { $at = $i; break }
+            }
+            if ($at -lt 0) { $at = 0 }
+            if (-not $assigned.ContainsKey($at)) { $assigned[$at] = New-Object System.Collections.Generic.List[object] }
+            $assigned[$at].Add($x)
+        }
+        for ($i = 0; $i -lt $chunks.Count; $i++) {
+            if (-not $assigned.ContainsKey($i)) { continue }
+            $xs = $assigned[$i]
+            $partNote = ''
+            if ($chunks.Count -gt 1) { $partNote = '（{0}/{1} の一部。この部分に無い指摘は要確認にしてください）' -f ($i + 1), $chunks.Count }
+            $no++
+            $prompt = & $build $xs $chunks[$i] $partNote
+            $requests.Add([pscustomobject]@{
+                    Id = 'R{0:000}' -f $no; File = $f.Path; Relative = $f.Relative; Part = ('{0}/{1}' -f ($i + 1), $chunks.Count)
+                    PointIds = @(); FindingNos = @($xs | ForEach-Object { $_.No }); Kind = '再確認'; Sheets = @($all.Keys)
+                    Chars = $prompt.Length; Hash = (Get-TextHash $prompt); Prompt = $prompt
+                })
+        }
+    }
+    return , $requests
+}
+
+function ConvertFrom-RecheckAnswer {
+    #     再確認の回答から「指摘No | 判定 | 場所 | 引用 | 説明」の行を取り出す（判定は 解消・未解消・要確認）
+    param([string] $Text, [string[]] $Nos)
+    $entries = New-Object System.Collections.Generic.List[object]
+    foreach ($raw in ($Text -split "`r?`n")) {
+        $line = $raw.Trim()
+        if (-not $line -or $line.StartsWith('```') -or $line -match '^\|?[\s:\-|]+\|?$') { continue }
+        if ($line.Contains('|')) { $fields = $line.Trim('|').Split('|') } elseif ($line.Contains("`t")) { $fields = $line.Split("`t") } else { continue }
+        $fields = @($fields | ForEach-Object { $_.Trim() })
+        if ($fields.Count -lt 2) { continue }
+        $no = ($fields[0].Trim('*', ' ') -replace '^(No\.?|NO\.?|№)\s*', '').Normalize($nfkc)
+        if ($Nos -notcontains $no) { continue }
+        $v = $fields[1].Trim('*', ' ').Normalize($nfkc)
+        if ($v -match '^(未解消|未対応|NG|×|残)') { $verdict = '未解消' }
+        elseif ($v -match '^(解消|対応済|OK|○|〇|直)') { $verdict = '解消' }
+        else { $verdict = '要確認' }
+        $get = { param($i) if ($fields.Count -gt $i -and $fields[$i] -ne '-' -and $fields[$i] -ne '－') { $fields[$i] } else { '' } }
+        $note = & $get 4
+        if ($fields.Count -gt 5) { $note = ($fields[4..($fields.Count - 1)] -join ' | ') }
+        $entries.Add([pscustomobject]@{ No = $no; Verdict = $verdict; Location = (& $get 2); Quote = (& $get 3).Trim('「', '」', '"', '“', '”'); Note = $note })
+    }
+    return , $entries
 }
 
 # ---------------------------------------------------------------- 依頼（プロンプト）の作成
@@ -1424,6 +1597,7 @@ if ($ImportOnly) {
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw "依頼の一覧がありません。先に -PromptOnly などで依頼を作成してください: $manifestPath" }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $requests = @($manifest.Requests)
+    if ($manifest.PSObject.Properties['Recheck'] -and $manifest.Recheck) { $recheckFindings = @($manifest.Recheck.Findings); $Recheck = $manifest.Recheck.Path }
     # 前の形の依頼（引用の列の無い回答形式）は、引用を読まない
     $quoteFormat = [bool]($manifest.PSObject.Properties['AnswerFormat'] -and $manifest.AnswerFormat -eq $answerFormat)
     if (-not $designFiles) {
@@ -1472,7 +1646,18 @@ else {
         if ($TextFormat -eq 'Markdown') { Write-Warning '前の版から変わった部分は、行の形（-TextFormat Rows）で渡します（Markdown は、新しい設計書と参照資料に使います）' }
     }
     Write-Host '依頼を作成しています...'
-    $requests = (New-ReviewRequests -Points $points -Files $designFiles).ToArray()
+    $recheckFindings = $null
+    if ($Recheck) {
+        # 前のレビューの NG・要確認の指摘を、今の設計書と対応付けて、直ったかを AI に確かめてもらう（ツールの指摘はツールで確かめ直す）
+        $recheckFindings = Read-PreviousFindings $Recheck
+        foreach ($x in $recheckFindings) {
+            $cur = Find-CurrentFile $x.Document $designFiles
+            $x | Add-Member -NotePropertyName Target -NotePropertyValue $(if ($cur) { $cur.Path } else { '' }) -Force
+        }
+        Write-Host ("  前のレビューの指摘: {0} 件（AI {1} 件・ツール {2} 件。今の設計書が見つからない指摘 {3} 件）" -f $recheckFindings.Count, @($recheckFindings | Where-Object Source -eq 'AI').Count, @($recheckFindings | Where-Object Rule).Count, @($recheckFindings | Where-Object { -not $_.Target }).Count)
+        $requests = (New-RecheckRequests -Findings $recheckFindings -Files $designFiles).ToArray()
+    }
+    else { $requests = (New-ReviewRequests -Points $points -Files $designFiles).ToArray() }
 
     # 前回の依頼と内容が変わったものは、古い回答を使わない
     $oldHash = @{}
@@ -1493,15 +1678,18 @@ else {
     $manifest = [pscustomobject]@{
         Created  = (Get-Date).ToString('yyyy/MM/dd HH:mm:ss')
         MaxChars = $MaxChars
-        Requests = @($requests | Select-Object Id, File, Relative, Part, PointIds, Sheets, Chars, Hash)
+        Requests = @($requests | Select-Object Id, File, Relative, Part, PointIds, Sheets, Chars, Hash, @{ n = 'Kind'; e = { [string]$_.Kind } }, @{ n = 'FindingNos'; e = { @($_.FindingNos) } })
         AnswerFormat = $answerFormat
+        # -Recheck: 前のレビューの指摘（-ImportOnly で再確認の結果を作るため）
+        Recheck  = $(if ($Recheck) { [pscustomobject]@{ Path = $Recheck; Findings = @($recheckFindings | Select-Object No, Source, Rule, PointId, Point, Document, Location, Finding, Target) } } else { $null })
         # -ImportOnly でツールの確認をする設計書（-Baseline のときは前の版と比べた結果も）
         Files    = @($designFiles | Select-Object Path, Name, Relative, @{ n = 'Diff'; e = { [string]$_.Diff } }, @{ n = 'Baseline'; e = { [string]$_.Baseline } })
     }
     [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5), $utf8Bom)
 
     Write-Host ''
-    if ($requests.Count -eq 0) { Write-Host 'AI に依頼する観点はありません（どの観点も、確かめ方がツールです）。' }
+    if ($requests.Count -eq 0 -and $Recheck) { Write-Host 'AI に確かめてもらう指摘はありません。' }
+    elseif ($requests.Count -eq 0) { Write-Host 'AI に依頼する観点はありません（どの観点も、確かめ方がツールです）。' }
     else { Write-Host ("依頼 {0} 件を作成しました（1 件あたり最大 {1} 文字）: {2}" -f $requests.Count, (($requests | Measure-Object Chars -Maximum).Maximum), $promptDir) }
 }
 
@@ -1539,6 +1727,13 @@ function Test-PromptText {
 function Import-Answer {
     #     回答を読み取って answers に保存し、件数を知らせる。読み取れなければ $false
     param($Request, [string] $Answer)
+    if ($Request.Kind -eq '再確認') {
+        $checked = ConvertFrom-RecheckAnswer -Text $Answer -Nos $Request.FindingNos
+        if ($checked.Count -eq 0) { return $false }
+        [System.IO.File]::WriteAllText((Join-Path $answerDir "$($Request.Id).txt"), $Answer, $utf8Bom)
+        Write-Host ("  取り込みました: 解消 {0} 件 / 未解消 {1} 件 / 要確認 {2} 件" -f @($checked | Where-Object Verdict -eq '解消').Count, @($checked | Where-Object Verdict -eq '未解消').Count, @($checked | Where-Object Verdict -eq '要確認').Count)
+        return $true
+    }
     $entries = ConvertFrom-Answer -Text $Answer -PointIds $Request.PointIds -Quote:$quoteFormat
     if ($entries.Count -eq 0) { return $false }
     [System.IO.File]::WriteAllText((Join-Path $answerDir "$($Request.Id).txt"), $Answer, $utf8Bom)
@@ -1595,7 +1790,9 @@ if (-not $PromptOnly -and -not $ImportOnly) {
     foreach ($r in $pending) {
         $i++
         $prompt = [System.IO.File]::ReadAllText((Join-Path $promptDir "$($r.Id).txt"))
-        $header = "[{0}/{1}] {2}  {3}（{4}）観点 {5}  {6} 文字 → クリップボードにコピーしました" -f $i, $pending.Count, $r.Id, $r.Relative, $r.Part, ($r.PointIds -join ','), $r.Chars
+        $what = '観点 ' + ($r.PointIds -join ',')
+        if ($r.Kind -eq '再確認') { $what = '指摘 ' + ($r.FindingNos -join ',') }
+        $header = "[{0}/{1}] {2}  {3}（{4}）{5}  {6} 文字 → クリップボードにコピーしました" -f $i, $pending.Count, $r.Id, $r.Relative, $r.Part, $what, $r.Chars
         if ($watch) {
             Set-Clipboard -Value $prompt
             Write-Host ''
@@ -1628,6 +1825,115 @@ if ($PromptOnly) {
     Write-Host ("  1. {0} の R001.txt から順に、内容を Copilot に貼り付けて送信する" -f $promptDir)
     Write-Host ("  2. 回答をコピーし、{0} に同じ名前（R001.txt など）で UTF-8 のテキストとして保存する" -f $answerDir)
     Write-Host '  3. -ImportOnly を付けて再実行し、レビュー結果を作る'
+    return
+}
+
+# ---------------------------------------------------------------- 再確認の結果
+
+
+if ($Recheck) {
+    # AI の指摘: 回答から
+    $result = @{}
+    $requestRows = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $requests) {
+        $ansPath = Join-Path $answerDir "$($r.Id).txt"
+        $state = '未回答'
+        if (Test-Path -LiteralPath $ansPath) {
+            $state = '回答済み'
+            foreach ($e in (ConvertFrom-RecheckAnswer -Text ([System.IO.File]::ReadAllText($ansPath)) -Nos @($r.FindingNos))) {
+                if (-not $result.ContainsKey($e.No)) { $result[$e.No] = [pscustomobject]@{ Entry = $e; Request = $r } }
+            }
+        }
+        $requestRows.Add(@{ Values = @($r.Id, $r.Relative, $r.Part, (@($r.FindingNos) -join ', '), $r.Chars, $state, "prompts\$($r.Id).txt") })
+    }
+    # ツールの指摘: 今の設計書をツールで確かめ直し、同じ確認・同じ内容の指摘が残っているか
+    $toolNow = $null
+    $files = @($designFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_.Path) })
+    if (@($recheckFindings | Where-Object { $_.Rule -and $_.Target }).Count -gt 0) {
+        Write-Host ''
+        Write-Host 'ツールで確かめ直しています...'
+        $toolNow = Invoke-ToolChecks -Points @($points | Where-Object { $_.ByTool }) -Files $files
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    $counts = [ordered]@{ '解消' = 0; '未解消' = 0; '要確認' = 0; '未回答' = 0; '設計書なし' = 0 }
+    $quoteCells = @{}
+    foreach ($x in $recheckFindings) {
+        $verdict = '未回答'; $location = ''; $quote = ''; $note = ''; $requestId = ''; $loc = $null
+        $cur = @($files | Where-Object { $_.Path -eq $x.Target })[0]
+        if (-not $cur) { $verdict = '設計書なし'; $note = '今の設計書に、この設計書（版数を除いた名前）が見つかりません' }
+        elseif ($x.Rule) {
+            $requestId = 'ツール'
+            if (-not $toolNow -or $toolNow.Failed.ContainsKey($x.Rule)) { $note = 'ツールで確かめられませんでした' }
+            else {
+                $same = @($toolNow.Findings | Where-Object { $_.Rule -eq $x.Rule -and $_.Path -eq $cur.Path -and $_.Detail -eq $x.Finding })[0]
+                if ($same) {
+                    $verdict = '未解消'
+                    $location = $same.Sheet
+                    if ($same.Cell) { $location = '{0}!{1}' -f $same.Sheet, $same.Cell }
+                    $loc = Resolve-Location -Location $location -SheetNames @($same.Sheet)
+                    $note = '機械のチェック（{0}）で、同じ指摘がまだあります' -f $x.Rule
+                }
+                else { $verdict = '解消'; $note = '機械のチェック（{0}）で、同じ指摘が無くなりました' -f $x.Rule }
+            }
+        }
+        elseif ($result.ContainsKey($x.No)) {
+            $hit = $result[$x.No]
+            $verdict = $hit.Entry.Verdict; $location = $hit.Entry.Location; $quote = $hit.Entry.Quote; $note = $hit.Entry.Note; $requestId = $hit.Request.Id
+            $loc = Resolve-Location -Location $location -SheetNames @($hit.Request.Sheets)
+            # 残っている場所の引用を確かめ、違えば引用のあるセルに直す
+            if ($verdict -eq '未解消' -and $quote) {
+                if (-not $quoteCells.ContainsKey($cur.Path)) { $quoteCells[$cur.Path] = Read-QuoteCells $cur.Path }
+                $qr = Resolve-Quote $quoteCells[$cur.Path] $quote $loc ''
+                if ($qr.State -eq '場所を直した') { $note = ('{0}（AI の場所 {1} を、引用のあるセルに直しました）' -f $note, $location).Trim(); $location = '{0}!{1}' -f $qr.Sheet, $qr.Cell; $loc = [pscustomobject]@{ Sheet = $qr.Sheet; Cell = $qr.Cell } }
+                elseif ($qr.State -eq '見つからない') { $note = ('{0}（{1}）' -f $note, $qr.Note).Trim() }
+            }
+        }
+        else {
+            $requestId = @($requests | Where-Object { @($_.FindingNos) -contains $x.No } | ForEach-Object { $_.Id })[0]
+        }
+        $counts[$verdict]++
+        $row = @{ Values = @($x.No, $x.Source, $x.PointId, $x.Point, $x.Document, $x.Location, $x.Finding, $verdict, $location, $quote, $note, [string]$requestId) }
+        if ($cur) {
+            # リンクは今の設計書の、残っている場所（場所の列）。無ければ前の場所（前の場所の列。Word の文書は開くだけ）
+            $column = 8
+            if (-not $loc) {
+                $column = 5
+                $sheetNames = @(@($requests | Where-Object { $_.File -eq $cur.Path } | Select-Object -First 1 | ForEach-Object { $_.Sheets }))
+                if ($sheetNames.Count -eq 0) {
+                    if (-not $quoteCells.ContainsKey($cur.Path)) { $quoteCells[$cur.Path] = Read-QuoteCells $cur.Path }
+                    $sheetNames = @($quoteCells[$cur.Path].Keys)
+                }
+                $loc = Resolve-Location -Location $x.Location -SheetNames $sheetNames
+            }
+            $target = ''
+            if ($loc -and -not (Test-WordPath $cur.Path)) { $target = "'{0}'!{1}" -f $loc.Sheet.Replace("'", "''"), $loc.Cell }
+            elseif (-not $loc) { $column = 4 }
+            $row.Link = @{ Column = $column; Path = $cur.Path; Location = $target }
+        }
+        $rows.Add($row)
+    }
+    $sheets = @(
+        @{
+            Name = '再確認'
+            Columns = @(
+                @{ Header = '前のNo'; Width = 7 }, @{ Header = '判定元'; Width = 12 }, @{ Header = '観点ID'; Width = 8 }, @{ Header = '観点'; Width = 30 },
+                @{ Header = '設計書'; Width = 30 }, @{ Header = '前の場所'; Width = 20 }, @{ Header = '前の指摘内容'; Width = 40 }, @{ Header = '結果'; Width = 9 },
+                @{ Header = '場所'; Width = 20 }, @{ Header = '引用'; Width = 20 }, @{ Header = '説明'; Width = 40 }, @{ Header = '依頼No'; Width = 8 })
+            Rows = $rows
+        },
+        @{
+            Name = '依頼一覧'
+            Columns = @(
+                @{ Header = '依頼No'; Width = 8 }, @{ Header = '設計書'; Width = 45 }, @{ Header = '分割'; Width = 6 }, @{ Header = '指摘No'; Width = 30 },
+                @{ Header = '文字数'; Width = 8 }, @{ Header = '状態'; Width = 9 }, @{ Header = 'プロンプト'; Width = 18 })
+            Rows = $requestRows
+        }
+    )
+    try { Export-Workbook -Sheets $sheets -FilePath $reportPath }
+    catch { throw ("レビュー結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $reportPath, $_.Exception.Message) }
+    Write-Host ''
+    Write-Host ("再確認: {0}" -f (@($counts.Keys | Where-Object { $counts[$_] -gt 0 } | ForEach-Object { '{0} {1}' -f $_, $counts[$_] }) -join '・'))
+    Write-Host "レビュー結果: $reportPath"
     return
 }
 
@@ -1986,6 +2292,13 @@ Write-Host "レビュー結果: $reportPath"
 #       Watch        クリップボードを見張り、回答がコピーされたら取り込んで次の依頼に進む。s キーでスキップ、q キーで中断
 #       Enter        回答をコピーして Enter を押す（s・q を入れて Enter でスキップ・中断）
 #
+# .PARAMETER Recheck
+#     前のレビュー結果（レビュー結果.xlsx か、それのあるフォルダ）。設計書を直したあとに、前の NG・要確認の指摘
+#     （対応要否が不要のものを除く）が直ったかを確かめます。AI の指摘は、指摘のあったシートと一緒に AI に渡して
+#     解消／未解消／要確認を判定させ、ツールの指摘はツールで確かめ直します。結果は「再確認」のシートに出します。
+#     設計書は、版数を除いたファイル名で前の指摘と対応付けます。-OutDir には前のレビューとは別のフォルダを指定します。
+#     -Baseline とは同時に使えません。
+#
 # .PARAMETER TextFormat
 #     設計書を AI に渡すときのテキストの形。Rows（既定）は「行番号| 列:値 | 列:値」の行の形、Markdown は
 #     Export-ExcelToMarkdown.ps1 と同じ形（項目定義などの表は Markdown の表、「■」の行は小見出し、それ以外は箇条書き）に、
@@ -2004,6 +2317,10 @@ Write-Host "レビュー結果: $reportPath"
 # .EXAMPLE
 #     # 観点表を編集したあと、書き方の誤りがないか確かめる
 #     .\Invoke-DesignReview.ps1 D:\Design\詳細設計 -CheckOnly
+#
+# .EXAMPLE
+#     # 設計書を直したあと、前のレビューの指摘が直ったかを確かめる
+#     .\Invoke-DesignReview.ps1 D:\Design\v1.1 -Recheck D:\design-review\レビュー結果.xlsx -OutDir D:\design-review-再確認
 #
 # .EXAMPLE
 #     # プロンプトをファイルで受け渡す

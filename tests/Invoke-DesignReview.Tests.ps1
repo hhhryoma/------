@@ -445,6 +445,50 @@ C03 | NG | イベント定義!J9 | 新規登録ボタン押下 | 「押下」と
     Assert-Match $byId['C02']['J'] '対応要否（要・不要）を書くと'
 }
 
+Test-Case 'Invoke-DesignReview: -Recheck で、前のレビューの NG・要確認の指摘が直ったかを確かめる（AI の指摘は AI に、ツールの指摘はツールで）' {
+    $dir = Copy-Fixture $designDir
+    $first = Join-Path $dir '1回目'
+    $null = & $Review -Path $dir -OutDir $first -PromptOnly 6>$null 3>$null
+    Write-Answer $first 'R002' $answerTable
+    $null = & $Review -OutDir $first -ImportOnly 6>$null 3>$null
+    $report = Join-Path $first 'レビュー結果.xlsx'
+    $f = Read-XlsxSheet -Path $report -Index 1
+    Assert-Equal @('S01', 'S06', 'C03', 'S03', 'S03', 'S03') @(2..7 | ForEach-Object { $f.Rows[$_]['E'] })
+    # C03（No 3）は対応しない。SCR002 の希望納品日の初期値を直す
+    Set-CellValues $report '指摘一覧' @{ O4 = '不要' }
+    Set-CellValues (Join-Path $dir 'DD02_画面設計書_SCR002_受注登録.xlsx') '画面項目定義' @{ AF10 = 'なし' }
+
+    $second = Join-Path $dir '再確認'
+    $text = Get-HostText { & $Review -Path $dir -OutDir $second -Recheck $first -PromptOnly }
+    Assert-Match $text '前のレビューの指摘: 5 件（AI 2 件・ツール 3 件。今の設計書が見つからない指摘 0 件）' '対応要否が不要の指摘は除く'
+    $m = Get-Manifest $second
+    Assert-Equal 1 @($m.Requests).Count 'AI の指摘のある設計書だけ'
+    $p = [System.IO.File]::ReadAllText((Join-Path $second 'prompts/R001.txt'))
+    Assert-Match $p '【前回の指摘】\n指摘No \| 観点 \| 場所（前の版） \| 指摘内容\n1 \| 入力項目の定義に漏れがない \| 画面項目定義!M11 \| 受注ステータスの型が未定義\n2 \| 処理手順と異常時の動きが書かれている \| イベント定義!P8 \| クリア時の動きが不明\n'
+    Assert-Match $p '\n### シート: 画面項目定義\n' '指摘のあったシート'
+    Assert-NotMatch $p '### シート: 画面概要' '指摘の無いシートは渡さない'
+
+    Write-Answer $second 'R001' @'
+1 | 解消 | - | - | 型が書かれた
+2 | 未解消 | イベント定義!P7 | 検索条件を初期表示の状態に戻し | クリア後の扱いがまだ書かれていない
+'@
+    $text = Get-HostText { & $Review -Path $dir -OutDir $second -ImportOnly }
+    Assert-Match $text '再確認: 解消 2・未解消 3'
+    $r = Read-XlsxSheet -Path (Join-Path $second 'レビュー結果.xlsx') -Index 1
+    Assert-Equal @('再確認', '依頼一覧') $r.Sheets
+    Assert-Equal @(
+        '1|AI|S01|解消||R001',
+        '2|AI|S06|未解消|イベント定義!P8|R001',
+        '4|ツール（初期値）|S03|解消||ツール',
+        '5|ツール（初期値）|S03|未解消|画面項目定義!AF12|ツール',
+        '6|ツール（初期値）|S03|未解消|画面項目定義!AF13|ツール') @(2..6 | ForEach-Object { $x = $r.Rows[$_]; '{0}|{1}|{2}|{3}|{4}|{5}' -f $x['A'], $x['B'], $x['C'], $x['H'], $x['I'], $x['L'] })
+    Assert-Match $r.Rows[3]['K'] '引用のあるセルに直しました' '残っている場所の引用も確かめる'
+    Assert-True (@($r.Links | Where-Object { $_.Location -eq "'イベント定義'!P8" }).Count -eq 1) '残っている場所へのリンク'
+    Assert-Throws { & $Review -Path $dir -OutDir $second -Recheck $first -Baseline $first 6>$null } '同時に指定できません'
+    Assert-Throws { & $Review -Path $dir -OutDir $first -Recheck $report 6>$null } '別のフォルダを指定してください'
+    Assert-Equal @('指摘一覧', '観点消化状況', '依頼一覧', '観点別の採用率') (Read-XlsxSheet -Path $report -Index 1).Sheets '前のレビュー結果は上書きしない'
+}
+
 Test-Case 'Invoke-DesignReview: 設計書・観点が変わった依頼の古い回答は退避する' {
     $dir = New-TestDir
     $null = & $Review -Path $designDir -OutDir $dir -PromptOnly 6>$null
