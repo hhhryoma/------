@@ -77,7 +77,7 @@ function Save-InstallInfo {
     #     配布元・中身の目印・最後に確かめた日時と、「送る」の登録の指定（更新のときに同じ指定で登録し直す）
     param([string] $From, [string] $Fingerprint, [datetime] $Checked)
     $info = [ordered]@{
-        Source = $From; Fingerprint = $Fingerprint; Installed = (Get-Date).ToString('yyyy/MM/dd HH:mm:ss'); LastCheck = $Checked.ToString('yyyy-MM-ddTHH:mm:ss')
+        Source = $From; Fingerprint = $Fingerprint; Installed = (Get-Date).ToString('yyyy/MM/dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture); LastCheck = $Checked.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
         Action = @($Action); OutDir = $OutDir; SendToDir = $SendToDir; NoSendTo = [bool]$NoSendTo; ShortcutDir = $ShortcutDir; Desktop = [bool]$Desktop
     }
     [System.IO.File]::WriteAllText($infoPath, ($info | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))

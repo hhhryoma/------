@@ -55,15 +55,17 @@ if (-not $Title) { $Title = '週次報告' }
 Update-TypeData -TypeName 'WeeklyReport.Item' -DefaultDisplayPropertySet Owner, State, Kind, Title, Date -Force -WhatIf:$false
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
+# 日付は、Windows の地域の設定（和暦など）によらず西暦で書く
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
 $AsOf = $AsOf.Date
 if ($PSBoundParameters.ContainsKey('Since')) { $Since = $Since.Date } else { $Since = $AsOf.AddDays(-6) }
-if ($Since -gt $AsOf) { throw ('-Since（{0:yyyy/MM/dd}）が -AsOf（{1:yyyy/MM/dd}）より後です' -f $Since, $AsOf) }
+if ($Since -gt $AsOf) { throw ('-Since（{0}）が -AsOf（{1}）より後です' -f $Since.ToString('yyyy/MM/dd', $invariant), $AsOf.ToString('yyyy/MM/dd', $invariant)) }
 # 来週: 基準日の翌日から 7 日
 $nextStart = $AsOf.AddDays(1)
 $nextEnd = $AsOf.AddDays(7)
 $maxListed = 10
 
-$reportName = '{0}_{1}' -f $Title, $AsOf.ToString('yyyyMMdd')
+$reportName = '{0}_{1}' -f $Title, $AsOf.ToString('yyyyMMdd', $invariant)
 $outXlsx = $null; $outText = $null; $outOwnerDir = $null
 if ($OutDir) {
     $outXlsx = Join-Path $OutDir ($reportName + '.xlsx')
@@ -425,7 +427,7 @@ foreach ($k in $givenKinds) {
 }
 
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
-$dateText = $AsOf.ToString('yyyy/MM/dd')
+$dateText = $AsOf.ToString('yyyy/MM/dd', $invariant)
 $history = New-Object System.Collections.Generic.List[object]
 $previousDate = $null
 $historyDates = @()
@@ -460,7 +462,7 @@ function Format-Count {
 
 
 $lines = New-Object System.Collections.Generic.List[string]
-$lines.Add(('{0}（{1}～{2}）' -f $Title, $Since.ToString('yyyy/MM/dd'), $AsOf.ToString('yyyy/MM/dd')))
+$lines.Add(('{0}（{1}～{2}）' -f $Title, $Since.ToString('yyyy/MM/dd', $invariant), $AsOf.ToString('yyyy/MM/dd', $invariant)))
 function Add-List {
     #     一覧を最大 $maxListed 件まで書き、残りは「ほか N 件」にする
     param($List, [scriptblock] $Format, [string] $Indent = '  ')
@@ -579,7 +581,7 @@ function Format-PlaceText {
 function Format-DateCell {
     param($Date)
     if ($null -eq $Date) { return '' }
-    return $Date.ToString('yyyy/MM/dd')
+    return $Date.ToString('yyyy/MM/dd', $invariant)
 }
 
 if ($OutDir) {
@@ -685,7 +687,7 @@ if ($OutDir) {
     foreach ($o in $owners) {
         $ownerLines = New-Object System.Collections.Generic.List[string]
         if ($o.Owner -ne $noOwner) { $ownerLines.Add(('{0} さん' -f $o.Owner)); $ownerLines.Add('') }
-        $ownerLines.Add(('{0}（{1}～{2}）の、{3}の分です。' -f $Title, $Since.ToString('yyyy/MM/dd'), $AsOf.ToString('yyyy/MM/dd'), $(if ($o.Owner -eq $noOwner) { '担当者が決まっていないもの' } else { '担当' })))
+        $ownerLines.Add(('{0}（{1}～{2}）の、{3}の分です。' -f $Title, $Since.ToString('yyyy/MM/dd', $invariant), $AsOf.ToString('yyyy/MM/dd', $invariant), $(if ($o.Owner -eq $noOwner) { '担当者が決まっていないもの' } else { '担当' })))
         foreach ($section in @(@('遅延・期限切れ', 0, 0), @('来週まで', 1, 2), @('そのほかの未完了', 3, 3))) {
             $list = @($o.Items | Where-Object { $_.Rank -ge $section[1] -and $_.Rank -le $section[2] })
             if ($list.Count -eq 0) { continue }

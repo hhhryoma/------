@@ -28,6 +28,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
+# 日付は、Windows の地域の設定（和暦など）によらず西暦で書く
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
 if (-not $Headers) { $Headers = Join-Path $PSScriptRoot 'progress/工数実績の見出し.csv' }
 foreach ($name in @('Headers', 'Holidays', 'OutXlsx')) {
@@ -137,13 +139,13 @@ foreach ($g in @($entries | Group-Object Owner | Sort-Object Name)) {
     $byWeek = @{}
     foreach ($e in $g.Group) {
         if (-not $e.Date) { continue }
-        $k = (& $monday $e.Date).ToString('yyyy/MM/dd')
+        $k = (& $monday $e.Date).ToString('yyyy/MM/dd', $invariant)
         if (-not $byWeek.ContainsKey($k)) { $byWeek[$k] = 0.0 }
         $byWeek[$k] += $e.Hours
     }
     $values = @($g.Name)
     foreach ($w in $weekStarts) {
-        $h = $byWeek[$w.ToString('yyyy/MM/dd')]
+        $h = $byWeek[$w.ToString('yyyy/MM/dd', $invariant)]
         $values += $(if ($h) { [double][math]::Round($h / $perUnit, 2, $away) } else { [double]0 })
     }
     $values += [double][math]::Round((($g.Group | Measure-Object Hours -Sum).Sum) / $perUnit, 2, $away)
@@ -180,7 +182,7 @@ if ($OutXlsx) {
     $u = '（' + $Unit + '）'
     $sheets = @(
         @{ Name = 'タスク'; Columns = @(@{ Header = 'WBS'; Width = 8 }, @{ Header = 'タスク'; Width = 30 }, @{ Header = '担当'; Width = 12 }, @{ Header = '予定' + $u; Width = 10 }, @{ Header = '実績' + $u; Width = 10 }, @{ Header = '消化率'; Width = 8 }, @{ Header = '進捗率'; Width = 8 }, @{ Header = '完了見込' + $u; Width = 13 }, @{ Header = '判定'; Width = 12 }, @{ Header = '状態'; Width = 10 }, @{ Header = '場所'; Width = 30 }); Rows = $taskRows },
-        @{ Name = '担当者×週'; Columns = @(@(@{ Header = '担当'; Width = 14 }) + @($weekStarts | ForEach-Object { @{ Header = $_.ToString('yyyy/MM/dd'); Width = 11 } }) + @(@{ Header = '合計'; Width = 9 })); Rows = $ownerRows })
+        @{ Name = '担当者×週'; Columns = @(@(@{ Header = '担当'; Width = 14 }) + @($weekStarts | ForEach-Object { @{ Header = $_.ToString('yyyy/MM/dd', $invariant); Width = 11 } }) + @(@{ Header = '合計'; Width = 9 })); Rows = $ownerRows })
     if ($Wbs) { $sheets += @{ Name = 'WBS に無い作業'; Columns = @(@{ Header = 'WBS 番号・作業'; Width = 36 }, @{ Header = '実績' + $u; Width = 10 }, @{ Header = '行'; Width = 6 }, @{ Header = '担当'; Width = 30 }, @{ Header = '場所'; Width = 30 }); Rows = $otherRows } }
     $sheets += New-ReadLogSheet $readLog
     try { Export-Workbook -FilePath $OutXlsx -Sheets $sheets }
@@ -193,9 +195,9 @@ if ($OutXlsx) {
 Write-Host ''
 Write-ReadLogSummary $readLog
 $range = ''
-if ($dated.Count -gt 0) { $range = '{0}～{1}・' -f (@($dated | Sort-Object Date)[0].Date.ToString('yyyy/MM/dd')), (@($dated | Sort-Object Date)[-1].Date.ToString('yyyy/MM/dd')) }
+if ($dated.Count -gt 0) { $range = '{0}～{1}・' -f (@($dated | Sort-Object Date)[0].Date.ToString('yyyy/MM/dd', $invariant)), (@($dated | Sort-Object Date)[-1].Date.ToString('yyyy/MM/dd', $invariant)) }
 Write-Host ('工数の実績: {0} 時間（{1} 人日。{2}{3} 人・{4} 行）' -f (Format-Number $totalHours), (Format-Number ($totalHours / $HoursPerDay)), $range, @($entries | ForEach-Object { $_.Owner } | Select-Object -Unique).Count, $entries.Count)
-if ($future -gt 0) { Write-Host ('基準日（{0}）より後の日付の行 {1} 件は数えていません' -f $AsOf.ToString('yyyy/MM/dd'), $future) }
+if ($future -gt 0) { Write-Host ('基準日（{0}）より後の日付の行 {1} 件は数えていません' -f $AsOf.ToString('yyyy/MM/dd', $invariant), $future) }
 if ($Wbs) {
     $line = 'WBS のタスクに対応した工数: {0} 時間（{1}%）' -f (Format-Number $matchedTotal), (Format-Number ($(if ($totalHours -gt 0) { $matchedTotal / $totalHours * 100 } else { 0 })) 0)
     if ($others.Count -gt 0) { $line += ' / WBS に無い作業: ' + ((@($others | Select-Object -First 5 | ForEach-Object { '{0} {1}' -f $_.Name, (Format-Number $_.Actual 2) })) -join '・') + $(if ($others.Count -gt 5) { ' ほか' } else { '' }) + '（' + $Unit + '）' }

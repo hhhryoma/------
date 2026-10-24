@@ -338,6 +338,19 @@ function Get-HostText {
     return ((& $Body 6>&1 3>&1 | ForEach-Object { "$_" }) -join "`n")
 }
 
+function Invoke-InWareki {
+    #     Windows の地域の設定を和暦（ja-JP の JapaneseCalendar）にして実行する。終わったら元に戻す
+    param([scriptblock] $Body)
+    $wareki = New-Object System.Globalization.CultureInfo('ja-JP')
+    $wareki.DateTimeFormat.Calendar = New-Object System.Globalization.JapaneseCalendar
+    $saved = [System.Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = $wareki
+        & $Body
+    }
+    finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $saved }
+}
+
 # ---------------------------------------------------------------- 実行
 
 

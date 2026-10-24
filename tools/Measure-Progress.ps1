@@ -41,6 +41,8 @@ if ($FillTemplate) {
 Update-TypeData -TypeName 'Progress.Task' -DefaultDisplayPropertySet WbsNo, Task, Owner, Progress, PlannedProgress, Delay, Status -Force -WhatIf:$false
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
+# 日付は、Windows の地域の設定（和暦など）によらず西暦で書く
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
 $AsOf = $AsOf.Date
 
 # ---------------------------------------------------------------- 設定・休日・営業日
@@ -410,8 +412,8 @@ if ($OutXlsx) {
     $taskRows = New-Object System.Collections.Generic.List[object]
     foreach ($t in $tasks) {
         $exp = ''
-        if ($t.ExpectedEnd) { $exp = $t.ExpectedEnd.ToString('yyyy/MM/dd') }
-        $row = @{ Values = @($t.WbsNo, $t.Task, $t.Owner, $t.PlanStart.ToString('yyyy/MM/dd'), $t.PlanEnd.ToString('yyyy/MM/dd'), $exp, [double]$t.Progress, [double]$t.PlannedProgress, [double]$t.Delay, $t.Status, [double][math]::Round($t.PV, 2), [double][math]::Round($t.EV, 2), ('{0} {1}' -f $t.Place.File, $t.Place.Cell)) }
+        if ($t.ExpectedEnd) { $exp = $t.ExpectedEnd.ToString('yyyy/MM/dd', $invariant) }
+        $row = @{ Values = @($t.WbsNo, $t.Task, $t.Owner, $t.PlanStart.ToString('yyyy/MM/dd', $invariant), $t.PlanEnd.ToString('yyyy/MM/dd', $invariant), $exp, [double]$t.Progress, [double]$t.PlannedProgress, [double]$t.Delay, $t.Status, [double][math]::Round($t.PV, 2), [double][math]::Round($t.EV, 2), ('{0} {1}' -f $t.Place.File, $t.Place.Cell)) }
         if ($t.Place.Sheet) { $row.Link = @{ Column = 12; Path = $t.Place.Path; Location = ("'{0}'!{1}" -f $t.Place.Sheet.Replace("'", "''"), $t.Place.Cell) } }
         $taskRows.Add($row)
     }
@@ -422,7 +424,7 @@ if ($OutXlsx) {
         $ownerRows.Add(@{ Values = @($o.Owner, [double]$o.Tasks, [double][math]::Round($o.PV, 2), [double][math]::Round($o.EV, 2), $spiV, [double]$o.Delayed) })
     }
     $weekRows = New-Object System.Collections.Generic.List[object]
-    foreach ($wk in $weeks) { $weekRows.Add(@{ Values = @($wk.No, $wk.Monday.ToString('yyyy/MM/dd'), [double]$wk.Planned, [double]$wk.Done, [double]$wk.TotalPlanned, [double]$wk.TotalDone) }) }
+    foreach ($wk in $weeks) { $weekRows.Add(@{ Values = @($wk.No, $wk.Monday.ToString('yyyy/MM/dd', $invariant), [double]$wk.Planned, [double]$wk.Done, [double]$wk.TotalPlanned, [double]$wk.TotalDone) }) }
     try {
         Export-Workbook -FilePath $OutXlsx -Sheets @(
             @{ Name = 'タスク'; Columns = @(@{ Header = 'WBS'; Width = 8 }, @{ Header = 'タスク'; Width = 30 }, @{ Header = '担当'; Width = 10 }, @{ Header = '予定開始'; Width = 11 }, @{ Header = '予定終了'; Width = 11 }, @{ Header = '実績／見込終了'; Width = 13 }, @{ Header = '進捗率'; Width = 7 }, @{ Header = '予定の進捗率'; Width = 10 }, @{ Header = '遅れ（営業日）'; Width = 12 }, @{ Header = '状態'; Width = 10 }, @{ Header = 'PV'; Width = 8 }, @{ Header = 'EV'; Width = 8 }, @{ Header = 'WBS の場所'; Width = 30 }); Rows = $taskRows },
@@ -436,7 +438,7 @@ if ($OutXlsx) {
 }
 
 Write-Host ''
-Write-Host ('タスク {0} 件（{1} 時点。親のタスクは除く）: 完了 {2}・遅延 {3}・予定どおり {4}・未着手 {5}' -f $tasks.Count, $AsOf.ToString('yyyy/MM/dd'),
+Write-Host ('タスク {0} 件（{1} 時点。親のタスクは除く）: 完了 {2}・遅延 {3}・予定どおり {4}・未着手 {5}' -f $tasks.Count, $AsOf.ToString('yyyy/MM/dd', $invariant),
     @($tasks | Where-Object Status -eq '完了').Count, $delayed.Count, @($tasks | Where-Object Status -eq '予定どおり').Count, @($tasks | Where-Object Status -eq '未着手').Count)
 $line = 'PV {0:0.##} / EV {1:0.##} / BAC {2:0.##}' -f $sumPV, $sumEV, $sumBAC
 if ($null -ne $spi) { $line += ' / SPI {0:0.00}' -f $spi }

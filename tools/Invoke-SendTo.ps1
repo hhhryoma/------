@@ -76,7 +76,7 @@ function Get-OldNew {
 function Get-ResultPath {
     #     結果のファイル名（名前_日時.xlsx）。同じ名前があれば連番を付ける
     param([string] $Dir, [string] $Name)
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $stamp = (Get-Date).ToString('yyyyMMdd_HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
     $candidate = Join-Path $Dir ('{0}_{1}.xlsx' -f $Name, $stamp)
     for ($n = 2; Test-Path -LiteralPath $candidate; $n++) { $candidate = Join-Path $Dir ('{0}_{1}({2}).xlsx' -f $Name, $stamp, $n) }
     return $candidate
@@ -182,7 +182,7 @@ try {
             $title = '品質評価'
             if ($settings.Contains('Title')) { $title = $settings.Title }
             $null = & $tool @reportArgs
-            $out = Join-Path $dir ('{0}_{1}.xlsx' -f $title, (Get-Date).ToString('yyyyMMdd'))
+            $out = Join-Path $dir ('{0}_{1}.xlsx' -f $title, (Get-Date).ToString('yyyyMMdd', [System.Globalization.CultureInfo]::InvariantCulture))
         }
         'Weekly' {
             if ($targets.Count -ne 1) { throw "案件のフォルダ（週次報告の設定.csv を置いたフォルダ）か、設定ファイルを 1 つ選んでください（$($targets.Count) 件選ばれています）" }
@@ -194,7 +194,7 @@ try {
             $title = '週次報告'
             if ($settings.Contains('Title')) { $title = $settings.Title }
             $null = & $tool @reportArgs
-            $name = '{0}_{1}' -f $title, (Get-Date).ToString('yyyyMMdd')
+            $name = '{0}_{1}' -f $title, (Get-Date).ToString('yyyyMMdd', [System.Globalization.CultureInfo]::InvariantCulture)
             $out = Join-Path $dir ($name + '.xlsx')
             # 報告の文章は、メールやチャットにそのまま貼れるようにクリップボードに写す
             $textFile = Join-Path $dir ($name + '.txt')

@@ -873,8 +873,9 @@ function Add-TableRuleFindings {
                 if ($p -and $t -and $p -ne $t) { $phys = $p; $type = $t; break }
             }
             if (-not $phys) { continue }
-            $table = @(Find-DesignTables $grid @($phys, $type) $phys)[0]
-            if (-not $table -or $table.Rows.Count -eq 0) { continue }
+            # カラムのある最初の表（Find-DesignTables は表の一覧を 1 つのリストで返す）
+            $table = @(foreach ($found in (Find-DesignTables $grid @($phys, $type) $phys)) { if ($found.Rows.Count -gt 0) { $found } })[0]
+            if (-not $table) { continue }
             $cof = $table.ColumnOf
             $label = @{}
             foreach ($f in @('桁数', '小数', '主キー')) { $label[$f] = @($candidates[$f] | Where-Object { $cof.ContainsKey($_) })[0] }
@@ -1676,7 +1677,7 @@ else {
     Get-ChildItem -LiteralPath $promptDir -Filter 'R*.txt' | Where-Object { @($requests | ForEach-Object { "$($_.Id).txt" }) -notcontains $_.Name } | Remove-Item -Force
 
     $manifest = [pscustomobject]@{
-        Created  = (Get-Date).ToString('yyyy/MM/dd HH:mm:ss')
+        Created  = (Get-Date).ToString('yyyy/MM/dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
         MaxChars = $MaxChars
         # 配列（PointIds・FindingNos）は計算したプロパティにしない（Windows PowerShell 5.1 の ConvertTo-Json は、それを {"value": [...], "Count": n} にしてしまう）。
         # Kind・FindingNos は再確認の依頼だけにあり、ほかの依頼では空になる

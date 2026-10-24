@@ -193,7 +193,7 @@ function Resolve-PartName {
     if ($TargetPath.StartsWith('/')) { return $TargetPath.TrimStart('/') }
 
     $dir = ''
-    $slash = $SourcePart.LastIndexOf('/')
+    $slash = $SourcePart.LastIndexOf([char]'/')
     if ($slash -ge 0) { $dir = $SourcePart.Substring(0, $slash) }
 
     $parts = New-Object System.Collections.Generic.List[string]
@@ -209,7 +209,7 @@ function Get-PartRelationships {
     #     パーツのリレーション（_rels/*.rels）を読み、Id / 種類 / 解決済みパーツ名を返す
     param($Package, [string] $PartName)
 
-    $slash = $PartName.LastIndexOf('/')
+    $slash = $PartName.LastIndexOf([char]'/')
     if ($slash -ge 0) {
         $relsName = $PartName.Substring(0, $slash) + '/_rels/' + $PartName.Substring($slash + 1) + '.rels'
     }
@@ -226,7 +226,7 @@ function Get-PartRelationships {
         $type = $rel.GetAttribute('Type')
         $list.Add([pscustomobject]@{
             Id     = $rel.GetAttribute('Id')
-            Kind   = $type.Substring($type.LastIndexOf('/') + 1)
+            Kind   = $type.Substring($type.LastIndexOf([char]'/') + 1)
             Target = Resolve-PartName -SourcePart $PartName -TargetPath $rel.GetAttribute('Target')
         })
     }

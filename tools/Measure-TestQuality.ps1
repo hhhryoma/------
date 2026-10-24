@@ -44,6 +44,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
+# 日付は、Windows の地域の設定（和暦など）によらず西暦で書く
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
 $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
 $sizeScript = Join-Path $PSScriptRoot 'Measure-DesignSize.ps1'
 
@@ -432,7 +434,7 @@ foreach ($c in $countedCases) {
         elseif ($c.Kind -eq 'NG' -and $bugById.ContainsKey($id) -and $bugById[$id].Closed) { Add-Issue '再テストの結果が無い' $c ("バグ {0} は完了していますが、ケースの結果が NG のままです（再テストの結果を書いてください）" -f $id) }
     }
     if (($c.Kind -eq 'OK' -or $c.Kind -eq 'NG') -and $c.HasDoneColumn -and -not $c.Done) { Add-Issue '実施日が無い' $c '結果がありますが、実施日がありません' }
-    if (($c.Kind -eq '未実施' -or $c.Kind -eq '保留') -and $c.Planned -and $c.Planned -lt $AsOf) { Add-Issue '予定日を過ぎても未実施' $c ("予定日 {0} を過ぎています（{1}）" -f $c.Planned.ToString('yyyy/MM/dd'), $c.Kind) }
+    if (($c.Kind -eq '未実施' -or $c.Kind -eq '保留') -and $c.Planned -and $c.Planned -lt $AsOf) { Add-Issue '予定日を過ぎても未実施' $c ("予定日 {0} を過ぎています（{1}）" -f $c.Planned.ToString('yyyy/MM/dd', $invariant), $c.Kind) }
 }
 
 # ---------------------------------------------------------------- 出力
@@ -443,7 +445,7 @@ if ($OutXlsx) {
     $plannedByNow = @($countedCases | Where-Object { $_.Planned -and $_.Planned -le $AsOf }).Count
     $summary = New-Object System.Collections.Generic.List[object]
     $add = { param($name, $value) $summary.Add(@{ Values = @($name, $value) }) }
-    & $add '時点' $AsOf.ToString('yyyy/MM/dd')
+    & $add '時点' $AsOf.ToString('yyyy/MM/dd', $invariant)
     & $add 'テストケース（対象外を除く）' ([double]$countedCases.Count)
     & $add '予定（時点まで）' ([double]$plannedByNow)
     & $add '実施（OK・NG）' ([double]$executedAll)
@@ -489,7 +491,7 @@ if ($OutXlsx) {
     }
     $trendRows = New-Object System.Collections.Generic.List[object]
     foreach ($t in $trend) {
-        $trendRows.Add(@{ Values = @($t.Date.ToString('yyyy/MM/dd'), [double]$t.Planned, [double]$t.Executed, [double]$t.Passed, [double]$t.Found, [double]$t.Closed, [double]$t.TotalFound, [double]$t.TotalClosed, [double]($t.TotalFound - $t.TotalClosed), (& $num $t.Fitted)) })
+        $trendRows.Add(@{ Values = @($t.Date.ToString('yyyy/MM/dd', $invariant), [double]$t.Planned, [double]$t.Executed, [double]$t.Passed, [double]$t.Found, [double]$t.Closed, [double]$t.TotalFound, [double]$t.TotalClosed, [double]($t.TotalFound - $t.TotalClosed), (& $num $t.Fitted)) })
     }
     $breakRows = New-Object System.Collections.Generic.List[object]
     foreach ($p in @(@('重要度', 'Severity'), @('原因', 'Cause'), @('混入工程', 'Injected'), @('摘出工程', 'Detected'), @('状態', 'Status'), @('機能', 'Function'))) {
@@ -533,7 +535,7 @@ Write-Host ''
 $executedAll = @($countedCases | Where-Object { $_.Kind -eq 'OK' -or $_.Kind -eq 'NG' }).Count
 $rateText = ''
 if ($countedCases.Count -gt 0) { $rateText = '消化率 {0:0.0}%' -f ($executedAll * 100.0 / $countedCases.Count) }
-Write-Host ('テストケース {0} 件（実施 {1}・OK {2}・NG {3}・保留 {4}・未実施 {5}。対象外 {6}）{7}（{8} 時点）' -f $countedCases.Count, $executedAll, @($countedCases | Where-Object Kind -eq 'OK').Count, @($countedCases | Where-Object Kind -eq 'NG').Count, @($countedCases | Where-Object Kind -eq '保留').Count, @($countedCases | Where-Object Kind -eq '未実施').Count, @($cases | Where-Object Kind -eq '対象外').Count, $rateText, $AsOf.ToString('yyyy/MM/dd'))
+Write-Host ('テストケース {0} 件（実施 {1}・OK {2}・NG {3}・保留 {4}・未実施 {5}。対象外 {6}）{7}（{8} 時点）' -f $countedCases.Count, $executedAll, @($countedCases | Where-Object Kind -eq 'OK').Count, @($countedCases | Where-Object Kind -eq 'NG').Count, @($countedCases | Where-Object Kind -eq '保留').Count, @($countedCases | Where-Object Kind -eq '未実施').Count, @($cases | Where-Object Kind -eq '対象外').Count, $rateText, $AsOf.ToString('yyyy/MM/dd', $invariant))
 if ($BugList) {
     Write-Host ('バグ {0} 件（未完了 {1} 件。取下げなどで数えなかったもの {2} 件）' -f $bugs.Count, @($bugs | Where-Object { -not $_.Closed }).Count, $excludedBugs)
     if ($null -ne $growth.Potential) {

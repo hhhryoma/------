@@ -192,6 +192,13 @@ Test-Case 'New-WeeklyReport: 工数実績から今週・累計の工数を出し
     Assert-Equal '佐藤|14|54' ((@('A', 'B', 'C') | ForEach-Object { $effort.Rows[2][$_] }) -join '|')
 }
 
+Test-Case 'New-WeeklyReport: 和暦の設定（ja-JP の JapaneseCalendar）でも、日付は西暦で書く' {
+    $message = ''
+    try { Invoke-InWareki { & $WeeklyReport -Wbs (Join-Path (New-TestDir) 'WBS.xlsx') -Since '2026-10-20' -AsOf '2026-10-14' 6>$null } }
+    catch { $message = $_.Exception.Message }
+    Assert-Equal '-Since（2026/10/20）が -AsOf（2026/10/14）より後です' $message
+}
+
 Test-Case 'New-WeeklyReport: Get-Help でヘルプが表示される' {
     $h = Get-Help $WeeklyReport
     Assert-Match $h.Synopsis '週次報告'
