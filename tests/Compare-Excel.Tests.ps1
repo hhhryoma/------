@@ -527,24 +527,6 @@ Test-Case 'Compare-Excel: -OutHtml は、左右に並べてそろえるための
     Assert-Equal 10 @($sheet.rp).Count
 }
 
-function Edit-ZipText {
-    #     xlsx の中の 1 つのパーツの文字を書き換える（テスト用）
-    param([string] $Path, [string] $Name, [scriptblock] $Change)
-    $fs = [System.IO.File]::Open($Path, 'Open', 'ReadWrite')
-    try {
-        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Update)
-        $entry = $zip.GetEntry($Name)
-        $sr = New-Object System.IO.StreamReader($entry.Open())
-        $text = $sr.ReadToEnd(); $sr.Dispose()
-        $text = & $Change $text
-        $entry.Delete()
-        $sw = New-Object System.IO.StreamWriter($zip.CreateEntry($Name).Open(), (New-Object System.Text.UTF8Encoding($false)))
-        $sw.Write($text); $sw.Dispose()
-        $zip.Dispose()
-    }
-    finally { $fs.Dispose() }
-}
-
 Test-Case 'Compare-Excel: -OutHtml は、行の高さ・非表示の行と、図形の位置と文字を入れる' {
     $dir = New-TestDir
     $old = Join-Path $dir 'old.xlsx'; $new = Join-Path $dir 'new.xlsx'

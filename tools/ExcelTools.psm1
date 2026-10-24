@@ -271,7 +271,7 @@ function Add-DrawingItem {
     if ($ParentPath) { $path = $ParentPath + '/' + $name }
     $item = [pscustomobject]@{
         Name = $name; Kind = $Node.LocalName; Text = $text; Path = $path; Key = ''; Group = ''; Cell = $Cell; Anchor = $Anchor; Box = $null
-        Hidden = $hidden; Bounds = $null; Hash = ''; Media = ''; Width = 0; Height = 0
+        Hidden = $hidden; Bounds = $null; Size = $null; Crop = $null; Hash = ''; Media = ''; Width = 0; Height = 0
     }
     $xf = Get-DrawingXfrm $Node
     if ($Top) {
@@ -281,11 +281,20 @@ function Add-DrawingItem {
                 X = ($Transform.TX + $Transform.SX * $xf.X - $Top.X) / $Top.W; Y = ($Transform.TY + $Transform.SY * $xf.Y - $Top.Y) / $Top.H
                 W = $Transform.SX * $xf.W / $Top.W; H = $Transform.SY * $xf.H / $Top.H
             }
+            $item.Size = [pscustomobject]@{ W = $item.Box.W * $Top.W; H = $item.Box.H * $Top.H }
         }
     }
+    elseif ($xf -and $xf.W -gt 0 -and $xf.H -gt 0) { $item.Size = [pscustomobject]@{ W = $xf.W; H = $xf.H } }
     if ($Node.LocalName -eq 'pic') {
         # 画像の中身は、パーツごとに 1 回だけ読む（同じ画像を何か所にも貼ったとき）
         $blip = $Node.SelectSingleNode("*[local-name()='blipFill']/*[local-name()='blip']")
+        # トリミング（srcRect の l t r b。1/1000 %）
+        $src = $Node.SelectSingleNode("*[local-name()='blipFill']/*[local-name()='srcRect']")
+        if ($src) {
+            $crop = @{}
+            foreach ($k in @('l', 't', 'r', 'b')) { $v = 0.0; [void][double]::TryParse($src.GetAttribute($k), [System.Globalization.NumberStyles]::Float, $invariant, [ref]$v); $crop[$k] = $v / 100000 }
+            if ($crop.l -or $crop.t -or $crop.r -or $crop.b) { $item.Crop = [pscustomobject]@{ L = $crop.l; T = $crop.t; R = $crop.r; B = $crop.b } }
+        }
         $rid = $null
         if ($blip) { foreach ($at in $blip.Attributes) { if ($at.LocalName -eq 'embed' -and $at.NamespaceURI -like '*relationships') { $rid = $at.Value } } }
         $target = $null
@@ -340,7 +349,8 @@ function Read-SheetDrawingItems {
     #       Path（グループの中なら「グループ名/名前」）・Key（Path#同じ Path の何番目か）・Group（グループの中なら、いちばん外のグループの名前）
     #       Cell（シートに置いた図形の左上のセル）・Anchor（R1 C1 OX OY と、R2 C2 EX EY（セルに合わせる）または W H。ピクセル）
     #       Box（グループの中のもの。いちばん外のグループの中での X Y W H の割合）・Hidden（非表示）
-    #       Bounds（シートの上の位置と大きさ。Set-DrawingBounds で求める）
+    #       Size（表示の大きさ W H。EMU。わからなければ $null）・Bounds（シートの上の位置と大きさ。Set-DrawingBounds で求める）
+    #       Crop（画像のトリミング L T R B の割合。無ければ $null）
     #       画像: Hash（中身の要約）・Media（パーツ名）・Width Height（画像の大きさ。わからなければ 0）
     #     Images は画像のパーツ名 → 中身の要約と大きさ（同じブックの中で使い回す）
     param($Package, [string] $SheetPart, [hashtable] $Images)
@@ -373,14 +383,36 @@ function Read-SheetDrawingItems {
     return , $items
 }
 
+function Get-MaxDigitWidth {
+    #     列の幅（文字数）をピクセルにするための、標準フォントの数字 1 文字の幅（ピクセル）の目安。
+    #     日本語のフォント（游ゴシック・ＭＳ Ｐゴシックなど）は 11 ポイントで 8、欧文のフォント（Calibri など）は 7
+    param($Package, [string] $StylesPart)
+    $doc = $null
+    if ($StylesPart) { $doc = Read-PartXml -Package $Package -PartName $StylesPart }
+    if ($null -eq $doc) { return 7 }
+    $font = $doc.SelectSingleNode("//*[local-name()='fonts']/*[local-name()='font']")
+    if ($null -eq $font) { return 7 }
+    $name = ''; $size = 11.0
+    $n = $font.SelectSingleNode("*[local-name()='name']")
+    if ($n) { $name = $n.GetAttribute('val') }
+    $z = $font.SelectSingleNode("*[local-name()='sz']")
+    if ($z) { [void][double]::TryParse($z.GetAttribute('val'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$size) }
+    $base = 7
+    if ($name -match '[^\x00-\x7F]|Yu Gothic|Meiryo|MS P?Gothic|MS P?Mincho') { $base = 8 }
+    return [math]::Max(4, [math]::Round($base * $size / 11))
+}
+
 function Get-SheetGeometry {
     #     シートの列の幅・行の高さ（ピクセル。非表示は 0）。図形の位置をシートの上のピクセルにするため（Get-SheetPoint）。
-    #     列の幅は、標準のフォントの数字の幅を 7 ピクセルとして求める（Excel の表示と少し違うことがあるが、同じシートの図形どうしの位置を比べるには足りる）
-    param([System.Xml.XmlDocument] $Doc)
+    #     Mdw は標準のフォントの数字 1 文字の幅（Get-MaxDigitWidth）。列の幅は目安で、Excel の表示と少し違うことがある
+    param([System.Xml.XmlDocument] $Doc, [int] $Mdw = 7)
     $num = { param([string] $Text, [double] $Default) $v = 0.0; if ($Text -and [double]::TryParse($Text, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$v)) { $v } else { $Default } }
     $fmt = $Doc.SelectSingleNode("//*[local-name()='sheetFormatPr']")
-    $colDefault = 64
-    if ($fmt -and $fmt.GetAttribute('defaultColWidth')) { $colDefault = [int][math]::Round((& $num $fmt.GetAttribute('defaultColWidth') 9.14) * 7) }
+    # 既定の列の幅: 指定が無ければ、基本の幅（8 文字）と余白 5 ピクセルを 8 ピクセルの倍数に切り上げたもの（Calibri 11 で 64）
+    $base = 8
+    if ($fmt -and $fmt.GetAttribute('baseColWidth')) { $base = & $num $fmt.GetAttribute('baseColWidth') 8 }
+    $colDefault = [int]([math]::Ceiling(($base * $Mdw + 5) / 8) * 8)
+    if ($fmt -and $fmt.GetAttribute('defaultColWidth')) { $colDefault = [int][math]::Round((& $num $fmt.GetAttribute('defaultColWidth') 9.14) * $Mdw) }
     $rowDefault = 20
     if ($fmt -and $fmt.GetAttribute('defaultRowHeight')) { $rowDefault = [int][math]::Round((& $num $fmt.GetAttribute('defaultRowHeight') 15) * 4 / 3) }
     # 列は「min〜max 列の幅」の範囲のまま持つ（最後の列までまとめて指定した <col max="16384"> もあるため）
@@ -388,7 +420,7 @@ function Get-SheetGeometry {
     foreach ($c in $Doc.SelectNodes("//*[local-name()='cols']/*[local-name()='col']")) {
         $min = 0; $max = 0
         if (-not [int]::TryParse($c.GetAttribute('min'), [ref]$min) -or -not [int]::TryParse($c.GetAttribute('max'), [ref]$max)) { continue }
-        $px = [int][math]::Round((& $num $c.GetAttribute('width') ($colDefault / 7)) * 7)
+        $px = [int][math]::Round((& $num $c.GetAttribute('width') ($colDefault / $Mdw)) * $Mdw)
         if (@('1', 'true') -contains $c.GetAttribute('hidden')) { $px = 0 }
         $cols.Add(@($min, $max, $px))
     }
@@ -460,11 +492,13 @@ function Read-BookDrawings {
     try {
         $parts = Get-WorkbookSheetParts $pkg
         $images = @{}
+        $mdw = $null
         foreach ($name in $parts.Sheets.Keys) {
             $items = Read-SheetDrawingItems $pkg $parts.Sheets[$name] $images
             if ($Bounds -and $items.Count -gt 0) {
+                if ($null -eq $mdw) { $mdw = Get-MaxDigitWidth $pkg (@((Get-PartRelationships -Package $pkg -PartName $parts.WorkbookPart) | Where-Object { $_.Kind -eq 'styles' } | ForEach-Object { $_.Target })[0]) }
                 $doc = Read-PartXml -Package $pkg -PartName $parts.Sheets[$name]
-                if ($doc) { Set-DrawingBounds $items (Get-SheetGeometry $doc) }
+                if ($doc) { Set-DrawingBounds $items (Get-SheetGeometry $doc $mdw) }
             }
             $result[$name] = $items
         }

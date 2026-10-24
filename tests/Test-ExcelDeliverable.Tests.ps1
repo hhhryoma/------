@@ -309,6 +309,38 @@ Test-Case 'Test-ExcelDeliverable: Word の残っている文言の場所（表�
     Assert-Equal $expected @($hits | ForEach-Object { $_.Location } | Sort-Object)
 }
 
+Test-Case 'Test-ExcelDeliverable: 画像の縦横比の崩れ・拡大しすぎ・印刷範囲からのはみ出しを見つける（非表示・トリミングした画像は正しく扱う）' {
+    $book = Join-Path (New-TestDir) '画面設計書.xlsx'
+    New-SheetsBook $book ([ordered]@{ '画面' = @(@('画面名', '受注登録')) })
+    Edit-ZipText $book 'xl/workbook.xml' { param($t) $t.Replace('<definedNames>', '<definedNames><definedName name="_xlnm.Print_Area" localSheetId="0">''画面''!$A$1:$H$30</definedName>') }
+    Add-TestDrawing $book @(
+        @{ Kind = 'pic'; Name = '図 1'; Png = 'Old'; From = @(1, 2); To = @(3, 4); Ext = @(40, 20) },
+        @{ Kind = 'pic'; Name = '図 2'; Png = 'Old'; From = @(1, 6); To = @(3, 9); Ext = @(80, 60) },
+        @{ Kind = 'pic'; Name = '図 3'; Png = 'Old'; From = @(6, 12); To = @(10, 15); Ext = @(40, 30) },
+        @{ Kind = 'pic'; Name = '図 4'; Png = 'Old'; From = @(12, 2); To = @(14, 4); Ext = @(40, 30) },
+        @{ Kind = 'pic'; Name = '図 5'; Png = 'Old'; From = @(1, 20); To = @(3, 21); Ext = @(80, 20); Hidden = $true },
+        @{ Kind = 'pic'; Name = '図 6'; Png = 'Old'; From = @(4, 20); To = @(5, 22); Ext = @(20, 30); Crop = @(50000, 0, 0, 0) })
+    $issues = Invoke-Check @{ Path = $book; Check = 'Picture' }
+    Assert-Equal @(@('警告|縦横比|画面!B3', '警告|拡大|画面!B7', '警告|印刷範囲の外|画面!G13', '警告|印刷範囲の外|画面!M3') | Sort-Object) (Get-IssueKeys $issues)
+    $detail = @{}
+    foreach ($i in $issues) { $detail[$i.Cell] = $i.Detail }
+    Assert-Equal '画像「図 1」の縦横比が、元の画像と違います（横に 50% 伸びています）。縦横比を元に戻してください' $detail['B3']
+    Assert-Equal '画像「図 2」を元の大きさの 200% に拡大して貼っています。印刷・PDF で文字が粗くなるので、元の大きさ（100%）以下にしてください' $detail['B7']
+    Assert-Equal '画像「図 3」の一部が、印刷範囲（A1:H30）からはみ出しています。はみ出した部分は印刷されません' $detail['G13']
+    Assert-Equal '画像「図 4」が印刷範囲（A1:H30）の外にあり、印刷されません' $detail['M3']
+}
+
+Test-Case 'Test-ExcelDeliverable: スクリーンショットの縮尺がシートによって違うことを知らせる（小さい画像は比べない）' {
+    $book = Join-Path (New-TestDir) '画面設計書.xlsx'
+    New-SheetsBook $book ([ordered]@{ '受注一覧' = @(, @('画面名')); '受注登録' = @(, @('画面名')); 'ロゴ' = @(, @('会社')) })
+    Add-TestDrawing $book @(@{ Kind = 'pic'; Name = '図 1'; Png = 'Screen'; From = @(1, 2); To = @(8, 20); Ext = @(400, 300) })
+    Add-TestDrawing $book @(@{ Kind = 'pic'; Name = '図 1'; Png = 'Screen'; From = @(1, 2); To = @(6, 14); Ext = @(280, 210) }) -Sheet 2
+    Add-TestDrawing $book @(@{ Kind = 'pic'; Name = 'ロゴ'; Png = 'Logo'; From = @(1, 2); To = @(3, 4); Ext = @(20, 15) }) -Sheet 3
+    $issues = Invoke-Check @{ Path = $book; Check = 'Picture' }
+    Assert-Equal @('情報|縮尺|') (Get-IssueKeys $issues)
+    Assert-Equal 'スクリーンショットの縮尺がシートによって違います（100%: 受注一覧 / 70%: 受注登録）。並べたときに文字の大きさがそろいません（撮った画面の拡大率が違うときは、そのままでかまいません）' $issues[0].Detail
+}
+
 Test-Case 'Test-ExcelDeliverable: Get-Help でヘルプが表示される' {
     $h = Get-Help $Deliverable
     Assert-Match $h.Synopsis '提出'
