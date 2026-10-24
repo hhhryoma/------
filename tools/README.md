@@ -1384,7 +1384,7 @@ Priority Function Id Reason
 「同じ不具合がほかの画面にもないか」を、人の記憶や全文検索に頼らず、設計書の書き方から洗い出します。候補の絞り込みは Copilot に頼めます。
 
 ```powershell
-.\Find-SimilarDefects.ps1 D:\テスト\障害管理表.xlsx D:\設計書 -OutXlsx D:\横展開.xlsx -OutPrompt D:\横展開の依頼.txt
+.\Find-SimilarDefects.ps1 D:\テスト\障害管理表.xlsx D:\設計書 -OutXlsx D:\横展開.xlsx -OutPrompt D:\横展開の依頼.txt | Format-Table
 # 依頼を Copilot に貼り付けて送り、回答を D:\横展開の回答.txt に保存してから
 .\Find-SimilarDefects.ps1 D:\テスト\障害管理表.xlsx D:\設計書 -Answer D:\横展開の回答.txt -OutXlsx D:\横展開.xlsx
 ```
