@@ -360,8 +360,9 @@ foreach ($p in $EvidencePath) {
         }
     }
 }
+# パスの順（[Array]::Sort に PowerShell の配列を渡すと、写しが並べ替わるだけなので、List の Sort で並べる）
+$fileList.Sort([System.Comparison[object]] { param($a, $b) [string]::Compare($a.FullName, $b.FullName, [System.StringComparison]::OrdinalIgnoreCase) })
 $files = $fileList.ToArray()
-[Array]::Sort([string[]]@($files | ForEach-Object { $_.FullName }), $files, [System.StringComparer]::OrdinalIgnoreCase)
 
 # ブックの文字（目印と、エビデンスが空でないかを見るため）
 $books = @{}

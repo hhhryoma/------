@@ -180,6 +180,20 @@ Test-Case 'Test-TestEvidence: 機能ごとに同じテストID でも、置き�
         '受注登録|3|あり|IT_受注.xlsx ケース!G6') $rows
 }
 
+Test-Case 'Test-TestEvidence: エビデンスは、サブフォルダのものも含めてパスの順に並べる' {
+    $dir = New-TestDir
+    $spec = Join-Path $dir 'UT.xlsx'
+    New-SheetsBook $spec ([ordered]@{ 'ケース' = @(@('No', '結果'), @('1', 'OK'), @('2', 'OK')) })
+    $ev = Join-Path $dir 'エビデンス'
+    # Get-ChildItem は、フォルダの直下のファイルを先に返す
+    New-EvidencePng (Join-Path $ev 'UT-2.png') 'Old'
+    New-EvidencePng (Join-Path $ev 'A/1.png') 'New'
+    $out = Join-Path $dir 'check.xlsx'
+    $null = & $EvidenceTool -Path $spec -EvidencePath $ev -OutXlsx $out 6>$null
+    $units = Read-XlsxSheet -Path $out -Index 3
+    Assert-Equal @('1.png', 'UT-2.png') @(2..($units.Rows.Count) | ForEach-Object { $units.Rows[$_]['A'] })
+}
+
 Test-Case 'Test-TestEvidence: Get-Help でヘルプが表示される' {
     $h = Get-Help $EvidenceTool
     Assert-Match $h.Synopsis 'エビデンス'
