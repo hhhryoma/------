@@ -218,6 +218,24 @@ Test-Case 'Test-TestEvidence: 名前の後ろの丸数字（UT-001①・UT-001�
     Assert-Equal @('UT-001 ③.png|UT-001', 'UT-001①.png|UT-001', 'UT-001②.png|UT-001', 'UT-002_①.png|UT-002', 'UT-011.png|UT-011', 'UT-012.png|UT-012') @(2..($units.Rows.Count) | ForEach-Object { '{0}|{1}' -f $units.Rows[$_]['A'], $units.Rows[$_]['F'] })
 }
 
+Test-Case 'Test-TestEvidence: シートの目印の丸数字（■UT-001①）も、UT-0011（UT-011 と同じ）と読まずに UT-001 のエビデンスにする' {
+    $dir = New-TestDir
+    $spec = Join-Path $dir 'UT_受注一覧.xlsx'
+    New-SheetsBook $spec ([ordered]@{ 'テストケース' = @(
+            @('テストID', '確認内容', '結果'),
+            @('UT-001', '一覧が表示される', 'OK'),
+            @('UT-002', '検索できる', 'OK'),
+            @('UT-011', '削除できる', 'OK')) })
+    $ev = Join-Path $dir 'エビデンス'
+    New-Item -ItemType Directory -Path $ev | Out-Null
+    New-SheetsBook (Join-Path $ev 'エビデンス.xlsx') ([ordered]@{ 'まとめ' = @(@('■UT-001①'), @('一覧'), @('■UT-001 ②'), @('一覧の続き'), @('■UT-002'), @('検索'), @('■UT-011'), @('削除')) })
+    $out = Join-Path $dir 'check.xlsx'
+    $issues = @(& $EvidenceTool -Path $spec -EvidencePath $ev -OutXlsx $out 6>$null)
+    Assert-Equal @() (Get-IssueKeys $issues)
+    $units = Read-XlsxSheet -Path $out -Index 3
+    Assert-Equal @('まとめ!A1|UT-001', 'まとめ!A3|UT-001', 'まとめ!A5|UT-002', 'まとめ!A7|UT-011') @(2..($units.Rows.Count) | Where-Object { $units.Rows[$_]['F'] } | ForEach-Object { '{0}|{1}' -f $units.Rows[$_]['B'], $units.Rows[$_]['F'] }) '目印の場所とケース'
+}
+
 Test-Case 'Test-TestEvidence: ケースのフォルダのブックの表（確認した項目など）は、エビデンスの置き場所を省いても、テスト仕様書として読まない' {
     $dir = New-TestDir
     New-SheetsBook (Join-Path $dir 'UT_受注一覧.xlsx') ([ordered]@{ 'テストケース' = @(@('テストID', '確認内容', '結果'), @('UT-001', '一覧が表示される', 'OK'), @('UT-002', '検索できる', 'OK')) })

@@ -22,6 +22,12 @@ Test-Case 'ExcelTools: Get-TestResultKind は、結果の丸（○ 記号・〇 
     Assert-Equal @('OK', 'OK', 'OK', 'OK', 'NG', '対象外', '保留', '未実施') @(@('OK', '○', '〇', '◯', '×', '-', '保留', '') | ForEach-Object { Get-TestResultKind $_ })
 }
 
+Test-Case 'ExcelTools: Get-TestResultKind は、チェックの印（✓・☑・◎）と済・完了を OK に、× に似た印（✖・✗・X）を NG にする' {
+    Assert-Equal @('OK', 'OK', 'OK', 'OK', 'OK', 'OK', 'OK', 'OK') @(@('✓', '✔', '☑', '◎', '済', '実施済み', '確認済', '完了') | ForEach-Object { Get-TestResultKind $_ }) 'OK'
+    Assert-Equal @('NG', 'NG', 'NG', 'NG', 'NG', 'NG') @(@('✖', '✗', '✘', '☓', 'X', 'ｘ') | ForEach-Object { Get-TestResultKind $_ }) 'NG'
+    Assert-Equal @('未実施', '未実施', '未実施') @(@('未完了', '未済', 'XX') | ForEach-Object { Get-TestResultKind $_ }) '「未」で始まるもの・X だけでないもの'
+}
+
 Test-Case 'ExcelTools: Export-Workbook は日付（datetime）を日付のセルとして書き、Search-Excel では yyyy/MM/dd で読める' {
     $path = Join-Path (New-TestDir) '日付.xlsx'
     Export-Workbook -FilePath $path -Sheets @(@{ Name = '予定'; Columns = @(@{ Header = '開始'; Width = 12 }, @{ Header = '工数'; Width = 6 }, @{ Header = 'メモ'; Width = 10 }); Rows = @(@{ Values = @([datetime]'2026-11-02', 1.5, '2026/11/03') }) })

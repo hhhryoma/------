@@ -37,7 +37,7 @@ $imageExtensions = @('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff')
 $fileExtensions = @('.xls', '.xlsb', '.pdf', '.docx', '.docm', '.doc', '.pptx', '.ppt', '.txt', '.log', '.csv', '.htm', '.html', '.mp4', '.wmv', '.avi', '.mov')
 # エビデンスの列の値のうち、要らないもの（なし・-）と、あるとだけ書いたもの（あり・○）。ほかの値はシート名・ファイル名として探す
 $notNeededPattern = '^(-|―|ー|なし|無し|無|不要|対象外|N/?A)$'
-$claimedPattern = '^(あり|有|有り|○|〇|◯|済|済み|取得済み?|OK)$'
+$claimedPattern = '^(あり|有|有り|○|〇|◯|✓|✔|☑|済|済み|取得済み?|OK)$'
 # ケースの始まりの目印（行のいちばん左のセルの「■UT-001」「【No.1】」「テストID: UT-001」など。全角・半角と大文字小文字をそろえてから比べる）
 $markerRx = New-Object System.Text.RegularExpressions.Regex('^(?<mark>[■□●◆◇▼▽★☆※#【\[]+)?\s*(?<label>(?:テストケース|テスト|ケース|試験|確認)?(?:ID|NO\.?|番号)|テストケース|テスト|ケース|試験)?\s*[:.]?\s*(?<id>[A-Z0-9][A-Z0-9_\-.]*)')
 # 名前の言葉のうち、どの機能にも付く一般的なもの（版数・テスト仕様書・エビデンスなど。機能を見分けるのに使わない）
@@ -48,13 +48,17 @@ $commonImageCases = 4
 # ---------------------------------------------------------------- 名前を比べる
 
 
+function ConvertTo-CircledSuffix {
+    #     数字の後ろの丸数字（UT-001①・UT-001 ② など）を「_1」「_2」にする（全角・半角をそろえると前の数字とつながり、UT-0011 になるため）
+    param([string] $Text)
+    return [regex]::Replace([string]$Text, '(?<=\d)\s*[①-⑳⑴-⒇⒈-⒛]', [System.Text.RegularExpressions.MatchEvaluator] { param($m) '_' + ($m.Value.Normalize($nfkc) -replace '\D', '') })
+}
+
 function ConvertTo-CaseKey {
     #     テストID・シート名・ファイル名・目印を比べる形。全角・半角と大文字小文字をそろえ、前に付けた「■」「No.」「ケース」「テストID:」と
-    #     空白を除き、数字の前の 0 を除く（UT-001 と UT-1、No.01 と 1 を同じにする）。
-    #     数字の後ろの丸数字（UT-001①・UT-001 ② など）は「_1」「_2」にする（全角・半角をそろえると前の数字とつながり、UT-0011 になるため）
+    #     空白を除き、数字の前の 0 を除く（UT-001 と UT-1、No.01 と 1 を同じにする）。数字の後ろの丸数字は「_1」「_2」にする
     param([string] $Text)
-    $t = [regex]::Replace([string]$Text, '(?<=\d\s*)[①-⑳⑴-⒇⒈-⒛]', [System.Text.RegularExpressions.MatchEvaluator] { param($m) '_' + ($m.Value.Normalize($nfkc) -replace '\D', '') })
-    $t = $t.Normalize($nfkc).ToUpperInvariant().Trim()
+    $t = (ConvertTo-CircledSuffix $Text).Normalize($nfkc).ToUpperInvariant().Trim()
     $t = $t -replace '^[■□●◆◇▼▽★☆※#【\[(]+\s*', ''
     $t = $t -replace '^(テストケース|テスト|ケース|試験|確認)?(ID|NO\.?|番号)?\s*[:.]?\s*(?=\d)', ''
     $t = $t -replace '^(テストケース|テスト|ケース|試験|確認)?(ID|NO\.?|番号)\s*:\s*', ''
@@ -280,9 +284,10 @@ function Find-Markers {
     if (-not $Grid) { return , $list }
     foreach ($row in $Grid.Rows) {
         $col = $Grid.Cols[$row][0]
-        $text = ([string]$Grid.Cells[$row][$col]).Normalize($nfkc).Trim()
+        $text = ([string]$Grid.Cells[$row][$col]).Trim()
         if ($text.Length -gt 60) { continue }
-        $m = $markerRx.Match($text.ToUpperInvariant())
+        # 丸数字は、全角・半角をそろえる前に「_1」にする（■UT-001① を UT-0011（UT-011 と同じ）と読まない）
+        $m = $markerRx.Match((ConvertTo-CircledSuffix $text).Normalize($nfkc).ToUpperInvariant())
         if (-not $m.Success) { continue }
         $id = $m.Groups['id'].Value.TrimEnd('.', '-', '_')
         if ($id -match '^[\d.\-]+$' -and -not ($m.Groups['mark'].Success -or $m.Groups['label'].Success)) { continue }
