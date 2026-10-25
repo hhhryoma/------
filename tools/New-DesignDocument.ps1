@@ -79,12 +79,12 @@ function New-Result {
 
 
 function Expand-Placeholder {
-    #     {{名前}} を値に置き換える
+    #     ファイル名・シート名の {{名前}} を値に置き換える（値のセル内の改行は空白にする）
     param([string] $Text, [hashtable] $Values)
     return [regex]::Replace($Text, '\{\{([^{}]+)\}\}', [System.Text.RegularExpressions.MatchEvaluator] {
         param($m)
         $k = $m.Groups[1].Value.Trim()
-        if ($Values.ContainsKey($k)) { return [string]$Values[$k] }
+        if ($Values.ContainsKey($k)) { return ([string]$Values[$k] -replace '\s*[\r\n]+\s*', ' ') }
         return $m.Value
     })
 }
@@ -120,8 +120,9 @@ function Read-ListRows {
             $grid = $b.Sheets[$sn]
             foreach ($t in (Find-DesignTables $grid $labels $labels[0])) {
                 foreach ($dr in $t.Rows) {
+                    # セル内の改行は、Search-Excel では ↵ なので、改行に戻す
                     $v = @{}
-                    for ($i = 0; $i -lt $Names.Count; $i++) { $v[$Names[$i]] = ([string]$dr.Cells[$t.ColumnOf[$labels[$i]]]).Trim() }
+                    for ($i = 0; $i -lt $Names.Count; $i++) { $v[$Names[$i]] = ([string]$dr.Cells[$t.ColumnOf[$labels[$i]]]).Replace('↵', "`n").Trim() }
                     $rows.Add([pscustomobject]@{ Values = $v; Where = ('{0}!{1}{2}' -f $sn, (ConvertTo-ColumnName $t.ColumnOf[$labels[0]]), $dr.Row) })
                 }
             }
@@ -133,17 +134,20 @@ function Read-ListRows {
 
 function Invoke-Fill {
     #     差し込み欄を値に置き換える（Replace-Excel.ps1。セル・図形・コメント・ヘッダー／フッター。セルの書式や部分ごとの書式は保たれる）。
-    #     SheetPattern を指定すると、そのシートだけを置き換える
+    #     {{ 画面名 }} のように括弧の内側に空白があってもよい。SheetPattern を指定すると、そのシートだけを置き換える。
+    #     返り値: 置き換えられなかったとき（Replace-Excel.ps1 の結果がスキップ・失敗）はその理由、置き換えたら空
     param([string] $FilePath, $Names, [hashtable] $Values, [string] $SheetPattern)
     $csv = Join-Path ([System.IO.Path]::GetTempPath()) ('placeholders-' + [guid]::NewGuid().ToString('N') + '.csv')
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add('置換前,置換後,正規表現')
-    foreach ($n in $Names) { $lines.Add(('"{0}","{1}",' -f ('{{' + $n + '}}').Replace('"', '""'), ([string]$Values[$n]).Replace('"', '""'))) }
+    # 正規表現で置き換えるので、値の $ は $$ にする
+    foreach ($n in $Names) { $lines.Add(('"{0}","{1}",○' -f ('\{\{\s*' + [regex]::Escape($n) + '\s*\}\}').Replace('"', '""'), ([string]$Values[$n]).Replace('$', '$$').Replace('"', '""'))) }
     [System.IO.File]::WriteAllLines($csv, $lines.ToArray(), (New-Object System.Text.UTF8Encoding($true)))
     $replaceArgs = @{ ListPath = $csv; Path = [System.Management.Automation.WildcardPattern]::Escape($FilePath); Force = $true; Confirm = $false; WhatIf = $false }
     if ($SheetPattern) { $replaceArgs['SheetNamePattern'] = $SheetPattern }
-    try { $null = & $replaceScript @replaceArgs 6>$null }
+    try { $results = @(& $replaceScript @replaceArgs 6>$null) }
     finally { Remove-Item -LiteralPath $csv -Force -ErrorAction SilentlyContinue }
+    return (@($results | Where-Object { $_.Result -eq 'スキップ' -or $_.Result -eq '失敗' } | ForEach-Object { $_.Detail } | Select-Object -Unique) -join ' / ')
 }
 
 $builtin = @{ '作成日' = $dateText; '日付' = $dateText; '作成者' = $Author }
@@ -183,8 +187,11 @@ if ($PSCmdlet.ParameterSetName -eq 'Create') {
         if (Test-Path -LiteralPath $target) { New-Result $outName '既存' '同じ名前のファイルがあるため作りません' $target; continue }
         if (-not $PSCmdlet.ShouldProcess($outName, '雛形から作成')) { continue }
 
-        Copy-Item -LiteralPath $Template -Destination $target
-        if ($inTemplate.Count -gt 0) { Invoke-Fill $target $inTemplate $values }
+        # 雛形が読み取り専用でも、作った設計書は書き換えられるようにする（Replace-Excel.ps1 は読み取り専用のファイルを書き換えない）
+        (Copy-Item -LiteralPath $Template -Destination $target -PassThru).IsReadOnly = $false
+        $problem = ''
+        if ($inTemplate.Count -gt 0) { $problem = Invoke-Fill $target $inTemplate $values }
+        if ($problem) { New-Result $outName '失敗' ('差し込み欄を置き換えられませんでした（{0}）' -f $problem) $target; continue }
         $created++
         New-Result $outName '作成' '' $target
     }
@@ -332,6 +339,8 @@ if ($PSCmdlet.ParameterSetName -eq 'AddSheet') {
     $pkg = Open-ZipPackage -FilePath $Book
     try { $existing = @((Get-WorkbookSheetParts $pkg).Sheets.Keys) } finally { $pkg.Zip.Dispose() }
     if ($existing -notcontains $TemplateSheet) { throw "雛形のシート「$TemplateSheet」が見つかりません（ブックのシート: $($existing -join '・')）" }
+    # 大文字・小文字の違う指定（template と Template）でも雛形のシートを参照する名前（印刷範囲など）を付け替えられるよう、ブックのシート名にする
+    $TemplateSheet = @($existing | Where-Object { $_ -eq $TemplateSheet })[0]
 
     $tplHits = @(& $searchScript -Pattern '\{\{[^{}]+\}\}' -Path ([System.Management.Automation.WildcardPattern]::Escape($Book)) -Target Value, Comment, Shape, HeaderFooter -SheetNamePattern ('^' + [regex]::Escape($TemplateSheet) + '$') -NoExcel 6>$null)
     $inTemplate = Get-Placeholders @($tplHits | ForEach-Object { $_.Text })
@@ -360,7 +369,9 @@ if ($PSCmdlet.ParameterSetName -eq 'AddSheet') {
     if ($planned.Count -gt 0 -and $PSCmdlet.ShouldProcess([System.IO.Path]::GetFileName($Book), ('雛形のシート「{0}」から {1} シートを足す（{2}）' -f $TemplateSheet, $planned.Count, (@($planned | ForEach-Object { $_.Name }) -join '・')))) {
         Add-SheetCopies $Book $TemplateSheet @($planned | ForEach-Object { $_.Name })
         foreach ($p in $planned) {
-            if ($inTemplate.Count -gt 0) { Invoke-Fill $Book $inTemplate $p.Values ('^' + [regex]::Escape($p.Name) + '$') }
+            $problem = ''
+            if ($inTemplate.Count -gt 0) { $problem = Invoke-Fill $Book $inTemplate $p.Values ('^' + [regex]::Escape($p.Name) + '$') }
+            if ($problem) { New-Result $p.Name '失敗' ('雛形のシート「{0}」から作りましたが、差し込み欄を置き換えられませんでした（{1}）' -f $TemplateSheet, $problem) $Book; continue }
             New-Result $p.Name '作成' ('雛形のシート「{0}」から作りました' -f $TemplateSheet) $Book
         }
         Write-Host ''
@@ -373,30 +384,83 @@ if ($PSCmdlet.ParameterSetName -eq 'AddSheet') {
 
 
 function ConvertTo-VersionText {
-    #     版数の文字（「第1.1版」「Ver.1.10」など）を「1.1」の形にする（無ければ $null）
+    #     版数の文字（「第1.1版」「Ver.1.10」など）の数の部分（「1.1」「1.10」。全角は半角にし、桁はそのまま）。無ければ $null
     param([string] $Text)
     if (-not $Text) { return $null }
-    $m = [regex]::Match($Text.Normalize($nfkc), '(\d+(?:\.\d+)*)')
+    $m = [regex]::Match($Text.Normalize($nfkc), '[0-9]+(?:\.[0-9]+)*')
     if (-not $m.Success) { return $null }
-    return (@($m.Groups[1].Value.Split('.') | ForEach-Object { [string][int64]$_ }) -join '.')
+    return $m.Value
 }
 
 function Get-NextVersion {
-    #     最後の数を 1 つ上げる（1.0 → 1.1、1.9 → 1.10）
+    #     最後の数を 1 つ上げる（1.0 → 1.1、1.9 → 1.10）。最後の数の桁数は保つ（1.01 → 1.02、1.09 → 1.10）
     param([string] $Current)
     $parts = @($Current.Split('.'))
     if ($parts.Count -eq 1) { $parts += '0' }
-    $parts[$parts.Count - 1] = [string]([int64]$parts[$parts.Count - 1] + 1)
+    $last = $parts[$parts.Count - 1]
+    $parts[$parts.Count - 1] = ([int64]$last + 1).ToString('D' + $last.Length, $invariant)
     return ($parts -join '.')
 }
 
 function Set-VersionText {
-    #     「第1.0版」の数の部分だけを新しい版数にする
+    #     「第1.0版」の数の部分だけを新しい版数にする（ほかの文字はそのまま。全角の数なら全角で書く）
     param([string] $Text, [string] $NewVersion)
-    $t = $Text.Normalize($nfkc)
-    $m = [regex]::Match($t, '\d+(?:\.\d+)*')
+    $m = [regex]::Match($Text, '[0-9０-９]+(?:[.．][0-9０-９]+)*')
     if (-not $m.Success) { return $NewVersion }
-    return $t.Substring(0, $m.Index) + $NewVersion + $t.Substring($m.Index + $m.Length)
+    if ($m.Value -match '[０-９]') { $NewVersion = -join @($NewVersion.ToCharArray() | ForEach-Object { [char]([int]$_ + 0xFEE0) }) }
+    return $Text.Substring(0, $m.Index) + $NewVersion + $Text.Substring($m.Index + $m.Length)
+}
+
+function Read-DecimalStyles {
+    #     セルの書式の番号 → 表示形式の小数点以下の桁数（「0.00」「#,##0.0」「0.0"版"」のように桁数を決めた表示形式のものだけ）
+    param($Package, [string] $WorkbookPart)
+    $digits = @{}
+    $part = @((Get-PartRelationships -Package $Package -PartName $WorkbookPart) | Where-Object { $_.Kind -eq 'styles' } | ForEach-Object { $_.Target })[0]
+    $doc = $null
+    if ($part) { $doc = Read-PartXml -Package $Package -PartName $part }
+    if (-not $doc) { return $digits }
+    $codes = @{ '2' = '0.00'; '4' = '#,##0.00' }
+    foreach ($nf in $doc.SelectNodes("//*[local-name()='numFmts']/*[local-name()='numFmt']")) { $codes[$nf.GetAttribute('numFmtId')] = $nf.GetAttribute('formatCode') }
+    $i = 0
+    foreach ($xf in $doc.SelectNodes("//*[local-name()='cellXfs']/*[local-name()='xf']")) {
+        $m = [regex]::Match([string]$codes[$xf.GetAttribute('numFmtId')], '^(?:"[^"]*"|[#,0])*0\.(0+)(?:"[^"]*")*(?:;|$)')
+        if ($m.Success) { $digits[[string]$i] = $m.Groups[1].Length }
+        $i++
+    }
+    return $digits
+}
+
+function Format-ShownNumber {
+    #     数値のセルの表示の文字（表示形式が小数点以下の桁数を決めたもの（Read-DecimalStyles）ならその桁数、ほかは R の形）
+    param([double] $Number, $Cell, [hashtable] $Decimals)
+    $s = $Cell.GetAttribute('s')
+    if (-not $s) { $s = '0' }
+    if ($Decimals.ContainsKey($s)) { return $Number.ToString('F' + $Decimals[$s], $invariant) }
+    return $Number.ToString('R', $invariant)
+}
+
+function Get-ShownVersion {
+    #     版数のセルの文字。数値のセルは表示の形で読む（Search-Excel.ps1 は表示形式によらずに読むため、0.00 の表示形式で 1.10 と表示した版数が 1.1 になる）
+    param($Doc, [int] $Row, [int] $Col, [string] $Text, [hashtable] $Decimals)
+    $rowEl = Get-SheetRowElement $Doc $Row
+    if (-not $rowEl) { return $Text }
+    $c = Get-SheetCellElement $Doc $rowEl $Row $Col
+    $num = 0.0
+    if ((Test-NumericCellElement $c) -and [double]::TryParse($Text, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$num)) { return Format-ShownNumber $num $c $Decimals }
+    return $Text
+}
+
+function Set-CoverValue {
+    #     表紙のセルを書き換え、書き換えた場所の名前を返す。数式のセル（改訂履歴を参照する LOOKUP など）は数式を残し、
+    #     計算結果（Excel が計算し直すまでの表示）だけを書き換える（名前に「（数式の結果）」を付ける）
+    param($Doc, $Cell, $Value, [string] $What)
+    if (@(Get-XmlChildElements $Cell 'f').Count -eq 0) { Set-SheetCellValue $Doc $Cell $Value; return $What }
+    foreach ($child in @($Cell.ChildNodes)) { if ($child.LocalName -ne 'f') { [void]$Cell.RemoveChild($child) } }
+    $v = $Doc.CreateElement($Cell.Prefix, 'v', $Cell.NamespaceURI)
+    if ($Value -is [string]) { $Cell.SetAttribute('t', 'str'); $v.InnerText = $Value }
+    else { $Cell.RemoveAttribute('t'); $v.InnerText = ([double]$Value).ToString('R', $invariant) }
+    [void]$Cell.AppendChild($v)
+    return $What + '（数式の結果）'
 }
 
 $versionLabel = '^(版数|版|改訂版数|バージョン|Version|Ver\.?|Rev\.?|改版番号)$'
@@ -484,7 +548,8 @@ foreach ($f in $files) {
 
     $pkg = Open-ZipPackage $f.FullName
     try {
-        $sheetParts = (Get-WorkbookSheetParts $pkg).Sheets
+        $wbParts = Get-WorkbookSheetParts $pkg
+        $sheetParts = $wbParts.Sheets
         $coverName = @($sheetParts.Keys | Where-Object { $_ -match '^\s*表紙\s*$' })[0]
         if (-not $coverName) { $coverName = @($sheetParts.Keys)[0] }
         $histName = @($sheetParts.Keys | Where-Object { $_ -match $HistorySheet })[0]
@@ -524,8 +589,21 @@ foreach ($f in $files) {
             }
         }
 
+        # 表紙と改訂履歴のシートの XML（ここに書き換える）。数値の版数のセルは、表示の形（0.00 の表示形式なら 1.10）で読む
+        $docs = @{}
+        foreach ($name in @($coverName, $histName)) {
+            if ($name -and -not $docs.ContainsKey($name)) { $docs[$name] = Read-PartXmlForEdit $pkg $sheetParts[$name] }
+        }
+        $decimals = Read-DecimalStyles $pkg $wbParts.WorkbookPart
+        if ($coverVersion) { $coverVersion.Text = Get-ShownVersion $docs[$coverName] $coverVersion.Row $coverVersion.Col $coverVersion.Text $decimals }
+        $lastVersion = $null
+        if ($hist -and $hist.Entries.Count -gt 0) {
+            $entryRow = $hist.Entries[-1]
+            $lastVersion = Get-ShownVersion $docs[$histName] $entryRow $hist.Cols['Version'] $design.Sheets[$histName].Cells[$entryRow][$hist.Cols['Version']] $decimals
+        }
+
         $current = $null
-        if ($hist -and $hist.Entries.Count -gt 0) { $current = ConvertTo-VersionText $design.Sheets[$histName].Cells[$hist.Entries[-1]][$hist.Cols['Version']] }
+        if ($lastVersion) { $current = ConvertTo-VersionText $lastVersion }
         elseif ($coverVersion) { $current = ConvertTo-VersionText $coverVersion.Text }
         if (-not $current -and -not $Version) { New-Result $f.Name 'スキップ' '表紙・改訂履歴に版数が見つかりません' $f.FullName; continue }
         $newVersion = $Version
@@ -561,12 +639,14 @@ foreach ($f in $files) {
             if ($busy.Count -gt 0) { New-Result $f.Name 'スキップ' ('改訂履歴の {0} 行目が空いていないため、行を足せません' -f $busy[0]) $f.FullName; continue }
         }
 
-        # 保存先: ファイル名に版数（_v1.0・第1.0版 など）があれば新しい版数の名前で別に保存し、無ければ上書きする
+        # 保存先: ファイル名に版数（_v1.0・第1.0版 など。「第2期」「第3章」は版数にしない）があれば新しい版数の名前で別に保存し、
+        # 無ければ上書きする。版数が 2 つあれば後ろのもの
         $baseName = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
-        $fm = [regex]::Match($baseName, '(?i)(?:(?<![a-z])v(?:er)?\.?\s*|第\s*)(\d+(?:\.\d+)*)')
+        $fms = [regex]::Matches($baseName, '(?i)(?<![a-z])v(?:er)?\.?\s*(\d+(?:\.\d+)*)|第\s*(\d+(?:\.\d+)*)\s*版')
         $outPath = $null
-        if ($fm.Success) {
-            $g = $fm.Groups[1]
+        if ($fms.Count -gt 0) {
+            $g = $fms[$fms.Count - 1].Groups[1]
+            if (-not $g.Success) { $g = $fms[$fms.Count - 1].Groups[2] }
             $outPath = Join-Path $f.DirectoryName ($baseName.Substring(0, $g.Index) + $newVersion + $baseName.Substring($g.Index + $g.Length) + $f.Extension)
             if (Test-Path -LiteralPath $outPath) { New-Result $f.Name 'スキップ' ('新しい版のファイルがすでにあります: {0}' -f [System.IO.Path]::GetFileName($outPath)) $f.FullName; continue }
         }
@@ -576,25 +656,20 @@ foreach ($f in $files) {
         if (-not $PSCmdlet.ShouldProcess($shown, $what)) { continue }
 
         $changes = @{}
-        $docs = @{}
-        foreach ($name in @($coverName, $histName)) {
-            if ($name -and -not $docs.ContainsKey($name)) { $docs[$name] = Read-PartXmlForEdit $pkg $sheetParts[$name] }
-        }
         $done = New-Object System.Collections.Generic.List[string]
         if ($coverVersion) {
             $doc = $docs[$coverName]
             $c = Get-SheetCellElement $doc (Get-SheetRowElement $doc $coverVersion.Row -Create) $coverVersion.Row $coverVersion.Col -Create
             $value = Set-VersionText $coverVersion.Text $newVersion
+            # 数値のセルには、表示が変わらない版数だけを数値で書く（1.9 の次の 1.10 を数値で書くと 1.1 と表示されるので、文字で書く）
             $num = 0.0
-            if ((Test-NumericCellElement $c) -and [double]::TryParse($value, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$num)) { $value = $num }
-            Set-SheetCellValue $doc $c $value
-            $done.Add('表紙の版数')
+            if ((Test-NumericCellElement $c) -and [double]::TryParse($value, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$num) -and (Format-ShownNumber $num $c $decimals) -eq $value) { $value = $num }
+            $done.Add((Set-CoverValue $doc $c $value '表紙の版数'))
         }
         if ($coverDate) {
             $doc = $docs[$coverName]
             $c = Get-SheetCellElement $doc (Get-SheetRowElement $doc $coverDate.Row -Create) $coverDate.Row $coverDate.Col -Create
-            Set-SheetCellValue $doc $c (Get-DateValue $c $coverDate.Text)
-            $done.Add('表紙の更新日')
+            $done.Add((Set-CoverValue $doc $c (Get-DateValue $c $coverDate.Text) '表紙の更新日'))
         }
         if ($hist) {
             $doc = $docs[$histName]
@@ -606,7 +681,7 @@ foreach ($f in $files) {
             $styleEl = $null
             if ($last -gt $hist.HeaderRow) { $styleEl = Get-SheetRowElement $doc $last }
             $versionText = $newVersion
-            if ($hist.Entries.Count -gt 0) { $versionText = Set-VersionText $grid.Cells[$srcRow][$hist.Cols['Version']] $newVersion }
+            if ($lastVersion) { $versionText = Set-VersionText $lastVersion $newVersion }
             for ($i = 0; $i -lt $entries.Count; $i++) {
                 $row = $newRow + $i
                 $rowEl = Get-SheetRowElement $doc $row -Create -TemplateRow $styleEl
@@ -663,6 +738,7 @@ foreach ($f in $files) {
 #
 #     版を上げる（-Bump）: 表紙の版数と更新日を新しい版数・日付にし、改訂履歴の最後の行の下に
 #     版数・改訂日・改訂箇所・改訂内容・改訂者の行を足します（最後の行の書式と結合を写します）。
+#     表紙の版数・更新日が数式のセルなら、数式は残し、計算結果だけを新しい版数・日付にします。
 #     -CompareWith で前の版を渡すと、前の版との差分から改訂箇所・改訂内容の行を作ります。
 #     ファイル名に版数（_v1.0・第1.0版 など）があれば新しい版数の名前で別のファイルに保存し、無ければ上書きします。
 #     表紙と改訂履歴の見つけ方は Test-ExcelDeliverable.ps1 の版数のチェックと同じです。
@@ -713,7 +789,7 @@ foreach ($f in $files) {
 #     改訂履歴の改訂箇所。既定は「全体」。
 #
 # .PARAMETER Version
-#     新しい版数（例: 2.0）。既定は最後の数を 1 つ上げた版数（1.0 → 1.1）。
+#     新しい版数（例: 2.0）。既定は最後の数を 1 つ上げた版数（1.0 → 1.1。最後の数の桁数は保ち、1.01 → 1.02）。
 #
 # .PARAMETER HistorySheet
 #     改訂履歴のシート名の正規表現。既定は「改訂履歴|変更履歴|改版履歴|更新履歴|改訂記録」。
