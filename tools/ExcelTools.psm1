@@ -2444,6 +2444,25 @@ function Get-OwnerKey {
     return (ConvertTo-Label $Name).ToUpperInvariant()
 }
 
+function Split-OwnerNames {
+    #     担当の欄の名前（「山田、佐藤」「山田さん・佐藤さん」）を 1 人ずつに分け、後ろのさん・様・氏・くんを除く（空の名前は返さない。
+    #     「お客様」「皆様」はそのまま）。「・」は、カタカナの名前の中（ジョン・スミス）なら区切りにしない（Export-ActionItems.ps1・New-WeeklyReport.ps1）
+    param([string] $Text)
+    $honorific = '\s*(さん|様|氏|くん)$'
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($part in ([string]$Text -split '\s*[、,，\uFF64]\s*')) {
+        $pieces = @($part)
+        if (($part.Trim() -replace $honorific, '') -notmatch '^[\p{IsKatakana}\uFF65-\uFF9F\s]+$') { $pieces = @($part -split '\s*[・\uFF65]\s*') }
+        foreach ($p in $pieces) {
+            $n = $p.Trim()
+            $plain = ($n -replace $honorific, '').Trim()
+            if ($plain -notmatch '^(お客|客|皆)$') { $n = $plain }
+            if ($n) { $names.Add($n) }
+        }
+    }
+    return $names.ToArray()
+}
+
 function ConvertTo-DateValue {
     #     日付の文字（2026/10/1・2026-10-01・2026年10月1日・令和8年10月1日・R8.10.1・10/1）を日付にする（無ければ $null）。
     #     年の無い日付（10/1・10月1日。後ろの曜日 (木)・（木）・(Thu) は読み飛ばす）は、AsOf の前後半年に入る年にする

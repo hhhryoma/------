@@ -268,6 +268,30 @@ Test-Case 'New-WeeklyReport: 英字の大文字・小文字だけが違う担当
     Assert-Match ([System.IO.File]::ReadAllText((Join-Path $ownerDir 'Nguyen.txt'))) '■ 遅延・期限切れ（3 件）'
 }
 
+Test-Case 'New-WeeklyReport: 担当に 2 人を書いた課題（山田、佐藤・山田さん、佐藤・山田・佐藤さん）は、1 人ずつの担当者のやることに入れる（2 人で 1 人の担当者にしない）' {
+    $dir = New-TestDir
+    @('No,区分,件名,担当,期限,状態,起票日,完了日',
+        '1,宿題,メッセージ一覧の文言をそろえる,"山田さん、佐藤",2026/10/20,未対応,2026/10/13,',
+        '2,宿題,IF 定義書を直す,山田・佐藤さん,2026/10/28,未対応,2026/10/13,',
+        '3,宿題,移行手順を書く,ジョン・スミス,2026/10/28,未対応,2026/10/13,',
+        '4,宿題,帳票を直す,"山田、佐藤",2026/10/16,完了,2026/10/13,2026/10/20') | Set-Content -LiteralPath (Join-Path $dir '宿題.csv') -Encoding UTF8
+    $out = Join-Path $dir '週次報告'
+    $text = Get-HostText { $script:items = @(& $WeeklyReport -IssueList (Join-Path $dir '宿題.csv') -AsOf '2026-10-23' -OutDir $out) }
+    $heads = @($text -split "`n" | Where-Object { $_ -match '^【' })
+    Assert-Equal 3 $heads.Count ($heads -join ' / ')
+    foreach ($h in @('【山田】期限切れ 1・期限間近 1', '【佐藤】期限切れ 1・期限間近 1', '【ジョン・スミス】期限間近 1')) { Assert-True ($heads -contains $h) ('{0} がありません: {1}' -f $h, ($heads -join ' / ')) }
+    Assert-Match $text '・今週: 起票 0 件・完了 1 件\n・未完了: 3 件・うち期限切れ 1 件\n  - 期限 10/20 1: メッセージ一覧の文言をそろえる（山田、佐藤）\n'
+    $ownerDir = Join-Path $out '週次報告_20261023_担当者別'
+    Assert-Equal 3 @(Get-ChildItem -LiteralPath $ownerDir -File).Count
+    foreach ($n in @('山田', '佐藤', 'ジョン・スミス')) { Assert-True (Test-Path -LiteralPath (Join-Path $ownerDir ($n + '.txt'))) "$n.txt がありません" }
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $ownerDir '佐藤.txt'))) '\[期限切れ\] 課題: 1: メッセージ一覧の文言をそろえる'
+    $people = Read-XlsxSheet -Path (Join-Path $out '週次報告_20261023.xlsx') -Index 2
+    $rows = @(2..$people.Rows.Count | ForEach-Object { $row = $people.Rows[$_]; (@('A', 'B', 'C', 'D', 'E') | ForEach-Object { $row[$_] }) -join '|' })
+    foreach ($r in @('山田|0|0|2|1', '佐藤|0|0|2|1')) { Assert-True ($rows -contains $r) ('担当者のシートに {0} がありません: {1}' -f $r, ($rows -join ' / ')) }
+    $issues = Read-XlsxSheet -Path (Join-Path $out '週次報告_20261023.xlsx') -Index 4
+    Assert-Equal '山田、佐藤' $issues.Rows[2]['G'] '課題のシートの担当は 1 人ずつの名前をつなぐ'
+}
+
 Test-Case 'New-WeeklyReport: Excel のセル内で改行した指摘（↵）は、報告の一覧では空白にして 1 行に書く' {
     $dir = New-TestDir
     Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking

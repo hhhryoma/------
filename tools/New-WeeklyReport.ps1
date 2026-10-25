@@ -96,7 +96,8 @@ function Format-Day {
 # ---------------------------------------------------------------- 担当者
 
 
-# 担当者の名前は、全角・半角、英字の大文字・小文字と空白の違いをそろえて同じ人とみなす（Get-OwnerKey。表示は最初に出てきた書き方）
+# 担当者の名前は、全角・半角、英字の大文字・小文字と空白の違いをそろえて同じ人とみなす（Get-OwnerKey。表示は最初に出てきた書き方）。
+# 指摘・障害・課題の担当に書いた 2 人以上の名前は、1 人ずつに分ける（Split-OwnerNames）
 $ownerNames = @{}
 $noOwner = '（担当なし）'
 function Add-OwnerName {
@@ -163,8 +164,13 @@ function Add-Issue {
     $cell = ''
     if ($Record.Sheet) { $cell = '{0}{1}' -f (ConvertTo-ColumnName $Record.Column), $Record.Row } else { $cell = '{0} 行目' -f $Record.Row }
     $open = -not $Closed
+    # 担当に 2 人以上を書いたもの（山田、佐藤・山田さん・佐藤さん）は、1 人ずつの担当にする（担当のいないものは '' の 1 人）
+    $keys = New-Object System.Collections.Generic.List[string]
+    foreach ($n in @(Split-OwnerNames $Owner)) { $k = Add-OwnerName $n; if (-not $keys.Contains($k)) { $keys.Add($k) } }
+    if ($keys.Count -eq 0) { $keys.Add('') }
+    $names = (@($keys | Where-Object { $_ } | ForEach-Object { Get-OwnerName $_ })) -join '、'
     $issues.Add([pscustomobject]@{
-            Kind = $Kind; Id = $Id; Target = $Target; Content = $Content; Severity = $Severity; Owner = $Owner; OwnerKey = (Add-OwnerName $Owner); Status = $Status
+            Kind = $Kind; Id = $Id; Target = $Target; Content = $Content; Severity = $Severity; Owner = $names; OwnerKeys = $keys.ToArray(); Status = $Status
             Opened = $Opened; Due = $Due; ClosedOn = $ClosedOn; Closed = $Closed
             Overdue = ($open -and $null -ne $Due -and $Due -lt $AsOf); DueSoon = ($open -and (Test-InRange $Due $AsOf $nextEnd))
             OpenedInPeriod = (Test-InRange $Opened $Since $AsOf); ClosedInPeriod = ($Closed -and (Test-InRange $ClosedOn $Since $AsOf))
@@ -371,9 +377,12 @@ foreach ($i in $issues) {
     if ($i.Closed) { continue }
     $note = $i.Status
     if ($i.Severity) { $note = (@($i.Severity, $i.Status) | Where-Object { $_ }) -join '・' }
-    if ($i.Overdue) { Add-Item $i.OwnerKey '期限切れ' 0 $i.Kind (Get-IssueTitle $i) '期限' $i.Due $note $i.Place $i }
-    elseif ($i.DueSoon) { Add-Item $i.OwnerKey '期限間近' 1 $i.Kind (Get-IssueTitle $i) '期限' $i.Due $note $i.Place $i }
-    else { Add-Item $i.OwnerKey '未完了' 3 $i.Kind (Get-IssueTitle $i) '期限' $i.Due $note $i.Place $i }
+    # 担当が 2 人以上なら、それぞれの人のやることにする
+    foreach ($key in $i.OwnerKeys) {
+        if ($i.Overdue) { Add-Item $key '期限切れ' 0 $i.Kind (Get-IssueTitle $i) '期限' $i.Due $note $i.Place $i }
+        elseif ($i.DueSoon) { Add-Item $key '期限間近' 1 $i.Kind (Get-IssueTitle $i) '期限' $i.Due $note $i.Place $i }
+        else { Add-Item $key '未完了' 3 $i.Kind (Get-IssueTitle $i) '期限' $i.Due $note $i.Place $i }
+    }
 }
 $sortedItems = @($items | Sort-Object @{ e = { if ($_.OwnerKey) { 0 } else { 1 } } }, Owner, Rank, @{ e = { if ($_.Date) { $_.Date } else { [datetime]::MaxValue } } }, Kind)
 # 担当者の順は $sortedItems の順（Group-Object は PowerShell の版によって並べ替えるため使わない）
@@ -386,7 +395,7 @@ foreach ($x in $sortedItems) {
 $owners = New-Object System.Collections.Generic.List[object]
 foreach ($key in $ownerKeys) {
     $list = @($groups[$key])
-    $ownerIssues = @($issues | Where-Object { $_.OwnerKey -eq $key -and -not $_.Closed })
+    $ownerIssues = @($issues | Where-Object { $_.OwnerKeys -contains $key -and -not $_.Closed })
     $owners.Add([pscustomobject]@{
             Owner = $list[0].Owner; Items = $list
             Delayed = @($list | Where-Object { $_.State -eq '遅延' }).Count; EndingNext = @($list | Where-Object { $_.State -eq '来週終了' }).Count
@@ -632,7 +641,7 @@ if ($OutDir) {
     foreach ($i in $issueOrder) {
         $state = '未完了'
         if ($i.Overdue) { $state = '期限切れ' } elseif ($i.DueSoon) { $state = '期限間近' } elseif ($i.Closed) { $state = '今週の完了' }
-        $row = @{ Values = @($i.Kind, $state, $i.Id, $i.Target, $i.Content, $i.Severity, (Get-OwnerName $i.OwnerKey), (Format-DateCell $i.Opened), (Format-DateCell $i.Due), (Format-DateCell $i.ClosedOn), $i.Status, (Format-PlaceText $i.Place)) }
+        $row = @{ Values = @($i.Kind, $state, $i.Id, $i.Target, $i.Content, $i.Severity, ((@($i.OwnerKeys | ForEach-Object { Get-OwnerName $_ })) -join '、'), (Format-DateCell $i.Opened), (Format-DateCell $i.Due), (Format-DateCell $i.ClosedOn), $i.Status, (Format-PlaceText $i.Place)) }
         $link = New-PlaceLink $i.Place 11
         if ($link) { $row.Link = $link }
         $issueRows.Add($row)
@@ -810,4 +819,5 @@ if ($HistoryCsv) {
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに ExcelTools.psm1・Search-Excel.ps1・Measure-Progress.ps1 が必要です。
 #     担当者の名前は、全角・半角、英字の大文字・小文字と空白の違いをそろえて同じ人とみなします（「山田」と「山田 太郎」は別の人になります）。
+#     指摘・障害・課題の担当に 2 人以上を書いたもの（山田、佐藤・山田・佐藤）は、1 人ずつの担当者のやることに入れます（名前の後ろのさん・様・氏・くんは除きます）。
 #     今週の完了は、WBS の実績終了日・表の完了日で数えます（日付の無い完了は数えません）。
