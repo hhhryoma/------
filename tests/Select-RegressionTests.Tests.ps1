@@ -169,6 +169,21 @@ Test-Case 'Select-RegressionTests: 改版履歴の追記・改訂日の変更（
     Assert-Match $text '設計書の変更 1 件（差分 3 件。表紙・改訂履歴・作成日などは除く）'
 }
 
+Test-Case 'Select-RegressionTests: テスト仕様書の隣のエビデンスのブック（テストID の名前のブック・フォルダ）の表は、ケースとして選ばない' {
+    $dir = New-TestDir
+    $d = New-RegressionData $dir
+    $spec = Join-Path $dir 'spec'
+    New-Item -ItemType Directory -Path (Join-Path $spec 'UT-001') | Out-Null
+    New-RegressionSpec (Join-Path $spec 'UT_受注登録.xlsx') @(
+        @('UT-001', 'SCR002', '正常', '画面を開く', '支払方法に銀行振込が選ばれている', 'OK'),
+        @('UT-002', 'SCR001', '正常', '検索ボタンを押す', '一覧が表示される', 'OK'))
+    # UT-001 のエビデンスのブック（支払方法の初期値を確かめた表）
+    New-RegressionSpec (Join-Path $spec 'UT-001/エビデンス.xlsx') @(, @('1', '', '正常', '画面を開く', '支払方法: 銀行振込', 'OK'))
+    $r = @(& $RegressionTool -Old $d.Old -New $d.New -TestPath $spec 6>$null)
+    Assert-Equal @('高|SCR002|UT-001') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Priority, $_.Function, $_.Id })
+    Assert-Match (Get-HostText { & $RegressionTool -Old $d.Old -New $d.New -TestPath $spec | Out-Null }) '/ テストケース 2 件'
+}
+
 Test-Case 'Select-RegressionTests: Get-Help でヘルプが表示される' {
     $h = Get-Help $RegressionTool
     Assert-Match $h.Synopsis '再テストするテストケースを選びます'

@@ -469,6 +469,8 @@ try {
         $file = Join-Path $detailDir '網羅.xlsx'
         $args4 = @{ DesignPath = $DesignPath; TestPath = $TestPath; OutXlsx = $file } + $common
         if ($Requirement) { $args4['Requirement'] = $Requirement }
+        # テスト仕様書のフォルダに置いた障害管理表を、テストとして読まない（Measure-TestQuality と同じ）
+        if ($BugList) { $args4['BugList'] = $BugList }
         $gaps = Invoke-Tool 'Test-Traceability' $args4
     }
     if ($null -ne $gaps) {
@@ -733,7 +735,8 @@ if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 
 #       -BugList / -Findings  Measure-DefectRemoval.ps1（摘出すべき工程までに見つかった割合・流出）
 #       -Findings と -BugList  Measure-ReviewEffectiveness.ps1（設計工程の摘出率・レビューで見逃した設計書）
 #       -AiReview と -Findings  Compare-ReviewFindings.ps1（AI と人の指摘の一致率・観点表への反映案。観点別の一致率のシート）
-#       -DesignPath と -TestPath  Test-Traceability.ps1（テストのある画面・イベント・メッセージ・IF の割合。-Requirement で要件も）
+#       -DesignPath と -TestPath  Test-Traceability.ps1（テストのある画面・イベント・メッセージ・IF の割合。-Requirement で要件も。
+#                                 -BugList も渡し、テスト仕様書のフォルダの障害管理表をテストとみなさない）
 #       -DesignPath      Test-DesignConsistency.ps1（設計書どうしの参照の食い違い）
 #
 #     「要対応」のシートには、基準から外れた設計書・機能、要対応のゾーン、流出のあった工程、テストの抜け、

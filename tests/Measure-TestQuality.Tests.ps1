@@ -312,6 +312,39 @@ Test-Case 'Measure-TestQuality: 基準値の CSV に「FP（トランザクシ�
     Assert-Equal '1|基準内' ('{0}|{1}' -f $r[0].TestDensity, $r[0].TestJudgement) '「FP（トランザクション）」の行を先に使う'
 }
 
+Test-Case 'Measure-TestQuality: 障害の状態の「誤指摘」も数えず、バグがどれも取下げ・仕様どおりなどの NG のケースを食い違いにする' {
+    $dir = New-TestDir
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'SCR201'; Header = @('項番', 'テスト項目', '実施日', '判定', '障害番号'); Rows = @(
+                @('1', '確認 1', '2026/11/02', 'NG', 'B001'),
+                @('2', '確認 2', '2026/11/02', 'NG', 'B002、B003'),
+                @('3', '確認 3', '2026/11/02', 'NG', 'B002、B004'),
+                @('4', '確認 4', '2026/11/02', 'OK', 'B003')) })
+    @('障害番号,件名,起票日,状態', 'B001,障害 1,2026/11/02,対応中', 'B002,仕様の誤解,2026/11/02,仕様どおり', 'B003,操作の勘違い,2026/11/02,誤指摘', 'B004,障害 4,2026/11/02,対応中') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $out = Join-Path $dir 'test-quality.xlsx'
+    $text = Get-HostText { & $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'bugs.csv') -AsOf '2026-11-06' -OutXlsx $out 3>$null | Out-Null }
+    Assert-Match $text 'バグ 2 件（未完了 2 件。取下げなどで数えなかったもの 2 件）' '誤指摘は Measure-DefectRemoval・Find-SimilarDefects と同じく数えない'
+    Assert-Match $text '食い違い: 1 件（バグは取下げ・仕様どおりなのに NG のまま 1）' 'バグの一部（B004）が数えるバグのケースは、食い違いにしない'
+    $issue = (Read-XlsxSheet -Path $out -Index 6).Rows[2]
+    Assert-Equal 'バグは取下げ・仕様どおりなのに NG のまま|2|バグ B002（仕様どおり）・B003（誤指摘）は障害として数えない状態ですが、ケースの結果が NG のままです（再テストするか、期待結果と結果を直してください）' ('{0}|{1}|{2}' -f $issue['A'], $issue['C'], $issue['D'])
+}
+
+Test-Case 'Measure-TestQuality: テスト仕様書の隣のエビデンスのブック（テストID の名前のブック・フォルダ）の表はケースとして数えず、読み取り結果に知らせる' {
+    $dir = New-TestDir
+    New-SheetBook (Join-Path $dir 'UT_受注詳細.xlsx') @(@{ Name = 'SCR003'; Header = @('テストID', '確認内容', '実施日', '結果'); Rows = @(
+                @('SCR003-001', '詳細を表示する', '2026/11/02', 'OK'),
+                @('SCR003-002', '更新する', '2026/11/02', 'OK'),
+                @('SCR003-003', '削除する', '', '')) })
+    # エビデンス: ケースのフォルダのブックと、テストID の名前のブック。どちらも確認した項目の表がある
+    New-Item -ItemType Directory -Path (Join-Path $dir 'SCR003-001') | Out-Null
+    New-SheetBook (Join-Path $dir 'SCR003-001/エビデンス.xlsx') @(@{ Name = '画面'; Header = @('No', '確認内容', '結果'); Rows = @(@('1', '受注番号が表示される', 'OK'), @('2', '明細が表示される', 'OK')) })
+    New-SheetBook (Join-Path $dir 'SCR003-002.xlsx') @(@{ Name = '画面'; Header = @('No', '確認内容', '結果'); Rows = @(, @('1', '更新される', 'OK')) })
+    $text = Get-HostText { $script:tq = @(& $TestQualityTool -Path $dir -AsOf '2026-11-06' 3>$null) }
+    Assert-Match $text 'テストケース 3 件（実施 2・OK 2・NG 0・保留 0・未実施 1。対象外 0）'
+    Assert-Equal @('UT_受注詳細|3') @($script:tq | ForEach-Object { '{0}|{1}' -f $_.Function, $_.Cases }) 'エビデンスのブックの名前を機能にしない'
+    Assert-Match $text '読み取り（テスト仕様書）: 1 ファイル・3 行'
+    Assert-Match $text 'エビデンスのブックとみなしたファイル（フォルダかファイルの名前がテストID）: .*SCR003-002\.xlsx'
+}
+
 Test-Case 'Measure-TestQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestQualityTool
     Assert-Match $h.Synopsis 'テスト'

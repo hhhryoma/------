@@ -161,6 +161,27 @@ Test-Case 'Test-Traceability: 要件一覧の CSV も、ID の見出しがいち
     Assert-Equal @('REQ-010') @($script:traceCsvGaps | Where-Object Judgement -eq '要件一覧に無い要件 ID' | ForEach-Object { $_.Id })
 }
 
+Test-Case 'Test-Traceability: テスト仕様書のフォルダの障害管理表（-BugList）と、エビデンスのブック（テストID の名前のブック・フォルダ）は、テストとみなさない' {
+    $dir = New-TestDir
+    New-TraceBook (Join-Path $dir 'UT_受注一覧.xlsx') @(@{ Name = 'ケース'; Header = @('テストID', '機能', '確認内容', '結果'); Rows = @(
+                , @('UT-001', 'SCR001', '初期表示で受注日の初期値を確かめる', 'OK')
+                , @('UT-002', 'SCR001', '検索ボタンで受注を検索する', 'OK')) })
+    # 障害管理表: 障害内容に IF001 と画面 SCR001 のクリアが出てくる（No と確認結果の列もある）
+    $bugs = Join-Path $dir '障害管理表.xlsx'
+    New-TraceBook $bugs @(@{ Name = '障害一覧'; Header = @('No', '障害番号', '機能', '障害内容', '起票日', '状態', '確認結果'); Rows = @(
+                , @('1', 'B001', 'IF001', '出荷指示データ（IF001）の CSV の日付が違う', '2026/10/06', '対応中', '')) })
+    # UT-002 のエビデンスのブック（SCR001 のクリアの画面も貼った）
+    New-Item -ItemType Directory -Path (Join-Path $dir 'UT-002') | Out-Null
+    New-TraceBook (Join-Path $dir 'UT-002/エビデンス.xlsx') @(@{ Name = '画面'; Header = @('No', '確認内容', '結果'); Rows = @(, @('1', 'SCR001 クリアで条件が空になった', 'OK')) })
+    $keys = { param($gaps) @($gaps | ForEach-Object { '{0}|{1}|{2}' -f $_.Kind, $_.Scope, $_.Id }) }
+    $all = & $keys @(& $TraceTool -DesignPath $traceDesignDir -TestPath $dir 6>$null)
+    Assert-True ($all -notcontains 'IF||IF001') '-BugList が無ければ、障害管理表もテスト仕様書として読む'
+    $gaps = & $keys @(& $TraceTool -DesignPath $traceDesignDir -TestPath $dir -BugList $bugs 6>$null)
+    Assert-True ($gaps -contains 'IF||IF001') '障害管理表の IF001 はテストではない'
+    Assert-True ($gaps -contains 'イベント|SCR001|EV03') 'エビデンスのブックのクリアはテストではない'
+    Assert-True ($gaps -notcontains 'イベント|SCR001|EV02') 'テスト仕様書の検索はテスト'
+}
+
 Test-Case 'Test-Traceability: Get-Help でヘルプが表示される' {
     $h = Get-Help $TraceTool
     Assert-Match $h.Synopsis 'テスト'

@@ -64,7 +64,8 @@ $readLog = New-Object System.Collections.Generic.List[object]
 $records = Read-HeaderRecords -Inputs (Get-InputFiles $Path 'テスト仕様書' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
     -Need @(@('期待結果', 'テスト内容'), @('テストID', '手順', '結果')) -Key @('テストID', '期待結果', 'テスト内容', '手順') -What 'テスト仕様書' `
     -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
-$allCases = ConvertTo-TestCases $records
+# エビデンスの置き場所にあるブック（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）の表は、ケースとして読まない
+$allCases = Remove-EvidenceCases (ConvertTo-TestCases $records) $readLog
 $cases = @($allCases | Where-Object { $_.Kind -ne '対象外' })
 if ($cases.Count -eq 0) { Write-Warning 'テストケースが見つかりません（期待結果か確認内容と、テストID・手順・結果のどれかの見出しがある表を探します）' }
 
@@ -340,6 +341,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       項目名の揺れ（画面のケースに、画面項目定義の項目名の別の書き方（受注番号 → 受注No・顧客コード → 顧客CD など）が出てくる）
 #
 #     必須・型・境界値・コード値の言葉と桁数の数字は、ケースの確認内容・期待結果・手順・前提条件・入力値・区分の列から探します（テスト ID・予定日などの数字は見ません）。
+#     エビデンスの置き場所にあるブック（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）の表は、ケースとして読みません。
 #     見出しの候補は tools\test-quality\見出し.csv（Measure-TestQuality.ps1 と同じ）で足せます。
 #
 # .PARAMETER Path

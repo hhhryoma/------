@@ -279,6 +279,22 @@ Test-Case 'Test-TestSpec: テストID の列の見出しが「No.」「テスト
     Assert-Equal @('テストIDの重複|3 行目|1') @(& $TestSpecTool -Path $csv 6>$null | ForEach-Object { '{0}|{1}|{2}' -f $_.Item, $_.Location, $_.Id }) 'CSV'
 }
 
+Test-Case 'Test-TestSpec: テスト仕様書の隣のエビデンスのブック（テストID の名前のブック・フォルダ）の表は、ケースとして読まない' {
+    $dir = New-TestDir
+    New-SpecBook (Join-Path $dir 'UT_受注詳細.xlsx') @('テストID', '区分', '手順', '期待結果', '結果') @(
+        @('SCR003-001', '正常', '詳細を開く', '受注番号が表示される', 'OK'),
+        @('SCR003-002', '異常', '数量に 0 を入れて更新する', 'E0009 が表示される', 'OK'))
+    # エビデンスの確認した項目の表（期待結果が空・あいまい。テスト仕様書なら指摘になる）
+    New-Item -ItemType Directory -Path (Join-Path $dir 'SCR003-001') | Out-Null
+    New-SpecBook (Join-Path $dir 'SCR003-001/エビデンス.xlsx') @('No', '手順', '期待結果', '結果') @(, @('1', '開く', '正しく表示される', 'OK'))
+    New-SpecBook (Join-Path $dir 'SCR003-002.xlsx') @('No', '手順', '期待結果', '結果') @(, @('1', '更新', '', 'OK'))
+    $issues = @(& $TestSpecTool -Path $dir 6>$null)
+    Assert-Equal @() @($issues | ForEach-Object { '{0}|{1}|{2}' -f $_.File, $_.Location, $_.Item })
+    $text = Get-HostText { & $TestSpecTool -Path $dir | Out-Null }
+    Assert-Match $text 'テストケース 2 件（機能 1）'
+    Assert-Match $text 'エビデンスのブックとみなしたファイル（フォルダかファイルの名前がテストID）: '
+}
+
 Test-Case 'Test-TestSpec: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestSpecTool
     Assert-Match $h.Synopsis 'テスト仕様書'

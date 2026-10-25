@@ -32,7 +32,8 @@ Update-TypeData -TypeName 'TestSpecDraft.Case' -DefaultDisplayPropertySet Id, Vi
 $searchArgs = @{ Pattern = '\S'; Path = $DesignPath; Target = 'Value' }
 if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-$design = Read-ScreenDesign (ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null))
+$books = ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null)
+$design = Read-ScreenDesign $books
 $screens = @($design.Items | ForEach-Object { $_.Screen }) + @($design.Events | ForEach-Object { $_.Screen }) | Select-Object -Unique
 if (@($screens).Count -eq 0) { throw '画面設計書（画面ID と、項目名・桁数の画面項目定義、またはイベント定義）が見つかりません' }
 if ($Screen) {
@@ -99,6 +100,31 @@ function Split-Checks {
     return , $out
 }
 
+# 画面の要件 ID を書く欄（画面概要などの「関連要件 | REQ-002」の見出し）と、要件 ID の形（REQ-002・FR-01・UC-1.2 など。英字と数字）
+$requirementLabels = @('関連要件', '要件ID', '要件No', '要件番号', '対応要件', '関連要求', '要求ID', '要求No', '要求番号') | ForEach-Object { ConvertTo-Label $_ }
+$requirementIdRx = New-Object System.Text.RegularExpressions.Regex('(?<![A-Za-z0-9])[A-Za-z]+(?:[_\-][A-Za-z]+)*[_\-]?\d+(?:[_\-.]\d+)*(?![A-Za-z0-9])')
+
+function Get-ScreenRequirements {
+    #     画面の要件 ID（画面設計書の「関連要件」「要件ID」などの欄に書いた ID。複数なら書いた順）。
+    #     その画面の画面項目定義・イベント定義のあるブックのシートのうち、ほかの画面のシート（1 つのブックに画面が複数あるとき）は見ない
+    param([string] $Screen)
+    $ids = New-Object System.Collections.Generic.List[string]
+    $paths = @(@($design.Items.ToArray()) + @($design.Events.ToArray()) | Where-Object { $_.Screen -eq $Screen } | ForEach-Object { $_.Path } | Select-Object -Unique)
+    foreach ($p in $paths) {
+        foreach ($sheetName in $books[$p].Sheets.Keys) {
+            $grid = $books[$p].Sheets[$sheetName]
+            $sheetScreen = Find-LabelValue $grid '画面ID'
+            if ($sheetScreen -and $sheetScreen.Trim() -ne $Screen) { continue }
+            foreach ($label in $requirementLabels) {
+                $value = Find-LabelValue $grid $label
+                if (-not $value) { continue }
+                foreach ($m in $requirementIdRx.Matches($value.Normalize($nfkc))) { if (-not $ids.Contains($m.Value)) { $ids.Add($m.Value) } }
+            }
+        }
+    }
+    return , $ids
+}
+
 function Get-BadValue {
     #     型のチェックに引っかかる値と、その説明
     param([string] $Name, $Item)
@@ -121,6 +147,8 @@ foreach ($scr in $screens) {
     $events = @($design.Events | Where-Object { $_.Screen -eq $scr })
     $name = @(@($items | ForEach-Object { $_.ScreenName }) + @($events | ForEach-Object { $_.ScreenName }) | Where-Object { $_ })[0]
     $function = ('{0} {1}' -f $scr, $name).Trim()
+    # 画面の要件 ID は、その画面のすべてのケースに書く（Test-Traceability.ps1 -Requirement で、要件からテストまでたどれるように）
+    $requirementText = (Get-ScreenRequirements $scr) -join '、'
     $list = New-Object System.Collections.Generic.List[object]
     $usedIds = @{}
     $add = {
@@ -129,6 +157,7 @@ foreach ($scr in $screens) {
         $c = [pscustomobject]@{
             Id = '{0}-{1:000}' -f $scr, ($list.Count + 1); Function = $function; Viewpoint = $Viewpoint; Kind = $Kind; Content = $Content
             Steps = $Steps.Replace('↵', "`n"); InputValue = $InputValue; Expected = $Expected.Replace('↵', "`n"); Source = $(if ($Source) { '{0} {1} {2} 行目' -f $Source.File, $Source.Sheet, $Source.Row } else { '' })
+            Requirement = $requirementText
         }
         $c.PSObject.TypeNames.Insert(0, 'TestSpecDraft.Case')
         $list.Add($c)
@@ -246,10 +275,17 @@ $columns = @(
     @{ Header = 'テストID'; Width = 13 }, @{ Header = '機能'; Width = 18 }, @{ Header = '観点'; Width = 10 }, @{ Header = '区分'; Width = 7 },
     @{ Header = '確認内容'; Width = 36 }, @{ Header = '手順'; Width = 40 }, @{ Header = '入力値'; Width = 18 }, @{ Header = '期待結果'; Width = 50 },
     @{ Header = '予定日'; Width = 11 }, @{ Header = '実施日'; Width = 11 }, @{ Header = '結果'; Width = 7 }, @{ Header = '障害番号'; Width = 10 }, @{ Header = '設計書'; Width = 40 })
+# 画面設計書に要件 ID（関連要件など）があれば、要件ID の列を足す
+$withRequirements = @($cases | Where-Object { $_.Requirement }).Count -gt 0
+if ($withRequirements) { $columns += @{ Header = '要件ID'; Width = 14 } }
 $bookSheets = New-Object System.Collections.Generic.List[object]
 $summary = New-Object System.Collections.Generic.List[object]
 foreach ($s in $sheets) {
-    $rows = @($s.Cases | ForEach-Object { @{ Values = @($_.Id, $_.Function, $_.Viewpoint, $_.Kind, $_.Content, $_.Steps, $_.InputValue, $_.Expected, '', '', '', '', $_.Source) } })
+    $rows = @($s.Cases | ForEach-Object {
+            $values = @($_.Id, $_.Function, $_.Viewpoint, $_.Kind, $_.Content, $_.Steps, $_.InputValue, $_.Expected, '', '', '', '', $_.Source)
+            if ($withRequirements) { $values += $_.Requirement }
+            @{ Values = $values }
+        })
     $bookSheets.Add(@{ Name = $s.Screen; Columns = $columns; Rows = $rows })
     $count = { param($k) @($s.Cases | Where-Object { $_.Kind -eq $k }).Count }
     $summary.Add(@{ Values = @($s.Function, [double]$s.Cases.Count, [double](& $count '正常'), [double](& $count '異常'), [double](& $count '境界')) })
@@ -275,6 +311,8 @@ Write-Host '下書きです。「（処理概要から書き足す）」の条�
 #
 #     列は テストID・機能・観点・区分（正常・異常・境界）・確認内容・手順・入力値・期待結果・予定日・実施日・結果・障害番号・設計書 で、
 #     Test-TestSpec.ps1・Test-Traceability.ps1・Measure-TestQuality.ps1 でそのまま読めます。
+#     画面設計書の「関連要件」「要件ID」などの欄に要件 ID（REQ-002 など）があれば、要件ID の列を足し、その画面のケースに書きます
+#     （Test-Traceability.ps1 -Requirement で、要件からテストまでたどれます）。
 #
 # .PARAMETER DesignPath
 #     画面設計書と、コード定義書・メッセージ一覧のファイルかフォルダ（いっしょに渡すと、コード値とメッセージの文言を使います）。

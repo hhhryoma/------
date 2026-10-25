@@ -46,8 +46,8 @@ if ($DesignPath -and $SizeCsv) { throw '-DesignPath と -SizeCsv は、どちら
 
 Update-TypeData -TypeName 'ReviewEffectiveness.Document' -DefaultDisplayPropertySet Document, Findings, DesignBugs, FindingDensity, BugDensity, RemovalRate, Zone -Force -WhatIf:$false
 
-# 数えない状態（取下げ・重複など）
-$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない|キャンセル|cancel'
+# 数えない状態（取下げ・誤指摘・仕様どおり・重複など。障害管理表を読むほかのツールと同じ）
+$excludedPattern = Get-ExcludedBugPattern
 
 # 指摘密度の判定 × 設計で入ったバグの有無 → ゾーン・要対応・対応の例
 $zoneTable = @{

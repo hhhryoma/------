@@ -138,6 +138,34 @@ Test-Case 'New-TestSpecDraft: -Screen に合う画面が無ければ設計書の
     Assert-Equal @('-Screen の SCR999 に合う画面がありません') @($warnings | ForEach-Object { $_.Message })
 }
 
+Test-Case 'New-TestSpecDraft: 画面設計書の関連要件（要件 ID）を、その画面のケースの要件ID の列に書き、要件からテストまでたどれるようにする' {
+    $dir = New-TestDir
+    $design = Join-Path $dir 'design'
+    New-Item -ItemType Directory -Path $design | Out-Null
+    $hdr = { param($id, $name) @('画面ID', $id, '画面名', $name, '', '', '') }
+    foreach ($s in @(@('SCR010', '顧客登録', 'REQ-010、REQ-011'), @('SCR011', '顧客一覧', ''))) {
+        $overview = @((& $hdr $s[0] $s[1]), @('画面概要', '顧客を扱う'))
+        if ($s[2]) { $overview += , @('関連要件', $s[2]) }
+        New-SheetsBook (Join-Path $design ('画面設計書_{0}.xlsx' -f $s[0])) ([ordered]@{
+                '画面概要'     = $overview
+                '画面項目定義' = @((& $hdr $s[0] $s[1]), @(), @('No', '項目名', '入出力', '型', '桁数', '必須', '入力チェック'), @('1', '顧客名', 'I', '全角', '20', '○', ''))
+            })
+    }
+    $out = Join-Path $dir 'UT_下書き.xlsx'
+    $cases = @(& $TestDraft $design -OutXlsx $out 6>$null)
+    Assert-Equal @('SCR010|REQ-010、REQ-011', 'SCR011|') @($cases | Group-Object { $_.Id.Split('-')[0] } | ForEach-Object { '{0}|{1}' -f $_.Name, (@($_.Group | ForEach-Object { $_.Requirement } | Select-Object -Unique) -join '/') }) '画面ごとの要件 ID を、その画面のすべてのケースに'
+    $sheet = Read-XlsxSheet -Path $out -Index 2
+    Assert-Equal '設計書|要件ID' ('{0}|{1}' -f $sheet.Rows[1]['M'], $sheet.Rows[1]['N'])
+    Assert-Equal 'REQ-010、REQ-011' $sheet.Rows[2]['N']
+    # Test-Traceability: 下書きのテスト仕様書で、画面設計書に書いた要件にテストがある
+    @('要件ID,要件名', 'REQ-010,顧客を登録する', 'REQ-011,顧客名を必須にする', 'REQ-012,顧客を削除する') | Set-Content -LiteralPath (Join-Path $dir '要件一覧.csv') -Encoding UTF8
+    $gaps = @(& (Join-Path $script:ToolsDir 'Test-Traceability.ps1') -DesignPath $design -TestPath $out -Requirement (Join-Path $dir '要件一覧.csv') 6>$null)
+    Assert-Equal @('REQ-012|設計・テストなし') @($gaps | Where-Object Kind -eq '要件' | ForEach-Object { '{0}|{1}' -f $_.Id, $_.Judgement })
+    # 要件 ID の無い設計書からは、要件ID の列を作らない
+    $null = & $TestDraft $designSample -Screen SCR001 -OutXlsx (Join-Path $dir 'UT_SCR001.xlsx') 6>$null
+    Assert-Equal '設計書|' ('{0}|{1}' -f (Read-XlsxSheet -Path (Join-Path $dir 'UT_SCR001.xlsx') -Index 2).Rows[1]['M'], (Read-XlsxSheet -Path (Join-Path $dir 'UT_SCR001.xlsx') -Index 2).Rows[1]['N'])
+}
+
 Test-Case 'New-TestSpecDraft: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestDraft
     Assert-Match $h.Synopsis 'テスト仕様書の下書き'

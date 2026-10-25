@@ -63,9 +63,9 @@ Update-TypeData -TypeName 'TestQuality.Function' -DefaultDisplayPropertySet Func
 
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
-# 障害の状態: 対応が終わった・障害として数えない
+# 障害の状態: 対応が終わった・障害として数えない（取下げ・誤指摘・仕様どおりなど。障害管理表を読むほかのツールと同じ）
 $closedPattern = '完了|済|クローズ|close|done|解決|対応不要|終了'
-$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない|キャンセル|cancel'
+$excludedPattern = Get-ExcludedBugPattern
 
 # ---------------------------------------------------------------- 設定
 
@@ -187,7 +187,8 @@ $bugFiles = $null
 if ($BugList) { $bugFiles = Get-FilePathSet $BugList -NoRecurse:$NoRecurse }
 $readArgs = @{ Candidates = $candidates; Exclude = $OutXlsx; NoRecurse = $NoRecurse; NoExcel = $NoExcel; ReadLog = $readLog }
 $caseRecords = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $Path 'テスト仕様書' -NoRecurse:$NoRecurse) -Fields $caseFields -Need @('結果', @('テストID', 'テスト内容')) -Key @('テストID', 'テスト内容') -What 'テスト仕様書' -Skip $bugFiles
-$cases = ConvertTo-TestCases $caseRecords $AsOf
+# エビデンスの置き場所にあるブック（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）の表は、ケースとして数えない
+$cases = Remove-EvidenceCases (ConvertTo-TestCases $caseRecords $AsOf) $readLog
 # 機能の対応表があれば、テスト仕様書の機能の書き方をそろえる
 $functionNames = Read-FunctionMap $FunctionMap
 foreach ($c in $cases) {
@@ -206,6 +207,7 @@ $excludedIds = New-Object 'System.Collections.Generic.HashSet[string]'
 # 時点（-AsOf）より後に起票したバグの番号（数えないが、テスト仕様書が参照していても障害管理表に無い番号にはしない）
 $laterIds = New-Object 'System.Collections.Generic.HashSet[string]'
 $laterBugs = 0
+$excludedStatus = @{}   # 数えないバグの番号 → 状態
 $bugListHasFunction = $false
 if ($BugList) {
     $bugRecords = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $BugList '障害管理表' -NoRecurse:$NoRecurse) -Fields $bugFields -Need @('障害内容', @('起票日', '状態', '重要度', '障害ID')) -Key @('障害内容') -What '障害管理表'
@@ -223,7 +225,7 @@ if ($BugList) {
         if ($status -match $excludedPattern) {
             $excludedBugs++
             $excludedId = @(ConvertTo-BugIds $v['障害ID'])[0]
-            if ($excludedId) { [void]$excludedIds.Add($excludedId) }
+            if ($excludedId) { [void]$excludedIds.Add($excludedId); if (-not $excludedStatus.ContainsKey($excludedId)) { $excludedStatus[$excludedId] = $status } }
             continue
         }
         if ($rec.Labels['機能']) { $bugListHasFunction = $true }
@@ -240,6 +242,8 @@ if ($BugList) {
             Injected = ([string]$v['混入工程']).Trim(); Detected = ([string]$v['摘出工程']).Trim(); Place = $rec
         })
     }
+    # 同じ障害番号が 2 つのファイルにあれば知らせる（食い違いは先の行で見るため、ツールの結果などを同じフォルダに置くと、本当の状態が隠れる）
+    Write-DuplicateIdWarning $bugRecords '障害ID' '障害管理表'
     if ($bugs.Count -gt 0 -and -not $bugListHasFunction) { Write-Warning '障害管理表に機能の列が無いため、機能ごとのバグ密度は出せません（全体の件数・推移だけ出します）' }
 }
 
@@ -475,6 +479,11 @@ foreach ($c in $countedCases) {
         if ($bugListHasId -and -not $bugById.ContainsKey($id) -and -not $excludedIds.Contains($id) -and -not $laterIds.Contains($id)) { Add-Issue '障害管理表に無いバグ番号' $c ("バグ番号 {0} が障害管理表にありません" -f $id) }
         elseif ($c.Kind -eq 'NG' -and $bugById.ContainsKey($id) -and $bugById[$id].Closed) { Add-Issue '再テストの結果が無い' $c ("バグ {0} は完了していますが、ケースの結果が NG のままです（再テストの結果を書いてください）" -f $id) }
     }
+    # NG のケースのバグが、どれも取下げ・仕様どおりなど（障害として数えない状態）
+    $withdrawn = @($c.BugIds | Where-Object { $excludedIds.Contains($_) -and -not $bugById.ContainsKey($_) })
+    if ($c.Kind -eq 'NG' -and $c.BugIds.Count -gt 0 -and $withdrawn.Count -eq $c.BugIds.Count) {
+        Add-Issue 'バグは取下げ・仕様どおりなのに NG のまま' $c ("バグ {0}は障害として数えない状態ですが、ケースの結果が NG のままです（再テストするか、期待結果と結果を直してください）" -f (@($withdrawn | ForEach-Object { '{0}（{1}）' -f $_, $excludedStatus[$_] }) -join '・'))
+    }
     if (($c.Kind -eq 'OK' -or $c.Kind -eq 'NG') -and $c.HasDoneColumn -and -not $c.Done) { Add-Issue '実施日が無い' $c '結果がありますが、実施日がありません' }
     if (($c.Kind -eq '未実施' -or $c.Kind -eq '保留') -and $c.Planned -and $c.Planned -lt $AsOf) { Add-Issue '予定日を過ぎても未実施' $c ("予定日 {0} を過ぎています（{1}）" -f $c.Planned.ToString('yyyy/MM/dd', $invariant), $c.Kind) }
 }
@@ -604,9 +613,12 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       ゾーン分析   テスト密度 × バグ密度の 9 つのゾーン（テスト不足・品質に問題 など）と対応の例
 #       推移         日ごとの予定・実施・OK の累計（テスト消化）、バグの発見・完了と未完了の残り（バグの収束）
 #       信頼度成長曲線  バグの累計にゴンペルツ曲線を当てはめ、潜在バグ数（推定）と収束率から「収束している」かを判定
-#       食い違い     NG なのにバグ番号が無い・障害管理表に無いバグ番号・バグは完了したのに NG のまま・実施日が無い・予定日を過ぎても未実施
+#       食い違い     NG なのにバグ番号が無い・障害管理表に無いバグ番号・バグは完了したのに NG のまま・バグは取下げ・仕様どおりなのに NG のまま・
+#                    実施日が無い・予定日を過ぎても未実施
 #
 #     テストケースの機能は、機能の列（空なら上の行の値）、無ければシート名（表のあるシートが複数のブック）かファイル名です。
+#     エビデンスの置き場所にあるブック（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）の表は、ケースとして数えません。
+#     障害管理表の状態が取下げ・誤指摘・仕様どおり・重複などのバグは数えません（障害管理表を読むほかのツールと同じ）。
 #     テスト密度・バグ密度の分母は、-SizeCsv（KLOC・ステップ数・FP など）か、-DesignPath（Measure-DesignSize.ps1 の規模）で渡します。
 #     規模があるのにテストケースが 1 件も無い機能は、基準値によらずテスト密度を「少ない」と判定します。
 #

@@ -5,6 +5,8 @@ param(
 
     [string[]] $EvidencePath,
 
+    [string[]] $BugList,
+
     [string] $Headers,
 
     [switch] $NoRecurse,
@@ -48,35 +50,6 @@ $commonImageCases = 4
 # ---------------------------------------------------------------- 名前を比べる
 
 
-function ConvertTo-CircledSuffix {
-    #     数字の後ろの丸数字（UT-001①・UT-001 ② など）を「_1」「_2」にする（全角・半角をそろえると前の数字とつながり、UT-0011 になるため）
-    param([string] $Text)
-    return [regex]::Replace([string]$Text, '(?<=\d)\s*[①-⑳⑴-⒇⒈-⒛]', [System.Text.RegularExpressions.MatchEvaluator] { param($m) '_' + ($m.Value.Normalize($nfkc) -replace '\D', '') })
-}
-
-function ConvertTo-CaseKey {
-    #     テストID・シート名・ファイル名・目印を比べる形。全角・半角と大文字小文字をそろえ、前に付けた「■」「No.」「ケース」「テストID:」と
-    #     空白を除き、数字の前の 0 を除く（UT-001 と UT-1、No.01 と 1 を同じにする）。数字の後ろの丸数字は「_1」「_2」にする
-    param([string] $Text)
-    $t = (ConvertTo-CircledSuffix $Text).Normalize($nfkc).ToUpperInvariant().Trim()
-    $t = $t -replace '^[■□●◆◇▼▽★☆※#【\[(]+\s*', ''
-    $t = $t -replace '^(テストケース|テスト|ケース|試験|確認)?(ID|NO\.?|番号)?\s*[:.]?\s*(?=\d)', ''
-    $t = $t -replace '^(テストケース|テスト|ケース|試験|確認)?(ID|NO\.?|番号)\s*:\s*', ''
-    $t = ($t -replace '[】\])]+$', '') -replace '\s', ''
-    $sb = New-Object System.Text.StringBuilder
-    $i = 0
-    while ($i -lt $t.Length) {
-        if (-not [char]::IsDigit($t[$i])) { [void]$sb.Append($t[$i]); $i++; continue }
-        $j = $i
-        while ($j -lt $t.Length -and [char]::IsDigit($t[$j])) { $j++ }
-        $digits = $t.Substring($i, $j - $i).TrimStart('0')
-        if (-not $digits) { $digits = '0' }
-        [void]$sb.Append($digits)
-        $i = $j
-    }
-    return $sb.ToString()
-}
-
 function Get-NameWords {
     #     名前を「_」・空白などで分けた言葉（全角・半角と大文字小文字をそろえる）。一般的な言葉（テスト仕様書・エビデンス・版数など）と 1 文字のものは除く
     param([string[]] $Names)
@@ -112,10 +85,17 @@ $fields = @('機能', 'テストID', 'テスト内容', '結果', 'エビデン�
 $candidates = Read-HeaderCandidates $Headers $fields
 # 読み取り結果（どのファイル・シートをどの見出しで読んだか）
 $readLog = New-Object System.Collections.Generic.List[object]
+# 障害管理表を同じフォルダに置いても、テスト仕様書・エビデンスとしては読まない（障害番号の No と確認結果の列を、テストID と結果と読まないように）
+$bugFiles = $null
+if ($BugList) { $bugFiles = Get-FilePathSet $BugList -NoRecurse:$NoRecurse }
 $records = Read-HeaderRecords -Inputs (Get-InputFiles $Path 'テスト仕様書' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
     -Need @('結果', @('テストID', 'エビデンス')) -Key @('テストID', 'テスト内容', 'エビデンス') -What 'テスト仕様書' `
-    -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
+    -Exclude $OutXlsx -Skip $bugFiles -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
 $cases = ConvertTo-TestCases $records
+# エビデンスの置き場所にあるファイル（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）の表は、
+# テスト仕様書ではなく、エビデンスの中の表（確認した項目の一覧など）。そのケースを除き、ファイルはエビデンスとして読む
+# （-EvidencePath を省くと、テスト仕様書と同じ場所のエビデンスのブックも、テスト仕様書として読むため）
+$cases = Remove-EvidenceCases $cases $readLog
 if ($cases.Count -eq 0) { Write-Warning 'テストケースが見つかりません（結果と、テストID かエビデンスの見出しがある表を探します）' }
 
 # ケース。名前で探すため、テストID と、機能とテストID をつないだもの（SCR001_UT-001 など）で引けるようにする
@@ -142,17 +122,15 @@ foreach ($c in $cases) {
 
 function Find-CaseCandidates {
     #     名前（シート名・ファイル名・目印）に合うケースの候補。テストID、機能とテストID をつないだもの（SCR001_UT-001 など）、
-    #     後ろの「_2」「(2)」「②」を除いたもの（同じケースの 2 枚目）、最後の「_」・空白のあと（受注一覧_No1 など。前が機能の名前のものだけ）の順に探す。
-    #     Strict なら、テストID と、後ろの番号を除いたものだけで探し、数字だけの名前（1・01 など）は見ない
-    param([string] $Name, [switch] $Strict)
+    #     後ろの「_2」「(2)」「②」を除いたもの（同じケースの 2 枚目）、最後の「_」・空白のあと（受注一覧_No1 など。前が機能の名前のものだけ）の順に探す
+    param([string] $Name)
     $key = ConvertTo-CaseKey $Name
-    if (-not $key -or ($Strict -and ([string]$Name).Normalize($nfkc).Trim() -match '^\d+$')) { return @() }
+    if (-not $key) { return @() }
     foreach ($k in @($key, ($key -replace '[_\-(]\d+\)?$', ''))) {
         if (-not $k) { continue }
         if ($byKey.ContainsKey($k)) { return $byKey[$k].ToArray() }
-        if ($byQualified.ContainsKey($k) -and -not $Strict) { return $byQualified[$k].ToArray() }
+        if ($byQualified.ContainsKey($k)) { return $byQualified[$k].ToArray() }
     }
-    if ($Strict) { return @() }
     $parts = @(([string]$Name).Normalize($nfkc).Trim() -split '[_\s]+' | Where-Object { $_ })
     if ($parts.Count -lt 2) { return @() }
     $tailKey = ConvertTo-CaseKey $parts[-1]
@@ -162,32 +140,11 @@ function Find-CaseCandidates {
 }
 
 function Find-PlaceCandidates {
-    #     ファイルの置き場所に合うケースの候補。フォルダの名前（ケースごとのフォルダ。UT-001\1.png など）、合わなければファイルの名前。
-    #     Strict は Find-CaseCandidates と同じ
-    param($File, [switch] $Strict)
-    $found = @(Find-CaseCandidates $File.Directory.Name -Strict:$Strict)
-    if ($found.Count -eq 0) { $found = @(Find-CaseCandidates ([System.IO.Path]::GetFileNameWithoutExtension($File.Name)) -Strict:$Strict) }
+    #     ファイルの置き場所に合うケースの候補。フォルダの名前（ケースごとのフォルダ。UT-001\1.png など）、合わなければファイルの名前
+    param($File)
+    $found = @(Find-CaseCandidates $File.Directory.Name)
+    if ($found.Count -eq 0) { $found = @(Find-CaseCandidates ([System.IO.Path]::GetFileNameWithoutExtension($File.Name))) }
     return $found
-}
-
-# エビデンスの置き場所にあるファイル（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）の表は、
-# テスト仕様書ではなく、エビデンスの中の表（確認した項目の一覧など）。そのケースを除き、ファイルはエビデンスとして読む
-# （-EvidencePath を省くと、テスト仕様書と同じ場所のエビデンスのブックも、テスト仕様書として読むため）。
-# 分けたテスト仕様書（数字の名前のフォルダ・受注一覧_2.xlsx など）を除かないよう、名前はテストID そのものだけを見る（Strict）
-$evidenceFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-foreach ($p in @($caseInfo | ForEach-Object { $_.Case.Place.Path } | Select-Object -Unique)) {
-    if (@(Find-PlaceCandidates (Get-Item -LiteralPath $p) -Strict | Where-Object { $_.Case.Place.Path -ne $p }).Count -gt 0) { [void]$evidenceFiles.Add($p) }
-}
-if ($evidenceFiles.Count -gt 0) {
-    $isEvidence = [System.Predicate[object]] { param($i) $evidenceFiles.Contains($i.Case.Place.Path) }
-    $evidenceNames = @($caseInfo | Where-Object { $evidenceFiles.Contains($_.Case.Place.Path) } | ForEach-Object { $_.Case.Place.File })
-    [void]$caseInfo.RemoveAll($isEvidence)
-    foreach ($index in @($byKey, $byQualified)) {
-        foreach ($k in @($index.Keys)) { [void]$index[$k].RemoveAll($isEvidence); if ($index[$k].Count -eq 0) { $index.Remove($k) } }
-    }
-    # 読み取り結果からも除く（同じ名前のファイルに残すケースがあれば除かない）
-    $specNames = @($caseInfo | ForEach-Object { $_.Case.Place.File })
-    [void]$readLog.RemoveAll([System.Predicate[object]] { param($l) $evidenceNames -contains $l.File -and $specNames -notcontains $l.File })
 }
 
 # テスト仕様書の表のあるシート（ブックのパス|シート名 → そのシートのケース。行の順）。表の中の画像は、その行のケースのエビデンスにする
@@ -387,6 +344,7 @@ foreach ($p in $EvidencePath) {
             if ($f.Name.StartsWith('~$') -or ($OutXlsx -and [string]::Equals($f.FullName, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase))) { continue }
             if (($bookExtensions + $imageExtensions + $fileExtensions) -notcontains $ext) { continue }
             if ($specPaths.Contains($f.FullName) -and $bookExtensions -notcontains $ext) { continue }
+            if ($bugFiles -and $bugFiles.Contains($f.FullName)) { continue }
             if ($seenFiles.Add($f.FullName)) { $fileList.Add($f) }
         }
     }
@@ -705,6 +663,9 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .PARAMETER EvidencePath
 #     エビデンスのファイルまたはフォルダ（複数可）。省略するとテスト仕様書と同じ場所（テスト仕様書のブックのほかのシートなど）。
 #     Excel（.xlsx / .xlsm）はシートごとに画像と文字を、画像（.png .jpg など）は中身を見ます。.xls・.pdf などはファイルの名前だけを見ます。
+#
+# .PARAMETER BugList
+#     障害管理表のファイルまたはフォルダ（複数可）。テスト仕様書と同じフォルダに置いた障害管理表を、テスト仕様書・エビデンスとして読みません。
 #
 # .PARAMETER Headers
 #     見出しの候補の CSV。既定は tools\test-quality\見出し.csv。

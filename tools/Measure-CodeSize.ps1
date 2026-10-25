@@ -11,7 +11,7 @@ param(
     [ValidateRange(1, 10)]
     [int] $Depth = 1,
 
-    [string[]] $Exclude = @('.git', '.svn', 'node_modules', 'bin', 'obj', 'target', 'build', 'dist', '.vs', '.idea'),
+    [string[]] $Exclude,
 
     [string] $OutCsv,
 
@@ -21,6 +21,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
+# 数えないフォルダの既定は、Test-CodeTrace.ps1 と同じ（同じソースのフォルダから同じファイルを読む）
+if (-not $PSBoundParameters.ContainsKey('Exclude')) { $Exclude = Get-SourceExcludeFolders }
 
 foreach ($name in @('OutCsv', 'OutXlsx')) {
     $v = Get-Variable -Name $name -ValueOnly
@@ -31,8 +33,8 @@ if ($OutXlsx -and [System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw 
 Update-TypeData -TypeName 'CodeSize.Group' -DefaultDisplayPropertySet Group, Files, Lines, Comment, Blank, Steps, Added, Changed, Deleted -Force -WhatIf:$false
 
 function Get-SourceFiles {
-    #     数えるファイル（言語の拡張子のもの）。相対パス → FileInfo
-    param([string] $Root)
+    #     数えるファイル（言語の拡張子のもの）。相対パス → FileInfo。Skipped を渡すと、-Exclude で除いたフォルダ → ソースのファイルの数を足す
+    param([string] $Root, $Skipped)
     $result = [ordered]@{}
     $rootItem = Get-Item -LiteralPath $Root
     if (-not $rootItem.PSIsContainer) {
@@ -40,12 +42,14 @@ function Get-SourceFiles {
         return $result
     }
     $rootPath = $rootItem.FullName.TrimEnd('\', '/')
-    $excludeSet = @($Exclude | ForEach-Object { $_.ToLowerInvariant() })
     foreach ($f in @(Get-ChildItem -LiteralPath $rootPath -File -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName)) {
         if (-not (Get-SourceLanguage $f.Extension)) { continue }
         $rel = $f.FullName.Substring($rootPath.Length).TrimStart('\', '/')
-        $segments = $rel -split '[\\/]'
-        if (@($segments[0..($segments.Count - 2)] | Where-Object { $excludeSet -contains $_.ToLowerInvariant() }).Count -gt 0) { continue }
+        $excluded = Get-ExcludedSourceFolder $rel $Exclude
+        if ($excluded) {
+            if ($null -ne $Skipped) { if (-not $Skipped.Contains($excluded)) { $Skipped[$excluded] = 0 }; $Skipped[$excluded]++ }
+            continue
+        }
         $result[($rel -replace '\\', '/')] = $f
     }
     return $result
@@ -73,7 +77,8 @@ function Compare-CodeLines {
     return [pscustomobject]@{ Added = $added - $changed; Changed = $changed; Deleted = $removed - $changed }
 }
 
-$files = Get-SourceFiles $Path
+$skippedFolders = [ordered]@{}
+$files = Get-SourceFiles $Path $skippedFolders
 $baseFiles = [ordered]@{}
 if ($Baseline) { $baseFiles = Get-SourceFiles $Baseline }
 
@@ -155,6 +160,7 @@ Write-Host ''
 $totalSteps = ($groups | Measure-Object -Property Steps -Sum).Sum
 if ($null -eq $totalSteps) { $totalSteps = 0 }
 Write-Host ('{0} ファイル: ステップ数 {1}（{2} KLOC）・コメント {3}・空行 {4}' -f @($fileResults | Where-Object { $_.Status -ne '削除' }).Count, $totalSteps, [math]::Round($totalSteps / 1000.0, 3), ($groups | Measure-Object -Property Comment -Sum).Sum, ($groups | Measure-Object -Property Blank -Sum).Sum)
+if ($skippedFolders.Count -gt 0) { Write-Host ('数えなかったフォルダ（-Exclude）: {0}' -f (Format-ExcludedSourceFolders $skippedFolders)) }
 if ($Baseline) {
     $statusText = (@($fileResults | Group-Object Status | Sort-Object Name | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・'
     Write-Host ('前の版との差: 新規 {0}・修正 {1}・削除 {2} ステップ（ファイル: {3}）' -f ($groups | Measure-Object -Property Added -Sum).Sum, ($groups | Measure-Object -Property Changed -Sum).Sum, ($groups | Measure-Object -Property Deleted -Sum).Sum, $statusText)
@@ -188,7 +194,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     Folder でまとめるときのフォルダの階層（既定 1。-Path の直下のフォルダごと）。
 #
 # .PARAMETER Exclude
-#     数えないフォルダの名前（既定は .git・node_modules・bin・obj・target・build・dist など）。
+#     数えないフォルダの名前（既定は .git・.svn・node_modules・bin・obj・target・build・dist・out・vendor・.vs・.idea。Test-CodeTrace.ps1 と同じ）。
+#     除いたフォルダは、ソースのファイルの数と一緒に表示します。
 #
 # .PARAMETER OutCsv
 #     機能ごとの規模を CSV（UTF-8・BOM 付き）に保存します。列は 機能・KLOC・ステップ数・ファイル数・行数・コメント・空行（・新規・修正・削除）。

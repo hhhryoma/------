@@ -96,6 +96,25 @@ Test-Case 'Measure-CodeSize: 固定形式の COBOL の一連番号（1〜6 桁�
     Assert-Equal '1|0|0' ('{0}|{1}|{2}' -f $r[0].Added, $r[0].Changed, $r[0].Deleted) '一連番号の振り直しと識別領域は修正にしない'
 }
 
+Test-Case 'Measure-CodeSize: 既定で数えないフォルダ（out・vendor・node_modules など）は Test-CodeTrace と同じにし、除いたフォルダを表示する' {
+    $root = Join-Path (New-TestDir) 'src'
+    Write-Source $root 'scr001/OrderList.java' @('class OrderList {', '    String id = "E0001";', '}')
+    Write-Source $root 'out/orderList.js' @('var a = 1;', 'var b = 2;')
+    Write-Source $root 'vendor/acme/Lib.php' @('<?php', 'echo 1;')
+    Write-Source $root 'web/node_modules/lib/x.js' @('var x = 1;')
+    $text = Get-HostText { $script:size = @(& $CodeSizeTool $root) }
+    Assert-Equal @('scr001|1|3') @($script:size | ForEach-Object { '{0}|{1}|{2}' -f $_.Group, $_.Files, $_.Steps }) 'ビルドの出力（out）・外部のライブラリ（vendor）は KLOC に入れない'
+    Assert-Match $text '数えなかったフォルダ（-Exclude）: out（1 ファイル）・vendor（1 ファイル）・web/node_modules（1 ファイル）'
+    $trace = Join-Path $script:ToolsDir 'Test-CodeTrace.ps1'
+    $text = Get-HostText { & $trace -DesignPath (Join-Path $script:RepoRoot 'docs/design-sample') -SourcePath $root | Out-Null }
+    Assert-Match $text 'ソース 1 ファイルで' 'Measure-CodeSize と同じファイルを読む'
+    Assert-Match $text '見なかったフォルダ（-Exclude）: out（1 ファイル）・vendor（1 ファイル）・web/node_modules（1 ファイル）'
+    # -Exclude を空にすると、すべてのフォルダを数える
+    $text = Get-HostText { & $CodeSizeTool $root -Exclude @() | Out-Null }
+    Assert-Match $text '^\s*4 ファイル: ステップ数 8'
+    Assert-NotMatch $text '数えなかったフォルダ'
+}
+
 Test-Case 'Measure-CodeSize: Get-Help でヘルプが表示される' {
     $h = Get-Help $CodeSizeTool
     Assert-Match $h.Synopsis 'ステップ数'

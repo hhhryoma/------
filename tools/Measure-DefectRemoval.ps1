@@ -34,8 +34,8 @@ if ($OutXlsx -and [System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw 
 Update-TypeData -TypeName 'DefectRemoval.Phase' -DefaultDisplayPropertySet Phase, Injected, FoundInTime, Leaked, RemovalRate, Detected, FromEarlier -Force -WhatIf:$false
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
-# 数えない状態（取下げ・重複など）
-$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない|誤指摘|キャンセル|cancel'
+# 数えない状態（取下げ・誤指摘・仕様どおり・重複など。障害管理表を読むほかのツールと同じ）
+$excludedPattern = Get-ExcludedBugPattern
 $unknown = '（不明）'
 
 # ---------------------------------------------------------------- 工程
