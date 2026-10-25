@@ -62,9 +62,9 @@ function Get-GroupName {
 
 function Compare-CodeLines {
     #     ステップの行の増減（同じ文字の行の数の差）から、新規・修正・削除の行数を出す。
-    #     増えた行と減った行のうち、少ない方の数を修正とみなす
+    #     増えた行と減った行のうち、少ない方の数を修正とみなす。行の文字は大文字・小文字も区別して比べる（userId → userID も修正）
     param($Old, $New)
-    $count = @{}
+    $count = New-Object System.Collections.Hashtable ([System.StringComparer]::Ordinal)
     foreach ($l in $Old) { if ($count.ContainsKey($l)) { $count[$l]-- } else { $count[$l] = -1 } }
     foreach ($l in $New) { if ($count.ContainsKey($l)) { $count[$l]++ } else { $count[$l] = 1 } }
     $added = 0; $removed = 0

@@ -254,6 +254,106 @@ Test-Case 'Measure-ReviewQuality: 状態の「キャンセル」「Cancelled」�
     Assert-Match $text '取下げなどで数えなかったもの 2 件'
 }
 
+Test-Case 'Measure-ReviewQuality: フォルダに前に保存した結果のブックがあっても、指摘管理表として読まずに知らせる' {
+    $dir = New-TestDir
+    New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況') @(
+        @('1', '2026/10/01', 'DD03_テーブル定義書', '型が違う', '対応中'),
+        @('2', '2026/10/01', 'DD03_テーブル定義書', '桁数が違う', '完了'))
+    $null = & $QualityTool -Path $dir -AsOf '2026-10-20' -OutXlsx (Join-Path $dir '品質分析_1020.xlsx') 6>$null 3>$null
+    $out = @(& $QualityTool -Path $dir -AsOf '2026-10-27' -OutXlsx (Join-Path $dir '品質分析_1027.xlsx') 6>$null 3>&1)
+    $r = @($out | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] })
+    Assert-Equal 'DD03_テーブル定義書|2|1' ('{0}|{1}|{2}' -f $r[0].Document, $r[0].Findings, $r[0].Open) '前の結果の設計書別・未完了のシートを指摘に数えない'
+    $warnings = @($out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
+    Assert-Match ($warnings -join "`n") '結果のブック.*品質分析_1020\.xlsx'
+}
+
+Test-Case 'Measure-ReviewQuality: -SizeCsv の「スキップ」の行（-SkipExisting で出し直さなかった PDF）のページ数も使い、「失敗」の行は使わない' {
+    $dir = New-TestDir
+    New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況') @(
+        @('1', '2026/10/01', 'DD02_画面設計書', '桁数が違う', '完了'),
+        @('2', '2026/10/01', 'DD03_テーブル定義書', '型が違う', '完了'))
+    $csv = Join-Path $dir 'pages.csv'
+    @('"ファイル","出力先","ページ数","除外ページ","結果","詳細","秒"',
+        '"D:\設計書\DD02_画面設計書.xlsx","D:\pdf\DD02_画面設計書.pdf","4","0","成功","","3.1"',
+        '"D:\設計書\DD03_テーブル定義書.xlsx","D:\pdf\DD03_テーブル定義書.pdf","10","0","スキップ","既存PDFが新しい","0"',
+        '"D:\設計書\DD04_コード定義書.xlsx","D:\pdf\DD04_コード定義書.pdf","3","0","失敗","保存できません","0"') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $r = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv $csv -AsOf '2026-10-20' 6>$null 3>$null)
+    Assert-Equal @('DD02_画面設計書|1|4|0.25', 'DD03_テーブル定義書|1|10|0.1') @($r | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Document, $_.Findings, $_.Size, $_.Density })
+}
+
+Test-Case 'Measure-ReviewQuality: 期限の年の無い日付・和暦・曜日つきの日付も読み、年をまたいだ期限を期限切れにする' {
+    $dir = New-TestDir
+    @('設計書,指摘内容,状態,期限', 'DD01,年をまたぐ期限,対応中,12/25', 'DD02,和暦の期限,対応中,令和8年12月25日', 'DD03,R の和暦,対応中,R8.12.25', 'DD04,曜日つき,対応中,12/25(金)', 'DD05,期限の前,対応中,1/15') | Set-Content -LiteralPath (Join-Path $dir 'list.csv') -Encoding UTF8
+    $r = @(& $QualityTool -Path (Join-Path $dir 'list.csv') -AsOf '2027-01-08' 6>$null 3>$null)
+    Assert-Equal @('DD01|1', 'DD02|1', 'DD03|1', 'DD04|1', 'DD05|0') @($r | ForEach-Object { '{0}|{1}' -f $_.Document, $_.Overdue })
+}
+
+Test-Case 'Measure-ReviewQuality: 推移の完了は、完了した起票日のある指摘だけ数える（差し戻した指摘の完了日・起票日の無い指摘は数えない）' {
+    $dir = New-TestDir
+    New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況', '完了日') @(
+        @('1', '2026/10/01', 'DD03_テーブル定義書', '型が違う', '完了', '2026/10/03'),
+        @('2', '2026/10/01', 'DD03_テーブル定義書', '桁数が違う', '差し戻し', '2026/10/03'))
+    # 起票日の列が無い（「レビュー日」は起票日の見出しの候補に無い）指摘管理表
+    @('レビュー日,設計書,指摘内容,状態,完了日', '2026/10/01,DD05_メッセージ一覧,誤記,完了,2026/10/05') | Set-Content -LiteralPath (Join-Path $dir '指摘.csv') -Encoding UTF8
+    $out = Join-Path $dir 'quality.xlsx'
+    $r = @(& $QualityTool -Path $dir -AsOf '2026-10-20' -OutXlsx $out 6>$null 3>$null)
+    Assert-Equal 'DD03_テーブル定義書|2|1' ('{0}|{1}|{2}' -f $r[0].Document, $r[0].Findings, $r[0].Open)
+    # 日付・起票・完了・未完了
+    $trend = Read-XlsxSheet -Path $out -Index 4
+    Assert-Equal @('2026/10/01|2|0|2', '2026/10/03|0|1|1') @(2..$trend.Rows.Count | ForEach-Object { '{0}|{1}|{2}|{3}' -f $trend.Rows[$_]['A'], $trend.Rows[$_]['B'], $trend.Rows[$_]['C'], $trend.Rows[$_]['F'] })
+}
+
+Test-Case 'Measure-ReviewQuality: 記録票の参加者は、右の見出し（欠席者・場所など）の前までを数える' {
+    $dir = New-TestDir
+    New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況') @(
+        @('1', '2026/10/01', 'DD03_テーブル定義書', '型が違う', '完了'),
+        @('2', '2026/10/01', 'DD05_メッセージ一覧', '誤記', '完了'))
+    $logDir = Join-Path $dir 'レビュー記録'
+    New-Item -ItemType Directory -Path $logDir | Out-Null
+    New-FindingBook (Join-Path $logDir 'DD03記録票.xlsx') '記録票' @('レビュー記録票', '', '', '') @(
+        @('対象成果物', 'DD03_テーブル定義書', '開催場所', '会議室A'),
+        @('レビュー時間', '2', '', ''),
+        @('参加者', '山田、佐藤', '欠席者', '鈴木'))
+    New-FindingBook (Join-Path $logDir 'DD05記録票.xlsx') '記録票' @('レビュー記録票', '', '', '', '') @(
+        @('対象成果物', 'DD05_メッセージ一覧', '', '', ''),
+        @('レビュー時間', '1', '', '', ''),
+        @('参加者', '山田', '佐藤', '場所', '会議室A'))
+    $r = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -ReviewLog $logDir -AsOf '2026-10-20' 6>$null 3>$null)
+    Assert-Equal @('DD03_テーブル定義書|4', 'DD05_メッセージ一覧|2') @($r | ForEach-Object { '{0}|{1}' -f $_.Document, $_.Effort }) '時間 × 参加者 2 人（欠席者・場所は数えない）'
+}
+
+Test-Case 'Measure-ReviewQuality: 設計書が空の指摘・レビュー記録の行は同じ表の上の行の設計書にし、「1時間半」も読み、読めない時間は知らせる' {
+    $dir = New-TestDir
+    New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '対象成果物', '指摘内容', '対応状況') @(
+        @('1', 'DD03_テーブル定義書', '型が違う', '対応中'),
+        @('2', '', '桁数が違う', '対応中'),
+        @('3', '', '索引が無い', '対応中'))
+    @('"ファイル","ページ数","結果"', '"DD03_テーブル定義書.pdf","10","成功"') | Set-Content -LiteralPath (Join-Path $dir 'pages.csv') -Encoding UTF8
+    $logDir = Join-Path $dir 'レビュー記録'
+    New-Item -ItemType Directory -Path $logDir | Out-Null
+    New-FindingBook (Join-Path $logDir 'レビュー記録.xlsx') '記録' @('No', '対象成果物', 'レビュー時間', '参加者') @(
+        @('1', 'DD03_テーブル定義書', '1', '山田、佐藤'),
+        @('2', '', '1', '山田、佐藤'),
+        @('3', 'DD03_テーブル定義書', '1時間半', '山田、佐藤'),
+        @('4', 'DD03_テーブル定義書', '約1時間', '山田'))
+    $out = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -SizeCsv (Join-Path $dir 'pages.csv') -ReviewLog $logDir -AsOf '2026-10-20' 6>$null 3>&1)
+    $r = @($out | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] })
+    Assert-Equal @('DD03_テーブル定義書|3|0.3|7|3') @($r | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Document, $_.Findings, $_.Density, $_.Effort, $_.Reviews }) '2 時間 + 2 時間 + 3 時間（1 時間半 × 2 人）'
+    $warnings = @($out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
+    Assert-Match ($warnings -join "`n") 'レビュー記録の 1 行は.*レビュー記録\.xlsx 記録 5 行目「約1時間」'
+}
+
+Test-Case 'Measure-ReviewQuality: 基準値の CSV の指摘密度・レビュー工数密度でない行（テスト密度など）は、分母が同じでも使わない' {
+    $dir = New-TestDir
+    @('設計書,指摘内容', 'SCR001,誤記', 'SCR001,漏れ') | Set-Content -LiteralPath (Join-Path $dir 'list.csv') -Encoding UTF8
+    @('ファイル,規模', 'SCR001.pdf,4') | Set-Content -LiteralPath (Join-Path $dir 'size.csv') -Encoding UTF8
+    # New-QualityLimits.ps1 の CSV には、テストの指標の行も入る（名前の順で、テスト密度が指摘密度より先）
+    $limits = Join-Path $dir 'limits.csv'
+    @('指標,分母,工程,下限,上限', 'テスト密度,規模,,8,12', 'バグ密度,規模,,1,3', '指摘密度,規模,,0.4,0.6') | Set-Content -LiteralPath $limits -Encoding UTF8
+    $r = @(& $QualityTool -Path (Join-Path $dir 'list.csv') -SizeCsv (Join-Path $dir 'size.csv') -Limits $limits -AsOf '2026-10-20' 6>$null 3>$null)
+    Assert-Equal 'SCR001|0.5|基準内' ('{0}|{1}|{2}' -f $r[0].Document, $r[0].Density, $r[0].Judgement) '指摘密度の基準値（0.4〜0.6）と比べる'
+}
+
 Test-Case 'Measure-ReviewQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityTool
     Assert-Match $h.Synopsis '指摘'
