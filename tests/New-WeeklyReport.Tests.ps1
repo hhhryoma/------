@@ -192,6 +192,26 @@ Test-Case 'New-WeeklyReport: 工数実績から今週・累計の工数を出し
     Assert-Equal '佐藤|14|54' ((@('A', 'B', 'C') | ForEach-Object { $effort.Rows[2][$_] }) -join '|')
 }
 
+Test-Case 'New-WeeklyReport: 日付を列に並べた工数表（行がタスク、列が日付）からも今週・累計の工数と予定超過を出す' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $cols = @('WBS', 'タスク名', '担当者', '予定開始日', '予定終了日', '進捗率', '予定工数') | ForEach-Object { @{ Header = $_; Width = 10 } }
+    $rows = @(@('1.2', 'テーブル設計', '佐藤', '2026/10/12', '2026/10/16', '50%', '5'), @('1.3', 'IF 設計', '佐藤', '2026/10/19', '2026/10/23', '20%', '4'))
+    Export-Workbook -FilePath (Join-Path $dir 'WBS.xlsx') -Sheets @(@{ Name = 'WBS'; Columns = $cols; Rows = @($rows | ForEach-Object { @{ Values = $_ } }) })
+    New-Item -ItemType Directory -Path (Join-Path $dir '工数') | Out-Null
+    New-SheetsBook (Join-Path $dir '工数/工数表.xlsx') ([ordered]@{
+            '10月' = @(
+                @('WBS番号', 'タスク名', '担当者', '10/12', '10/13', '10/14', '10/15', '10/16', '10/19', '10/20', '10/21', '10/22', '10/23', '合計'),
+                @('1.2', '', '佐藤', [double]8, [double]8, [double]8, [double]8, [double]8, [double]4, '', '', '', '', [double]44),
+                @('1.3', '', '佐藤', '', '', '', '', '', [double]4, '', '', [double]6, '', [double]10),
+                @('', '定例会議', '山田', '', '', '', '', '', '', '1:30', '', '', '', [double]1.5))
+        })
+    @('項目,値', 'WBS,WBS.xlsx', '工数実績,工数') | Set-Content -LiteralPath (Join-Path $dir '週次報告の設定.csv') -Encoding UTF8
+    $text = Get-HostText { $script:items = @(& $WeeklyReport $dir -AsOf '2026-10-23') }
+    Assert-Match $text '■ 工数\n・今週: 15\.5 時間（1\.94 人日）・累計 55\.5 時間\n・担当者別（今週）: 佐藤 14・山田 1\.5（時間）\n'
+    Assert-Match $text '  - \[予定超過\] 1\.2 テーブル設計（佐藤）: 予定 5 / 実績 5\.5 / 進捗 50% → 完了見込 11\n  - \[超過の見込み\] 1\.3 IF 設計（佐藤）: 予定 4 / 実績 1\.25 / 進捗 20% → 完了見込 6\.25\n'
+}
+
 Test-Case 'New-WeeklyReport: 和暦の設定（ja-JP の JapaneseCalendar）でも、日付は西暦で書く' {
     $message = ''
     try { Invoke-InWareki { & $WeeklyReport -Wbs (Join-Path (New-TestDir) 'WBS.xlsx') -Since '2026-10-20' -AsOf '2026-10-14' 6>$null } }
