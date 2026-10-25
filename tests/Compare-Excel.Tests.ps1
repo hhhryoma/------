@@ -853,6 +853,201 @@ Test-Case 'Compare-Excel: -OutXlsx のリンク先は、ファイル名の #・%
     Assert-Match @((Read-XlsxSheet -Path $out -Index 2).Links)[0].Target '設計%20%231%20%2541\.xlsx$' 'ファイル別のリンクも'
 }
 
+Test-Case 'Compare-Excel: 行を削除して番号を振り直しても、似た別の行と取り違えず、削除した行と番号の変更だけを出す' {
+    $dir = New-TestDir
+    # 画面項目定義: 5 番目の希望納品日を削除し、下の No を振り直す（同じ列に値のある行どうしは、値がすべて違っても似ている度合いが 0.5 以上）
+    $items = @(
+        @('受注日', 'orderDate', '日付', '日付', '10', '○'), @('顧客コード', 'customerCd', 'テキスト', '半角英数', '8', '○'),
+        @('顧客名', 'customerName', 'ラベル', '文字', '100', ''), @('支払方法', 'paymentMethod', '選択', '－', '1', '○'),
+        @('希望納品日', 'deliveryDate', '日付', '日付', '10', ''), @('配送時間帯', 'deliveryTimeKbn', '選択', '－', '2', ''),
+        @('備考', 'remarks', 'テキストエリア', '文字', '500', ''), @('受注明細', 'detailList', '一覧', '－', '', ''),
+        @('明細番号', 'detail.lineNo', 'ラベル', '数値', '3', ''), @('商品コード', 'detail.productCd', 'テキスト', '半角英数', '10', '○'))
+    $numbered = { param($list) $no = 0; @(, @('No', '項目名', '項目ID', '区分', '型', '桁数', '必須')) + @($list | ForEach-Object { $no++; , (@("$no") + $_) }) }
+    # コード一覧: 支払方法のクレジットカードを削除し、代金引換の表示順を 3 → 2 にする
+    $codes = @(@('コード区分ID', 'コード区分名', 'コード値', '表示名', '表示順'),
+        @('C001', '受注ステータス', '10', '受付', '1'), @('C001', '受注ステータス', '20', '出荷指示済', '2'),
+        @('C002', '支払方法', '1', '銀行振込', '1'), @('C002', '支払方法', '2', 'クレジットカード', '2'), @('C002', '支払方法', '3', '代金引換', '3'),
+        @('C003', '顧客区分', '1', '法人', '1'), @('C003', '顧客区分', '2', '個人', '2'))
+    $newCodes = @($codes[0..3]) + @(, @('C002', '支払方法', '3', '代金引換', '2')) + @($codes[6..7])
+    New-SheetsBook (Join-Path $dir 'old.xlsx') ([ordered]@{ '画面項目定義' = (& $numbered $items); 'コード一覧' = $codes })
+    New-SheetsBook (Join-Path $dir 'new.xlsx') ([ordered]@{ '画面項目定義' = (& $numbered @($items[0..3] + $items[5..9])); 'コード一覧' = $newCodes })
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx') }
+    Assert-Equal @(
+        '画面項目定義!A6:A10|画面項目定義!A7:A11|連番の振り直し: 6～10 → 5～9（5 個）',
+        '画面項目定義!A6|画面項目定義!A6|行を削除: A:5 | B:希望納品日 | C:deliveryDate | D:日付 | E:日付 | F:10',
+        'コード一覧!A5|コード一覧!A5|行を削除: A:C002 | B:支払方法 | C:2 | D:クレジットカード | E:2',
+        'コード一覧!E5|コード一覧!E6|値: 3 → 2（旧 E6）') @($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.OldLocation, $_.Detail })
+}
+
+Test-Case 'Compare-Excel: 番号付きの表で行を移動しても、ほかの行を追加・削除にしない。内容が同じ行の移動は「移動」のまま' {
+    $dir = New-TestDir
+    $old = @(1..10 | ForEach-Object { , @("$_", "項目$_", "説明$_") })
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $old) { $list.Add(@($r[0], $r[1], $r[2])) }
+    $m = $list[1]; $list.RemoveAt(1); $list.Insert(7, $m)          # 項目2 を 8 番目に移し、No を振り直す
+    for ($i = 0; $i -lt $list.Count; $i++) { $list[$i][0] = "$($i + 1)" }
+    New-TableBook -Path (Join-Path $dir 'old.xlsx') -Header @('No', '項目', '説明') -Rows $old
+    New-TableBook -Path (Join-Path $dir 'new.xlsx') -Header @('No', '項目', '説明') -Rows $list
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx') }
+    Assert-Equal @('new.xlsx|Data!A3:A8|連番|変更', 'new.xlsx|Data!A3|行|削除', 'new.xlsx|Data!A9|行|追加') @($diffs | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.File, $_.Location, $_.Kind, $_.Change })
+    Assert-Match ($diffs[1].Detail + $diffs[2].Detail) '^行を削除: A:2 \| B:項目2 .*行を追加: A:8 \| B:項目2 '
+
+    # 番号の無い表で、項目2 を後ろへ移し、項目3 を変更する（項目2 を、すぐ下の変更した項目3 と組にしない）
+    $plain = @(1..8 | ForEach-Object { , @("項目$_", "説明$_", '文字') })
+    $moved = @($plain[0], @('項目3', '説明3（改）', '文字'), $plain[3], $plain[4], $plain[1]) + @($plain[5..7])
+    New-TableBook -Path (Join-Path $dir 'old2.xlsx') -Header @('項目', '説明', '型') -Rows $plain
+    New-TableBook -Path (Join-Path $dir 'new2.xlsx') -Header @('項目', '説明', '型') -Rows $moved
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old2.xlsx'); New = (Join-Path $dir 'new2.xlsx') }
+    Assert-Equal @('Data!B3|値|変更|Data!B4', 'Data!A6|行|移動|Data!A3') @($diffs | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Location, $_.Kind, $_.Change, $_.OldLocation })
+}
+
+Test-Case 'Compare-Excel: 表の中の「更新者」などの行の変更は版情報にしない（-Ignore 版情報 でも外さず、改訂履歴の下書き・記載漏れの対象）' {
+    $dir = New-TestDir
+    # シートの上部の作成者・更新者・作成日・更新日の欄と、カラム定義の表（監査用のカラム 更新日・更新者）
+    $table = {
+        param([string] $Updater, [string] $Updated, [string] $DateName, [string] $UserName)
+        @(@('テーブル定義書', '', '作成者', '山田', '作成日', '2026/10/01'),
+            @('T_ORDER', '', '更新者', $Updater, '更新日', $Updated),
+            @('No', '論理名', '物理名', 'データ型', '桁数'),
+            @('1', '受注番号', 'ORDER_NO', 'CHAR', '12'),
+            @('2', '更新日', $DateName, 'TIMESTAMP', ''),
+            @('3', '更新者', $UserName, 'VARCHAR', '20'))
+    }
+    $old = Join-Path $dir 'old.xlsx'; $new = Join-Path $dir 'new.xlsx'
+    New-SheetsBook $old ([ordered]@{ 'T_ORDER' = (& $table '佐藤' '2026/10/01' 'UPDATED_AT' 'UPDATED_BY'); '改訂履歴' = @(@('版数', '内容'), @('1.0', '新規作成')) })
+    New-SheetsBook $new ([ordered]@{ 'T_ORDER' = (& $table '鈴木' '2026/10/20' 'UPDATE_DATE' 'UPDATE_USER_ID'); '改訂履歴' = @(@('版数', '内容'), @('1.0', '新規作成'), @('1.1', '受注番号の桁数を変更')) })
+    $diffs = Invoke-Compare @{ Old = $old; New = $new }
+    Assert-Equal @('T_ORDER!D2|版情報', 'T_ORDER!F2|版情報', 'T_ORDER!C5|', 'T_ORDER!C6|', '改訂履歴!A3|版情報') @($diffs | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Tag }) 'シートの上部の欄だけが版情報'
+    $diffs = Invoke-Compare @{ Old = $old; New = $new; Ignore = '版情報' }
+    Assert-Equal @('T_ORDER!C5', 'T_ORDER!C6') @($diffs | ForEach-Object { $_.Location }) '-Ignore 版情報 でも表の中の変更は残す'
+
+    $csv = Join-Path $dir 'history.csv'
+    $diffs = Invoke-Compare @{ Old = $old; New = $new; OutHistory = $csv; CheckHistory = $true }
+    Assert-Equal @('T_ORDER|更新日: 物理名を UPDATED_AT → UPDATE_DATE に変更', 'T_ORDER|更新者: 物理名を UPDATED_BY → UPDATE_USER_ID に変更') @(Import-Csv -LiteralPath $csv -Encoding UTF8 | ForEach-Object { '{0}|{1}' -f $_.'改訂箇所', $_.'改訂内容' })
+    Assert-Equal @('T_ORDER!C5', 'T_ORDER!C6') @($diffs | Where-Object Kind -eq '改訂履歴' | ForEach-Object { $_.Location }) '改訂履歴に書かれていない変更として知らせる'
+}
+
+Test-Case 'Compare-Excel: 全角の数字や桁の多い数字の変更で止まらず、ほかのシートも比べる' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir 'old.xlsx') ([ordered]@{
+            '画面項目定義' = @(@('項目名', '桁数', 'コード'), @('受注番号', '１０', '12345678901234567890'), @('受注日', '８', '1'))
+            'イベント定義' = @(@('イベント', '処理概要'), @('登録', '受注を登録する')) })
+    New-SheetsBook (Join-Path $dir 'new.xlsx') ([ordered]@{
+            '画面項目定義' = @(@('項目名', '桁数', 'コード'), @('受注番号', '２０', '12345678901234567899'), @('受注日', '９', '1'))
+            'イベント定義' = @(@('イベント', '処理概要'), @('登録', '受注を登録・更新する')) })
+    $diffs = @(& $CompareExcel -Old (Join-Path $dir 'old.xlsx') -New (Join-Path $dir 'new.xlsx') 6>$null -WarningVariable script:numberWarnings -WarningAction SilentlyContinue)
+    Assert-Equal 0 @($script:numberWarnings).Count ('警告: ' + (@($script:numberWarnings) -join ' | '))
+    Assert-Equal @('画面項目定義!B2|値|変更', '画面項目定義!C2|値|変更', '画面項目定義!B3|値|変更', 'イベント定義!B2|値|変更') @($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Kind, $_.Change })
+}
+
+function Add-TestComments {
+    #     ブックの Sheet 番目のシートにコメントを付ける（テスト用）。Comments: セル番地 → 文言 の順序付き辞書
+    param([string] $Path, $Comments, [int] $Sheet = 1)
+    $head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    $list = (@($Comments.Keys | ForEach-Object { '<comment ref="{0}" authorId="0"><text><r><t xml:space="preserve">{1}</t></r></text></comment>' -f $_, [System.Security.SecurityElement]::Escape($Comments[$_]) })) -join ''
+    $xml = $head + '<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>テスト</author></authors><commentList>' + $list + '</commentList></comments>'
+    $rels = $head + ('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdCmt1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments{0}.xml"/></Relationships>' -f $Sheet)
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $fs = [System.IO.File]::Open($Path, 'Open', 'ReadWrite')
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Update)
+        $put = { param([string] $Name, [string] $Text) $e = $zip.GetEntry($Name); if ($e) { $e.Delete() }; $sw = New-Object System.IO.StreamWriter($zip.CreateEntry($Name).Open(), $utf8); $sw.Write($Text); $sw.Dispose() }
+        & $put ('xl/comments{0}.xml' -f $Sheet) $xml
+        & $put ('xl/worksheets/_rels/sheet{0}.xml.rels' -f $Sheet) $rels
+        $sr = New-Object System.IO.StreamReader($zip.GetEntry('[Content_Types].xml').Open())
+        $types = $sr.ReadToEnd(); $sr.Dispose()
+        & $put '[Content_Types].xml' $types.Replace('</Types>', ('<Override PartName="/xl/comments{0}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml"/></Types>' -f $Sheet))
+        $zip.Dispose()
+    }
+    finally { $fs.Dispose() }
+}
+
+Test-Case 'Compare-Excel: 削除した行のコメントは「削除」とし、上に詰めた行のコメントと取り違えない' {
+    $dir = New-TestDir
+    $items = @(@('受注番号', '自動採番'), @('受注日', 'システム日付'), @('顧客コード', '必須'), @('支払方法', '選択'))
+    $old = Join-Path $dir 'old.xlsx'; $new = Join-Path $dir 'new.xlsx'
+    New-TableBook -Path $old -Header @('項目', '説明') -Rows $items
+    New-TableBook -Path $new -Header @('項目', '説明') -Rows @($items[0], $items[2], $items[3])   # 受注日の行を削除
+    Add-TestComments $old ([ordered]@{ 'B3' = '日付の形式を確認'; 'B4' = '桁数を確認' })
+    Add-TestComments $new ([ordered]@{ 'B3' = '桁数を確認' })
+    $diffs = Invoke-Compare @{ Old = $old; New = $new }
+    Assert-Equal @('Data!A3|行|削除|A:受注日 | B:システム日付', 'Data!B3|コメント|削除|日付の形式を確認') @($diffs | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Location, $_.Kind, $_.Change, $_.Old })
+}
+
+Test-Case 'Compare-Excel: 行を挿入しても、ずれただけの相対参照の数式（=B3*C3 → =B4*C4）は「変更」にしない' {
+    $dir = New-TestDir
+    $make = {
+        param([string] $Path, $Items)
+        $rows = @(, @('項目', '数量', '単価', '金額'))
+        $total = 0
+        foreach ($it in $Items) { $rows += , @($it[0], $it[1], $it[2], ($it[1] * $it[2])); $total += $it[1] * $it[2] }
+        $rows += , @('合計', '', '', $total)
+        New-SheetsBook $Path ([ordered]@{ '見積' = $rows })
+        # 金額は 数量 × 単価、合計は金額の SUM の数式にする
+        $last = $Items.Count + 1
+        Edit-ZipText $Path 'xl/worksheets/sheet1.xml' {
+            param($t)
+            for ($r = 2; $r -le $last + 1; $r++) {
+                $f = 'B{0}*C{0}' -f $r
+                if ($r -gt $last) { $f = 'SUM(D2:D{0})' -f $last }
+                $t = $t -replace ('(<c r="D{0}"[^>]*>)<v>' -f $r), ('$1<f>{0}</f><v>' -f $f)
+            }
+            $t
+        }
+    }
+    $items = @(@('設計', 10, 5000), @('製造', 20, 4000), @('単体テスト', 8, 4000), @('結合テスト', 6, 5000), @('総合テスト', 4, 6000))
+    & $make (Join-Path $dir 'old.xlsx') $items
+    & $make (Join-Path $dir 'new.xlsx') (@($items[0], @('レビュー', 3, 5000)) + @($items[1..4]))   # 2 行目の下に 1 行挿入
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx') }
+    Assert-Equal @('見積!A3|行|追加|', '見積!D8|値|変更|見積!D7', '見積!D8|数式|変更|見積!D7') @($diffs | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Location, $_.Kind, $_.Change, $_.OldLocation })
+    Assert-Equal '数式: =SUM(D2:D6) → =SUM(D2:D7)（旧 D7）' @($diffs | Where-Object Kind -eq '数式')[0].Detail
+}
+
+Test-Case 'Compare-Excel: ゼロ幅スペースなどの見えない文字だけの変更も見落とさず、表記にもしない' {
+    $dir = New-TestDir
+    $sheet = { param($no, $date) [ordered]@{ 'T_ORDER' = @(@('論理名', '物理名'), @('受注番号', $no), @('受注日', $date), @('顧客コード', 'CUSTOMER_CD')) } }
+    New-SheetsBook (Join-Path $dir 'old.xlsx') (& $sheet 'ORDER_NO' 'ORDER_DATE')
+    New-SheetsBook (Join-Path $dir 'new.xlsx') (& $sheet "ORDER$([char]0x200B)_NO" "ORDER_$([char]0xAD)DATE")
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx'); Ignore = '表記' }
+    Assert-Equal @('T_ORDER!B2|値|変更|', 'T_ORDER!B3|値|変更|') @($diffs | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Location, $_.Kind, $_.Change, $_.Tag })
+    Assert-Equal "ORDER$([char]0x200B)_NO" $diffs[0].New
+}
+
+Test-Case 'Compare-Excel: -NoExcel で読めないブック（.xls など）は「同じ」にせず「失敗」にする' {
+    $dir = New-TestDir
+    $old = Join-Path $dir 'v1'; $new = Join-Path $dir 'v2'
+    $null = New-Item -ItemType Directory -Path $old, $new
+    [System.IO.File]::WriteAllBytes((Join-Path $old '画面設計書.xls'), [byte[]](@(0xD0, 0xCF, 0x11, 0xE0) + @(1..200)))
+    [System.IO.File]::WriteAllBytes((Join-Path $new '画面設計書.xls'), [byte[]](@(0xD0, 0xCF, 0x11, 0xE0) + @(50..250)))
+    $out = Join-Path $dir 'diff.xlsx'
+    $null = @(& $CompareExcel -Old $old -New $new -NoExcel -OutXlsx $out 6>$null -WarningVariable script:noExcelWarnings -WarningAction SilentlyContinue)
+    Assert-Match (@($script:noExcelWarnings) -join ' / ') '画面設計書\.xls: 比較できませんでした: .*-NoExcel'
+    Assert-Equal '失敗' (Read-XlsxSheet -Path $out -Index 2).Rows[2]['B']
+}
+
+Test-Case 'Compare-Excel: セルの中の改行だけの変更と、英字の大文字・小文字だけの変更も「表記」にする' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir 'old.xlsx') ([ordered]@{ '画面' = @(@('項目', '説明'), @('受注番号', '受注を登録する。登録時に受注番号を採番する。'), @('顧客コード', 'customer code')) })
+    New-SheetsBook (Join-Path $dir 'new.xlsx') ([ordered]@{ '画面' = @(@('項目', '説明'), @("受注`n番号", "受注を登録する。`n登録時に受注番号を採番する。"), @('顧客コード', 'Customer Code')) })
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx') }
+    Assert-Equal @('画面!A2|表記', '画面!B2|表記', '画面!B3|表記') @($diffs | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Tag })
+    Assert-Equal 0 (Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx'); Ignore = '表記' }).Count '-Ignore 表記 で外す'
+}
+
+Test-Case 'Compare-Excel: 画面ID などの行の下に「作成者 | 山田 | 作成日 | …」と並べたシートの上部の欄は、表の中の行とみなさず版情報にする' {
+    $dir = New-TestDir
+    $sheet = {
+        param([string] $Updater, [string] $Updated)
+        @(@('画面ID', 'SCR001', '画面名', '受注登録', 'システム名', '受注管理'), @('作成者', '山田', '作成日', '2026/10/01'), @('更新者', $Updater, '更新日', $Updated),
+            @(''), @('No', '項目名', '型', '桁数'), @('1', '受注番号', '文字', '10'))
+    }
+    $old = Join-Path $dir 'old.xlsx'; $new = Join-Path $dir 'new.xlsx'
+    New-SheetsBook $old ([ordered]@{ '画面' = (& $sheet '佐藤' '2026/10/01') })
+    New-SheetsBook $new ([ordered]@{ '画面' = (& $sheet '鈴木' '2026/10/20') })
+    $diffs = Invoke-Compare @{ Old = $old; New = $new }
+    Assert-Equal @('画面!B3|版情報', '画面!D3|版情報') @($diffs | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Tag })
+}
+
 Test-Case 'Compare-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $CompareExcel
     Assert-Match $h.Synopsis '差分'
