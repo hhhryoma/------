@@ -780,6 +780,79 @@ Test-Case 'Compare-Excel: ファイルとフォルダを混ぜて指定すると
     Assert-Throws { & $CompareExcel -Old (Join-Path $cmpDir 'v1') -New (Join-Path $cmpDir 'v2/同じ.xlsx') 6>$null } '両方とも'
 }
 
+Test-Case 'Compare-Excel: -OutMarkedDir の入力規則は、ワークシート直下のスキーマの順の位置に入れる（ユーザー設定のビュー・データバーの中には入れない）' {
+    $dir = New-TestDir
+    $null = New-Item -ItemType Directory -Path (Join-Path $dir 'old'), (Join-Path $dir 'new')
+    $sheets = { param($v) [ordered]@{ 'ビュー' = @(@('No', '値'), @('1', $v)); 'データバー' = @(@('No', '値'), @('1', $v)) } }
+    New-SheetsBook (Join-Path $dir 'old/a.xlsx') (& $sheets '10')
+    $new = Join-Path $dir 'new/a.xlsx'
+    New-SheetsBook $new (& $sheets '15')
+    # ユーザー設定のビュー（中に pageMargins・pageSetup がある）と、データバー（Excel 2010 以降は cfRule の中に extLst を書く）
+    $view = '<customSheetViews><customSheetView guid="{8C3A1F2B-5D4E-4F6A-9B7C-0D1E2F3A4B5C}"><selection activeCell="A1" sqref="A1"/><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="portrait"/></customSheetView></customSheetViews>'
+    $bar = '<conditionalFormatting sqref="B2"><cfRule type="dataBar" priority="1"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar><extLst><ext uri="{B025F937-C7B1-47D3-B67F-A62EFF666E3E}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:id>{78C0D931-6437-407D-A8EE-F0AAD7539E65}</x14:id></ext></extLst></cfRule></conditionalFormatting>'
+    Edit-ZipText $new 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('<pageMargins', $view + '<pageMargins') }
+    Edit-ZipText $new 'xl/worksheets/sheet2.xml' { param($t) $t.Replace('<pageMargins', $bar + '<pageMargins') }
+    $outDir = Join-Path $dir 'marked'
+    $null = Invoke-Compare @{ Old = (Join-Path $dir 'old'); New = (Join-Path $dir 'new'); OutMarkedDir = $outDir }
+    $marked = Join-Path $outDir 'a.xlsx'
+    Test-XlsxWellFormed $marked
+    foreach ($s in @(@('sheet1', 'customSheetViews'), @('sheet2', 'conditionalFormatting'))) {
+        $doc = [xml](Read-ZipEntryText $marked "xl/worksheets/$($s[0]).xml")
+        Assert-Equal @('dimension', 'sheetViews', 'sheetFormatPr', 'cols', 'sheetData', 'autoFilter', $s[1], 'dataValidations', 'pageMargins', 'pageSetup') @($doc.DocumentElement.ChildNodes | ForEach-Object { $_.LocalName }) "$($s[0]) のワークシート直下の要素"
+        Assert-Equal 1 $doc.GetElementsByTagName('dataValidations').Count "$($s[0]) の入力規則は 1 か所だけ"
+    }
+}
+
+Test-Case 'Compare-Excel: -Versions で -OutMarkedDir を付けると、写しは拡張子の前に版の組を付けた名前で保存する' {
+    $dir = New-TestDir
+    $hist = Join-Path $dir '履歴'
+    New-Item -ItemType Directory -Path $hist | Out-Null
+    foreach ($v in @(@('1.0', '10'), @('1.1', '11'), @('1.2', '12'))) { New-TableBook (Join-Path $hist "画面設計書_v$($v[0]).xlsx") @('項目', '桁数') @(, @('受注番号', $v[1])) }
+    $outDir = Join-Path $dir 'marked'
+    $null = Invoke-Compare @{ Versions = @($hist); OutMarkedDir = $outDir }
+    Assert-Equal @('画面設計書_v1.1（v1.0 → v1.1）.xlsx', '画面設計書_v1.2（v1.1 → v1.2）.xlsx') @(Get-ChildItem -LiteralPath $outDir -File | ForEach-Object { $_.Name } | Sort-Object)
+    Test-XlsxWellFormed (Join-Path $outDir '画面設計書_v1.1（v1.0 → v1.1）.xlsx')
+
+    # 版のフォルダを並べたとき（どの版も同じ名前）も、写しが重ならない
+    foreach ($v in @('v1.0', 'v1.1', 'v1.2')) {
+        New-Item -ItemType Directory -Path (Join-Path $dir $v) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $hist ('画面設計書_{0}.xlsx' -f $v)) -Destination (Join-Path $dir ('{0}/画面設計書.xlsx' -f $v))
+    }
+    $outDir = Join-Path $dir 'marked2'
+    $null = Invoke-Compare @{ Versions = @((Join-Path $dir 'v1.0'), (Join-Path $dir 'v1.1'), (Join-Path $dir 'v1.2')); OutMarkedDir = $outDir }
+    Assert-Equal @('画面設計書（v1.0 → v1.1）.xlsx', '画面設計書（v1.1 → v1.2）.xlsx') @(Get-ChildItem -LiteralPath $outDir -File | ForEach-Object { $_.Name } | Sort-Object)
+}
+
+Test-Case 'Compare-Excel: -CheckHistory の改訂履歴のシートが無い・追記が無いという差分は、-OutXlsx の差分一覧の「変更後」に内容を書く' {
+    foreach ($case in @(@('改訂履歴', '改訂履歴に追記がありません（ほかのシートの変更: 2 件）'), @('履歴', '改訂履歴のシートが見つかりません（-HistorySheet の「改訂履歴|変更履歴|改版履歴|更新履歴|改訂記録」に一致する名前のシート）'))) {
+        $dir = New-TestDir
+        New-HistoryBooks $dir @() -HistoryName $case[0]
+        $out = Join-Path $dir 'diff.xlsx'
+        $null = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx'); CheckHistory = $true; OutXlsx = $out }
+        $sheet = Read-XlsxSheet -Path $out -Index 1
+        $row = @(2..$sheet.Rows.Count | Where-Object { $sheet.Rows[$_]['E'] -eq '改訂履歴' } | ForEach-Object { $sheet.Rows[$_] })
+        Assert-Equal 1 $row.Count $case[0]
+        Assert-Equal '記載なし' $row[0]['F']
+        Assert-Equal $case[1] $row[0]['H'] '変更前・変更後が無いので、変更後に内容'
+    }
+}
+
+Test-Case 'Compare-Excel: -OutXlsx のリンク先は、ファイル名の #・%・空白を %xx にする（日本語はそのまま。別のファイルを開かない）' {
+    $dir = New-TestDir
+    $name = '設計 #1 %41.xlsx'
+    $null = New-Item -ItemType Directory -Path (Join-Path $dir 'old'), (Join-Path $dir 'new')
+    New-TableBook (Join-Path $dir "old/$name") @('項目', '桁数') @(, @('受注番号', '10'))
+    New-TableBook (Join-Path $dir "new/$name") @('項目', '桁数') @(, @('受注番号', '12'))
+    $out = Join-Path $dir 'diff.xlsx'
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old'); New = (Join-Path $dir 'new'); OutXlsx = $out }
+    $link = @((Read-XlsxSheet -Path $out -Index 1).Links)[0]
+    Assert-Match $link.Target '^file:///.*[\\/]設計%20%231%20%2541\.xlsx$'
+    Assert-Equal "'Data'!B2" $link.Location
+    # %xx を戻すと、比べたファイルのパスになる（「#1」から後ろをブックの中の場所と読んだり、「%41」を「A」と読んだりしない）
+    Assert-Equal $diffs[0].Path.TrimStart('/') ([System.Uri]::UnescapeDataString($link.Target.Substring('file:///'.Length)))
+    Assert-Match @((Read-XlsxSheet -Path $out -Index 2).Links)[0].Target '設計%20%231%20%2541\.xlsx$' 'ファイル別のリンクも'
+}
+
 Test-Case 'Compare-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $CompareExcel
     Assert-Match $h.Synopsis '差分'
