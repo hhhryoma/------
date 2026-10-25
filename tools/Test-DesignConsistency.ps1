@@ -581,12 +581,6 @@ function Get-Digits {
     return $null
 }
 
-function Test-Flag {
-    #     必須などの印（○・Y・1 など）が付いているか
-    param([string] $Text)
-    return (([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant() -replace '\s', '') -match '^(○|◯|〇|●|Y|YES|1|TRUE|必須|NOTNULL)$'
-}
-
 function Test-Attributes {
     #     参照（画面項目・IF の項目・外部キーなど）と、参照先の定義（カラム）の属性（ルールの「属性」）を比べる
     param($Ref, $Def)
@@ -608,14 +602,15 @@ function Test-Attributes {
         Add-Issue '警告' '属性の違い' ('{0}が {1} ですが、{2} は {3} です{4}' -f $n, $a, $Def.Shown, $b, $tail) $Ref.Place $Ref.Kind
     }
     if ($ra.ContainsKey('必須') -and $da.ContainsKey('必須')) {
-        $refRequired = Test-Flag $ra['必須']; $defRequired = Test-Flag $da['必須']
+        # 必須の印（○・要 など）と既定値の無い書き方（「－」「なし」など）は、テーブル定義書から DDL を作るとき（Read-TableDesign）と同じに読む
+        $refRequired = Test-MarkedValue $ra['必須']; $defRequired = Test-MarkedValue $da['必須']
         # 入力が任意の項目は、その画面がテーブルを登録・更新する（使用テーブルの CRUD に C・U がある）ときだけ確かめる（検索条件などを除くため）
         $writes = $false
         $owner = $fileOwner[$Ref.Place.Path]
         if ($owner -and $Ref.ParentKey -and $script:Crud.Contains($owner) -and $script:Crud[$owner].Targets.ContainsKey($Ref.ParentKey)) {
             $writes = $script:Crud[$owner].Targets[$Ref.ParentKey].Letters -match '[CU]'
         }
-        if ($isInput -and $writes -and -not $refRequired -and $defRequired -and -not $da['既定値']) {
+        if ($isInput -and $writes -and -not $refRequired -and $defRequired -and (Test-BlankValue $da['既定値'])) {
             Add-Issue '警告' '属性の違い' ('入力が任意ですが、{0} は必須で既定値がありません（未入力では登録できません）' -f $Def.Shown) $Ref.Place $Ref.Kind
         }
         elseif (-not $hasIo -and $refRequired -and -not $defRequired) {

@@ -219,6 +219,17 @@ Test-Case 'Test-DesignConsistency: ファイル名に同じ長さの ID が 2 �
     Assert-Equal @('画面設計書_SCR001_SCR002.xlsx|ファイル名は「SCR001」ですが、画面IDは「SCR002」です', '画面設計書_SCR002_SCR001.xlsx|ファイル名は「SCR002」ですが、画面IDは「SCR001」です') @($issues | ForEach-Object { '{0}|{1}' -f $_.File, $_.Detail })
 }
 
+Test-Case 'Test-DesignConsistency: カラムの必須の「要」などの印と、既定値の「－」「なし」を、テーブル定義書から DDL を作るとき（Export-TableDdl）と同じに読む' {
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    # 顧客コードの必須を「要」（DDL では NOT NULL）に、配送時間帯の既定値を「－」（既定値なし）にする
+    Set-CellValues (Join-Path $dir 'DD03_テーブル定義書.xlsx') 'T_ORDER' @{ AE15 = '要'; AG19 = '－' }
+    $issues = Invoke-Consistency @{ Path = $dir }
+    Assert-Equal (@(
+        '警告|属性の違い|DD02_画面設計書_SCR002_受注登録.xlsx|画面項目定義!AS11',
+        '警告|属性の違い|DD02_画面設計書_SCR003_受注詳細.xlsx|画面項目定義!AS13') | Sort-Object) (Get-ConsistencyKeys $issues)
+    Assert-Equal 2 @($issues | Where-Object Detail -eq '入力が任意ですが、T_ORDER.DELIVERY_TIME_KBN は必須で既定値がありません（未入力では登録できません）').Count
+}
+
 Test-Case 'Test-DesignConsistency: Get-Help でヘルプが表示される' {
     $h = Get-Help $ConsistencyTool
     Assert-Match $h.Synopsis '参照'

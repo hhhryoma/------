@@ -49,6 +49,9 @@ $nfkc = [System.Text.NormalizationForm]::FormKC
 # 名前の長さの上限（バイト）。Oracle は 12.2 から 128、それより前は 30
 $nameLimit = @{ Oracle = 128; PostgreSQL = 63; SQLServer = 128; MySQL = 64 }[$Database]
 
+# 日時・時刻の秒の小数部の桁数の上限
+$fractionLimit = @{ Oracle = 9; PostgreSQL = 6; SQLServer = 7; MySQL = 6 }[$Database]
+
 # どの DB でも予約語になっている（または一部の DB で予約語の）よく使われる語
 $reserved = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($w in @('ACCESS', 'ADD', 'ALL', 'ALTER', 'AND', 'ANY', 'AS', 'ASC', 'AUDIT', 'BETWEEN', 'BY', 'CASE', 'CHAR', 'CHECK', 'COLUMN', 'COMMENT',
@@ -128,15 +131,41 @@ function Expand-TypeTemplate {
     return [pscustomobject]@{ Sql = $t.Replace('{n}', $N).Replace('{s}', $S); Missing = $missing }
 }
 
-function Test-Name {
+function Get-TypeFamily {
+    #     型の種類（DB ごとの名前の違いをそろえる）
+    param([string] $Type)
+    $b = (([string]$Type) -replace '\(.*$', '').Trim().ToLowerInvariant()
+    switch -Regex ($b) {
+        '^(varchar2?|nvarchar2?|character varying|national character varying)$' { return '可変長文字' }
+        '^(char|nchar|character|bpchar|national character)$' { return '固定長文字' }
+        '^(number|numeric|decimal|dec|integer|int|int2|int4|int8|smallint|bigint|tinyint|mediumint)$' { return '数値' }
+        '^date$' { return '日付' }
+        '^(timestamp|datetime|datetime2|smalldatetime|datetimeoffset)' { return '日時' }
+        '^time' { return '時刻' }
+        '^(text|clob|nclob|ntext|longtext|mediumtext|tinytext|long)$' { return '長い文字' }
+        '^(blob|bytea|varbinary|binary|longblob|mediumblob|image|raw|long raw)$' { return 'バイナリ' }
+        '^(boolean|bool|bit)$' { return '真偽' }
+    }
+    return $b
+}
+
+function Test-NameLength {
+    #     名前の長さ（DB の上限と、Oracle 12.1 以前の 30 バイト）。定義書の名前と、作る制約名（PK_・FK_）に使う
     param([string] $Name, [string] $What, $Place)
-    if ($Name -notmatch '^[A-Za-z][A-Za-z0-9_$#]*$') { Add-Finding ('{0}「{1}」に英数字と _ 以外の文字が含まれています' -f $What, $Name) $Place; return }
-    if ($reserved.Contains($Name.ToUpperInvariant())) { Add-Finding ('{0}「{1}」は SQL の予約語です' -f $What, $Name) $Place }
     $bytes = [System.Text.Encoding]::UTF8.GetByteCount($Name)
     if ($bytes -gt $nameLimit) { Add-Finding ('{0}「{1}」が {2} の名前の上限（{3} バイト）を超えています' -f $What, $Name, $Database, $nameLimit) $Place }
     elseif ($Database -eq 'Oracle' -and $bytes -gt 30) { Add-Finding ('{0}「{1}」が 30 バイトを超えています（Oracle 12.1 以前では使えません）' -f $What, $Name) $Place }
 }
 
+function Test-Name {
+    param([string] $Name, [string] $What, $Place)
+    if ($Name -notmatch '^[A-Za-z][A-Za-z0-9_$#]*$') { Add-Finding ('{0}「{1}」に英数字と _ 以外の文字が含まれています' -f $What, $Name) $Place; return }
+    if ($reserved.Contains($Name.ToUpperInvariant())) { Add-Finding ('{0}「{1}」は SQL の予約語です' -f $What, $Name) $Place }
+    Test-NameLength $Name $What $Place
+}
+
+# Oracle・PostgreSQL のインデックス名はスキーマの中で 1 つ（SQL Server・MySQL はテーブルごと）。インデックス名 → テーブル
+$indexTables = @{}
 foreach ($t in $tables) {
     Test-Name $t.Id 'テーブル名' $t.Place
     foreach ($c in $t.Columns) {
@@ -144,6 +173,16 @@ foreach ($t in $tables) {
         $k = ConvertTo-TypeKey $c.BaseType
         if ($typeTemplates.ContainsKey($k)) {
             $x = Expand-TypeTemplate $typeTemplates[$k] $c.Length $c.Scale
+            $family = Get-TypeFamily $x.Sql
+            if ($c.Length -and -not $typeTemplates[$k].Contains('{n}')) {
+                # 整数・真偽・日付の桁数（INTEGER の 10 など）は型で大きさが決まるので、使わないことを知らせない
+                if (@('数値', '真偽', '日付') -notcontains $family) { Add-Finding ('{0}.{1} の桁数 {2} は、データ型 {3}（{4} の {5}）では使いません' -f $t.Id, $c.Name, $c.Length, $c.BaseType, $Database, $x.Sql) $c.Place }
+            }
+            elseif ($c.Length -and @('日時', '時刻') -contains $family -and [int]$c.Length -gt $fractionLimit) {
+                # 日時・時刻の桁数は秒の小数部の桁数。DB の上限を超える桁数（「yyyy/MM/dd HH:mm:ss」の 19 など）は使わない
+                Add-Finding ('{0}.{1} の桁数 {2} は、{3} の秒の小数部の上限（{4} 桁）を超えるため使いません' -f $t.Id, $c.Name, $c.Length, $Database, $fractionLimit) $c.Place
+                $x = Expand-TypeTemplate $typeTemplates[$k] '' $c.Scale
+            }
             $c.SqlType = $x.Sql
             if ($x.Missing) { Add-Finding ('{0}.{1} のデータ型 {2} に桁数がありません' -f $t.Id, $c.Name, $c.BaseType) $c.Place }
         }
@@ -154,15 +193,27 @@ foreach ($t in $tables) {
         }
     }
     if (@($t.Columns | Where-Object { $null -ne $_.PkOrder }).Count -eq 0) { Add-Finding ('テーブル {0} に主キーがありません' -f $t.Id) $t.Place }
+    else { Test-NameLength ('PK_' + $t.Id) '主キーの制約名' $t.Place }
     $names = @{}
     foreach ($c in $t.Columns) { $names[$c.Name.ToUpperInvariant()] = $true }
     foreach ($ix in $t.Indexes) {
         Test-Name $ix.Name 'インデックス名' $ix.Place
+        if ($Database -eq 'Oracle' -or $Database -eq 'PostgreSQL') {
+            $ixKey = $ix.Name.ToUpperInvariant()
+            if ($indexTables.ContainsKey($ixKey)) { Add-Finding ('インデックス名「{0}」はテーブル {1} のインデックスにも使っています（{2} ではスキーマの中で同じインデックス名を使えません）' -f $ix.Name, $indexTables[$ixKey], $Database) $ix.Place }
+            else { $indexTables[$ixKey] = $t.Id }
+        }
         foreach ($ic in $ix.Columns) {
             $bare = ($ic -replace '\s+(ASC|DESC)$', '')
             if (-not $names.ContainsKey($bare.ToUpperInvariant())) { Add-Finding ('インデックス {0} のカラム {1} がテーブル {2} にありません' -f $ix.Name, $bare, $t.Id) $ix.Place }
         }
     }
+}
+
+function Get-ColumnSetKey {
+    #     カラムの組み合わせを比べる形（並び順の ASC・DESC を除き、大文字にして名前の順に並べる）
+    param([string[]] $Names)
+    return (@($Names | ForEach-Object { ($_ -replace '\s+(ASC|DESC)$', '').ToUpperInvariant() } | Sort-Object) -join ',')
 }
 
 # 外部キー: 参照先のテーブルごとにまとめる（同じテーブルの同じカラムを 2 回参照するときは分ける）
@@ -183,7 +234,7 @@ foreach ($t in $tables) {
         }
         $gk = $parent.Id.ToUpperInvariant()
         while ($groups.Contains($gk) -and @($groups[$gk].ParentColumns) -contains $pc.Name) { $gk += '+' }
-        if (-not $groups.Contains($gk)) { $groups[$gk] = [pscustomobject]@{ Parent = $parent.Id; Columns = (New-Object System.Collections.Generic.List[string]); ParentColumns = (New-Object System.Collections.Generic.List[string]) } }
+        if (-not $groups.Contains($gk)) { $groups[$gk] = [pscustomobject]@{ Parent = $parent.Id; Columns = (New-Object System.Collections.Generic.List[string]); ParentColumns = (New-Object System.Collections.Generic.List[string]); Place = $c.Place } }
         $groups[$gk].Columns.Add($c.Name)
         $groups[$gk].ParentColumns.Add($pc.Name)
     }
@@ -193,7 +244,13 @@ foreach ($t in $tables) {
         $i = 1
         while ($used.ContainsKey($fkName.ToUpperInvariant())) { $i++; $fkName = 'FK_{0}_{1}_{2}' -f $t.Id, $g.Parent, $i }
         $used[$fkName.ToUpperInvariant()] = $true
-        if ([System.Text.Encoding]::UTF8.GetByteCount($fkName) -gt $nameLimit) { Add-Finding ('外部キーの制約名「{0}」が {1} の名前の上限（{2} バイト）を超えています' -f $fkName, $Database, $nameLimit) $t.Place }
+        Test-NameLength $fkName '外部キーの制約名' $t.Place
+        # 参照先は、親の主キーかユニークインデックスのカラムのすべて（主キーの一部だけなどでは、DB で外部キーを作れない）
+        $parent = $allById[$g.Parent.ToUpperInvariant()]
+        $want = Get-ColumnSetKey $g.ParentColumns
+        $isKey = (Get-ColumnSetKey @($parent.Columns | Where-Object { $null -ne $_.PkOrder } | ForEach-Object { $_.Name })) -eq $want
+        foreach ($ix in $parent.Indexes) { if ($ix.Unique -and (Get-ColumnSetKey $ix.Columns) -eq $want) { $isKey = $true } }
+        if (-not $isKey) { Add-Finding ('{0} ({1}) の外部キーの参照先 {2} ({3}) が、{2} の主キーでもユニークインデックスでもありません' -f $t.Id, ($g.Columns -join ', '), $g.Parent, ($g.ParentColumns -join ', ')) $g.Place }
         $foreignKeys.Add([pscustomobject]@{ Name = $fkName; Table = $t.Id; Columns = $g.Columns.ToArray(); Parent = $g.Parent; ParentColumns = $g.ParentColumns.ToArray() })
     }
 }
@@ -222,8 +279,11 @@ while ($pending.Count -gt 0) {
 
 
 function ConvertTo-SqlString {
+    #     コメントの文字列。セル内の改行（↵）は空白にして 1 行にする。MySQL は \ もエスケープの文字なので \\ にする
     param([string] $Text)
-    return "'" + ([string]$Text).Replace("'", "''") + "'"
+    $s = ([string]$Text -replace '\s*↵\s*', ' ').Trim().Replace("'", "''")
+    if ($Database -eq 'MySQL') { $s = $s.Replace('\', '\\') }
+    return "'" + $s + "'"
 }
 
 $lines = New-Object System.Collections.Generic.List[string]
@@ -314,24 +374,6 @@ elseif (-not $CompareCatalog) { $ddl }
 # ---------------------------------------------------------------- DB のカタログと比べる
 
 
-function Get-TypeFamily {
-    #     型の種類（DB ごとの名前の違いをそろえる）
-    param([string] $Type)
-    $b = (([string]$Type) -replace '\(.*$', '').Trim().ToLowerInvariant()
-    switch -Regex ($b) {
-        '^(varchar2?|nvarchar2?|character varying|national character varying)$' { return '可変長文字' }
-        '^(char|nchar|character|bpchar|national character)$' { return '固定長文字' }
-        '^(number|numeric|decimal|dec|integer|int|int2|int4|int8|smallint|bigint|tinyint|mediumint)$' { return '数値' }
-        '^date$' { return '日付' }
-        '^(timestamp|datetime|datetime2|smalldatetime|datetimeoffset)' { return '日時' }
-        '^time' { return '時刻' }
-        '^(text|clob|nclob|ntext|longtext|mediumtext|tinytext|long)$' { return '長い文字' }
-        '^(blob|bytea|varbinary|binary|longblob|mediumblob|image|raw|long raw)$' { return 'バイナリ' }
-        '^(boolean|bool|bit)$' { return '真偽' }
-    }
-    return $b
-}
-
 function Get-CatalogValue {
     #     カタログの CSV の値（列名の候補のうち最初にあるもの）
     param($Row, [string[]] $Names)
@@ -375,10 +417,14 @@ if ($CompareCatalog) {
             $dbType = Get-CatalogValue $r @('DATA_TYPE')
             $famDoc = Get-TypeFamily $c.SqlType
             $famDb = Get-TypeFamily $dbType
+            # 型の対応に桁数（{n}）・小数（{s}）の無い型（INTEGER など）は、その値を DB と比べない。型の対応に無い型は、桁数・小数をそのまま書いている
+            $template = $typeTemplates[(ConvertTo-TypeKey $c.BaseType)]
+            $usesLength = (-not $template) -or $template.Contains('{n}')
+            $usesScale = (-not $template) -or $template.Contains('{s}')
             if ($famDoc -ne $famDb) {
                 Add-Difference $t.Id $c.Name '型' $c.SqlType $dbType ('{0}.{1} の型が違います（定義書: {2} / DB: {3}）' -f $t.Id, $c.Name, $c.SqlType, $dbType) $c.Place
             }
-            elseif ($c.Length) {
+            elseif ($c.Length -and $usesLength) {
                 if ($famDoc -eq '可変長文字' -or $famDoc -eq '固定長文字') {
                     $len = Get-CatalogValue $r @('CHARACTER_MAXIMUM_LENGTH', 'CHAR_LENGTH', 'CHAR_COL_DECL_LENGTH')
                     if ($len -match '^\d+$' -and [int]$len -ne [int]$c.Length) {
@@ -391,7 +437,7 @@ if ($CompareCatalog) {
                     if (-not $scale) { $scale = '0' }
                     $docScale = $c.Scale
                     if (-not $docScale) { $docScale = '0' }
-                    if ($prec -match '^\d+$' -and ([int]$prec -ne [int]$c.Length -or [int]$scale -ne [int]$docScale)) {
+                    if ($prec -match '^\d+$' -and ([int]$prec -ne [int]$c.Length -or ($usesScale -and [int]$scale -ne [int]$docScale))) {
                         Add-Difference $t.Id $c.Name '桁数' ('{0},{1}' -f $c.Length, $docScale) ('{0},{1}' -f $prec, $scale) ('{0}.{1} の桁数が違います（定義書: {2},{3} / DB: {4},{5}）' -f $t.Id, $c.Name, $c.Length, $docScale, $prec, $scale) $c.Place
                     }
                 }
@@ -477,8 +523,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       CREATE INDEX    インデックス定義の表（主キーと同じカラムのものは作らない）
 #       外部キー        外部キー参照先（テーブルID.カラム）から ALTER TABLE … ADD CONSTRAINT
 #
-#     テーブルは参照先が先に来る順に並べます。あわせて、名前の文字・長さ・予約語、未知の型、桁数の抜け、
-#     主キーの無いテーブル、外部キーの参照先の有無と型の違い、インデックスのカラムの有無を確かめて警告します。
+#     テーブルは参照先が先に来る順に並べます。あわせて、名前の文字・長さ（作る制約名の長さも）・予約語、未知の型、桁数の抜けと使わない桁数、
+#     主キーの無いテーブル、外部キーの参照先の有無・型の違い・主キーかユニークインデックスか、インデックスのカラムの有無と名前の重なりを確かめて警告します。
 #
 #     -CompareCatalog に DB のカタログ（列の一覧）の CSV を渡すと、DDL の代わりに定義書との差異を出力します。
 #

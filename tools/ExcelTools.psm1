@@ -1290,13 +1290,28 @@ function Read-TableHeaderCandidates {
     return $candidates
 }
 
+function Test-MarkedValue {
+    #     設計書の必須・PK・ユニークなどの列に、○・Y・1・要 などの印があるか（値の全体で比べる。空白は見ない）
+    #     テーブル定義書（Read-TableDesign）と、設計書どうしの属性の比較（Test-DesignConsistency）で同じに読むため
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($script:Nfkc).ToUpperInvariant() -replace '\s', ''
+    return $t -match '^(○|◯|〇|●|✓|✔|Y|YES|TRUE|1|必須|NOTNULL|有|あり|要|PK|UK)$'
+}
+
+function Test-BlankValue {
+    #     設計書のデフォルト（既定値）などの列の値が、空か「-」「なし」などの値が無いことを表す書き方か
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($script:Nfkc).Trim()
+    return (-not $t) -or $t -match '^(-|－|ー|―|‐|×|なし|N/A)$'
+}
+
 function Read-TableDesign {
     #     テーブル定義書のカラム定義（物理名とデータ型の見出しがそろった表）とインデックス定義を、シートごとに読む（Books は ConvertTo-DesignBooks の結果。パスの順に読む）。
     #       Candidates: 見出しの候補（Read-TableHeaderCandidates）
     #       OnFinding: 使わなかった表・カラム（テーブル ID が無い・ほかのシートと同じテーブル・同じシートの 2 つ目からの表・同じカラム）を知らせるスクリプトブロック（引数: 文、場所）
     #     戻り値: @{ Id; Name; File; Sheet; Place; Columns; Indexes } の一覧。場所（Place）は @{ File; Path; Sheet; Cell }
     #       Columns: @{ Name; Logical; BaseType; Length; Scale; PkOrder（主キーの順。主キーでなければ $null）; NotNull; Default; FkTable; FkColumn; Note（備考）; Place; SqlType（空） }
-    #       Indexes: @{ Name; Columns; Unique; Place }
+    #       Indexes: @{ Name; Columns; Unique; Place }（インデックス名が空の行は、上の行のインデックスのカラムの続き）
     param($Books, [hashtable] $Candidates, [scriptblock] $OnFinding)
     $nfkc = $script:Nfkc
     $newPlace = { param($Book, [string] $Sheet, [int] $Row, [int] $Col) [pscustomobject]@{ File = $Book.File; Path = $Book.Path; Sheet = $Sheet; Cell = ('{0}{1}' -f (ConvertTo-ColumnName $Col), $Row) } }
@@ -1305,14 +1320,6 @@ function Read-TableDesign {
     $first = { param($Labels, [string[]] $Names) foreach ($n in $Names) { if ($Labels -contains $n) { return $n } }; return $null }
     # シートのヘッダの値（候補のうち最初に見つかった見出しの右）
     $sheetValue = { param($Grid, [string[]] $Names) foreach ($n in $Names) { $c = Find-LabelCell $Grid $n; if ($c -and $c.Value) { return $c } }; return $null }
-    # ○・Y・1 などの印があるか
-    $marked = {
-        param([string] $Text)
-        $t = ([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant()
-        if (-not $t) { return $false }
-        return $t -match '^(○|◯|〇|●|✓|✔|Y|YES|TRUE|1|必須|NOTNULL|NOT NULL|有|あり|要|PK|UK)$'
-    }
-    $blank = { param([string] $Text) $t = ([string]$Text).Normalize($nfkc).Trim(); return (-not $t) -or $t -match '^(-|－|ー|―|‐|×|なし|N/A)$' }
     $cell = { param($Row, $ColumnOf, [string] $Label) if (-not $Label -or -not $ColumnOf.ContainsKey($Label)) { return '' }; return [string]$Row.Cells[$ColumnOf[$Label]] }
 
     $tables = New-Object System.Collections.Generic.List[object]
@@ -1381,13 +1388,17 @@ function Read-TableDesign {
                 $pkText = (& $cell $dr $cof $label['主キー']).Normalize($nfkc).Trim()
                 $pkOrder = $null
                 if ($pkText -match '^\d+$' -and [int]$pkText -gt 0) { $pkOrder = [int]$pkText }
-                elseif (& $marked $pkText) { $pkSeq++; $pkOrder = 1000 + $pkSeq }
+                elseif (Test-MarkedValue $pkText) { $pkSeq++; $pkOrder = 1000 + $pkSeq }
                 $notNull = $false
-                if ($label['必須']) { $notNull = & $marked (& $cell $dr $cof $label['必須']) }
-                elseif ($label['NULL許可']) { $notNull = -not (& $marked (& $cell $dr $cof $label['NULL許可'])) }
+                if ($label['必須']) { $notNull = Test-MarkedValue (& $cell $dr $cof $label['必須']) }
+                elseif ($label['NULL許可']) {
+                    # NULL許可の列: 可・許可・○ などは NULL 可。不可・×・NOT NULL と空は NOT NULL（値の全体で比べ、「不可」を「可」としない）
+                    $nullText = (& $cell $dr $cof $label['NULL許可']).Normalize($nfkc).ToUpperInvariant() -replace '\s', ''
+                    $notNull = -not ($nullText -match '^(可|許可)$' -or ((Test-MarkedValue $nullText) -and $nullText -notmatch '^(NOTNULL|必須)$'))
+                }
                 if ($null -ne $pkOrder) { $notNull = $true }
                 $default = (& $cell $dr $cof $label['デフォルト']).Trim()
-                if (& $blank $default) { $default = '' }
+                if (Test-BlankValue $default) { $default = '' }
                 $fkTable = ''; $fkColumn = ''
                 $fm = [regex]::Match((& $cell $dr $cof $label['外部キー']).Normalize($nfkc), '([A-Za-z_][A-Za-z0-9_$#]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_$#]*)')
                 if ($fm.Success) { $fkTable = $fm.Groups[1].Value; $fkColumn = $fm.Groups[2].Value }
@@ -1408,19 +1419,38 @@ function Read-TableDesign {
                 if ($a -and $b) { $ixName = $a; $ixCols = $b; break }
             }
             if ($ixName) {
-                foreach ($it in (Find-DesignTables $grid @($ixName, $ixCols) $ixName)) {
+                # インデックス名かカラムのある行を読む（1 行に 1 カラムずつ書き、インデックス名を縦に結合した表では、2 行目からインデックス名が空）。
+                # 表の見つけ方は同じなので、インデックス名の列で読んだ表とカラムの列で読んだ表は同じ順に並ぶ
+                $nameTables = Find-DesignTables $grid @($ixName, $ixCols) $ixName
+                $ixTables = Find-DesignTables $grid @($ixName, $ixCols) $ixCols
+                for ($ti = 0; $ti -lt $ixTables.Count; $ti++) {
+                    $it = $ixTables[$ti]
+                    $rowOf = @{}
+                    foreach ($dr in $it.Rows) { $rowOf[$dr.Row] = $dr }
+                    foreach ($dr in $nameTables[$ti].Rows) { $rowOf[$dr.Row] = $dr }
+                    $rowNumbers = [int[]]@($rowOf.Keys)
+                    [Array]::Sort($rowNumbers)
                     $uniqueLabel = & $first @($it.ColumnOf.Keys) $Candidates['ユニーク']
-                    foreach ($dr in $it.Rows) {
-                        $names = @(((& $cell $dr $it.ColumnOf $ixCols).Normalize($nfkc) -split '[,、\s]+') | Where-Object { $_ })
-                        # 「ORDER_DATE DESC」のような並び順は前のカラムに付ける
+                    $prev = $null
+                    foreach ($rn in $rowNumbers) {
+                        $dr = $rowOf[$rn]
+                        $name = (& $cell $dr $it.ColumnOf $ixName).Normalize($nfkc).Trim()
+                        # インデックス名が空の行は、同じ表の上の行のインデックスにカラムを足す（上に無ければ使わない）
+                        if (-not $name -and -not $prev) { continue }
                         $list = New-Object System.Collections.Generic.List[string]
+                        if (-not $name) { $list.AddRange([string[]]$prev.Columns) }
+                        # カラムの区切りは「,」「、」・空白・セル内の改行（↵）
+                        $names = @(((& $cell $dr $it.ColumnOf $ixCols).Normalize($nfkc) -split '[,、\s↵]+') | Where-Object { $_ })
+                        # 「ORDER_DATE DESC」のような並び順は前のカラムに付ける
                         foreach ($nm in $names) {
                             if ($nm -match '^(?i:ASC|DESC)$' -and $list.Count -gt 0) { $list[$list.Count - 1] = '{0} {1}' -f $list[$list.Count - 1], $nm.ToUpperInvariant() } else { $list.Add($nm) }
                         }
-                        $indexes.Add([pscustomobject]@{
-                                Name = (& $cell $dr $it.ColumnOf $ixName).Normalize($nfkc).Trim(); Columns = $list.ToArray()
-                                Unique = (& $marked (& $cell $dr $it.ColumnOf $uniqueLabel)); Place = (& $newPlace $book $sheetName $dr.Row $it.ColumnOf[$ixName])
-                            })
+                        if (-not $name) { $prev.Columns = $list.ToArray(); continue }
+                        $prev = [pscustomobject]@{
+                            Name = $name; Columns = $list.ToArray()
+                            Unique = (Test-MarkedValue (& $cell $dr $it.ColumnOf $uniqueLabel)); Place = (& $newPlace $book $sheetName $dr.Row $it.ColumnOf[$ixName])
+                        }
+                        $indexes.Add($prev)
                     }
                 }
             }
