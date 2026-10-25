@@ -384,6 +384,189 @@ Test-Case 'Test-ExcelDeliverable: -BackupDir の中のファイルはチェッ�
     Assert-Equal $hash (Get-FileHash -LiteralPath (Join-Path $backup 'bad.xlsx')).Hash '前に残した直す前のファイル'
 }
 
+function New-ViewBook {
+    #     シートの表示（<sheetView>）を書き換えたブックを作る（テスト用）。Views: シート名 → <sheetView> の XML の順序付き辞書
+    param([string] $Path, $Views)
+    $sheets = [ordered]@{}
+    foreach ($name in $Views.Keys) { $sheets[$name] = @(@('No', '項目'), @('1', 'x')) }
+    New-SheetsBook $Path $sheets
+    $i = 0
+    foreach ($name in $Views.Keys) {
+        $i++
+        $view = $Views[$name]
+        Edit-ZipText $Path "xl/worksheets/sheet$i.xml" { param($t) [regex]::Replace($t, '<sheetViews>.*?</sheetViews>', '<sheetViews>' + $view + '</sheetViews>') }
+    }
+}
+
+Test-Case 'Test-ExcelDeliverable: スクロールした状態でウィンドウ枠を固定したシートは、固定した行・列の直後をスクロール領域の左上とみなす' {
+    # スクロールした状態で固定すると、Excel は固定した部分の左上を sheetView の topLeftCell に、スクロール領域の左上を pane の topLeftCell に保存する
+    $book = Join-Path (New-TestDir) '画面一覧.xlsx'
+    New-ViewBook $book ([ordered]@{
+            # 1〜9 行目（タイトル）を上に隠して、10〜11 行目（表の見出し）を固定した
+            '行'     = '<sheetView tabSelected="1" topLeftCell="A10" workbookViewId="0"><pane ySplit="2" topLeftCell="A12" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A12" sqref="A12"/></sheetView>'
+            # 右へスクロールして、J〜K 列を固定した
+            '列'     = '<sheetView topLeftCell="J1" workbookViewId="0"><pane xSplit="2" topLeftCell="L1" activePane="topRight" state="frozen"/><selection pane="topRight" activeCell="L1" sqref="L1"/></sheetView>'
+            # C 列と 10〜11 行目を固定した
+            '行と列' = '<sheetView topLeftCell="C10" workbookViewId="0"><pane xSplit="1" ySplit="2" topLeftCell="D12" activePane="bottomRight" state="frozen"/><selection pane="topRight" activeCell="D10" sqref="D10"/><selection pane="bottomLeft" activeCell="C12" sqref="C12"/><selection pane="bottomRight" activeCell="D12" sqref="D12"/></sheetView>'
+        })
+    $issues = Invoke-Check @{ Path = $book; Check = 'View' }
+    Assert-Equal 0 $issues.Count ((@($issues | ForEach-Object { '{0} {1}' -f $_.Location, $_.Detail })) -join ' / ')
+
+    # 固定した行・列より上・左の行・列は、固定を解除しないと表示されないので、非表示の行・列と同じく情報として知らせる
+    $hidden = Invoke-Check @{ Path = $book; Check = 'Hidden' }
+    Assert-Equal (@(
+            '情報|行|固定した行（10〜11 行目）より上の 1〜9 行目は、ウィンドウ枠の固定を解除しないと表示されません',
+            '情報|列|固定した列（J〜K 列）より左の A〜I 列は、ウィンドウ枠の固定を解除しないと表示されません',
+            '情報|行と列|固定した行（10〜11 行目）より上の 1〜9 行目は、ウィンドウ枠の固定を解除しないと表示されません',
+            '情報|行と列|固定した列（C 列）より左の A〜B 列は、ウィンドウ枠の固定を解除しないと表示されません') | Sort-Object) @($hidden | ForEach-Object { '{0}|{1}|{2}' -f $_.Level, $_.Location, $_.Detail } | Sort-Object)
+}
+
+Test-Case 'Test-ExcelDeliverable: ウィンドウ枠を固定したシートでも、スクロールしたまま保存したシートと、表示されない A1 を選択したシートは知らせる' {
+    $book = Join-Path (New-TestDir) '画面一覧.xlsx'
+    New-ViewBook $book ([ordered]@{
+            # 10〜11 行目を固定し、スクロール領域を 30 行目までスクロールした
+            'スクロール' = '<sheetView tabSelected="1" topLeftCell="A10" workbookViewId="0"><pane ySplit="2" topLeftCell="A30" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A12" sqref="A12"/></sheetView>'
+            # A〜B 列を固定して下へスクロールした（列だけを固定したときの sheetView の topLeftCell の行は、スクロールの位置）
+            '列・下へ'   = '<sheetView topLeftCell="A50" workbookViewId="0"><pane xSplit="2" topLeftCell="C50" activePane="topRight" state="frozen"/><selection pane="topRight" activeCell="C1" sqref="C1"/></sheetView>'
+            # 10〜11 行目を固定して右へスクロールした
+            '行・右へ'   = '<sheetView topLeftCell="D10" workbookViewId="0"><pane ySplit="2" topLeftCell="D12" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A12" sqref="A12"/></sheetView>'
+            # 選択した A1 は、固定した行より上にあって表示されない
+            '上の行'     = '<sheetView topLeftCell="A10" workbookViewId="0"><pane ySplit="2" topLeftCell="A12" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A1" sqref="A1"/></sheetView>'
+        })
+    $issues = Invoke-Check @{ Path = $book; Check = 'View' }
+    Assert-Equal (@('警告|表示位置|スクロール', '警告|表示位置|列・下へ', '警告|表示位置|行・右へ', '警告|選択セル|上の行!A1') | Sort-Object) (Get-IssueKeys $issues) ((@($issues | ForEach-Object { '{0} {1}' -f $_.Location, $_.Detail })) -join ' / ')
+    Assert-Equal '選択セルが A1 です（A12 にしてください）' (@($issues | Where-Object Item -eq '選択セル')[0].Detail)
+}
+
+Test-Case 'Test-ExcelDeliverable: シート全体・列全体を選択したまま保存したシートを知らせる（結合したセルの選択は知らせない）' {
+    $book = Join-Path (New-TestDir) '一覧.xlsx'
+    New-ViewBook $book ([ordered]@{
+            '全体' = '<sheetView tabSelected="1" workbookViewId="0"><selection activeCell="A1" sqref="A1:XFD1048576"/></sheetView>'
+            '列'   = '<sheetView workbookViewId="0"><selection activeCell="A1" sqref="A1:A1048576"/></sheetView>'
+            '結合' = '<sheetView workbookViewId="0"><selection activeCell="A1" sqref="A1:C2"/></sheetView>'
+        })
+    $issues = Invoke-Check @{ Path = $book; Check = 'View' }
+    Assert-Equal (@('警告|選択セル|全体!A1', '警告|選択セル|列!A1') | Sort-Object) (Get-IssueKeys $issues)
+    Assert-Equal '選択範囲が A1:XFD1048576 です（A1 だけを選択してください）' (@($issues | Where-Object Location -eq '全体!A1')[0].Detail)
+    # Reset-ExcelView.ps1（-Fix）で A1 だけの選択に直る
+    $null = & (Join-Path $script:ToolsDir 'Reset-ExcelView.ps1') -Path $book 6>$null 3>$null
+    Assert-Equal 0 (Invoke-Check @{ Path = $book; Check = 'View' }).Count
+}
+
+Test-Case 'Test-ExcelDeliverable: ウィンドウに合わせて拡大縮小するグラフシートの倍率は確かめない' {
+    $book = Join-Path (New-TestDir) '集計.xlsx'
+    New-SheetsBook $book ([ordered]@{ '一覧' = @(@('No', '件数'), @('1', '3')); 'グラフ' = @(, @('No')); '固定倍率' = @(, @('No')) })
+    # 2・3 つ目をグラフシートにする（グラフの中身は省く）。ウィンドウに合わせる（zoomToFit）と、zoomScale は保存したときの画面の大きさで変わる
+    Edit-ZipText $book 'xl/_rels/workbook.xml.rels' { param($t) $t.Replace('relationships/worksheet" Target="worksheets/sheet2.xml"', 'relationships/chartsheet" Target="worksheets/sheet2.xml"').Replace('relationships/worksheet" Target="worksheets/sheet3.xml"', 'relationships/chartsheet" Target="worksheets/sheet3.xml"') }
+    $chart = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews>{0}</sheetViews><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/></chartsheet>'
+    Edit-ZipText $book 'xl/worksheets/sheet2.xml' { param($t) $chart -f '<sheetView zoomScale="88" workbookViewId="0" zoomToFit="1"/>' }
+    Edit-ZipText $book 'xl/worksheets/sheet3.xml' { param($t) $chart -f '<sheetView zoomScale="88" workbookViewId="0"/>' }
+    $issues = Invoke-Check @{ Path = $book; Check = 'View' }
+    Assert-Equal @('警告|倍率|固定倍率') (Get-IssueKeys $issues)
+}
+
+Test-Case 'Test-ExcelDeliverable: マクロシート（Excel 4.0 マクロ）も、ワークシートと同じように選択セルを確かめる' {
+    $book = Join-Path (New-TestDir) '集計.xlsm'
+    New-ViewBook $book ([ordered]@{
+            '一覧'   = '<sheetView tabSelected="1" workbookViewId="0"><selection activeCell="A1" sqref="A1"/></sheetView>'
+            'マクロ' = '<sheetView workbookViewId="0"><selection activeCell="C5" sqref="C5"/></sheetView>'
+        })
+    # 2 つ目をマクロシートにする（リレーションの種類は .../xlMacrosheet）
+    Edit-ZipText $book 'xl/_rels/workbook.xml.rels' { param($t) $t.Replace('http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"', 'http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet" Target="worksheets/sheet2.xml"') }
+    $issues = Invoke-Check @{ Path = $book; Check = 'View' }
+    Assert-Equal @('警告|選択セル|マクロ!C5') (Get-IssueKeys $issues)
+}
+
+Test-Case 'Test-ExcelDeliverable: 改訂履歴に同じ版数の行が続いても（変更点ごとの行）指摘せず、版数が前の行より小さい行だけを知らせる' {
+    $book = Join-Path (New-TestDir) '受注仕様書.xlsx'
+    New-SheetsBook $book ([ordered]@{
+            '表紙'     = @(@('版数', '1.1'), @('更新日', '2026/10/12'))
+            '改訂履歴' = @(@('版数', '改訂日', '改訂内容'), @('1.0', '2026/10/01', '初版'), @('1.1', '2026/10/12', '画面項目を追加'), @('1.1', '2026/10/12', 'メッセージを修正'))
+        })
+    $issues = Invoke-Check @{ Path = $book; Check = 'Version' }
+    Assert-Equal 0 $issues.Count ((@($issues | ForEach-Object { $_.Detail })) -join ' / ')
+    # 1.0 → 1.2 → 1.1
+    $issues = Invoke-Check @{ Path = (Join-Path $printDir '仕様書_v1.2.xlsx'); Check = 'Version' }
+    Assert-Equal '改訂履歴の版数（1.1）が前の行（1.2）より小さくなっています' (@($issues | Where-Object Item -eq '改訂履歴の版数')[0].Detail)
+}
+
+Test-Case 'Test-ExcelDeliverable: 表紙の更新日と改訂履歴の改訂日は、和暦の文字（令和8年10月1日・R8.10.1）でも比べる' {
+    $dir = New-TestDir
+    # 表紙の更新日と、改訂履歴の最後の改訂日（4 つ目だけそろっている）
+    $pairs = @(@('令和8年10月1日', '2026/10/12'), @('R8.10.1', 'R8.10.12'), @('2026/10/1', '令和8年10月12日'), @('R8.10.12', '令和8年10月12日'))
+    for ($i = 0; $i -lt $pairs.Count; $i++) {
+        New-SheetsBook (Join-Path $dir "仕様書$($i + 1).xlsx") ([ordered]@{
+                '表紙'     = @(@('版数', '1.1'), @('更新日', $pairs[$i][0]))
+                '改訂履歴' = @(@('版数', '改訂日', '改訂内容'), @('1.0', '2026/09/01', '初版'), @('1.1', $pairs[$i][1], '画面項目を追加'))
+            })
+    }
+    # 地域の設定が和暦でも、日付は西暦で示す
+    $issues = Invoke-InWareki { Invoke-Check @{ Path = $dir; Check = 'Version' } }
+    Assert-Equal @('仕様書1.xlsx', '仕様書2.xlsx', '仕様書3.xlsx') @($issues | ForEach-Object { $_.File } | Sort-Object)
+    foreach ($i in $issues) { Assert-Equal '表紙の更新日（2026/10/01）と、改訂履歴の最後の改訂日（2026/10/12）が違います' $i.Detail $i.File }
+}
+
+Test-Case 'Test-ExcelDeliverable: 相対パスで保存された社内のファイルへのリンク（../../社内/見積根拠.xlsx）も知らせる（チェックするフォルダの中のファイルへのリンクと URL は知らせない）' {
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $root = Join-Path (New-TestDir) '提出物'
+    $book = Join-Path $root '01_要件定義/要件定義書.xlsx'
+    New-Item -ItemType Directory -Force -Path (Split-Path $book -Parent) | Out-Null
+    # Excel・Word は、同じドライブ・共有フォルダのファイルへのリンクを、ファイルの場所からの相対パスで保存する
+    $targets = @(
+        '../../%E7%A4%BE%E5%86%85/%E8%A6%8B%E7%A9%8D%E6%A0%B9%E6%8B%A0.xlsx',
+        '..\..\社内\メモ.xlsx',
+        '../02_基本設計/基本設計書.xlsx',
+        '別紙/画面一覧.xlsx',
+        'https://example.com/manual',
+        'mailto:support@example.com')
+    $rows = @(for ($i = 0; $i -lt $targets.Count; $i++) { @{ Values = @("リンク$i"); Link = @{ Column = 0; Path = "link$i.xlsx"; Location = '' } } })
+    Export-Workbook -FilePath $book -Sheets @(@{ Name = '参照'; Columns = @(@{ Header = 'リンク'; Width = 20 }); Rows = $rows })
+    Edit-ZipText $book 'xl/worksheets/_rels/sheet1.xml.rels' { param($t) for ($i = 0; $i -lt $targets.Count; $i++) { $t = $t.Replace("file:///link$i.xlsx", $targets[$i]) }; $t }
+    $docx = Join-Path $root '01_要件定義/画面仕様書.docx'
+    New-DeliverableDocx $docx
+    Edit-ZipText $docx 'word/_rels/document.xml.rels' { param($t) $t.Replace('\\fs01\share\受注', '../../社内/受注') }
+
+    $issues = Invoke-Check @{ Path = $root; Check = 'Link' }
+    $issues = @($issues | Where-Object Item -eq 'ファイルへのリンク')
+    Assert-Equal (@(
+            '参照!A2|社内のファイルやフォルダへのリンクがあります（../../社内/見積根拠.xlsx）',
+            '参照!A3|社内のファイルやフォルダへのリンクがあります（..\..\社内\メモ.xlsx）',
+            '本文|社内のファイルやフォルダへのリンクがあります（../../社内/受注）') | Sort-Object) @($issues | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Detail } | Sort-Object) 'チェックするフォルダの中の 02_基本設計・別紙へのリンクは、一緒に提出するファイル'
+}
+
+Test-Case 'Test-ExcelDeliverable: 列全体・行全体の印刷範囲（$A:$E・$1:$40）も印刷範囲として確かめる' {
+    $dir = New-TestDir
+    Copy-Item -LiteralPath (Join-Path $printDir 'wide.xlsx') -Destination $dir
+    $wide = Join-Path $dir 'wide.xlsx'
+    # 一覧（A1〜T1 に値）は A〜E 列、範囲（A1〜C10 と E20 に値）は 1〜5 行目と 7〜10 行目
+    Edit-ZipText $wide 'xl/workbook.xml' { param($t) $t.Replace('<definedNames>', '<definedNames><definedName name="_xlnm.Print_Area" localSheetId="0">''一覧''!$A:$E</definedName>').Replace('''範囲''!$A$1:$C$10', '''範囲''!$1:$5,''範囲''!$7:$10') }
+    $issues = Invoke-Check @{ Path = $wide; Check = 'Print' }
+    Assert-Equal (@('情報|用紙の向き|', '警告|ヘッダー／フッター|一覧', '警告|印刷範囲の外|一覧!F1', '警告|印刷範囲の外|範囲!A6') | Sort-Object) (Get-IssueKeys $issues) '横のはみ出しは、印刷範囲の列（A〜E 列）と値のある列（行全体のとき）で見積もる'
+    Assert-Match (@($issues | Where-Object Location -eq '範囲!A6')[0].Detail) '4 個あります（A6、B6、C6、E20）'
+
+    # 画像の印刷範囲からのはみ出しも、列全体の印刷範囲で確かめる
+    $book = Join-Path $dir '画面設計書.xlsx'
+    New-SheetsBook $book ([ordered]@{ '画面' = @(@('画面名', '受注登録')) })
+    Edit-ZipText $book 'xl/workbook.xml' { param($t) $t.Replace('<definedNames>', '<definedNames><definedName name="_xlnm.Print_Area" localSheetId="0">''画面''!$A:$H</definedName>') }
+    Add-TestDrawing $book @(
+        @{ Kind = 'pic'; Name = '図 1'; Png = 'Old'; From = @(1, 40); To = @(3, 43); Ext = @(40, 30) },
+        @{ Kind = 'pic'; Name = '図 2'; Png = 'Old'; From = @(12, 2); To = @(14, 4); Ext = @(40, 30) })
+    $issues = Invoke-Check @{ Path = $book; Check = 'Picture' }
+    Assert-Equal @('警告|印刷範囲の外|画面!M3') (Get-IssueKeys $issues) '41 行目の図 1 は、列全体の印刷範囲の中'
+    Assert-Equal '画像「図 2」が印刷範囲（A:H）の外にあり、印刷されません' $issues[0].Detail
+}
+
+Test-Case 'Test-ExcelDeliverable: ヘッダー／フッターの文字の「&Z」（&&Z と書く）はファイルの場所とみなさない' {
+    $dir = New-TestDir
+    Copy-Item -LiteralPath (Join-Path $printDir 'wide.xlsx') -Destination $dir
+    $wide = Join-Path $dir 'wide.xlsx'
+    # 一覧のフッターは文字の「A&Z 社」とファイル名、収めるのフッターは文字の「&」とファイルの場所
+    Edit-ZipText $wide 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('<oddFooter>&amp;L&amp;Z&amp;F</oddFooter>', '<oddFooter>&amp;LA&amp;&amp;Z 社&amp;F</oddFooter>') }
+    Edit-ZipText $wide 'xl/worksheets/sheet2.xml' { param($t) $t.Replace('<oddFooter>&amp;C&amp;P / &amp;N</oddFooter>', '<oddFooter>&amp;C&amp;&amp;&amp;Z</oddFooter>') }
+    $issues = Invoke-Check @{ Path = $wide; Check = 'Print' }
+    Assert-Equal @('収める') @($issues | Where-Object Item -eq 'ヘッダー／フッター' | ForEach-Object { $_.Location })
+}
+
 Test-Case 'Test-ExcelDeliverable: Get-Help でヘルプが表示される' {
     $h = Get-Help $Deliverable
     Assert-Match $h.Synopsis '提出'

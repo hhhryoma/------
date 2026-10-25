@@ -113,7 +113,7 @@ function Read-SheetFacts {
     param($Package, [string] $PartName, $PrintAreas)
 
     $facts = [pscustomobject]@{
-        HasView = $false; TabSelected = $false; Zoom = 100; TopLeft = 'A1'; ViewMode = 'normal'
+        HasView = $false; TabSelected = $false; Zoom = 100; ZoomToFit = $false; TopLeft = 'A1'; ViewMode = 'normal'
         Pane = $null; Selections = New-Object System.Collections.Generic.List[object]
         HiddenRows = 0; HiddenCols = 0
         Errors = New-Object System.Collections.Generic.List[object]
@@ -151,6 +151,8 @@ function Read-SheetFacts {
                         $facts.TabSelected = @('1', 'true') -contains $reader.GetAttribute('tabSelected')
                         $z = $reader.GetAttribute('zoomScale')
                         if ($z) { $facts.Zoom = [int]$z }
+                        # グラフシートの「ウィンドウに合わせる」（zoomToFit）は、倍率が保存したときの画面の大きさで決まる
+                        $facts.ZoomToFit = @('1', 'true') -contains $reader.GetAttribute('zoomToFit')
                         $t = $reader.GetAttribute('topLeftCell')
                         if ($t) { $facts.TopLeft = $t.ToUpperInvariant() }
                         $v = $reader.GetAttribute('view')
@@ -174,7 +176,7 @@ function Read-SheetFacts {
                     if ($inFirstView) {
                         $ac = $reader.GetAttribute('activeCell')
                         if (-not $ac) { $ac = 'A1' }
-                        $facts.Selections.Add([pscustomobject]@{ Pane = [string]$reader.GetAttribute('pane'); ActiveCell = $ac.ToUpperInvariant() })
+                        $facts.Selections.Add([pscustomobject]@{ Pane = [string]$reader.GetAttribute('pane'); ActiveCell = $ac.ToUpperInvariant(); Sqref = ([string]$reader.GetAttribute('sqref')).ToUpperInvariant() })
                     }
                 }
                 'col' {
@@ -270,7 +272,11 @@ function Test-PrintSetup {
         # 横が 1 ページに収まるか（「次のページ数に合わせて印刷」や改ページを設定していれば意図どおりとみなす）
         if (-not $f.FitToPage -and -not $f.HasColBreaks) {
             $c0 = 1; $c1 = $f.MaxValueCol
-            if ($s.PrintAreas.Count -gt 0) { $c0 = ($s.PrintAreas | Measure-Object C0 -Minimum).Minimum; $c1 = ($s.PrintAreas | Measure-Object C1 -Maximum).Maximum }
+            if ($s.PrintAreas.Count -gt 0) {
+                $c0 = ($s.PrintAreas | Measure-Object C0 -Minimum).Minimum
+                # 行全体の印刷範囲（$1:$40）は、値のある最後の列までが印刷される
+                $c1 = (@($s.PrintAreas | ForEach-Object { if ($_.C1 -ge 16384) { $f.MaxValueCol } else { $_.C1 } }) | Measure-Object -Maximum).Maximum
+            }
             $default = $f.DefaultColWidth
             if ($default -le 0) { $default = $f.BaseColWidth + 0.71 }
             $px = 0.0
@@ -301,7 +307,8 @@ function Test-PrintSetup {
 
         # ヘッダー／フッター
         $hf = (@($f.HeaderFooter.Values) -join "`n")
-        if ($hf -match '&[Zz]') { Add-Issue '警告' '情報漏れ' 'ヘッダー／フッター' 'ヘッダー／フッターにファイルの場所（&Z）が印刷されます' -Sheet $s.Name }
+        # 文字の & は && と書くので、&&Z（文字の「&Z」）はファイルの場所ではない（-Fix の Repair-HeaderFooterPath と同じ見方）
+        if ($hf -match '(?<!&)(?:&&)*&[Zz]') { Add-Issue '警告' '情報漏れ' 'ヘッダー／フッター' 'ヘッダー／フッターにファイルの場所（&Z）が印刷されます' -Sheet $s.Name }
         if ($checkSet['Word'] -and $Words) {
             $plain = [regex]::Replace($hf, '&(?:"[^"]*"|\d+|[A-Za-z&])', ' ')
             $m = [regex]::Match($plain, $Words, 'IgnoreCase')
@@ -411,7 +418,12 @@ function Test-PictureInPrintArea {
         if ($inside) { return }
         if ($b.X -lt $p1[0] -and $b.X + $b.W -gt $p0[0] -and $b.Y -lt $p1[1] -and $b.Y + $b.H -gt $p0[1]) { $overlap = $true }
     }
-    $range = @($Sheet.PrintAreas | ForEach-Object { '{0}{1}:{2}{3}' -f (ConvertTo-ColumnName $_.C0), $_.R0, (ConvertTo-ColumnName $_.C1), $_.R1 }) -join '、'
+    # 列全体・行全体の印刷範囲は、Excel と同じ A:H・1:40 の形で示す
+    $range = @($Sheet.PrintAreas | ForEach-Object {
+            if ($_.R0 -eq 1 -and $_.R1 -ge 1048576) { '{0}:{1}' -f (ConvertTo-ColumnName $_.C0), (ConvertTo-ColumnName $_.C1) }
+            elseif ($_.C0 -eq 1 -and $_.C1 -ge 16384) { '{0}:{1}' -f $_.R0, $_.R1 }
+            else { '{0}{1}:{2}{3}' -f (ConvertTo-ColumnName $_.C0), $_.R0, (ConvertTo-ColumnName $_.C1), $_.R1 }
+        }) -join '、'
     if ($overlap) { $detail = '{0}の一部が、印刷範囲（{1}）からはみ出しています。はみ出した部分は印刷されません' -f $Label, $range }
     else { $detail = '{0}が印刷範囲（{1}）の外にあり、印刷されません' -f $Label, $range }
     Add-Issue '警告' '画像' '印刷範囲の外' $detail -Sheet $Sheet.Name -Cell $Picture.Cell
@@ -428,13 +440,12 @@ function ConvertTo-VersionText {
 }
 
 function ConvertTo-DateText {
-    #     日付の文字（2026/10/1・2026-10-01・2026年10月1日）を「2026/10/01」の形にする（無ければ $null）
-    param([string] $Text)
-    if (-not $Text) { return $null }
-    $t = $Text.Normalize([System.Text.NormalizationForm]::FormKC)
-    $m = [regex]::Match($t, '(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})')
-    if (-not $m.Success) { return $null }
-    return '{0}/{1:D2}/{2:D2}' -f [int]$m.Groups[1].Value, [int]$m.Groups[2].Value, [int]$m.Groups[3].Value
+    #     日付の文字（2026/10/1・2026-10-01・2026年10月1日・令和8年10月1日・R8.10.1 など。ExcelTools.psm1 の ConvertTo-DateValue で読む）を
+    #     「2026/10/01」の形にする（無ければ $null）。年の無い日付（10/1）は、AsOf（ファイルの更新日時）の前後半年に入る年にする
+    param([string] $Text, [datetime] $AsOf)
+    $d = ConvertTo-DateValue $Text $AsOf
+    if ($null -eq $d) { return $null }
+    return $d.ToString('yyyy/MM/dd', [System.Globalization.CultureInfo]::InvariantCulture)
 }
 
 function Compare-VersionText {
@@ -474,6 +485,7 @@ function Test-VersionConsistency {
         $cells[$h.Sheet][$row].Add([pscustomobject]@{ Col = (Get-ColumnIndex $m.Groups[1].Value); Cell = $h.Cell; Text = $h.Text.Trim() })
     }
     $norm = { param($t) $t.Normalize([System.Text.NormalizationForm]::FormKC) -replace '\s', '' }
+    $asOf = [System.IO.File]::GetLastWriteTime($FilePath)
     $versionLabel = '^(版数|版|改訂版数|バージョン|Version|Ver\.?|Rev\.?|改版番号)$'
     $dateLabel = '^(最終更新日|更新日|改訂日|改版日|最終改訂日)$'
 
@@ -488,7 +500,7 @@ function Test-VersionConsistency {
                     $coverVersion = ConvertTo-VersionText $list[$i + 1].Text; $coverVersionCell = $list[$i + 1].Cell
                 }
                 elseif (-not $coverDate -and $label -match $dateLabel -and $i + 1 -lt $list.Count) {
-                    $coverDate = ConvertTo-DateText $list[$i + 1].Text; $coverDateCell = $list[$i + 1].Cell
+                    $coverDate = ConvertTo-DateText $list[$i + 1].Text $asOf; $coverDateCell = $list[$i + 1].Cell
                 }
                 elseif (-not $coverVersion -and $label -match '^(第\d+(\.\d+)*版|(Ver|Version|Rev)\.?\d+(\.\d+)*)$') {
                     $coverVersion = ConvertTo-VersionText $label; $coverVersionCell = $list[$i].Cell
@@ -519,15 +531,16 @@ function Test-VersionConsistency {
                 if (-not $v) { continue }
                 $dc = @($cells[$hist.Name][$r] | Where-Object { $_.Col -eq $dCol })[0]
                 $d = $null
-                if ($dc) { $d = ConvertTo-DateText $dc.Text }
+                if ($dc) { $d = ConvertTo-DateText $dc.Text $asOf }
                 $entries.Add([pscustomobject]@{ Version = $v; Text = $vc.Text; Cell = $vc.Cell; Date = $d })
             }
             if (-not $best -or $entries.Count -gt $best.Count) { $best = $entries }
         }
         if ($best -and $best.Count -gt 0) {
+            # 版数の逆戻り（変更点ごとに 1 行ずつ書くと、同じ版数の行が続くことがある）
             for ($i = 1; $i -lt $best.Count; $i++) {
-                if ((Compare-VersionText $best[$i].Version $best[$i - 1].Version) -le 0) {
-                    Add-Issue '警告' '版数' '改訂履歴の版数' ("改訂履歴の版数（{0}）が前の行（{1}）より大きくありません" -f $best[$i].Text, $best[$i - 1].Text) -Sheet $hist.Name -Cell $best[$i].Cell
+                if ((Compare-VersionText $best[$i].Version $best[$i - 1].Version) -lt 0) {
+                    Add-Issue '警告' '版数' '改訂履歴の版数' ("改訂履歴の版数（{0}）が前の行（{1}）より小さくなっています" -f $best[$i].Text, $best[$i - 1].Text) -Sheet $hist.Name -Cell $best[$i].Cell
                 }
             }
             $histVersion = $best[$best.Count - 1].Version
@@ -559,11 +572,26 @@ function Test-VersionConsistency {
     }
 }
 
-function Get-ExpectedCell {
-    #     見出しを固定（ウィンドウ枠の固定）しているシートで、スクロール領域の左上になるセル
-    param($Pane)
-    if ($Pane.TopLeft) { return $Pane.TopLeft }
-    return (ConvertTo-ColumnName ([int]$Pane.XSplit + 1)) + ([int]$Pane.YSplit + 1)
+function Get-FrozenView {
+    #     見出しを固定（ウィンドウ枠の固定）しているシートの、固定した部分の左上（Origin。列番号 Col・行番号 Row）と、
+    #     スクロール領域の左上（Home。Ctrl+Home で移動するセル）。固定していなければ $null。
+    #     固定した部分は sheetView の topLeftCell（スクロールした状態で固定すると A1 でない）から xSplit 列・ySplit 行。
+    #     固定していない向き（行だけを固定したときの列など）の topLeftCell はスクロールの位置なので、A 列・1 行目からとする
+    param($Facts)
+    $pane = $Facts.Pane
+    if (-not $pane -or ($pane.State -ne 'frozen' -and $pane.State -ne 'frozenSplit')) { return $null }
+    $x = [int]$pane.XSplit; $y = [int]$pane.YSplit
+    $col = 1; $row = 1
+    $m = [regex]::Match($Facts.TopLeft, '^([A-Z]{1,3})(\d{1,7})$')
+    if ($m.Success -and $x -gt 0) { $col = Get-ColumnIndex $m.Groups[1].Value }
+    if ($m.Success -and $y -gt 0) { $row = [int]$m.Groups[2].Value }
+    # スクロール領域の左上がシートの外になるとき（壊れたファイル）は、Reset-ExcelView.ps1 と同じく A1 から固定したものとする
+    if ($col + $x -gt 16384 -or $row + $y -gt 1048576) { $col = 1; $row = 1 }
+    return [pscustomobject]@{
+        Col = $col; Row = $row; XSplit = $x; YSplit = $y
+        Origin = (ConvertTo-ColumnName $col) + $row
+        Home = (ConvertTo-ColumnName ($col + $x)) + ($row + $y)
+    }
 }
 
 # ---------------------------------------------------------------- 1 ファイルのチェック
@@ -599,7 +627,8 @@ function Test-Workbook {
             if (-not $state) { $state = 'visible' }
             $areas = $printAreas[$index]
             if (-not $areas) { $areas = New-Object System.Collections.Generic.List[object] }
-            $isWorksheet = $rel -and (@('worksheet', 'macrosheet') -contains $rel.Kind)
+            # マクロシート（Excel 4.0 マクロ）のリレーションの種類は xlMacrosheet・xlIntlMacrosheet
+            $isWorksheet = $rel -and ($rel.Kind -eq 'worksheet' -or $rel.Kind -match 'macrosheet')
             $sheets.Add([pscustomobject]@{ Name = $s.GetAttribute('name'); State = $state; Rel = $rel; Facts = $null; PrintAreas = $areas; IsWorksheet = $isWorksheet })
             $index++
         }
@@ -619,11 +648,21 @@ function Test-Workbook {
             $sheetRels = Get-PartRelationships -Package $pkg -PartName $s.Rel.Target
             if ($needFacts) { $s.Facts = Read-SheetFacts -Package $pkg -PartName $s.Rel.Target -PrintAreas $s.PrintAreas }
             $f = $s.Facts
-            $isWorksheet = @('worksheet', 'macrosheet') -contains $s.Rel.Kind
+            $isWorksheet = $s.IsWorksheet
+            $frozen = $null
+            if ($f -and $isWorksheet) { $frozen = Get-FrozenView $f }
 
             if ($checkSet['Hidden'] -and $f -and $s.State -eq 'visible') {
                 if ($f.HiddenRows -gt 0) { Add-Issue '情報' '消し忘れ' '非表示の行・列' "非表示の行が $($f.HiddenRows) 行あります" -Sheet $s.Name }
                 if ($f.HiddenCols -gt 0) { Add-Issue '情報' '消し忘れ' '非表示の行・列' "非表示の列が $($f.HiddenCols) 列あります" -Sheet $s.Name }
+                # スクロールした状態でウィンドウ枠を固定すると、固定した行・列より上・左の行・列は、固定を解除しないと表示されない
+                $span = { param($From, $To, $Unit) if ($From -eq $To) { '{0} {1}' -f $From, $Unit } else { '{0}〜{1} {2}' -f $From, $To, $Unit } }
+                if ($frozen -and $frozen.Row -gt 1) {
+                    Add-Issue '情報' '消し忘れ' '非表示の行・列' ('固定した行（{0}）より上の {1}は、ウィンドウ枠の固定を解除しないと表示されません' -f (& $span $frozen.Row ($frozen.Row + $frozen.YSplit - 1) '行目'), (& $span 1 ($frozen.Row - 1) '行目')) -Sheet $s.Name
+                }
+                if ($frozen -and $frozen.Col -gt 1) {
+                    Add-Issue '情報' '消し忘れ' '非表示の行・列' ('固定した列（{0}）より左の {1}は、ウィンドウ枠の固定を解除しないと表示されません' -f (& $span (ConvertTo-ColumnName $frozen.Col) (ConvertTo-ColumnName ($frozen.Col + $frozen.XSplit - 1)) '列'), (& $span 'A' (ConvertTo-ColumnName ($frozen.Col - 1)) '列')) -Sheet $s.Name
+                }
             }
 
             if ($checkSet['Error'] -and $f -and $f.Errors.Count -gt 0) {
@@ -644,8 +683,8 @@ function Test-Workbook {
                     if (-not $l.RelId) { continue }
                     # 外部リンクの Target は Resolve-PartName を通さない生の値が必要なので、rels を直接読む
                     $target = Get-ExternalTarget -Package $pkg -SourcePart $s.Rel.Target -RelId $l.RelId
-                    if ($target -match '^(file:|\\\\|[A-Za-z]:\\)') {
-                        Add-Issue '警告' '情報漏れ' 'ファイルへのリンク' "社内のファイルやフォルダへのリンクがあります（$target）" -Sheet $s.Name -Cell $l.Ref
+                    if (Test-InternalLink $target) {
+                        Add-Issue '警告' '情報漏れ' 'ファイルへのリンク' ("社内のファイルやフォルダへのリンクがあります（{0}）" -f [System.Uri]::UnescapeDataString($target)) -Sheet $s.Name -Cell $l.Ref
                     }
                 }
             }
@@ -665,7 +704,7 @@ function Test-Workbook {
 
             # ---- 表示の状態（表示されているシートだけ）
             if ($checkSet['View'] -and $f -and $f.HasView -and $s.State -eq 'visible') {
-                if ($f.Zoom -ne $Zoom) { Add-Issue '警告' '体裁' '倍率' "倍率が $($f.Zoom)% です（$Zoom% にしてください）" -Sheet $s.Name }
+                if ($f.Zoom -ne $Zoom -and -not $f.ZoomToFit) { Add-Issue '警告' '体裁' '倍率' "倍率が $($f.Zoom)% です（$Zoom% にしてください）" -Sheet $s.Name }
                 if ($f.ViewMode -ne 'normal') {
                     $modeName = @{ pageBreakPreview = '改ページプレビュー'; pageLayout = 'ページレイアウト' }[$f.ViewMode]
                     if (-not $modeName) { $modeName = $f.ViewMode }
@@ -673,22 +712,32 @@ function Test-Workbook {
                 }
 
                 if ($isWorksheet) {
-                    $frozen = $f.Pane -and ($f.Pane.State -eq 'frozen' -or $f.Pane.State -eq 'frozenSplit')
-                    # 選択セル: 見出しを固定しているシートは、スクロール領域の左上でもよい
+                    # 選択セル: 見出しを固定しているシートは、スクロール領域の左上（Ctrl+Home で移動するセル）でもよい。
+                    #           スクロールした状態で固定したシートは、A1 が固定した行・列より上・左にあって表示されないので、スクロール領域の左上だけ
                     $okCells = @('A1')
-                    if ($frozen) { $okCells += (Get-ExpectedCell $f.Pane) }
+                    $expect = 'A1'
+                    if ($frozen) {
+                        $okCells = @($frozen.Home)
+                        if ($frozen.Origin -eq 'A1') { $okCells += 'A1' } else { $expect = $frozen.Home }
+                    }
                     $active = 'A1'
+                    $sqref = ''
                     $activePane = ''
                     if ($f.Pane) { $activePane = $f.Pane.ActivePane }
                     $sel = @($f.Selections | Where-Object { $_.Pane -eq $activePane })
                     if ($sel.Count -eq 0) { $sel = $f.Selections.ToArray() }
-                    if ($sel.Count -gt 0) { $active = $sel[0].ActiveCell }
+                    if ($sel.Count -gt 0) { $active = $sel[0].ActiveCell; $sqref = $sel[0].Sqref }
+                    # シート全体・列全体・行全体を選択したまま（A1:XFD1048576・A1:A1048576・A1:XFD1 など。結合したセルの選択は除く）
+                    $whole = @($sqref.Split(' ') | Where-Object { $_ -match '^([A-Z]+1:[A-Z]+1048576|A\d+:XFD\d+)$' }).Count -gt 0
                     if ($okCells -notcontains $active) {
-                        Add-Issue '警告' '体裁' '選択セル' "選択セルが $active です（A1 にしてください）" -Sheet $s.Name -Cell $active
+                        Add-Issue '警告' '体裁' '選択セル' "選択セルが $active です（$expect にしてください）" -Sheet $s.Name -Cell $active
                     }
-                    # 表示位置: 左上が A1、見出しを固定している場合はスクロール領域が固定位置の直後
+                    elseif ($whole) {
+                        Add-Issue '警告' '体裁' '選択セル' "選択範囲が $sqref です（$expect だけを選択してください）" -Sheet $s.Name -Cell $active
+                    }
+                    # 表示位置: 左上が A1。見出しを固定している場合は、固定した部分の左上がそのままで、スクロール領域が固定位置の直後
                     $scrolled = $f.TopLeft -ne 'A1'
-                    if ($frozen -and $f.Pane.TopLeft -and $f.Pane.TopLeft -ne (ConvertTo-ColumnName ([int]$f.Pane.XSplit + 1)) + ([int]$f.Pane.YSplit + 1)) { $scrolled = $true }
+                    if ($frozen) { $scrolled = $f.TopLeft -ne $frozen.Origin -or ($f.Pane.TopLeft -and $f.Pane.TopLeft -ne $frozen.Home) }
                     if ($scrolled) { Add-Issue '警告' '体裁' '表示位置' 'スクロールした状態で保存されています（左上を表示してください）' -Sheet $s.Name }
                 }
             }
@@ -847,8 +896,8 @@ function Test-WordDocument {
                 if (-not $rels) { continue }
                 foreach ($r in $rels.SelectNodes('//*[local-name()="Relationship"]')) {
                     $target = $r.GetAttribute('Target')
-                    if ($r.GetAttribute('TargetMode') -eq 'External' -and $target -match '^(file:|\\\\|[A-Za-z]:\\)') {
-                        Add-Issue '警告' '情報漏れ' 'ファイルへのリンク' "社内のファイルやフォルダへのリンクがあります（$target）" -Sheet $p.Name
+                    if ($r.GetAttribute('TargetMode') -eq 'External' -and (Test-InternalLink $target)) {
+                        Add-Issue '警告' '情報漏れ' 'ファイルへのリンク' ("社内のファイルやフォルダへのリンクがあります（{0}）" -f [System.Uri]::UnescapeDataString($target)) -Sheet $p.Name
                     }
                 }
             }
@@ -885,6 +934,23 @@ function Get-ExternalTarget {
         if ($Kind -and $type.EndsWith('/' + $Kind)) { return $r.GetAttribute('Target') }
     }
     return $null
+}
+
+function Test-InternalLink {
+    #     リンク先（リレーションの Target）が社内のファイルやフォルダか。file:・UNC（\\サーバー\共有）・ドライブ（C:\）のほか、
+    #     チェックするフォルダの外を指す相対パス（Excel・Word は、同じドライブ・共有フォルダのファイルへのリンクを ../../社内/見積根拠.xlsx のように
+    #     ファイルの場所からの相対パスで保存する）。http: や mailto: などの URL と、チェックするフォルダの中のファイル（一緒に提出するもの）へのリンクは除く
+    param([string] $Target)
+    if (-not $Target -or $Target.StartsWith('#')) { return $false }
+    if ($Target -match '^(file:|[\\/]|[A-Za-z]:)') { return $true }
+    if ($Target -match '^[A-Za-z][A-Za-z0-9+.\-]*:') { return $false }
+    # チェックするフォルダ（-Path）からファイルのあるフォルダまでの深さから、.. でたどって外へ出るか
+    $depth = @($script:CurrentFile -split '[\\/]').Count - 1
+    foreach ($seg in ([System.Uri]::UnescapeDataString($Target) -split '[\\/]')) {
+        if ($seg -eq '..') { $depth--; if ($depth -lt 0) { return $true } }
+        elseif ($seg -and $seg -ne '.') { $depth++ }
+    }
+    return $false
 }
 
 function Get-FileKind {
@@ -1185,10 +1251,12 @@ if ($Fix) {
 # .DESCRIPTION
 #     フォルダ配下の xlsx / xlsm を Excel を使わずに読み、次の項目をチェックします。ファイルは変更しません。
 #
-#       体裁       選択セルが A1 でない、倍率が既定と違う、スクロールしたまま、先頭シートが表示されない、
-#                  複数シートの選択（作業グループ）のまま、改ページプレビュー表示（情報）
-#       消し忘れ   非表示シート、コメント（メモ）、TODO などの文言、非表示の行・列（情報）
+#       体裁       選択セルが A1 でない（シート全体などを選択したままも）、倍率が既定と違う、スクロールしたまま、
+#                  先頭シートが表示されない、複数シートの選択（作業グループ）のまま、改ページプレビュー表示（情報）。
+#                  ウィンドウ枠を固定したシートは、固定した行・列の直後（Ctrl+Home で移動するセル）を左上とみなす
+#       消し忘れ   非表示シート、コメント（メモ）、TODO などの文言、非表示の行・列とウィンドウ枠の固定で隠れた行・列（情報）
 #       情報漏れ   作成者・最終更新者・会社名などのプロパティ、他ブックへの外部リンク、社内パスへのハイパーリンク
+#                  （相対パスでチェックするフォルダの外を指すものも）
 #       壊れ       エラー値（#REF! など）のセル、参照先が壊れた名前の定義
 #       版数       表紙の版数・更新日と、改訂履歴の最後の行・ファイル名の版数の食い違い、改訂履歴の版数の逆戻り
 #       印刷       印刷すると横がはみ出す、印刷範囲の外のデータ、ヘッダー／フッターのファイルの場所（&Z）や TODO、
@@ -1201,7 +1269,7 @@ if ($Fix) {
 #
 #       消し忘れ   変更履歴（挿入・削除・移動・書式の変更）と、変更履歴の記録がオンのまま（情報）、コメント、隠し文字、
 #                  TODO などの文言（本文・ヘッダー・フッター・脚注）、蛍光ペン（情報）
-#       情報漏れ   作成者・最終更新者・会社名などのプロパティ、社内パスへのハイパーリンク、テンプレートの場所（情報）
+#       情報漏れ   作成者・最終更新者・会社名などのプロパティ、社内パスへのハイパーリンク（相対パスも）、テンプレートの場所（情報）
 #       マクロ     VBA を含む文書（情報）
 #
 #     結果は 1 指摘 1 行のオブジェクトで出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
