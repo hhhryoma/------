@@ -189,8 +189,51 @@ function ConvertFrom-AnalysisAnswer {
     return $result
 }
 
+function Read-AskedMetrics {
+    #     保存した依頼の文の「基準から外れた指標」の表から、No と区分・指標（ConvertTo-Cell の形）を読む
+    param([string] $Text)
+    $list = New-Object System.Collections.Generic.List[object]
+    $section = ''
+    foreach ($line in ($Text -split '\r?\n')) {
+        if ($line.StartsWith('# ')) { $section = $line.Trim(); continue }
+        if ($section -ne '# 基準から外れた指標') { continue }
+        $cells = @($line.Trim().Trim('|').Split('|') | ForEach-Object { $_.Trim() })
+        if ($cells.Count -lt 3 -or $cells[0] -notmatch '^\d+$') { continue }
+        $list.Add([pscustomobject]@{ No = [int]$cells[0]; Area = $cells[1]; Name = $cells[2] })
+    }
+    return , $list
+}
+
 # ---------------------------------------------------------------- 実行
 
+
+# -ImportOnly: 回答の No は、依頼を作ったときの番号。今のブックから数え直すと、-Force の有無や、そのあとの記入で番号がずれるので、
+# 保存した依頼の表の No・区分・指標で今のブックの指標に当てる（記入済みの指標は、-Force のときだけ書き直す）
+$skipped = New-Object System.Collections.Generic.List[object]
+$lost = New-Object System.Collections.Generic.List[object]
+if ($ImportOnly -and (Test-Path -LiteralPath $promptPath)) {
+    $asked = Read-AskedMetrics ([System.IO.File]::ReadAllText($promptPath))
+    if ($asked.Count -gt 0) {
+        $byKey = @{}
+        foreach ($m in $metrics) {
+            $key = '{0}|{1}' -f (ConvertTo-Cell $m.Area), (ConvertTo-Cell $m.Name)
+            if (-not $byKey.ContainsKey($key)) { $byKey[$key] = New-Object System.Collections.Generic.Queue[object] }
+            $byKey[$key].Enqueue($m)
+        }
+        $targets = New-Object System.Collections.Generic.List[object]
+        foreach ($a in $asked) {
+            $key = '{0}|{1}' -f $a.Area, $a.Name
+            if (-not $byKey.ContainsKey($key) -or $byKey[$key].Count -eq 0) { $lost.Add($a); continue }
+            $m = $byKey[$key].Dequeue()
+            $m.No = $a.No
+            if (-not $Force -and ($m.Cause -or $m.Measure)) { $skipped.Add($m); continue }
+            $targets.Add($m)
+        }
+        $targets = $targets.ToArray()
+        $filled = $skipped.Count
+    }
+}
+if ($lost.Count -gt 0) { Write-Warning ('依頼の指標が、品質評価のシートにありません（ブックを作り直したときは、依頼も作り直してください）: {0}' -f ((@($lost | ForEach-Object { '{0}. {1}' -f $_.No, $_.Name })) -join '・')) }
 
 if ($targets.Count -eq 0) {
     Write-Host ''
@@ -274,6 +317,7 @@ Write-Host ''
 Write-Host ('定性分析・対策の下書きを {0} 件書き込みました（判定が × か △ の指標 {1} 件）: {2}' -f $written.Count, $targets.Count, $Path)
 $missing = @($targets | Where-Object { -not $answers[$_.No] })
 if ($missing.Count -gt 0) { Write-Warning ('回答に無い指標があります: {0}' -f ((@($missing | ForEach-Object { '{0}. {1}' -f $_.No, $_.Name })) -join '・')) }
+if ($skipped.Count -gt 0) { Write-Warning ('記入済みの指標には書き込んでいません（書き直すときは -Force）: {0}' -f ((@($skipped | ForEach-Object { '{0}. {1}' -f $_.No, $_.Name })) -join '・')) }
 Write-Host 'AI の下書きです。会議の前に、事実と合っているかを確かめて書き直してください。'
 
 # .SYNOPSIS
@@ -295,7 +339,8 @@ Write-Host 'AI の下書きです。会議の前に、事実と合っている�
 #     依頼のファイルを作るだけにします（クリップボードが使えないとき）。回答を「_定性分析の回答.txt」に保存してから -ImportOnly を実行します。
 #
 # .PARAMETER ImportOnly
-#     保存した回答のファイルを読んで、ブックに書き込みます。
+#     保存した回答のファイルを読んで、ブックに書き込みます。回答の No は、保存した依頼の No の指標に当てます
+#     （記入済みの指標に書き込むのは、-Force を付けたときだけです）。
 #
 # .PARAMETER Force
 #     定性分析・対策が記入済みの指標も、依頼に含めて書き直します。

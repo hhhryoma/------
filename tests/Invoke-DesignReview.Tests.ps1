@@ -555,6 +555,215 @@ Test-Case 'Invoke-DesignReview: -AnswerMode Watch では、回答をコピーす
     Assert-Equal 30 $state.Sleeps '取り込むまでは待ってから見直す'
 }
 
+Test-Case 'Invoke-DesignReview: 引用に「|」やセル内の改行（Markdown の <br>・\|）があっても、回答の列がずれずに引用を突き合わせる。全角のセル番地も読む' {
+    $dir = New-TestDir
+    $design = Join-Path $dir '設計書'
+    New-Item -ItemType Directory -Path $design | Out-Null
+    New-SheetsBook (Join-Path $design 'DD04_コード定義書.xlsx') ([ordered]@{ 'コード定義' = @(@('No', 'コード名', '値', '説明'), @('1', '有効フラグ', '1:有効|0:無効', "有効なら 1。`n無効なら 0。"), @('2', '削除フラグ', '0|1', '削除したら 1')) })
+    New-WordDoc (Join-Path $design 'BD01_基本設計書_受注管理.docx') @('1. 概要', @(@('項目', '桁数'), @('受注番号', '10')))
+    $csv = Join-Path $dir '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効',
+        'X01,コード,値の意味が書かれている,すべての値に意味が書かれている,高,*,○') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $show = { param($Out) $f = Read-XlsxSheet -Path (Join-Path $Out 'レビュー結果.xlsx') -Index 1; @(2..($f.Rows.Count) | ForEach-Object { $r = $f.Rows[$_]; '{0} / {1} / {2} / {3} / {4}' -f $r['I'], $r['J'], $r['K'], $r['L'], $r['M'] }) }
+
+    # 行の形。R001 は Word の文書（表の行は「表 1 の 2 行目| 受注番号 | 10」）、R002 は Excel
+    $out = Join-Path $dir 'rows'
+    $null = & $Review -Path $design -Checklist $csv -OutDir $out -PromptOnly 6>$null 3>$null
+    Write-Answer $out 'R001' 'X01 | NG | 本文!表 1 の 2 行目 | 受注番号 | 10 | 桁数の単位が書かれていない | 文字数かバイト数か'
+    Write-Answer $out 'R002' "| X01 | NG | コード定義!C2 | 1:有効|0:無効 | 2 以外の値の扱いが無い | 値の一覧が不足 |`nX01 | NG | コード定義!Ｃ３ | 0\|1 | 値の意味が無い | 値ごとの意味が必要"
+    $null = & $Review -Checklist $csv -OutDir $out -ImportOnly 6>$null 3>$null
+    Assert-Equal @(
+        '本文!表 1 の 2 行目 / 受注番号 | 10 / 一致 / 桁数の単位が書かれていない / 文字数かバイト数か',
+        'コード定義!C2 / 1:有効|0:無効 / 一致 / 2 以外の値の扱いが無い / 値の一覧が不足',
+        'コード定義!Ｃ３ / 0|1 / 一致 / 値の意味が無い / 値ごとの意味が必要') (& $show $out) '列が多い行は、引用の中の「|」とみる。「\|」は区切りにしない'
+    $f = Read-XlsxSheet -Path (Join-Path $out 'レビュー結果.xlsx') -Index 1
+    Assert-True (@($f.Links | Where-Object { $_.Location -eq "'コード定義'!C3" }).Count -eq 1) '全角のセル番地へのリンク'
+
+    # Markdown の形では、セル内の改行は <br>、表の中の「|」は「\|」
+    $out = Join-Path $dir 'markdown'
+    $null = & $Review -Path $design -Checklist $csv -OutDir $out -PromptOnly -TextFormat Markdown 6>$null 3>$null
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $out 'prompts/R002.txt'))) '\n\| 2 \| 1 \| 有効フラグ \| 1:有効\\\|0:無効 \| 有効なら 1。<br>無効なら 0。 \|\n'
+    Write-Answer $out 'R002' "| X01 | NG | コード定義!C2 | 1:有効\|0:無効 | 2 以外の値の扱いが無い | 値の一覧が不足 |`n| X01 | NG | コード定義!D3 | 有効なら 1。<br>無効なら 0。 | 削除の説明と形がそろっていない | テスト |"
+    $null = & $Review -Checklist $csv -OutDir $out -ImportOnly 6>$null 3>$null
+    Assert-Equal @(
+        'コード定義!C2 / 1:有効|0:無効 / 一致 / 2 以外の値の扱いが無い / 値の一覧が不足',
+        'コード定義!D2 / 有効なら 1。<br>無効なら 0。 / 場所を直した / 削除の説明と形がそろっていない / テスト') (& $show $out) '<br> はセル内の改行として比べる'
+}
+
+Test-Case 'Invoke-DesignReview: -Baseline で、シートを足した設計書は、足したシートの全体を ★ 付きで渡す（-TextFormat Markdown でも、変わった部分は行の形と、その説明で渡す）' {
+    $dir = New-TestDir
+    $old = Join-Path $dir 'v1.0'
+    $new = Join-Path $dir 'v1.1'
+    New-Item -ItemType Directory -Path $old, $new | Out-Null
+    New-SheetsBook (Join-Path $old 'DD02_画面設計書_SCR009.xlsx') ([ordered]@{ '画面項目定義' = @(@('No', '項目名', '型', '桁数'), @('1', '受注番号', '文字', '10')) })
+    New-SheetsBook (Join-Path $new 'DD02_画面設計書_SCR009.xlsx') ([ordered]@{ '画面項目定義' = @(@('No', '項目名', '型', '桁数'), @('1', '受注番号', '文字', '12')); 'イベント定義' = @(@('No', 'イベント', '処理概要', 'メッセージ'), @('1', '登録', '登録する', 'E0001')) })
+    $csv = Join-Path $dir '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効',
+        'X01,画面項目,桁数が書かれている,文字の項目に桁数が書かれている,高,*,○') | Set-Content -LiteralPath $csv -Encoding UTF8
+    foreach ($format in 'Rows', 'Markdown') {
+        $out = Join-Path $dir $format
+        $null = & $Review -Path $new -Baseline $old -Checklist $csv -OutDir $out -PromptOnly -TextFormat $format 6>$null 3>$null
+        $p = [System.IO.File]::ReadAllText((Join-Path $out 'prompts/R001.txt'))
+        Assert-Match $p '設計書の各行は「行番号\| 列:値」の形' "${format}: 変わった部分の形の説明"
+        Assert-NotMatch $p '設計書は Markdown で' $format
+        Assert-Match $p '\n### シート: 画面項目定義（前の版から変わった行だけ）\n★2\| A:1 \| B:受注番号 \| C:文字 \| D:12（旧: 10）\n' $format
+        Assert-Match $p '\n### シート: イベント定義（前の版から大きく変わったため、全体）\n★1\| A:No \| B:イベント \| C:処理概要 \| D:メッセージ\n★2\| A:1 \| B:登録 \| C:登録する \| D:E0001\n' "${format}: 足したシート"
+    }
+}
+
+Test-Case 'Invoke-DesignReview: 回答のあとで観点を無効にしても -ImportOnly でき、対応要否の「要対応」「不要（誤指摘）」なども採用率に数える' {
+    $dir = New-TestDir
+    $design = Join-Path $dir 'design'
+    New-Item -ItemType Directory -Path $design | Out-Null
+    New-SheetsBook (Join-Path $design 'DD02_画面設計書_SCR009.xlsx') ([ordered]@{ '画面項目定義' = @(@('No', '項目名', '型', '桁数'), @('1', '受注番号', '文字', ''), @('2', '受注日', '日付', ''), @('3', '顧客名', '文字', '')) })
+    $csv = Join-Path $dir '観点表.csv'
+    $writeChecklist = {
+        param([string] $Enabled)
+        @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効',
+            'X01,画面項目,桁数が書かれている,文字の項目に桁数が書かれている,高,*,○',
+            "X02,画面項目,型が書かれている,入力項目に型が書かれている,中,*,$Enabled") | Set-Content -LiteralPath $csv -Encoding UTF8
+    }
+    & $writeChecklist '○'
+    $out = Join-Path $dir 'review'
+    $null = & $Review -Path $design -Checklist $csv -OutDir $out -PromptOnly 6>$null 3>$null
+    Write-Answer $out 'R001' @'
+X01 | NG | 画面項目定義!D2 | （空欄） | 受注番号の桁数が空欄 | 文字には桁数が必要
+X01 | NG | 画面項目定義!D3 | （空欄） | 受注日の桁数が空欄 | テスト
+X01 | NG | 画面項目定義!D4 | （空欄） | 顧客名の桁数が空欄 | 文字には桁数が必要
+X02 | NG | 画面項目定義!C3 | 日付 | 型があいまい | テスト
+'@
+    $null = & $Review -Checklist $csv -OutDir $out -ImportOnly 6>$null 3>$null
+    $report = Join-Path $out 'レビュー結果.xlsx'
+    # 人が対応要否を書き、X02 を無効にしてから作り直す
+    Set-CellValues $report '指摘一覧' @{ O2 = '要対応'; O3 = '不要（誤指摘）'; O4 = '要修正' }
+    & $writeChecklist '×'
+    $text = Get-HostText { & $Review -Checklist $csv -OutDir $out -ImportOnly }
+    Assert-Match $text '観点表で有効でない観点の回答は、レビュー結果に入れません: X02'
+    Assert-Match $text 'AI の指摘の採用率（対応要否から）: 要 2・不要 1（67%）'
+    $f = Read-XlsxSheet -Path $report -Index 1
+    Assert-Equal @('X01|要対応', 'X01|不要（誤指摘）', 'X01|要修正') @(2..($f.Rows.Count) | ForEach-Object { '{0}|{1}' -f $f.Rows[$_]['E'], $f.Rows[$_]['O'] })
+}
+
+Test-Case 'Invoke-DesignReview: -Baseline で、前の版の設計書とはサブフォルダも含めた相対パスで対応付ける。変わった設計書が無いことを知らせ、-Path を付けた -ImportOnly でも変更なしにする' {
+    $dir = New-TestDir
+    foreach ($v in 'v1.0', 'v1.1') {
+        New-Item -ItemType Directory -Path (Join-Path $dir "$v/SCR001"), (Join-Path $dir "$v/SCR002") | Out-Null
+        New-SheetsBook (Join-Path $dir "$v/SCR001/画面設計書.xlsx") ([ordered]@{ '画面項目定義' = @(@('No', '項目名', '型', '桁数'), @('1', '受注番号', '文字', '10'), @('2', '受注日', '日付', '')) })
+        New-SheetsBook (Join-Path $dir "$v/SCR002/画面設計書.xlsx") ([ordered]@{ '画面項目定義' = @(@('No', '項目名', '型', '桁数'), @('1', '顧客コード', '文字', '8'), @('2', '顧客名', '文字', '40')) })
+    }
+    $csv = Join-Path $dir '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効',
+        'X01,画面項目,桁数が書かれている,文字の項目に桁数が書かれている,高,*,○') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $new = Join-Path $dir 'v1.1'
+    $out = Join-Path $dir 'review'
+    $text = Get-HostText { & $Review -Path $new -Baseline (Join-Path $dir 'v1.0') -Checklist $csv -OutDir $out -PromptOnly }
+    Assert-Match $text '前の版と比べた設計書: 変更なし 2'
+    Assert-Match $text 'AI に依頼する設計書はありません（前の版から変わった設計書がありません）'
+    Assert-NotMatch $text '確かめ方がツールです'
+    $m = Get-Manifest $out
+    Assert-Equal @('SCR001/画面設計書.xlsx|v1.0/SCR001/画面設計書.xlsx', 'SCR002/画面設計書.xlsx|v1.0/SCR002/画面設計書.xlsx') @($m.Files | ForEach-Object { '{0}|{1}' -f (ConvertTo-Slash $_.Relative), (ConvertTo-Slash $_.Baseline.Substring($dir.Length + 1)) } | Sort-Object)
+
+    # README の手順どおり -Path を付けて -ImportOnly しても、前の版と比べた結果は依頼の一覧から使う
+    $null = & $Review -Path $new -Checklist $csv -OutDir $out -ImportOnly 6>$null 3>$null
+    $s = Read-XlsxSheet -Path (Join-Path $out 'レビュー結果.xlsx') -Index 2
+    Assert-Equal @('SCR001/画面設計書.xlsx|X01|変更なし', 'SCR002/画面設計書.xlsx|X01|変更なし') @($s.Rows.Keys | Where-Object { $_ -gt 1 } | ForEach-Object { $r = $s.Rows[$_]; '{0}|{1}|{2}' -f (ConvertTo-Slash $r['A']), $r['B'], $r['F'] } | Sort-Object)
+}
+
+Test-Case 'Invoke-DesignReview: -Recheck で、ツールの指摘は数（か所の数・版数）が変わっても、残っていれば未解消にする' {
+    $dir = New-TestDir
+    $design = Join-Path $dir '設計書'
+    New-Item -ItemType Directory -Path $design | Out-Null
+    $scr1 = Join-Path $design 'DD02_画面設計書_SCR001_受注一覧.xlsx'
+    Copy-Item -LiteralPath (Join-Path $designDir 'DD02_画面設計書_SCR001_受注一覧.xlsx') -Destination $scr1
+    # 長音の無い「ログインユーザ」を 2 か所（長音の有るほうが多い）と TBD を書き、表紙の版数を改訂履歴と違える
+    Set-CellValues $scr1 '画面概要' @{ I8 = '条件を指定して受注を検索し、一覧表示する。ログインユーザーの所属の受注だけを、ログインユーザーの権限で表示する。'; I9 = '受注担当者（ログインユーザ）。TBD'; I10 = 'ログインユーザの所属で絞り込む' }
+    Set-CellValues $scr1 '表紙' @{ X23 = '1.1' }
+    $csv = Join-Path $dir '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効,確かめ方,ツールの確認',
+        'X01,版数,版数がそろっている,,高,*,○,ツール,版数',
+        'X02,記述,未確定事項が残っていない,,高,*,○,ツール,残っている文言',
+        'X03,表記,表記がそろっている,,中,*,○,ツール,表記ゆれ') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $first = Join-Path $dir '1回目'
+    $null = & $Review -Path $design -Checklist $csv -OutDir $first -PromptOnly 6>$null 3>$null
+    $null = & $Review -Checklist $csv -OutDir $first -ImportOnly 6>$null 3>$null
+    $f = Read-XlsxSheet -Path (Join-Path $first 'レビュー結果.xlsx') -Index 1
+    Assert-Equal @(
+        'ツール（版数）|表紙!X23|表紙の版数（1.1）と、改訂履歴の最後の版数（1.0）が違います',
+        'ツール（残っている文言）|画面概要!I9|「TBD」が残っています: 受注担当者（ログインユーザ）。TBD',
+        'ツール（表記ゆれ）|画面概要!I9|「ログインユーザ」は「ログインユーザー」の表記ゆれです（長音（ー）。このファイルで 2 か所）') @(2..($f.Rows.Count) | ForEach-Object { $r = $f.Rows[$_]; '{0}|{1}|{2}' -f $r['C'], $r['I'], $r['L'] })
+
+    # 「ログインユーザ」は 1 か所だけ直し、TBD は消す。表紙の版数は 1.2 にしたが、改訂履歴はまだ 1.0
+    Set-CellValues $scr1 '画面概要' @{ I9 = '受注担当者（ログインユーザ）'; I10 = 'ログインユーザーの所属で絞り込む' }
+    Set-CellValues $scr1 '表紙' @{ X23 = '1.2' }
+    $second = Join-Path $dir '再確認'
+    $null = & $Review -Path $design -Checklist $csv -OutDir $second -Recheck $first -PromptOnly 6>$null 3>$null
+    $text = Get-HostText { & $Review -Checklist $csv -OutDir $second -ImportOnly }
+    Assert-Match $text '再確認: 解消 1・未解消 2'
+    $r = Read-XlsxSheet -Path (Join-Path $second 'レビュー結果.xlsx') -Index 1
+    Assert-Equal @(
+        'ツール（版数）|未解消|表紙!X23|機械のチェック（版数）で、同じ指摘がまだあります（今: 表紙の版数（1.2）と、改訂履歴の最後の版数（1.0）が違います）',
+        'ツール（残っている文言）|解消||機械のチェック（残っている文言）で、同じ指摘が無くなりました',
+        'ツール（表記ゆれ）|未解消|画面概要!I9|機械のチェック（表記ゆれ）で、同じ指摘がまだあります（今: 「ログインユーザ」は「ログインユーザー」の表記ゆれです（長音（ー）。このファイルで 1 か所））') @(2..($r.Rows.Count) | ForEach-Object { $x = $r.Rows[$_]; '{0}|{1}|{2}|{3}' -f $x['B'], $x['H'], $x['I'], $x['K'] })
+}
+
+Test-Case 'Invoke-DesignReview: -Recheck で、前の指摘はその行のある部分の依頼に入れる（-TextFormat Markdown・Word の段落も）。設計書はサブフォルダも含めて対応付ける' {
+    $dir = New-TestDir
+    $design = Join-Path $dir '設計書'
+    New-Item -ItemType Directory -Path (Join-Path $design 'SCR001'), (Join-Path $design 'SCR002') | Out-Null
+    $rows = @(, @('No', '項目名', '型', '桁数', '説明'))
+    for ($i = 1; $i -le 120; $i++) { $rows += , @("$i", "項目$i", '文字', '10', "項目 $i の説明文です。入力された値をそのまま保存する。") }
+    # 同じ名前の設計書が、画面ごとのフォルダにある
+    New-SheetsBook (Join-Path $design 'SCR001/DD02_画面設計書.xlsx') ([ordered]@{ '画面項目定義' = @(@('No', '項目名', '型', '桁数'), @('1', '受注番号', '文字', '10')) })
+    New-SheetsBook (Join-Path $design 'SCR002/DD02_画面設計書.xlsx') ([ordered]@{ '画面項目定義' = $rows })
+    New-WordDoc (Join-Path $design 'BD01_基本設計書_受注管理.docx') @(1..120 | ForEach-Object { "段落 $_ の文です。受注を登録するときの処理を説明する。入力された値をそのまま保存する。" })
+    $csv = Join-Path $dir '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効',
+        'X01,記述,桁数と目的,桁数と目的が書かれている,高,*,○') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $first = Join-Path $dir '1回目'
+    $null = & $Review -Path $design -Checklist $csv -OutDir $first -PromptOnly -MaxChars 200000 6>$null 3>$null
+    $m = Get-Manifest $first
+    $idOf = { param([string] $Relative) @($m.Requests | Where-Object { (ConvertTo-Slash $_.Relative) -eq $Relative })[0].Id }
+    Write-Answer $first (& $idOf 'SCR002/DD02_画面設計書.xlsx') 'X01 | NG | 画面項目定義!D110 | 10 | 桁数が短い | テスト'
+    Write-Answer $first (& $idOf 'BD01_基本設計書_受注管理.docx') 'X01 | NG | 本文!段落 110 | 段落 110 の文です | 目的が無い | テスト'
+    $null = & $Review -Checklist $csv -OutDir $first -ImportOnly 6>$null 3>$null
+
+    $second = Join-Path $dir '再確認'
+    $null = & $Review -Path $design -Checklist $csv -OutDir $second -Recheck $first -PromptOnly -TextFormat Markdown -MaxChars 3000 6>$null 3>$null
+    $m = Get-Manifest $second
+    Assert-Equal @('BD01_基本設計書_受注管理.docx', 'SCR002/DD02_画面設計書.xlsx') @($m.Requests | ForEach-Object { ConvertTo-Slash $_.Relative } | Sort-Object) '指摘のある部分だけを依頼する（同じ名前の別のフォルダの設計書ではない）'
+    foreach ($case in @(@('SCR002/DD02_画面設計書.xlsx', '\n\| 110 \| 109 \| 項目109 \| '), @('BD01_基本設計書_受注管理.docx', '\n段落 110\| '))) {
+        $r = @($m.Requests | Where-Object { (ConvertTo-Slash $_.Relative) -eq $case[0] })[0]
+        Assert-True ([int]$r.Part.Split('/')[1] -gt 1) ('{0} を分けていません（{1}）' -f $case[0], $r.Part)
+        Assert-Match ([System.IO.File]::ReadAllText((Join-Path $second "prompts/$($r.Id).txt"))) $case[1] ('{0} の依頼（{1}）に、指摘の行がありません' -f $case[0], $r.Part)
+    }
+    $p = [System.IO.File]::ReadAllText((Join-Path $second ('prompts/{0}.txt' -f @($m.Requests | Where-Object { (ConvertTo-Slash $_.Relative) -eq 'SCR002/DD02_画面設計書.xlsx' })[0].Id)))
+    Assert-Match $p '設計書は Markdown で、「## 」の見出しがシート名です' 'Markdown の形の説明'
+    Assert-NotMatch $p '設計書の各行は「行番号\| 列:値」の形'
+}
+
+Test-Case 'Invoke-DesignReview: 1 行で上限を超える行も分けて、どの依頼も -MaxChars に収める（続きには行番号と列を付け直す）' {
+    $dir = New-TestDir
+    $design = Join-Path $dir 'design'
+    New-Item -ItemType Directory -Path $design | Out-Null
+    # 1 つのセルに長い処理概要（セル内の改行で 60 行）
+    $long = (1..60 | ForEach-Object { "$_. 受注テーブルと顧客マスタを結合して、条件に合う受注を検索する。" }) -join "`n"
+    New-SheetsBook (Join-Path $design 'DD02_画面設計書_SCR009.xlsx') ([ordered]@{ 'イベント定義' = @(@('No', 'イベント', 'トリガー', '処理概要'), @('EV01', '検索', '検索ボタン押下', $long), @('EV02', 'クリア', 'クリアボタン押下', '検索条件を初期表示の状態に戻す')) })
+    $csv = Join-Path $dir '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効',
+        'X01,イベント,異常時の動き,0 件のときの表示が書かれている,高,*,○') | Set-Content -LiteralPath $csv -Encoding UTF8
+    foreach ($case in @(@('Rows', '\n2\| D:（続き）\d+\. 受注テーブル'), @('Markdown', '\n\| 2 \|  \|  \|  \| （続き）\d+\. 受注テーブル'))) {
+        $out = Join-Path $dir $case[0]
+        $null = & $Review -Path $design -Checklist $csv -OutDir $out -PromptOnly -MaxChars 3000 -TextFormat $case[0] 6>$null 3>$null
+        $m = Get-Manifest $out
+        Assert-True (@($m.Requests).Count -gt 2) ('{0}: 長い行を分けていません' -f $case[0])
+        Assert-Equal 0 @($m.Requests | Where-Object { $_.Chars -gt 3000 }).Count ('{0}: 上限 3000 を超える依頼（{1}）' -f $case[0], ((@($m.Requests) | ForEach-Object { $_.Chars }) -join ', '))
+        $all = (@($m.Requests) | ForEach-Object { [System.IO.File]::ReadAllText((Join-Path $out "prompts/$($_.Id).txt")) }) -join "`n"
+        Assert-Match $all $case[1] ('{0}: 続きの行' -f $case[0])
+        foreach ($n in 1, 30, 60) { Assert-Match $all ('[^\d]{0}\. 受注テーブルと顧客マスタを結合して' -f $n) ('{0}: {1} 行目の文が無い' -f $case[0], $n) }
+        Assert-Match $all '検索条件を初期表示の状態に戻す'
+    }
+}
+
 Test-Case 'Invoke-DesignReview: Get-Help でヘルプが表示される' {
     $h = Get-Help $Review
     Assert-Match $h.Synopsis 'AI'

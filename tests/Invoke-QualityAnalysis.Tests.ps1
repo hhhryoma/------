@@ -97,6 +97,36 @@ Test-Case 'Invoke-QualityAnalysis: 依頼の表のセルの、セル内の改行
     Assert-True (-not $prompt.Contains('↵')) '↵ を書かない'
 }
 
+Test-Case 'Invoke-QualityAnalysis: -ImportOnly は、依頼を作ったときの No の指標に回答を書く（記入済みの行は -Force のときだけ）' {
+    $dir = New-TestDir
+    $book = Join-Path $dir '品質評価_20261022.xlsx'
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    # 記入済みの × の指標が、空欄の × の指標より上にある
+    $columns = @(@('区分', '指標', '実績', '判定', '判定の考え方', '定性分析（原因）', '対策') | ForEach-Object { @{ Header = $_; Width = 14 } })
+    Export-Workbook -FilePath $book -Sheets @(@{ Name = '品質評価'; Columns = $columns; Rows = @(
+                @{ Values = @('テスト', '未完了のバグ', [double]5, '×', '0 件が ○', '担当の割り当てが遅れた', '日次で確認する') },
+                @{ Values = @('レビュー', '指摘密度（件/ページ）', [double]0.4, '×', '0.8 以上が ○', '', '') }) })
+    # -Force で記入済みの指標も依頼に入れる（No 1 が未完了のバグ、No 2 が指摘密度）
+    $null = & $QualityAnalysis $book -PromptOnly -Force 6>$null
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $dir '品質評価_20261022_定性分析の依頼.txt'))) '\| 1 \| テスト \| 未完了のバグ \|[\s\S]*\| 2 \| レビュー \| 指摘密度'
+    $answer = @('| No | 定性分析（原因） | 対策 |', '| --- | --- | --- |', '| 1 | 修正の担当が 1 人に集中した | 担当を 2 人にする |', '| 2 | レビュー時間が短かった | 再レビューする |')
+    [System.IO.File]::WriteAllText((Join-Path $dir '品質評価_20261022_定性分析の回答.txt'), ($answer -join "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
+
+    # -Force を付けずに取り込むと、No 2 の回答は指摘密度に書き、記入済みの未完了のバグは書き換えずに知らせる
+    $text = Get-HostText { & $QualityAnalysis $book -ImportOnly | Out-Null }
+    $sheet = Read-XlsxSheet -Path $book -Index 1
+    Assert-Equal 'レビュー時間が短かった|再レビューする' ('{0}|{1}' -f $sheet.Rows[3]['F'], $sheet.Rows[3]['G']) 'No 2 の回答は指摘密度の行に書く'
+    Assert-Equal '担当の割り当てが遅れた|日次で確認する' ('{0}|{1}' -f $sheet.Rows[2]['F'], $sheet.Rows[2]['G']) '記入済みの行は書き換えない'
+    Assert-Match $text '記入済みの指標には書き込んでいません（書き直すときは -Force）: 1\. 未完了のバグ'
+
+    # -Force を付けると、記入済みの行にも書く
+    $result = @(& $QualityAnalysis $book -ImportOnly -Force 6>$null)
+    Assert-Equal @('1|未完了のバグ', '2|指摘密度（件/ページ）') @($result | ForEach-Object { '{0}|{1}' -f $_.No, $_.Name })
+    $sheet = Read-XlsxSheet -Path $book -Index 1
+    Assert-Equal '修正の担当が 1 人に集中した|担当を 2 人にする' ('{0}|{1}' -f $sheet.Rows[2]['F'], $sheet.Rows[2]['G'])
+    Assert-Equal 'レビュー時間が短かった|再レビューする' ('{0}|{1}' -f $sheet.Rows[3]['F'], $sheet.Rows[3]['G'])
+}
+
 Test-Case 'Invoke-QualityAnalysis: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityAnalysis
     Assert-Match $h.Synopsis '定性分析（原因）と対策の下書き'
