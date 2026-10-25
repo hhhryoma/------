@@ -182,6 +182,252 @@ function Resolve-HeaderMap {
     return $map
 }
 
+# ガントチャート（予定開始・予定終了の列が無く、タスクの右に日付の見出しが並ぶ表）は、タスクの行のセルの塗りつぶし（バー）から日付を読む
+$ganttLog = New-Object System.Collections.Generic.List[string]
+$ganttNoBars = New-Object System.Collections.Generic.List[string]
+$planWord = '^(予定|計画|予|計|(?i:plan(ned)?))$'
+$actualWord = '^(実績|実|(?i:actuals?))$'
+
+function ConvertTo-GanttDay {
+    #     ガントチャートの日付の見出しのセルを読む（読めなければ $null）。戻り値: @{ Year（無ければ 0）; Month（無ければ 0）; Day }
+    #       2026/10/01（日付のセル）・10/1・10/1(水)・10月1日・10/5～（週の見出し）、月の行の下の 1・1日・1(水)
+    param([string] $Text)
+    # 週の見出しの「～」から後ろと「週」、後ろの曜日（(水)・(Wed)）は読み飛ばす
+    $t = (([string]$Text).Normalize($nfkc) -replace '\s', '') -replace '[~〜].*$', '' -replace '週$', '' -replace '\([^)]*\)$', ''
+    $m = [regex]::Match($t, '^(\d{4})[/\-.年](\d{1,2})[/\-.月](\d{1,2})日?$')
+    if ($m.Success) { return @{ Year = [int]$m.Groups[1].Value; Month = [int]$m.Groups[2].Value; Day = [int]$m.Groups[3].Value } }
+    $m = [regex]::Match($t, '^(\d{1,2})[/月](\d{1,2})日?$')
+    if ($m.Success) { return @{ Year = 0; Month = [int]$m.Groups[1].Value; Day = [int]$m.Groups[2].Value } }
+    $m = [regex]::Match($t, '^(\d{1,2})日?$')
+    if ($m.Success -and [int]$m.Groups[1].Value -ge 1) { return @{ Year = 0; Month = 0; Day = [int]$m.Groups[1].Value } }
+    return $null
+}
+
+function ConvertTo-GanttMonth {
+    #     ガントチャートの月の行のセル（2026年10月・2026/10・10月・日付のセル・10/5 の週の見出し）の年と月（読めなければ $null。年が無ければ 0）
+    param([string] $Text)
+    $t = (([string]$Text).Normalize($nfkc) -replace '\s', '') -replace '[~〜].*$', '' -replace '週$', '' -replace '\([^)]*\)$', ''
+    $m = [regex]::Match($t, '^(\d{4})[/\-.年](\d{1,2})(月(\d{1,2}日)?|[/\-.]\d{1,2})?$')
+    if ($m.Success) { $y = [int]$m.Groups[1].Value; $mo = [int]$m.Groups[2].Value }
+    else {
+        $m = [regex]::Match($t, '^(\d{1,2})(月|/\d{1,2})$')
+        if (-not $m.Success) { return $null }
+        $y = 0; $mo = [int]$m.Groups[1].Value
+    }
+    if ($mo -lt 1 -or $mo -gt 12) { return $null }
+    return @{ Year = $y; Month = $mo }
+}
+
+function Resolve-GanttDates {
+    #     続いた列の日付の見出し（ConvertTo-GanttDay に列番号 Col を足したもの）を、左から日付にする。日だけの見出しの月は月の行（Months）の
+    #     左にある見出し（結合したセル）から決め、同じ月の見出しの中で日が戻れば次の月にする。年の無い見出しは前の列の年（先頭は BaseYear）にし、
+    #     前の列の日付より前なら次の年にする。日付にできない・増えない・31 日より空くところで止める。戻り値: 日付の一覧
+    param($Days, $Months, [int] $BaseYear)
+    $dates = New-Object System.Collections.Generic.List[datetime]
+    $prev = $null; $prevLabel = 0
+    foreach ($l in $Days) {
+        $y = $l.Year; $mo = $l.Month; $label = $prevLabel
+        if (-not $mo) {
+            $mm = $null
+            foreach ($x in $Months) { if ($x.Col -le $l.Col) { $mm = $x } }
+            if ($mm -and $mm.Col -ne $prevLabel) { $y = $mm.Year; $mo = $mm.Month; $label = $mm.Col }
+            elseif ($prev) {
+                $y = $prev.Year; $mo = $prev.Month
+                if ($l.Day -le $prev.Day) { $mo++; if ($mo -gt 12) { $mo = 1; $y++ } }
+            }
+            else { break }
+        }
+        $explicit = $y -gt 0
+        if (-not $explicit) { if ($prev) { $y = $prev.Year } else { $y = $BaseYear } }
+        try {
+            $d = New-Object DateTime $y, $mo, $l.Day
+            if ($prev -and $d -le $prev -and -not $explicit) { $d = New-Object DateTime ($y + 1), $mo, $l.Day }
+        }
+        catch { break }
+        if ($prev -and ($d -le $prev -or ($d - $prev).TotalDays -gt 31)) { break }
+        $dates.Add($d); $prev = $d; $prevLabel = $label
+    }
+    return , $dates
+}
+
+function Get-GanttColumns {
+    #     Row の行の、FromCol より右に続いて並ぶ日付の見出し（日付が増えていく 3 列以上のうち、いちばん長いもの）。
+    #     日だけの見出しの月は、上の 3 行までのうち月の見出しのある、いちばん近い行で決める。年の無い見出しは、ガントチャートの期間が
+    #     基準日にいちばん近くなる年（基準日の年と前後 1 年）にする。戻り値: @{ Row; Cols = 列番号; Dates = 日付 }（無ければ $null）
+    param($Grid, [int] $Row, [int] $FromCol)
+    $segments = New-Object System.Collections.Generic.List[object]
+    $seg = $null; $last = 0
+    foreach ($c in $Grid.Cols[$Row]) {
+        if ($c -le $FromCol) { continue }
+        $day = ConvertTo-GanttDay $Grid.Cells[$Row][$c]
+        if (-not $day) { $seg = $null; continue }
+        $day['Col'] = $c
+        if (-not $seg -or $c -ne $last + 1) { $seg = New-Object System.Collections.Generic.List[object]; $segments.Add($seg) }
+        $seg.Add($day); $last = $c
+    }
+    if ($segments.Count -eq 0) { return $null }
+    $months = @()
+    for ($r = $Row - 1; $r -ge $Row - 3; $r--) {
+        if (-not $Grid.Cols.ContainsKey($r)) { continue }
+        $found = @(foreach ($c in $Grid.Cols[$r]) { if ($c -gt $FromCol) { $mm = ConvertTo-GanttMonth $Grid.Cells[$r][$c]; if ($mm) { $mm['Col'] = $c; $mm } } })
+        if ($found.Count -gt 0) { $months = $found; break }
+    }
+    $best = $null
+    foreach ($seg in $segments) {
+        $i = 0
+        while ($i -lt $seg.Count) {
+            $rest = $seg.GetRange($i, $seg.Count - $i)
+            $dates = $null; $gap = 0
+            foreach ($y in @($AsOf.Year, ($AsOf.Year - 1), ($AsOf.Year + 1))) {
+                $d = Resolve-GanttDates $rest $months $y
+                if ($d.Count -eq 0) { continue }
+                $g = 0
+                if ($AsOf -lt $d[0]) { $g = ($d[0] - $AsOf).TotalDays } elseif ($AsOf -gt $d[$d.Count - 1]) { $g = ($AsOf - $d[$d.Count - 1]).TotalDays }
+                if ($null -eq $dates -or $g -lt $gap) { $dates = $d; $gap = $g }
+            }
+            if ($null -eq $dates) { $i++; continue }
+            if ($dates.Count -ge 3 -and (-not $best -or $dates.Count -gt $best.Dates.Count)) {
+                $best = @{ Row = $Row; Cols = @(for ($k = 0; $k -lt $dates.Count; $k++) { $rest[$k].Col }); Dates = $dates.ToArray() }
+            }
+            $i += $dates.Count
+        }
+    }
+    return $best
+}
+
+function Find-GanttTable {
+    #     タスクの見出しのある行（Headers: @{ Row; Map }）のうち、上下 3 行までに日付の見出しが並ぶもの（下はタスクの行より前だけ）。
+    #     戻り値: @{ Row（見出しの最後の行）; Map; Cols; Dates }（無ければ $null）
+    param($Grid, $Headers)
+    foreach ($h in $Headers) {
+        $taskCol = $h.Map['タスク']
+        $best = $null
+        foreach ($r in $Grid.Rows) {
+            if ($r -lt $h.Row - 3) { continue }
+            if ($r -gt $h.Row + 3) { break }
+            if ($r -gt $h.Row -and $Grid.Cells[$r].ContainsKey($taskCol) -and $Grid.Cells[$r][$taskCol].Trim()) { break }
+            $g = Get-GanttColumns $Grid $r $taskCol
+            if ($g -and (-not $best -or $g.Dates.Count -gt $best.Dates.Count)) { $best = $g }
+        }
+        if ($best) { return @{ Row = [math]::Max($h.Row, $best.Row); Map = $h.Map; Cols = $best.Cols; Dates = $best.Dates } }
+    }
+    return $null
+}
+
+function Read-GanttBars {
+    #     ガントチャートのタスクの行の、塗りつぶしたセル（バー）の最初と最後の列の日付を読む（.xlsx / .xlsm）。各列は、次の列の日付の前日まで
+    #     （1 列の日数（いちばん多い日付の間隔）まで）の期間で、バーの最初の列の期間の最初の営業日から、最後の列の期間の最後の営業日までにする。
+    #     バーにしない色: 白、タスク名のセルと同じ色（行全体の色）、土日・休日の列か、ほとんど（8 割以上）のタスクの行を塗った列にしか無い色
+    #     （土日・祝日・今日の線など）と、土日・休日の列でほとんどの行を塗った色（土日の色がバーと同じとき）。
+    #     「予定」「実績」の列があり、予定の行のすぐ下に実績の行が続く表は、実績の行のバーを実績にする（実績の行はタスクとして数えない）。
+    #     戻り値: @{ Dates = 行番号 → @{ Plan; Actual }（最初と最後の日。バーが無ければ $null）; Skip = 実績の行; Actual = 実績の行があるか; Step = 1 列の日数 }。
+    #     予定のバーが 1 つも無ければ $null
+    param([string] $FilePath, [string] $SheetName, $Grid, $Gantt)
+    $taskCol = $Gantt.Map['タスク']
+    $cols = $Gantt.Cols; $dates = $Gantt.Dates; $n = $cols.Count
+    $below = @($Grid.Rows | Where-Object { $_ -gt $Gantt.Row })
+
+    # 予定・実績の列（区分）: 予定の行のすぐ下に実績の行が続く、ガントチャートの左の列
+    $kindOf = $null; $bestPairs = 0
+    $kindCols = @{}
+    foreach ($r in $below) { foreach ($c in $Grid.Cols[$r]) { if ($c -lt $cols[0] -and $c -ne $taskCol) { $kindCols[$c] = $true } } }
+    foreach ($c in $kindCols.Keys) {
+        $kinds = @{}
+        foreach ($r in $below) {
+            $l = $Grid.Labels[$r][$c]
+            if ($l -match $planWord) { $kinds[$r] = 'plan' } elseif ($l -match $actualWord) { $kinds[$r] = 'actual' }
+        }
+        $actuals = @($kinds.Keys | Where-Object { $kinds[$_] -eq 'actual' })
+        $pairs = @($actuals | Where-Object { $kinds[$_ - 1] -eq 'plan' }).Count
+        if ($pairs -gt $bestPairs -and $pairs * 2 -ge $actuals.Count) { $bestPairs = $pairs; $kindOf = $kinds }
+    }
+    $records = New-Object System.Collections.Generic.List[int]
+    $actualOf = @{}; $skip = @{}
+    foreach ($r in $below) {
+        if (-not ([string]$Grid.Cells[$r][$taskCol]).Trim()) { continue }
+        if ($kindOf -and $kindOf[$r] -eq 'actual' -and $kindOf[$r - 1] -eq 'plan') { $skip[$r] = $true; continue }
+        $records.Add($r)
+        if ($kindOf -and $kindOf[$r] -eq 'plan' -and $kindOf[$r + 1] -eq 'actual') { $actualOf[$r] = $r + 1 }
+    }
+    if ($records.Count -eq 0) { return $null }
+    $rows = New-Object System.Collections.Generic.List[int]
+    foreach ($r in $records) { $rows.Add($r); if ($actualOf.ContainsKey($r)) { $rows.Add($actualOf[$r]) } }
+
+    try {
+        $pkg = Open-ZipPackage $FilePath
+        try {
+            $parts = Get-WorkbookSheetParts $pkg
+            if (-not $parts.Sheets.Contains($SheetName)) { return $null }
+            $styles = Read-StyleFills -Package $pkg -PartName $parts.StylesPart
+            $fills = Read-SheetFills -Package $pkg -PartName $parts.Sheets[$SheetName] -Fills $styles -Rows $rows.ToArray() -FromCol ([math]::Min($taskCol, $cols[0])) -ToCol $cols[$n - 1]
+        }
+        finally { $pkg.Zip.Dispose() }
+    }
+    catch { Write-Warning ('{0}「{1}」: ガントチャートの塗りつぶしを読めません: {2}' -f [System.IO.Path]::GetFileName($FilePath), $SheetName, $_.Exception.Message); return $null }
+    # 白の塗りつぶしは塗りつぶし無しと同じに見えるので、バーにしない（バーを白で塗って消したセルなど）
+    foreach ($line in $fills.Values) { foreach ($c in @($line.Keys)) { if ($line[$c] -eq '白' -or $line[$c] -eq '背景1') { $line.Remove($c) } } }
+
+    # 1 列の日数と、各列の期間の最後の日。土日・休日だけの列
+    $stepCount = @{}
+    for ($i = 1; $i -lt $n; $i++) { $s = [int]($dates[$i] - $dates[$i - 1]).TotalDays; $stepCount[$s] = 1 + [int]$stepCount[$s] }
+    $step = @($stepCount.Keys | Sort-Object @{ e = { $stepCount[$_] }; Descending = $true }, @{ e = { $_ } })[0]
+    $ends = New-Object datetime[] $n
+    $business = New-Object bool[] $n
+    for ($i = 0; $i -lt $n; $i++) {
+        $len = $step
+        if ($i -lt $n - 1) { $len = [math]::Min($len, [int]($dates[$i + 1] - $dates[$i]).TotalDays) }
+        $ends[$i] = $dates[$i].AddDays($len - 1)
+        for ($d = $dates[$i]; $d -le $ends[$i]; $d = $d.AddDays(1)) { if (Test-BusinessDay $d) { $business[$i] = $true; break } }
+    }
+
+    # 列ごとに、塗った行の数と、いちばん多い色。営業日の、塗った行が 8 割に満たない列にある色をバーの色とする
+    $rowColor = @{}
+    foreach ($r in $rows) { $rowColor[$r] = [string]$fills[$r][$taskCol] }
+    $full = New-Object bool[] $n
+    $top = New-Object string[] $n
+    $barColor = @{}
+    for ($i = 0; $i -lt $n; $i++) {
+        $count = @{}; $filled = 0
+        foreach ($r in $rows) {
+            $k = $fills[$r][$cols[$i]]
+            if (-not $k -or $k -eq $rowColor[$r]) { continue }
+            $filled++; $count[$k] = 1 + [int]$count[$k]
+        }
+        $full[$i] = $rows.Count -ge 3 -and $filled -ge 0.8 * $rows.Count
+        if ($count.Count -gt 0) { $top[$i] = @($count.Keys | Sort-Object @{ e = { $count[$_] }; Descending = $true })[0] }
+        if ($business[$i] -and -not $full[$i]) { foreach ($k in $count.Keys) { $barColor[$k] = $true } }
+    }
+
+    $result = @{}; $any = $false
+    foreach ($r in $records) {
+        $spans = @{ Plan = $r }
+        if ($actualOf.ContainsKey($r)) { $spans['Actual'] = $actualOf[$r] }
+        $one = @{ Plan = $null; Actual = $null }
+        foreach ($kind in @($spans.Keys)) {
+            $line = $fills[$spans[$kind]]
+            $own = $rowColor[$spans[$kind]]
+            $a = -1; $b = -1
+            for ($i = 0; $i -lt $n; $i++) {
+                $k = $line[$cols[$i]]
+                if (-not $k -or $k -eq $own -or -not $barColor.ContainsKey($k)) { continue }
+                if (-not $business[$i] -and $full[$i] -and $k -eq $top[$i]) { continue }
+                if ($a -lt 0) { $a = $i }
+                $b = $i
+            }
+            if ($a -lt 0) { continue }
+            $from = $dates[$a]
+            for ($d = $dates[$a]; $d -le $ends[$a]; $d = $d.AddDays(1)) { if (Test-BusinessDay $d) { $from = $d; break } }
+            $to = $ends[$b]
+            for ($d = $ends[$b]; $d -ge $dates[$b]; $d = $d.AddDays(-1)) { if (Test-BusinessDay $d) { $to = $d; break } }
+            $one[$kind] = @($from, $to)
+            if ($kind -eq 'Plan') { $any = $true }
+        }
+        $result[$r] = $one
+    }
+    if (-not $any) { return $null }
+    return @{ Dates = $result; Skip = $skip; Actual = ($actualOf.Count -gt 0); Step = $step }
+}
+
 $files = New-Object System.Collections.Generic.List[string]
 $csvFiles = New-Object System.Collections.Generic.List[object]
 foreach ($p in $Path) {
@@ -203,18 +449,53 @@ if ($files.Count -gt 0) {
         foreach ($sheetName in $book.Sheets.Keys) {
             $grid = $book.Sheets[$sheetName]
             $header = $null; $map = $null; $prev = 0
+            # タスクの見出しだけがある行（ガントチャートの見出しの候補。最初の 20 行まで）
+            $taskHeaders = New-Object System.Collections.Generic.List[object]
             foreach ($row in $grid.Rows) {
                 $m = Resolve-HeaderMap $grid $row 0
                 if (-not ($m['タスク'] -and $m['予定開始'] -and $m['予定終了']) -and $prev -eq $row - 1) { $m = Resolve-HeaderMap $grid $row $prev }
                 if ($m['タスク'] -and $m['予定開始'] -and $m['予定終了']) { $header = $row; $map = $m; break }
+                if ($m['タスク'] -and $taskHeaders.Count -lt 20) { $taskHeaders.Add(@{ Row = $row; Map = $m }) }
                 $prev = $row
             }
-            if (-not $header) { continue }
+            $bars = $null
+            if (-not $header) {
+                # 予定開始・予定終了の列が無い表は、タスクの右に日付の見出しが並ぶガントチャートなら、セルの塗りつぶし（バー）から読む。
+                # .xls / .xlsb（Excel で読む）は塗りつぶしを読めないので、今までどおり読まない
+                if ($taskHeaders.Count -eq 0 -or @('.xlsx', '.xlsm') -notcontains [System.IO.Path]::GetExtension($book.Path).ToLowerInvariant()) { continue }
+                $gantt = Find-GanttTable $grid $taskHeaders
+                if (-not $gantt) { continue }
+                $bars = Read-GanttBars $book.Path $sheetName $grid $gantt
+                if (-not $bars) { $ganttNoBars.Add(('{0}「{1}」' -f $book.File, $sheetName)); continue }
+                $header = $gantt.Row; $map = $gantt.Map
+                $unit = '{0} 日' -f $bars.Step
+                if ($bars.Step -eq 1) { $unit = '1 日' } elseif ($bars.Step -eq 7) { $unit = '1 週' }
+                $note = ''
+                $actualFields = @(@('実績開始', '実績終了') | Where-Object { -not $map[$_] })
+                if ($bars.Actual -and $actualFields.Count -gt 0) { $note = '（「実績」の行から{0}も）' -f ($actualFields -join '・') }
+                $ganttLog.Add(('読み取り（ガントチャート）: {0}「{1}」の {2}〜{3} 列（1 列 {4}）の塗りつぶしから、{5}を読みました{6}' -f $book.File, $sheetName,
+                        (ConvertTo-ColumnName $gantt.Cols[0]), (ConvertTo-ColumnName $gantt.Cols[-1]), $unit, ((@(@('予定開始', '予定終了') | Where-Object { -not $map[$_] })) -join '・'), $note))
+            }
             foreach ($row in @($grid.Rows | Where-Object { $_ -gt $header })) {
                 $cells = $grid.Cells[$row]
                 $v = @{}
                 foreach ($f in $map.Keys) { $v[$f] = [string]$cells[$map[$f]] }
                 if (-not $v['タスク'].Trim()) { continue }
+                if ($bars) {
+                    # 列の日付があれば列の日付を使い、列が無い（空の）項目だけバーの日付にする。実績の行のバーは作業した日までで、
+                    # 途中のタスクと見分けられないので、実績終了日にするのは進捗率が 100%（完了）のタスクだけ
+                    if ($bars.Skip.ContainsKey($row)) { continue }
+                    $d = $bars.Dates[$row]
+                    if (-not $d) { $d = @{} }
+                    $fromBars = @{ '予定開始' = $d.Plan; '予定終了' = $d.Plan; '実績開始' = $d.Actual; '実績終了' = $d.Actual }
+                    if ((ConvertTo-Rate $v['進捗率']) -ne 1.0) { $fromBars.Remove('実績終了') }
+                    foreach ($f in @($fromBars.Keys)) {
+                        if (-not $fromBars[$f] -or ($map[$f] -and (ConvertTo-Date $v[$f]))) { continue }
+                        $day = $fromBars[$f][0]
+                        if ($f -like '*終了') { $day = $fromBars[$f][1] }
+                        $v[$f] = $day.ToString('yyyy/MM/dd', $invariant)
+                    }
+                }
                 $rows.Add([pscustomobject]@{ Values = $v; Place = [pscustomobject]@{ File = $book.File; Path = $book.Path; Sheet = $sheetName; Cell = ('{0}{1}' -f (ConvertTo-ColumnName $map['タスク']), $row) } })
             }
         }
@@ -236,7 +517,12 @@ foreach ($c in $csvFiles) {
         $rows.Add([pscustomobject]@{ Values = $v; Place = [pscustomobject]@{ File = $c.Name; Path = $c.FullName; Sheet = ''; Cell = ('{0} 行目' -f $line) } })
     }
 }
-if ($rows.Count -eq 0) { Write-Warning 'WBS（タスク・予定開始・予定終了の見出しのある表）が見つかりませんでした'; return }
+if ($rows.Count -eq 0) {
+    $hint = ''
+    if ($ganttNoBars.Count -gt 0) { $hint = '。日付の見出しの下に、セルを塗りつぶしたバーがありません（条件付き書式で描いたバーは読めません）: {0}' -f ($ganttNoBars -join '・') }
+    Write-Warning ('WBS（タスク・予定開始・予定終了の見出しのある表）が見つかりませんでした' + $hint)
+    return
+}
 
 # ---------------------------------------------------------------- タスクごとの計算
 
@@ -317,7 +603,7 @@ foreach ($r in $rows) {
     $tasks.Add($task)
 }
 if ($skipped -gt 0) { Write-Warning ('予定開始日・予定終了日が読めないタスク {0} 件は数えていません' -f $skipped) }
-if ($tasks.Count -eq 0) { Write-Warning 'WBS に、予定開始日・予定終了日の読めるタスクがありませんでした'; return }
+if ($tasks.Count -eq 0) { foreach ($l in $ganttLog) { Write-Host $l }; Write-Warning 'WBS に、予定開始日・予定終了日の読めるタスクがありませんでした'; return }
 $tasks
 
 # ---------------------------------------------------------------- 集計
@@ -468,6 +754,7 @@ if ($null -ne $spi) { $line += ' / SPI {0:0.00}' -f $spi }
 if ($null -ne $sumAC) { $line += ' / AC {0:0.##} / CPI {1:0.00}' -f $sumAC, $cpi }
 Write-Host $line
 if ($delayed.Count -gt 0) { Write-Host ('遅延 {0} 件（最大 {1} 営業日: {2}）' -f $delayed.Count, $delayed[0].Delay, $delayed[0].Task) }
+foreach ($l in $ganttLog) { Write-Host $l }
 if ($FillTemplate) { Write-Host ('テンプレートに書き込みました: {0}（02_遅延状況 {1} 件・08_週次モニタリング {2} 週）' -f $OutFile, $written['02_遅延状況'], $written['08_週次モニタリング']) }
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
@@ -477,6 +764,11 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .DESCRIPTION
 #     WBS の表を見出しの文字で読み（「予定」「実績」の下に「開始」「終了」がある 2 行の見出しも読めます）、
 #     子のタスクの無いタスクごとに、-AsOf の時点の予定の進捗率・遅れ（営業日）・状態を出します。
+#
+#     予定開始・予定終了の列が無く、タスクの右に日付の見出し（1 列 1 日か 1 列 1 週）が並ぶガントチャートの WBS（.xlsx / .xlsm）は、
+#     タスクの行の塗りつぶしたセル（バー）の最初と最後の日付を、予定開始日・予定終了日にします。土日・休日の列や今日の線など列全体を
+#     塗った色と、タスク名のセルと同じ色（行全体の色）はバーにしません。「予定」「実績」の 2 行のタスクは、実績の行のバーを実績開始日
+#     （完了したタスクは実績終了日も）にします。条件付き書式で描いたバーは読めません。
 #
 #       遅れ        完了したタスクは予定終了日との差、見込終了日（基準日以降のもの）があればその差、予定終了日を過ぎていれば
 #                   その日数に残りの作業の日数（（1 − 進捗率）× 予定の営業日）を足したもの、それ以外は予定の進捗率との差を

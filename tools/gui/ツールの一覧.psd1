@@ -286,7 +286,7 @@
             Summary = 'WBS から遅れているタスク（営業日）と PV・EV・SPI を出します。'
             Main = @('Path', 'AsOf', 'Holidays', 'OutXlsx')
             Labels = @{ Path = 'WBS のファイル・フォルダ'; AsOf = '基準日（空欄なら今日）'; Holidays = '休日の CSV（無くてもよい）'; OutXlsx = '結果の保存先' }
-            Required = @('Path'); Output = @('OutXlsx'); OutputName = '進捗'; Keywords = 'WBS 遅延 EVM SPI'
+            Required = @('Path'); Output = @('OutXlsx'); OutputName = '進捗'; Keywords = 'WBS 遅延 EVM SPI ガントチャート'
         }
         @{
             Id = 'Effort'; Label = '工数の実績を集計する'; Group = '見積もり・進捗'; Tool = 'Measure-Effort.ps1'

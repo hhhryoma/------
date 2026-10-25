@@ -2537,11 +2537,167 @@ function ConvertTo-TestCases {
     return , $cases
 }
 
+# ---------------------------------------------------------------- セルの塗りつぶしを読む（Compare-Excel の -CompareFormat・Measure-Progress のガントチャート）
+
+
+$script:ThemeColorNames = @('背景1', 'テキスト1', '背景2', 'テキスト2', 'アクセント1', 'アクセント2', 'アクセント3', 'アクセント4', 'アクセント5', 'アクセント6', 'ハイパーリンク', '表示済みのハイパーリンク')
+# 既定のカラーパレット（indexed の 0～63。64・65 はシステムの前景色・背景色）
+$script:IndexedColors = @(
+    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
+    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
+    '800000', '008000', '000080', '808000', '800080', '008080', 'C0C0C0', '808080',
+    '9999FF', '993366', 'FFFFCC', 'CCFFFF', '660066', 'FF8080', '0066CC', 'CCCCFF',
+    '000080', 'FF00FF', 'FFFF00', '00FFFF', '800080', '800000', '008080', '0000FF',
+    '00CCFF', 'CCFFFF', 'CCFFCC', 'FFFF99', '99CCFF', 'FF99CC', 'CC99FF', 'FFCC99',
+    '3366FF', '33CCCC', '99CC00', 'FFCC00', 'FF9900', 'FF6600', '666699', '969696',
+    '003366', '339966', '003300', '333300', '993300', '993366', '333399', '333333')
+# Excel の「標準の色」と黒・白は名前で表す
+$script:ColorNames = @{
+    'C00000' = '濃い赤'; 'FF0000' = '赤'; 'FFC000' = 'オレンジ'; 'FFFF00' = '黄'; '92D050' = '薄い緑'
+    '00B050' = '緑'; '00B0F0' = '薄い青'; '0070C0' = '青'; '002060' = '濃い青'; '7030A0' = '紫'
+    '000000' = '黒'; 'FFFFFF' = '白'
+}
+
+function Get-ColorText {
+    #     色の指定（rgb / theme / indexed / auto）を「赤」「#1F4E79」「アクセント1 +40%」のような文字にする。自動は ''
+    param([string] $Rgb, [string] $Theme, [string] $Indexed, [string] $Tint, [string] $Auto)
+
+    if ($Auto -eq '1' -or $Auto -eq 'true') { return '' }
+    $n = 0
+    $hex = $null
+    if ($Rgb -and $Rgb.Length -ge 6) { $hex = $Rgb.Substring($Rgb.Length - 6).ToUpperInvariant() }
+    elseif ($Indexed -and [int]::TryParse($Indexed, [ref]$n)) {
+        if ($n -ge $script:IndexedColors.Count) { return '' }
+        $hex = $script:IndexedColors[$n]
+    }
+    elseif ($Theme -and [int]::TryParse($Theme, [ref]$n)) {
+        $name = "テーマの色$n"
+        if ($n -lt $script:ThemeColorNames.Count) { $name = $script:ThemeColorNames[$n] }
+        $tint = 0.0
+        if ($Tint -and [double]::TryParse($Tint, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$tint) -and [math]::Abs($tint) -ge 0.005) {
+            # 正は明るく、負は暗くした色
+            $sign = ''
+            if ($tint -gt 0) { $sign = '+' }
+            $name += ' {0}{1}%' -f $sign, [math]::Round($tint * 100)
+        }
+        return $name
+    }
+    if (-not $hex) { return '' }
+    if ($script:ColorNames.ContainsKey($hex)) { return $script:ColorNames[$hex] }
+    return "#$hex"
+}
+
+function Get-FillText {
+    #     styles.xml の塗りつぶし（fill の要素）を「黄」「#FFC7CE」「アクセント1 +40%」「赤（模様 lightGray）」「グラデーション」の形にする。
+    #     塗りつぶし無し（none・gray125）は ''
+    param($Fill)
+    $pf = $Fill.SelectSingleNode("*[local-name()='patternFill']")
+    if ($pf) {
+        $type = $pf.GetAttribute('patternType')
+        if (-not $type -or $type -eq 'none' -or $type -eq 'gray125') { return '' }
+        $text = ''
+        $fg = $pf.SelectSingleNode("*[local-name()='fgColor']")
+        if ($fg) { $text = Get-ColorText $fg.GetAttribute('rgb') $fg.GetAttribute('theme') $fg.GetAttribute('indexed') $fg.GetAttribute('tint') $fg.GetAttribute('auto') }
+        if (-not $text) { $text = '自動' }
+        if ($type -ne 'solid') { $text += "（模様 $type）" }
+        return $text
+    }
+    if ($Fill.SelectSingleNode("*[local-name()='gradientFill']")) { return 'グラデーション' }
+    return ''
+}
+
+function Read-StyleFills {
+    #     styles.xml の cellXfs を読み、スタイル番号ごとの塗りつぶし（Get-FillText。無ければ ''）を返す
+    param($Package, [string] $PartName)
+    $result = New-Object System.Collections.Generic.List[string]
+    if (-not $PartName) { return , $result }
+    $doc = Read-PartXml -Package $Package -PartName $PartName
+    if ($null -eq $doc) { return , $result }
+    $fills = New-Object System.Collections.Generic.List[string]
+    foreach ($fill in $doc.SelectNodes("//*[local-name()='fills']/*[local-name()='fill']")) { $fills.Add((Get-FillText $fill)) }
+    foreach ($xf in $doc.SelectNodes("//*[local-name()='cellXfs']/*[local-name()='xf']")) {
+        $fillId = 0
+        [void][int]::TryParse($xf.GetAttribute('fillId'), [ref]$fillId)
+        if ($fillId -lt $fills.Count) { $result.Add($fills[$fillId]) } else { $result.Add('') }
+    }
+    return , $result
+}
+
+function Read-SheetFills {
+    #     ワークシートの Rows の行・FromCol～ToCol の列のセルの塗りつぶし（Read-StyleFills の文字）を読む。
+    #     セルの要素が無いところは、行のスタイル（行全体を塗ったとき）か列のスタイル（列全体を塗ったとき）を見る。条件付き書式の色は見ない。
+    #     戻り値: 行番号 → @{ 列番号 → 塗りつぶし }（塗りつぶしの無いセルは含めない）
+    param($Package, [string] $PartName, $Fills, [int[]] $Rows, [int] $FromCol, [int] $ToCol)
+
+    $want = @{}
+    foreach ($r in $Rows) { $want[$r] = $true }
+    $cellStyles = @{}; $rowStyles = @{}; $colStyles = @{}
+    $reader = New-PartXmlReader -Package $Package -PartName $PartName
+    if ($null -ne $reader) {
+        try {
+            $row = 0; $col = 0; $inRow = $false; $s = 0
+            while ($reader.Read()) {
+                if ($reader.NodeType -eq [System.Xml.XmlNodeType]::EndElement) {
+                    # 行・列のスタイルとセルは sheetData までにある
+                    if ($reader.LocalName -eq 'sheetData') { break }
+                    continue
+                }
+                if ($reader.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+                $name = $reader.LocalName
+                if ($name -eq 'c') {
+                    if (-not $inRow) { continue }
+                    $ref = $reader.GetAttribute('r')
+                    # r 属性を省略するツールで作られたファイル向けに位置を数える
+                    if ($ref) { $col = Get-ColumnIndex $ref } else { $col++ }
+                    if ($col -lt $FromCol -or $col -gt $ToCol) { continue }
+                    $s = 0
+                    [void][int]::TryParse([string]$reader.GetAttribute('s'), [ref]$s)
+                    $cellStyles[$row][$col] = $s
+                }
+                elseif ($name -eq 'row') {
+                    $r = $reader.GetAttribute('r')
+                    if ($r) { $row = [int]$r } else { $row++ }
+                    $col = 0
+                    $inRow = $want.ContainsKey($row)
+                    if (-not $inRow) { continue }
+                    $cellStyles[$row] = @{}
+                    $custom = $reader.GetAttribute('customFormat')
+                    if (($custom -eq '1' -or $custom -eq 'true') -and [int]::TryParse([string]$reader.GetAttribute('s'), [ref]$s)) { $rowStyles[$row] = $s }
+                }
+                elseif ($name -eq 'col') {
+                    $min = 0; $max = 0
+                    if (-not [int]::TryParse([string]$reader.GetAttribute('style'), [ref]$s)) { continue }
+                    [void][int]::TryParse([string]$reader.GetAttribute('min'), [ref]$min)
+                    [void][int]::TryParse([string]$reader.GetAttribute('max'), [ref]$max)
+                    for ($c = [math]::Max($min, $FromCol); $c -le [math]::Min($max, $ToCol); $c++) { $colStyles[$c] = $s }
+                }
+            }
+        }
+        finally { $reader.Dispose() }
+    }
+
+    $result = @{}
+    foreach ($r in $Rows) {
+        $line = @{}
+        $cells = $cellStyles[$r]
+        $styleOf = @{}
+        if ($rowStyles.ContainsKey($r)) { for ($c = $FromCol; $c -le $ToCol; $c++) { $styleOf[$c] = $rowStyles[$r] } }
+        else { foreach ($c in $colStyles.Keys) { $styleOf[$c] = $colStyles[$c] } }
+        if ($cells) { foreach ($c in $cells.Keys) { $styleOf[$c] = $cells[$c] } }
+        foreach ($c in $styleOf.Keys) {
+            $st = $styleOf[$c]
+            if ($st -ge 0 -and $st -lt $Fills.Count -and $Fills[$st]) { $line[$c] = $Fills[$st] }
+        }
+        $result[$r] = $line
+    }
+    return $result
+}
+
 # ---------------------------------------------------------------- シートの XML のセルを書き換える
 
 
 function Get-WorkbookSheetParts {
-    #     ブックのパーツ名と、シート名 → シートのパーツ名（シートの順）
+    #     ブックのパーツ名と、シート名 → シートのパーツ名（シートの順）。StylesPart はスタイル（styles.xml）のパーツ名（無ければ $null）
     param($Package)
     $wbPart = @((Get-PartRelationships -Package $Package -PartName '') | Where-Object { $_.Kind -eq 'officeDocument' })[0].Target
     $wb = Read-PartXml -Package $Package -PartName $wbPart
@@ -2552,7 +2708,10 @@ function Get-WorkbookSheetParts {
         $t = @($rels | Where-Object { $_.Id -eq $rid })[0]
         if ($t) { $sheets[$s.GetAttribute('name')] = $t.Target }
     }
-    return [pscustomobject]@{ WorkbookPart = $wbPart; Sheets = $sheets }
+    $styles = @($rels | Where-Object { $_.Kind -eq 'styles' })[0]
+    $stylesPart = $null
+    if ($styles) { $stylesPart = $styles.Target }
+    return [pscustomobject]@{ WorkbookPart = $wbPart; Sheets = $sheets; StylesPart = $stylesPart }
 }
 
 function Get-XmlChildElements {
