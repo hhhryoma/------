@@ -317,18 +317,24 @@ function Find-GuiNewResult {
 }
 
 function Get-GuiOldNewOrder {
-    #     2 つのパスを旧・新の順にする（「送る」の差分と同じ。両方に版数があって違えば版数で、そうでなければ更新日時で）
-    param([string[]] $Paths)
-    if (@($Paths).Count -ne 2) { return @($Paths) }
-    Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -DisableNameChecking
-    $a = Get-Item -LiteralPath $Paths[0] -ErrorAction SilentlyContinue
-    $b = Get-Item -LiteralPath $Paths[1] -ErrorAction SilentlyContinue
-    if (-not $a -or -not $b) { return @($Paths) }
-    $va = Get-NameVersion $a.Name
-    $vb = Get-NameVersion $b.Name
-    if ($null -ne $va -and $null -ne $vb -and $va -ne $vb) { $swap = $va -gt $vb } else { $swap = $a.LastWriteTime -gt $b.LastWriteTime }
-    if ($swap) { return @($Paths[1], $Paths[0]) }
-    return @($Paths)
+    #     2 つのパスを旧・新の順にする（「送る」の差分と同じ。ExcelTools.psm1 の Get-OldNewOrder。ファイルは版数か更新日時、
+    #     フォルダは名前の版数・中のファイルの版数・中でいちばん新しいファイルの更新日時で決める）。
+    #     Detail を付けると、パスの並び（Paths）と決め方（Rule・ByTime。決めなかったときは Rule が空）を返す
+    param([string[]] $Paths, [switch] $Detail)
+    $result = [pscustomobject]@{ Paths = @($Paths); Rule = ''; ByTime = $false }
+    if (@($Paths).Count -eq 2) {
+        Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -DisableNameChecking
+        $a = Get-Item -LiteralPath $Paths[0] -ErrorAction SilentlyContinue
+        $b = Get-Item -LiteralPath $Paths[1] -ErrorAction SilentlyContinue
+        if ($a -and $b -and $a.PSIsContainer -eq $b.PSIsContainer) {
+            $order = Get-OldNewOrder $a.FullName $b.FullName
+            if ($order.Swapped) { $result.Paths = @($Paths[1], $Paths[0]) }
+            $result.Rule = $order.Rule
+            $result.ByTime = $order.ByTime
+        }
+    }
+    if ($Detail) { return $result }
+    return $result.Paths
 }
 
 function Get-GuiBrowseStart {
@@ -1311,7 +1317,15 @@ function Add-GuiPaths {
     # 1 つしか入らない欄が続くところへ、順に入れる
     $singles = New-Object System.Collections.Generic.List[object]
     foreach ($c in $candidates) { if ($c.Input -is [System.Windows.Forms.ListBox]) { break }; $singles.Add($c) }
-    if ($Paths.Count -eq 2 -and $singles.Count -ge 2 -and $singles[0].Field.Name -eq 'Old' -and $singles[1].Field.Name -eq 'New') { $Paths = Get-GuiOldNewOrder $Paths }
+    if ($Paths.Count -eq 2 -and $singles.Count -ge 2 -and $singles[0].Field.Name -eq 'Old' -and $singles[1].Field.Name -eq 'New') {
+        $order = Get-GuiOldNewOrder $Paths -Detail
+        $Paths = $order.Paths
+        # どれで旧・新を決めたかを出す（更新日時で決めたときは、逆なら入れ替えるよう知らせる）
+        if ($order.Rule -and $s.Status) {
+            $s.Status.Text = '旧・新は{0}で決めました' -f $order.Rule
+            if ($order.ByTime) { $s.Status.Text += '（版数で決められないため。逆のときは旧と新を入れ替えてください）' }
+        }
+    }
     for ($i = 0; $i -lt [Math]::Min($Paths.Count, $singles.Count); $i++) { Set-GuiControlValue $singles[$i] $Paths[$i] }
 }
 

@@ -88,11 +88,10 @@ foreach ($r in (Read-CsvFile $Limits @('分母', '下限', '上限') '基準値'
 }
 
 function ConvertTo-DocKey {
-    #     設計書の名前を比べる形（フォルダと拡張子を除き、全角・半角と空白をそろえる）
+    #     設計書の名前を比べる形（フォルダ・拡張子・版数（_v1.0 など）を除き、全角・半角と空白をそろえる。ExcelTools.psm1 の ConvertTo-DocNameKey）。
+    #     版を上げてファイル名の版数が変わっても（…_v1.0.xlsx の指摘と …_v1.1.xlsx の規模）、同じ設計書として対応付ける
     param([string] $Name)
-    $n = Get-LeafName $Name
-    if ($n -match '\.(xlsx|xlsm|xls|xlsb|pdf|docx?|pptx?)$') { $n = [System.IO.Path]::GetFileNameWithoutExtension($n) }
-    return (ConvertTo-Label $n).ToUpperInvariant()
+    return ConvertTo-DocNameKey $Name
 }
 
 # ---------------------------------------------------------------- 指摘管理表を読む
@@ -413,7 +412,30 @@ if ($ReviewLog) {
 # ---------------------------------------------------------------- 規模（分母）
 
 
-$sizes = [ordered]@{}   # 設計書の比較用の名前 → @{ Name; Size; Unit }
+$sizes = [ordered]@{}   # 設計書の比較用の名前 → @{ Name; Size; Unit; Version; Files }
+$staleSizes = New-Object System.Collections.Generic.List[string]   # 規模に数えなかった古い版のファイル
+
+function Add-Size {
+    #     設計書の規模を足す（同じ設計書の複数の行・シートは足す）。版数だけが違う同じ設計書のファイル（版を上げたあとに残った前の版など）は、
+    #     いちばん大きい版数のファイルだけを数え、ほかは staleSizes に入れる（版数の無いファイルはいちばん古いとみなす）
+    param([string] $Name, [double] $Size, [string] $Unit)
+    $k = ConvertTo-DocKey $Name
+    $leaf = Get-LeafName $Name
+    $version = Get-NameVersion $leaf
+    if ($null -eq $version) { $version = New-Object System.Version(0, 0, 0, 0) }
+    if ($sizes.Contains($k) -and $version -lt $sizes[$k].Version) {
+        if (-not $staleSizes.Contains($leaf)) { $staleSizes.Add($leaf) }
+        return
+    }
+    if ($sizes.Contains($k) -and $version -gt $sizes[$k].Version) {
+        foreach ($f in $sizes[$k].Files) { if (-not $staleSizes.Contains($f)) { $staleSizes.Add($f) } }
+        $sizes.Remove($k)
+    }
+    if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = $Name; Size = 0.0; Unit = $Unit; Version = $version; Files = (New-Object System.Collections.Generic.List[string]) } }
+    $sizes[$k].Size += $Size
+    if (-not $sizes[$k].Files.Contains($leaf)) { $sizes[$k].Files.Add($leaf) }
+}
+
 if ($SizeCsv) {
     $rows = Read-CsvFile $SizeCsv @() '規模の CSV'
     if ($rows.Count -gt 0) {
@@ -426,9 +448,7 @@ if ($SizeCsv) {
             if ($r.PSObject.Properties['結果'] -and ([string]$r.'結果').Trim() -eq '失敗') { continue }
             $n = 0.0
             if (-not [double]::TryParse(([string]$r.$sizeCol).Trim(), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { continue }
-            $k = ConvertTo-DocKey $r.$nameCol
-            if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = @(([string]$r.$nameCol).Trim() -split '[\\/]')[-1]; Size = 0.0; Unit = $sizeCol } }
-            $sizes[$k].Size += $n
+            Add-Size (@(([string]$r.$nameCol).Trim() -split '[\\/]')[-1]) $n $sizeCol
         }
     }
 }
@@ -436,20 +456,43 @@ elseif ($DesignPath) {
     $sizeArgs = @{ Path = $DesignPath }
     if ($NoRecurse) { $sizeArgs['NoRecurse'] = $true }
     if ($NoExcel) { $sizeArgs['NoExcel'] = $true }
-    foreach ($item in @(& $sizeScript @sizeArgs 6>$null 3>$null)) {
-        $k = ConvertTo-DocKey $item.File
-        if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = $item.File; Size = 0.0; Unit = '規模' } }
-        $sizes[$k].Size += [double]$item.Size
+    foreach ($item in @(& $sizeScript @sizeArgs 6>$null 3>$null)) { Add-Size $item.File ([double]$item.Size) '規模' }
+}
+if ($staleSizes.Count -gt 0) {
+    Write-Warning ('同じ設計書の版が複数あるため、いちばん新しい版の規模を使います。古い版 {0} 件は数えていません: {1}' -f $staleSizes.Count, ($staleSizes -join '・'))
+}
+
+# 規模を数えない設計書: -DesignPath にあるのに、規模の数え方（Measure-DesignSize.ps1）に無い種類の設計書（画面一覧・補足資料など）。
+# 指摘があっても指摘密度を出せないので、判定を「規模を数えない」にして分けて知らせる（-DesignPath に無い設計書の「規模なし」と分ける）
+$uncounted = [ordered]@{}   # 設計書の比較用の名前 → ファイル名
+if ($DesignPath) {
+    foreach ($p in $DesignPath) {
+        foreach ($item in @(Get-PathItem $p)) {
+            $files = @($item)
+            if ($item.PSIsContainer) { $files = @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue) }
+            foreach ($f in $files) {
+                if ($f.Extension -notmatch '^\.xls[xmb]?$' -or $f.Name.StartsWith('~$')) { continue }
+                if ($OutXlsx -and [string]::Equals($f.FullName, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                $k = ConvertTo-DocKey $f.Name
+                if (-not $sizes.Contains($k) -and -not $uncounted.Contains($k)) { $uncounted[$k] = $f.Name }
+            }
+        }
     }
+}
+
+function Find-MatchKey {
+    #     名前（比べる形）に対応するキー（同じ名前、またはどちらかがもう一方を含む名前がただ 1 つ）
+    param($Keys, [string] $Key)
+    if (@($Keys) -contains $Key) { return $Key }
+    $hit = @($Keys | Where-Object { $_.Contains($Key) -or $Key.Contains($_) })
+    if ($hit.Count -eq 1) { return $hit[0] }
+    return $null
 }
 
 function Find-SizeKey {
     #     指摘の設計書の名前に対応する規模（同じ名前、またはどちらかがもう一方を含む名前がただ 1 つ）
     param([string] $Key)
-    if ($sizes.Contains($Key)) { return $Key }
-    $hit = @($sizes.Keys | Where-Object { $_.Contains($Key) -or $Key.Contains($_) })
-    if ($hit.Count -eq 1) { return $hit[0] }
-    return $null
+    return Find-MatchKey @($sizes.Keys) $Key
 }
 
 # ---------------------------------------------------------------- 集計
@@ -530,7 +573,11 @@ foreach ($k in $docs.Keys) {
             if ($level -and $effortJudgement) { $zone = $zones[('{0}|{1}' -f $effortJudgement, $level)] }
         }
     }
-    elseif ($sizes.Count -gt 0) { $judgement = '規模なし' }
+    elseif ($sizes.Count -gt 0) {
+        # 規模の数え方に無い種類の設計書（画面一覧など）は「規模を数えない」、-DesignPath・-SizeCsv に見つからない設計書は「規模なし」
+        $judgement = '規模なし'
+        if ($uncounted.Count -gt 0 -and (Find-MatchKey @($uncounted.Keys) $k)) { $judgement = '規模を数えない' }
+    }
     if ($wasReviewed -eq $false) { $judgement = '未レビュー'; $zone = $null }
     $effort = $null
     if ($null -ne $d.Effort) { $effort = [math]::Round($d.Effort, 2) }
@@ -654,6 +701,8 @@ foreach ($p in @(@('重要度', 'Severity'), @('分類', 'Category'))) {
 }
 $flagged = @($results | Where-Object { $_.Judgement -like '少ない*' -or $_.Judgement -like '多い*' })
 if ($flagged.Count -gt 0) { Write-Host ('基準値から外れた設計書: {0} 件' -f $flagged.Count) }
+$notSized = @($results | Where-Object { $_.Judgement -eq '規模を数えない' })
+if ($notSized.Count -gt 0) { Write-Host ('規模を数えない設計書: {0} 件（画面一覧など規模の数え方に無い種類か、表の見出しが見つからない設計書。指摘密度・判定を出しません）: {1}' -f $notSized.Count, (@($notSized | ForEach-Object { $_.Document }) -join '・')) }
 if ($ReviewLog) {
     $reviewed = @($results | Where-Object { $null -ne $_.Effort })
     Write-Host ('レビュー工数 {0} 人時（レビュー {1} 回・設計書 {2} 件）' -f [math]::Round((@($efforts | ForEach-Object { $_.Hours }) | Measure-Object -Sum).Sum, 2), $efforts.Count, $reviewed.Count)
@@ -702,6 +751,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER DesignPath
 #     設計書のフォルダ・ファイル。Measure-DesignSize.ps1 で数えた規模（項目数・カラム数など）を指摘密度の分母にします。
+#     設計書の名前は拡張子・フォルダ・版数（_v1.0 など）を除いて指摘と対応付け、同じ設計書の版が複数あれば、いちばん新しい版の規模を使います。
+#     規模の数え方に無い種類の設計書（画面一覧など）は、判定を「規模を数えない」にして名前を知らせます。
 #
 # .PARAMETER SizeCsv
 #     設計書ごとの規模の CSV（ファイル・ページ数などの列）。Export-ExcelToPdf.ps1 -CountOnly -LogPath の CSV をそのまま使えます。

@@ -25,7 +25,7 @@ $actions = [ordered]@{
     Gui         = @{ Label = 'ツールの画面で開く'; Tool = 'Start-ExcelTools.ps1'; Literal = $true; Detail = '選んだファイル・フォルダを入れた状態で、ツールの画面を開きます（やりたいことは画面で選びます）' }
     Check       = @{ Label = '提出前チェック'; File = '提出前チェック'; Tool = 'Test-ExcelDeliverable.ps1'; Detail = '体裁・消し忘れ・情報漏れ・印刷のはみ出し（Word は変更履歴・コメント・隠し文字の残り）などを確かめ、結果の Excel を開きます' }
     ResetView   = @{ Label = '表示を整える'; Tool = 'Reset-ExcelView.ps1'; Detail = '開いたときに先頭シートの A1 が倍率 100% で表示される状態に直します（上書きします）' }
-    Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック・Word 文書（またはフォルダ）を比べ、差分をシートの方眼のまま色付けした画面（ブラウザー）を開きます（一覧の Excel も保存）。版数（ファイル名）か更新日時の古い方を旧にします。3 つ以上か、版数の付いたファイルを置いたフォルダを 1 つ選ぶと、版を続けて比べます' }
+    Compare     = @{ Label = '差分（2 つ選ぶ）'; File = '差分'; Tool = 'Compare-Excel.ps1'; Literal = $true; Detail = '2 つのブック・Word 文書（またはフォルダ）を比べ、差分をシートの方眼のまま色付けした画面（ブラウザー）を開きます（一覧の Excel も保存）。版数（ファイル名。フォルダは中のファイルの版数）か更新日時の古い方を旧にします。3 つ以上か、版数の付いたファイルを置いたフォルダを 1 つ選ぶと、版を続けて比べます' }
     SpVersion   = @{ Label = 'SharePoint の版と比べる'; Tool = 'Compare-SharePointVersion.ps1'; Literal = $true; Detail = 'OneDrive で同期している SharePoint のファイルを 1 つ選び、バージョン履歴の番号（3.0 など）を入力すると、その版と現在の版の差分の画面（ブラウザー）を開きます（版は Excel で取り出します）' }
     Search      = @{ Label = '検索'; File = '検索'; Tool = 'Search-Excel.ps1'; Detail = '入力した文字を、値・数式・コメント・図形など（Word の文書も）から探し、結果の Excel を開きます' }
     Terms       = @{ Label = '表記ゆれ'; File = '表記ゆれ'; Tool = 'Test-ExcelTerms.ps1'; Detail = '表記ゆれ（ユーザ／ユーザー など）を Excel・Word の文書から見つけ、結果の Excel を開きます' }
@@ -59,18 +59,15 @@ function ConvertFrom-SendToArgument {
 }
 
 function Get-OldNew {
-    #     2 つのパスを旧・新の順に並べる。両方に版数があり違えば版数で（ExcelTools.psm1 の Get-NameVersion）、そうでなければ更新日時で決める
+    #     2 つのパスを旧・新の順に並べる（ExcelTools.psm1 の Get-OldNewOrder）。ファイルは、両方に版数があり違えば版数で、そうでなければ更新日時で決める。
+    #     フォルダは、名前の版数、中のファイルの版数、中でいちばん新しいファイルの更新日時の順に決める（フォルダそのものの更新日時は、
+    #     旧のフォルダのファイルを Excel で開くだけで新しくなるので使わない）。戻り値: Old・New・Rule・ByTime
     param([string[]] $Pair)
     Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
     $a = Get-Item -LiteralPath $Pair[0]
     $b = Get-Item -LiteralPath $Pair[1]
     if ($a.PSIsContainer -ne $b.PSIsContainer) { throw 'ファイルどうし、またはフォルダどうしを選んでください' }
-    $va = Get-NameVersion $a.Name
-    $vb = Get-NameVersion $b.Name
-    if ($null -ne $va -and $null -ne $vb -and $va -ne $vb) { $swap = $va -gt $vb }
-    else { $swap = $a.LastWriteTime -gt $b.LastWriteTime }
-    if ($swap) { return , @($b.FullName, $a.FullName) }
-    return , @($a.FullName, $b.FullName)
+    return Get-OldNewOrder $a.FullName $b.FullName
 }
 
 function Get-ResultPath {
@@ -140,10 +137,12 @@ try {
             else {
                 if ($targets.Count -ne 2) { throw "比べるファイル（またはフォルダ）を 2 つ選んでください（$($targets.Count) 件選ばれています。版を続けて比べるときは 3 つ以上か、版数の付いたファイルを置いたフォルダを 1 つ）" }
                 $pair = Get-OldNew $targets
-                Write-Host "旧: $($pair[0])"
-                Write-Host "新: $($pair[1])"
+                Write-Host "旧: $($pair.Old)"
+                Write-Host "新: $($pair.New)"
+                Write-Host ('（旧・新は{0}で決めました）' -f $pair.Rule)
+                if ($pair.ByTime) { Write-Warning '版数で旧・新を決められないため、更新日時で決めました。逆のときは、ツールの画面（「ツールの画面で開く」）で旧と新を入れ替えて比べてください' }
                 Write-Host ''
-                $null = & $tool -Old $pair[0] -New $pair[1] -OutXlsx $out -OutHtml $html
+                $null = & $tool -Old $pair.Old -New $pair.New -OutXlsx $out -OutHtml $html
             }
             Write-Host "差分の一覧（Excel）: $out"
             $out = $html

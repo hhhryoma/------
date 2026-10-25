@@ -106,6 +106,34 @@ Test-Case 'Start-ExcelTools: 入力から引数を作る（空は渡さず、必
     Assert-Equal $true $r.Arguments['Bump'] 'いつも付ける引数（Fixed）'
 }
 
+Test-Case 'Start-ExcelTools: 2 つのフォルダの旧・新は、フォルダの更新日時でなく、中のファイルの版数（無ければ中のファイルの更新日時）で決める' {
+    $dir = New-TestDir
+    $first = Join-Path $dir '提出/第1回'; $second = Join-Path $dir '提出/第2回'
+    New-Item -ItemType Directory -Path $first, $second -Force | Out-Null
+    foreach ($f in @('受注一覧_v1.0.xlsx', '受注登録_v1.0.xlsx', '共通_v1.0.xlsx')) { [System.IO.File]::WriteAllText((Join-Path $first $f), 'x') }
+    foreach ($f in @('受注一覧_v1.1.xlsx', '受注登録_v1.0.xlsx', '共通_v1.0.xlsx')) { [System.IO.File]::WriteAllText((Join-Path $second $f), 'x') }
+    # 旧のフォルダのファイルを Excel で開くと、~$ のファイルができて消え、フォルダの更新日時が新しくなる
+    (Get-Item -LiteralPath $second).LastWriteTime = (Get-Date).AddDays(-1)
+    (Get-Item -LiteralPath $first).LastWriteTime = Get-Date
+    $order = Get-GuiOldNewOrder @($second, $first) -Detail
+    Assert-Equal @($first, $second) $order.Paths
+    Assert-Match $order.Rule 'フォルダの中のファイルの版数'
+    Assert-Equal $false $order.ByTime
+    Assert-Equal @($first, $second) (Get-GuiOldNewOrder @($first, $second)) '-Detail が無ければパスだけ'
+
+    # 版数の無いフォルダは、中でいちばん新しいファイル（~$ のファイルは見ない）の更新日時
+    $a = Join-Path $dir 'A'; $b = Join-Path $dir 'B'
+    New-Item -ItemType Directory -Path $a, $b | Out-Null
+    foreach ($p in @((Join-Path $a '設計書.xlsx'), (Join-Path $b '設計書.xlsx'), (Join-Path $a '~$設計書.xlsx'))) { [System.IO.File]::WriteAllText($p, 'x') }
+    (Get-Item -LiteralPath (Join-Path $a '設計書.xlsx')).LastWriteTime = (Get-Date).AddDays(-2)
+    (Get-Item -LiteralPath (Join-Path $b '設計書.xlsx')).LastWriteTime = (Get-Date).AddDays(-1)
+    (Get-Item -LiteralPath $b).LastWriteTime = (Get-Date).AddDays(-3)
+    $order = Get-GuiOldNewOrder @($b, $a) -Detail
+    Assert-Equal @($a, $b) $order.Paths
+    Assert-Match $order.Rule 'いちばん新しいファイルの更新日時'
+    Assert-Equal $true $order.ByTime
+}
+
 Test-Case 'Start-ExcelTools: 結果の既定の保存先（名前_日時。同じ名前があれば連番）と、同じことをするコマンド・PowerShell の画面で実行するスクリプト' {
     $dir = New-TestDir
     $compare = Get-TestEntry 'Compare'

@@ -115,6 +115,26 @@ Test-Case 'Measure-ReviewEffectiveness: 指摘管理表に設計書の列が無�
     Assert-Match "$($warning[0])" 'レビュー記録_SCR002_受注登録\.xlsx'
 }
 
+Test-Case 'Measure-ReviewEffectiveness: 版を上げて設計書の名前の版数が変わっても、指摘・規模・バグ・機能の対応表を同じ設計書に対応付ける' {
+    $dir = New-TestDir
+    # 指摘はレビューした v1.0 の名前、規模（ページ数）は版を上げたあとの v1.1（v1.0 の行も残っている）、バグは v1.1 の名前と機能
+    @('設計書,指摘内容,分類,状態',
+        'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx,桁数が違う,誤り,完了',
+        'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx,型が違う,誤り,完了',
+        'DD02_画面設計書_SCR002_受注登録_v1.0.xlsx,必須の誤り,誤り,完了') | Set-Content -LiteralPath (Join-Path $dir 'findings.csv') -Encoding UTF8
+    $pages = Join-Path $dir 'pages.csv'
+    @('"ファイル","ページ数"', '"DD02_画面設計書_SCR001_受注一覧_v1.0.pdf","3"', '"DD02_画面設計書_SCR001_受注一覧_v1.1.pdf","4"', '"DD02_画面設計書_SCR002_受注登録_v1.1.pdf","10"') | Set-Content -LiteralPath $pages -Encoding UTF8
+    @('障害番号,障害内容,機能,設計書,混入工程,状態',
+        'B1,登録の必須チェックが無い,,DD02_画面設計書_SCR002_受注登録_v1.1.xlsx,詳細設計,完了',
+        'B2,一覧のソート順,一覧画面,,詳細設計,完了') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    # 機能の対応表の設計書は版数を付けずに書く
+    @('機能,別名,設計書', 'SCR001,一覧画面,DD02_画面設計書_SCR001_受注一覧') | Set-Content -LiteralPath (Join-Path $dir 'map.csv') -Encoding UTF8
+    $text = Get-HostText { $script:effect = @(& $EffectTool -Findings (Join-Path $dir 'findings.csv') -BugList (Join-Path $dir 'bugs.csv') -SizeCsv $pages -FunctionMap (Join-Path $dir 'map.csv') -AsOf '2026-10-20' 3>$null) }
+    Assert-Equal @('DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx|2|1|4|B2', 'DD02_画面設計書_SCR002_受注登録_v1.0.xlsx|1|1|10|B1') @($script:effect | Sort-Object Document | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Document, $_.Findings, $_.DesignBugs, $_.Size, $_.BugIds })
+    Assert-Match $text '設計書 2 件・設計で入ったバグ 2 件（設計書に対応付けたもの 2 件）'
+    Assert-NotMatch $text '対応付けられなかったバグ'
+}
+
 Test-Case 'Measure-ReviewEffectiveness: Get-Help でヘルプが表示される' {
     $h = Get-Help $EffectTool -Full
     Assert-Match $h.Synopsis 'レビューで見逃した'

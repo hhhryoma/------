@@ -105,6 +105,34 @@ Test-Case 'Invoke-SendTo: 差分は 2 つを選び、版数（無ければ更新
     Assert-Throws { Invoke-SendTo @{ Action = 'SpVersion'; Text = '3.0' } @($v10) } '同期している SharePoint のフォルダのファイルではありません'
 }
 
+Test-Case 'Invoke-SendTo: 差分で 2 つのフォルダを選ぶと、フォルダの更新日時でなく中のファイルの版数で旧・新を決め、決め方を表示する' {
+    $dir = New-TestDir
+    $first = Join-Path $dir '提出/第1回'; $second = Join-Path $dir '提出/第2回'
+    New-Item -ItemType Directory -Path $first, $second -Force | Out-Null
+    New-VersionBook (Join-Path $first '受注_v1.0.xlsx') '受注'
+    New-VersionBook (Join-Path $second '受注_v1.1.xlsx') '受注明細'
+    # 旧のフォルダのファイルを Excel で開いた（~$ のファイルができて消え、旧のフォルダの更新日時が新しくなった）
+    (Get-Item -LiteralPath $second).LastWriteTime = (Get-Date).AddMinutes(-10)
+    $lock = Join-Path $first '~$受注_v1.0.xlsx'
+    [System.IO.File]::WriteAllText($lock, 'x'); Remove-Item -LiteralPath $lock
+    $outDir = Join-Path $dir '結果'
+    $text = Get-HostText { & $SendTo -Action Compare -OutDir $outDir -NoOpen -NoPause $first $second | Out-Null }
+    Assert-Match $text ('旧: {0}' -f [regex]::Escape($first))
+    Assert-Match $text '旧・新はフォルダの中のファイルの版数（版数の違うファイル 1 組のうち 1 組）で決めました'
+    Assert-NotMatch $text '更新日時で決めました'
+    $rows = Get-SheetValues (Get-ResultFiles $outDir)[0]
+    Assert-True (@($rows | Where-Object { $_ -match '\|受注\|受注明細$' }).Count -eq 1) ($rows -join ' / ')
+
+    # 版数の無いファイルどうしは更新日時で決め、警告する
+    $a = Join-Path $dir 'a.xlsx'; $b = Join-Path $dir 'b.xlsx'
+    New-VersionBook $a '受注'
+    New-VersionBook $b '受注明細'
+    (Get-Item -LiteralPath $a).LastWriteTime = (Get-Date).AddDays(-1)
+    $text = Get-HostText { & $SendTo -Action Compare -OutDir (Join-Path $dir '結果2') -NoOpen -NoPause $b $a | Out-Null }
+    Assert-Match $text '旧・新は更新日時で決めました'
+    Assert-Match $text '版数で旧・新を決められないため、更新日時で決めました'
+}
+
 Test-Case 'Invoke-SendTo: 検索は入力した文字そのものを探す。対象が無い・見つからないときはエラーを知らせる' {
     $dir = New-TestDir
     New-VersionBook (Join-Path $dir '受注 (1).xlsx') '受注.明細'
