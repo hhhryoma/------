@@ -294,8 +294,8 @@ function Add-DrawingItem {
     #     シートに直接置いたものは $null）、Transform はグループの中の図形の座標を、いちばん外のグループの座標にする倍率と移動（SX TX SY TY）
     param($Items, [System.Xml.XmlElement] $Node, $Anchor, [string] $Cell, [string] $ParentPath, $Top, $Transform, $Package, $Rels, [hashtable] $Images)
     $nv = $Node.SelectSingleNode("*[starts-with(local-name(), 'nv')]/*[local-name()='cNvPr']")
-    $name = ''; $hidden = $false
-    if ($nv) { $name = $nv.GetAttribute('name'); $hidden = @('1', 'true') -contains $nv.GetAttribute('hidden') }
+    $name = ''; $hidden = $false; $descr = ''
+    if ($nv) { $name = $nv.GetAttribute('name'); $hidden = @('1', 'true') -contains $nv.GetAttribute('hidden'); $descr = $nv.GetAttribute('descr') }
     $text = ''
     if ($Node.LocalName -eq 'sp') {
         # 段落と、段落の中の改行（<a:br>。Shift+Enter の改行）を改行にしてつなぐ（Search-Excel と同じ）
@@ -304,7 +304,7 @@ function Add-DrawingItem {
     $path = $name
     if ($ParentPath) { $path = $ParentPath + '/' + $name }
     $item = [pscustomobject]@{
-        Name = $name; Kind = $Node.LocalName; Text = $text; Path = $path; Key = ''; Group = ''; Cell = $Cell; Anchor = $Anchor; Box = $null
+        Name = $name; Kind = $Node.LocalName; Text = $text; Descr = $descr; Path = $path; Key = ''; Group = ''; Cell = $Cell; Anchor = $Anchor; Box = $null
         Hidden = $hidden; Bounds = $null; Size = $null; Crop = $null; Look = ''; Hash = ''; Media = ''; Width = 0; Height = 0
     }
     # 見た目の要約: 名前・番号（nvSpPr など）と、グループの中の図形（それぞれの要約がある）を除いた XML。
@@ -384,7 +384,7 @@ function Add-DrawingItem {
 
 function Read-SheetDrawingItems {
     #     シートの図形・画像（描画パーツ）を、文書の順に読む（グループの中のものも。互換用の代替表示（mc:Fallback）は除く）。
-    #       Name・Kind（sp 図形 / pic 画像 / grpSp グループ / graphicFrame グラフ / cxnSp 線）・Text
+    #       Name・Kind（sp 図形 / pic 画像 / grpSp グループ / graphicFrame グラフ / cxnSp 線）・Text・Descr（代替テキスト）
     #       Path（グループの中なら「グループ名/名前」）・Key（Path#同じ Path の何番目か）・Group（グループの中なら、いちばん外のグループの名前）
     #       Cell（シートに置いた図形の左上のセル）・Anchor（R1 C1 OX OY と、R2 C2 EX EY（セルに合わせる）または W H。ピクセル。
     #       位置で置いたもの（absoluteAnchor）は、その位置のセルとセルの左上からのずれ。列の幅・行の高さは Get-SheetGeometry の目安）
@@ -2573,10 +2573,112 @@ function ConvertTo-MarkdownText {
     return $t
 }
 
+function Get-MarkdownLeftColumn {
+    #     Cols（小さい順）のうち、Col 以下でいちばん右の列。無ければ $null
+    param([int[]] $Cols, [int] $Col)
+    $found = $null
+    foreach ($c in $Cols) { if ($c -le $Col) { $found = $c } else { break } }
+    return $found
+}
+
+function Join-MarkdownHeaderRows {
+    #     2 行の見出し（上の行の「予定」「実績」の下に「開始」「終了」がある）なら、列 → 「予定 開始」のような見出し（SortedDictionary）。
+    #     そうでなければ $null。上の行の見出しは結合されていることが多いので、右へ続くものとして下の行の見出しとつなぐ（Measure-Progress と同じ）。
+    #       下の行: 2 つ以上の、数値・日付でない値。上の行に見出しの無い列の値は、左の上の見出しの列から続く（その列にも下の行の値がある）。
+    #               上の行に見出しのある列の値は、右に続く下の行の値がある（上の見出しの下に 2 つ以上の見出しがある）
+    #       Next（その次の行）: 見出しのある列だけに 2 つ以上の値がある
+    param($Upper, $Lower, $Next)
+    if ($Upper.Count -lt 2 -or $Lower.Count -lt 2) { return $null }
+    $up = @{}
+    foreach ($c in $Upper) { $up[$c.Col] = $c.Text }
+    $low = @{}
+    foreach ($c in $Lower) { $low[$c.Col] = $c.Text }
+    $upCols = [int[]]@($up.Keys)
+    [Array]::Sort($upCols)
+    $children = @{}
+    foreach ($c in $Lower) {
+        $t = $c.Text.Trim()
+        if ($t -match '^[\d\s,.:/%+\-]*$' -or $t.StartsWith('■')) { return $null }
+        if ($up.ContainsKey($c.Col)) { continue }
+        $parent = Get-MarkdownLeftColumn $upCols $c.Col
+        if ($null -eq $parent -or -not $low.ContainsKey($parent)) { return $null }
+        $children[$parent] = $true
+    }
+    if ($children.Count -eq 0) { return $null }
+    foreach ($c in $Lower) { if ($up.ContainsKey($c.Col) -and -not $children.ContainsKey($c.Col)) { return $null } }
+    $n = 0
+    foreach ($c in $Next) {
+        if (-not ($up.ContainsKey($c.Col) -or $low.ContainsKey($c.Col))) { return $null }
+        $n++
+    }
+    if ($n -lt 2) { return $null }
+    $columns = New-Object 'System.Collections.Generic.SortedDictionary[int,string]'
+    foreach ($col in @(@($up.Keys) + @($low.Keys))) {
+        if ($columns.ContainsKey($col)) { continue }
+        if (-not $low.ContainsKey($col)) { $columns[$col] = $up[$col]; continue }
+        $parent = Get-MarkdownLeftColumn $upCols $col
+        if ($null -eq $parent) { $columns[$col] = $low[$col] }
+        else { $columns[$col] = $up[$parent].Trim() + ' ' + $low[$col].Trim() }
+    }
+    return , $columns
+}
+
+function Get-MarkdownTable {
+    #     RowNums の Index の行から始まる表。戻り値: Columns（列 → 見出し。SortedDictionary）・HeaderRows（見出しの行数）・Body（表の行の番号）・
+    #     Next（表の次の行の Index）。表でなければ $null
+    #       見出し: 3 つ以上の値のある行、または 2 行の見出し（Join-MarkdownHeaderRows）
+    #       表の行: 見出しの列だけを使う行。見出しの列より右に値（備考など）があっても、見出しの列の値が 2 つ以上でそちらのほうが多ければ
+    #               表の行にし、その列を見出しの空いた列として足す（見出しの列の間に値のある行は入れない。帳票の上の欄の 2 行目など）
+    #       空の行: 最初の列の番号（No など）が続く行は、2 行までの空の行をはさんでも同じ表にする（表の下の注記や次の表は入れない）
+    param($Rows, [int[]] $RowNums, [int] $Index)
+    $first = $Rows[$RowNums[$Index]]
+    $columns = $null
+    $headerRows = 1
+    if ($Index + 2 -lt $RowNums.Count -and $RowNums[$Index + 1] -eq $RowNums[$Index] + 1 -and $RowNums[$Index + 2] -eq $RowNums[$Index] + 2) {
+        $columns = Join-MarkdownHeaderRows $first $Rows[$RowNums[$Index + 1]] $Rows[$RowNums[$Index + 2]]
+        if ($columns) { $headerRows = 2 }
+    }
+    if (-not $columns) {
+        if ($first.Count -lt 3) { return $null }
+        $columns = New-Object 'System.Collections.Generic.SortedDictionary[int,string]'
+        foreach ($c in $first) { $columns[$c.Col] = $c.Text }
+    }
+    $firstCol = @($columns.Keys)[0]
+    $lastCol = @($columns.Keys)[-1]
+    $extra = @{}
+    $body = New-Object System.Collections.Generic.List[int]
+    $lastNo = $null
+    $prev = $RowNums[$Index + $headerRows - 1]
+    $k = $Index + $headerRows
+    while ($k -lt $RowNums.Count) {
+        $rowNum = $RowNums[$k]
+        $cells = $Rows[$rowNum]
+        if ($cells[0].Text.TrimStart().StartsWith('■')) { break }
+        $gap = $rowNum - $prev - 1
+        if ($gap -gt 2) { break }
+        $in = 0; $out = 0; $no = $null
+        foreach ($c in $cells) {
+            if ($columns.ContainsKey($c.Col)) { $in++ }
+            elseif ($c.Col -gt $lastCol) { $out++ }
+            else { $out = [int]::MaxValue; break }
+            if ($c.Col -eq $firstCol -and $c.Text.Trim() -match '^[0-9]{1,9}$') { $no = [int]$c.Text.Trim() }
+        }
+        if ($out -gt 0 -and -not ($in -ge 2 -and $in -gt $out)) { break }
+        if ($gap -gt 0 -and ($null -eq $no -or $null -eq $lastNo -or $no -le $lastNo -or $in -lt 2)) { break }
+        foreach ($c in $cells) { if (-not $columns.ContainsKey($c.Col)) { $extra[$c.Col] = $true } }
+        if ($null -ne $no) { $lastNo = $no }
+        $body.Add($rowNum)
+        $prev = $rowNum
+        $k++
+    }
+    if ($body.Count -eq 0) { return $null }
+    foreach ($col in $extra.Keys) { $columns[$col] = '' }
+    return [pscustomobject]@{ Columns = $columns; HeaderRows = $headerRows; Body = $body; Next = $k }
+}
+
 function ConvertTo-SheetMarkdown {
     #     1 シートの値（行番号 → 列の順のセル）を Markdown の行にして Lines に足す。
-    #       見出しの行（3 つ以上の値）の下に、見出しの列だけを使う行が続くところは表に、それ以外の行は箇条書きに、
-    #       「■」で始まる行は小見出しにする。
+    #       表（Get-MarkdownTable）は表に、それ以外の行は箇条書きに、「■」で始まる行は小見出しにする。
     #       -CellAddress: 表に行番号、箇条書きにセル番地を付ける。-ColumnLetter: 表の見出しに列を付ける（C:項目名）
     param($Rows, [System.Collections.Generic.List[string]] $Lines, [switch] $CellAddress, [switch] $ColumnLetter)
     $rowNums = [int[]]@($Rows.Keys)
@@ -2593,41 +2695,29 @@ function ConvertTo-SheetMarkdown {
             $i++
             continue
         }
-        $headerCols = @{}
-        foreach ($c in $cells) { $headerCols[$c.Col] = $true }
-        $j = $i + 1
-        if ($cells.Count -ge 3) {
-            while ($j -lt $rowNums.Count -and $rowNums[$j] -eq $rowNums[$j - 1] + 1) {
-                $next = $Rows[$rowNums[$j]]
-                if ($next[0].Text.TrimStart().StartsWith('■')) { break }
-                $inside = $true
-                foreach ($c in $next) { if (-not $headerCols.ContainsKey($c.Col)) { $inside = $false; break } }
-                if (-not $inside) { break }
-                $j++
-            }
-        }
-        if ($j - $i -ge 2) {
+        $table = Get-MarkdownTable $Rows $rowNums $i
+        if ($table) {
             if ($last) { $Lines.Add('') }
-            $cols = @($cells | ForEach-Object { $_.Col })
-            $head = @($cells | ForEach-Object {
-                    $h = ConvertTo-MarkdownText $_.Text -InTable
-                    if ($ColumnLetter) { $h = '{0}:{1}' -f (ConvertTo-ColumnName $_.Col), $h }
+            $cols = @($table.Columns.Keys)
+            $head = @($cols | ForEach-Object {
+                    $h = ConvertTo-MarkdownText $table.Columns[$_] -InTable
+                    if ($ColumnLetter) { $h = '{0}:{1}' -f (ConvertTo-ColumnName $_), $h }
                     $h
                 })
             $sep = @($cols | ForEach-Object { '---' })
             if ($CellAddress) { $head = @('行') + $head; $sep = @('---') + $sep }
             $Lines.Add('| ' + ($head -join ' | ') + ' |')
             $Lines.Add('| ' + ($sep -join ' | ') + ' |')
-            for ($k = $i + 1; $k -lt $j; $k++) {
+            foreach ($rowNum in $table.Body) {
                 $byCol = @{}
-                foreach ($c in $Rows[$rowNums[$k]]) { $byCol[$c.Col] = $c.Text }
+                foreach ($c in $Rows[$rowNum]) { $byCol[$c.Col] = $c.Text }
                 $vals = @($cols | ForEach-Object { ConvertTo-MarkdownText $byCol[$_] -InTable })
-                if ($CellAddress) { $vals = @([string]$rowNums[$k]) + $vals }
+                if ($CellAddress) { $vals = @([string]$rowNum) + $vals }
                 $Lines.Add('| ' + ($vals -join ' | ') + ' |')
             }
             $Lines.Add('')
             $last = ''
-            $i = $j
+            $i = $table.Next
             continue
         }
         if ($last -ne 'list' -and $Lines.Count -gt 0 -and $Lines[$Lines.Count - 1] -ne '') { $Lines.Add('') }
@@ -2642,8 +2732,9 @@ function ConvertTo-SheetMarkdown {
 function ConvertTo-SheetMarkdownLines {
     #     Search-Excel の結果（1 ブック分。Target は Value・Comment・Shape・SheetName）を、
     #     シート名 → そのシートの Markdown の行（「## シート名」から）の順序付き辞書にする。
-    #     図形・コメントはシートごとに後ろへまとめる
-    param($Hits, [switch] $CellAddress, [switch] $ColumnLetter)
+    #     図形・画像・コメントはシートごとに後ろへまとめる。Pictures はシート名 → 画像（Name・Text（代替テキスト）・Cell・Width・Height・
+    #     Hash・Hidden・Link（画像のファイルへのリンク。無ければ空））
+    param($Hits, [switch] $CellAddress, [switch] $ColumnLetter, [hashtable] $Pictures)
     # シート → 行番号 → セル（列の順）
     $sheets = [ordered]@{}
     foreach ($h in $Hits) {
@@ -2668,7 +2759,9 @@ function ConvertTo-SheetMarkdownLines {
         $result[$name] = $lines
         $lines.Add('## ' + $name)
         $lines.Add('')
-        if ($s.Rows.Count -eq 0 -and $s.Shapes.Count -eq 0 -and $s.Comments.Count -eq 0) { $lines.Add('（空）'); $lines.Add(''); continue }
+        $pics = @()
+        if ($Pictures -and $Pictures.ContainsKey($name)) { $pics = @($Pictures[$name]) }
+        if ($s.Rows.Count -eq 0 -and $s.Shapes.Count -eq 0 -and $s.Comments.Count -eq 0 -and $pics.Count -eq 0) { $lines.Add('（空）'); $lines.Add(''); continue }
         foreach ($row in @($s.Rows.Keys)) {
             $sorted = @($s.Rows[$row] | Sort-Object Col)
             $s.Rows[$row] = $sorted
@@ -2685,6 +2778,24 @@ function ConvertTo-SheetMarkdownLines {
             }
             $lines.Add('')
         }
+        if ($pics.Count -gt 0) {
+            # 画像の中身は、大きさと中身の目印（ハッシュ値の先頭）で表す（差し替えると差分に出る）
+            $lines.Add('### 画像')
+            $lines.Add('')
+            foreach ($p in $pics) {
+                $line = '- ' + $p.Name
+                if ($CellAddress -and $p.Cell) { $line = '- {0}（{1} 付近）' -f $p.Name, $p.Cell }
+                if ($p.Text) { $line += ': ' + (ConvertTo-MarkdownText $p.Text) }
+                $info = @()
+                if ($p.Width -gt 0 -and $p.Height -gt 0) { $info += ('{0}×{1}' -f $p.Width, $p.Height) }
+                if ($p.Hash) { $info += $p.Hash.Substring(0, [math]::Min(8, $p.Hash.Length)) }
+                if ($p.Hidden) { $info += '非表示' }
+                if ($info.Count -gt 0) { $line += '（画像 ' + ($info -join '・') + '）' }
+                $lines.Add($line)
+                if ($p.Link) { $lines.Add(('  ![{0}](<{1}>)' -f ($p.Name -replace '[\[\]]', ''), $p.Link)) }
+            }
+            $lines.Add('')
+        }
         if ($s.Comments.Count -gt 0) {
             $lines.Add('### コメント')
             $lines.Add('')
@@ -2696,11 +2807,12 @@ function ConvertTo-SheetMarkdownLines {
 }
 
 function ConvertTo-BookMarkdown {
-    #     Search-Excel の結果（1 ブック分）を Markdown の文字列にする（Title があれば「# Title」の見出しを付ける）
-    param([string] $Title, $Hits, [switch] $CellAddress)
+    #     Search-Excel の結果（1 ブック分）を Markdown の文字列にする（Title があれば「# Title」の見出しを付ける）。
+    #     Pictures はシート名 → 画像（ConvertTo-SheetMarkdownLines）
+    param([string] $Title, $Hits, [switch] $CellAddress, [hashtable] $Pictures)
     $lines = New-Object System.Collections.Generic.List[string]
     if ($Title) { $lines.Add('# ' + $Title); $lines.Add('') }
-    $sheets = ConvertTo-SheetMarkdownLines $Hits -CellAddress:$CellAddress
+    $sheets = ConvertTo-SheetMarkdownLines $Hits -CellAddress:$CellAddress -Pictures $Pictures
     foreach ($name in $sheets.Keys) { $lines.AddRange($sheets[$name]) }
     while ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
     return (($lines -join "`n") + "`n")
