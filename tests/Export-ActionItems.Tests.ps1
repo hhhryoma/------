@@ -236,6 +236,21 @@ Test-Case 'Export-ActionItems: -OutXlsx の期限・起票日と決定事項の�
     Assert-Equal '2026/10/23|2026/10/20' ('{0}|{1}' -f $csv[0].'期限', $csv[0].'起票日')
 }
 
+Test-Case 'Export-ActionItems: 宿題の表で縦に結合した担当・期限は結合した各行の値として読み、結合したセルに書いた本文はくり返さない' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $xlsx = Join-Path $dir '20261020_定例.xlsx'
+    Export-Workbook -FilePath $xlsx -Sheets @(
+        @{ Name = '宿題'; Columns = @(@('No', '内容', '担当', '期限') | ForEach-Object { @{ Header = $_; Width = 20 } }); Rows = @(
+                @{ Values = @('1', '画面設計書を直す', '山田', '10/30') }, @{ Values = @('2', 'テーブル定義書を直す', '', '') }) },
+        @{ Name = '議事録'; Columns = @(@{ Header = '定例会議 議事録'; Width = 60 }); Rows = @(@{ Values = @("■ 宿題`n・IF 定義書を更新する（佐藤、10/28まで）") }) })
+    # 宿題の表の担当・期限を 2 行ずつ結合し、議事録のシートの本文のセルを 5 行に結合する
+    Edit-ZipText $xlsx 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('<pageMargins', '<mergeCells count="2"><mergeCell ref="C2:C3"/><mergeCell ref="D2:D3"/></mergeCells><pageMargins') }
+    Edit-ZipText $xlsx 'xl/worksheets/sheet2.xml' { param($t) $t.Replace('<pageMargins', '<mergeCells count="1"><mergeCell ref="A2:A6"/></mergeCells><pageMargins') }
+    $r = @(& $ActionItems $xlsx 6>$null)
+    Assert-Equal @('画面設計書を直す|山田|2026/10/30', 'テーブル定義書を直す|山田|2026/10/30', 'IF 定義書を更新する|佐藤|2026/10/28') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Title, $_.Owner, $(if ($_.Due) { $_.Due.ToString('yyyy/MM/dd') } else { '' }) })
+}
+
 Test-Case 'Export-ActionItems: Get-Help でヘルプが表示される' {
     $h = Get-Help $ActionItems
     Assert-Match $h.Synopsis '議事録'

@@ -149,7 +149,8 @@ foreach ($p in $Path) {
 # 読み取り結果（どのファイル・シートをどの見出しで読んだか）
 $readLog = New-Object System.Collections.Generic.List[object]
 if ($excelFiles.Count -gt 0) {
-    $searchArgs = @{ Pattern = '\S'; Path = $excelFiles.ToArray(); Target = 'Value' }
+    # 縦に結合したセル（状態・期限など）は、結合した各行の値として読む（Read-HeaderRecords と同じ）
+    $searchArgs = @{ Pattern = '\S'; Path = $excelFiles.ToArray(); Target = 'Value'; FillMerged = $true }
     if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
     if ($NoExcel) { $searchArgs['NoExcel'] = $true }
     $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
@@ -171,7 +172,8 @@ if ($excelFiles.Count -gt 0) {
             }
             if (-not $map) { continue }
             $tableFound = $true
-            foreach ($t in (Find-DesignTables $grid @($map.Values) $map['指摘内容'])) {
+            # 一覧の表として読む（「■索引: …」のように「■」で始まる指摘内容の行で表を終えない）
+            foreach ($t in (Find-DesignTables $grid @($map.Values) $map['指摘内容'] -List)) {
                 Add-ReadLog $readLog '指摘管理表' $book.File $sheetName $t.HeaderRow $t.Rows.Count $map $fields ''
                 foreach ($dr in $t.Rows) {
                     $v = @{}

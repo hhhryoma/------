@@ -40,8 +40,10 @@ $ignoreCase = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
 
 function New-Line {
     #     Row: Excel の行番号（表の終わりを、行が飛んだことで見分ける）。ほかは 0
-    param([string] $Text, $Cells, $Place, [int] $Row = 0)
-    return [pscustomobject]@{ Text = $Text; Cells = $Cells; Place = $Place; Row = $Row }
+    #     FilledCells: Excel の行の、縦に結合したセルを結合した各行の値にしたセル（宿題の表の行を読むときだけ使う）
+    param([string] $Text, $Cells, $Place, [int] $Row = 0, $FilledCells)
+    if ($null -eq $FilledCells) { $FilledCells = $Cells }
+    return [pscustomobject]@{ Text = $Text; Cells = $Cells; Place = $Place; Row = $Row; FilledCells = $FilledCells }
 }
 
 function Split-CellLines {
@@ -155,15 +157,25 @@ if ($excelPaths.Count -gt 0) {
     $searchArgs = @{ Pattern = '\S'; Path = $excelPaths.ToArray(); Target = 'Value'; NoRecurse = $true }
     if ($NoExcel) { $searchArgs['NoExcel'] = $true }
     $books = ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null)
+    # 縦に結合したセル（宿題の表の担当・期限など）は、宿題の表の行だけ、結合した各行の値として読む
+    # （議事録の本文を大きく結合したセルに書いたものを、結合した行の数だけくり返して読まないため）
+    $filledBooks = ConvertTo-DesignBooks @(& $searchScript @searchArgs -FillMerged 6>$null)
     foreach ($book in $books.Values) {
         $lines = New-Object System.Collections.Generic.List[object]
         foreach ($sheetName in $book.Sheets.Keys) {
             $grid = $book.Sheets[$sheetName]
+            $filledGrid = $null
+            if ($filledBooks.Contains($book.Path)) { $filledGrid = $filledBooks[$book.Path].Sheets[$sheetName] }
             foreach ($row in $grid.Rows) {
                 $cols = @($grid.Cols[$row])
                 # 空のセルは読み取り結果に無いため、列の位置どおりに並べる（表の見出しと列を合わせる）
                 $cells = @(for ($c = 1; $c -le $cols[-1]; $c++) { [string]$grid.Cells[$row][$c] })
-                $lines.Add((New-Line ((@($cells | Where-Object { $_ })) -join ' ') $cells ([pscustomobject]@{ File = $book.File; Path = $book.Path; Sheet = $sheetName; Cell = ('{0}{1}' -f (ConvertTo-ColumnName $cols[0]), $row) }) $row))
+                $filled = $cells
+                if ($filledGrid -and $filledGrid.Cells.ContainsKey($row)) {
+                    $last = [math]::Max($cols[-1], @($filledGrid.Cols[$row])[-1])
+                    $filled = @(for ($c = 1; $c -le $last; $c++) { [string]$filledGrid.Cells[$row][$c] })
+                }
+                $lines.Add((New-Line ((@($cells | Where-Object { $_ })) -join ' ') $cells ([pscustomobject]@{ File = $book.File; Path = $book.Path; Sheet = $sheetName; Cell = ('{0}{1}' -f (ConvertTo-ColumnName $cols[0]), $row) }) $row $filled))
             }
             $lines.Add((New-Line '' $null $null))
         }
@@ -391,8 +403,8 @@ foreach ($doc in $documents) {
             $map = Find-TableMap $line.Cells
             if ($map) { $tableMap = $map; continue }
             if ($tableMap) {
-                # セルの中の改行（Excel の ↵）は空白にして 1 行にする
-                $cell = { param($k) if ($tableMap.ContainsKey($k) -and $tableMap[$k] -lt $line.Cells.Count) { (([string]$line.Cells[$tableMap[$k]]) -replace '\s*↵\s*', ' ').Trim() } else { '' } }
+                # セルの中の改行（Excel の ↵）は空白にして 1 行にする。縦に結合したセルは、結合した各行の値として読む
+                $cell = { param($k) if ($tableMap.ContainsKey($k) -and $tableMap[$k] -lt $line.FilledCells.Count) { (([string]$line.FilledCells[$tableMap[$k]]) -replace '\s*↵\s*', ' ').Trim() } else { '' } }
                 $content = & $cell 'Content'
                 if (-not $content) { continue }
                 $kind = '宿題'

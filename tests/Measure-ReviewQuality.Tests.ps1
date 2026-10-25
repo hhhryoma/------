@@ -354,6 +354,20 @@ Test-Case 'Measure-ReviewQuality: 基準値の CSV の指摘密度・レビュ�
     Assert-Equal 'SCR001|0.5|基準内' ('{0}|{1}|{2}' -f $r[0].Document, $r[0].Density, $r[0].Judgement) '指摘密度の基準値（0.4〜0.6）と比べる'
 }
 
+Test-Case 'Measure-ReviewQuality: 「■」で始まる指摘内容の行で表を終えず、縦に結合した対応状況は結合した各行の値として読む' {
+    $dir = New-TestDir
+    $book = Join-Path $dir '指摘管理表.xlsx'
+    New-FindingBook $book '指摘' @('No', '対象成果物', '指摘内容', '対応状況') @(
+        @('1', 'DD03_テーブル定義書', '型が違う', '完了'),
+        @('2', 'DD03_テーブル定義書', '■索引: 一意索引が足りない', '対応中'),
+        @('3', 'DD03_テーブル定義書', '桁数が違う', '完了'),
+        @('4', 'DD03_テーブル定義書', '必須が違う', ''))
+    # 3 件目・4 件目の指摘の対応状況（D4:D5）を結合する
+    Edit-ZipText $book 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('<pageMargins', '<mergeCells count="1"><mergeCell ref="D4:D5"/></mergeCells><pageMargins') }
+    $r = @(& $QualityTool -Path $book -AsOf '2026-10-20' 6>$null 3>$null)
+    Assert-Equal 'DD03_テーブル定義書|4|1' ('{0}|{1}|{2}' -f $r[0].Document, $r[0].Findings, $r[0].Open) '指摘 4 件・未完了 1 件（■索引 の指摘だけ）'
+}
+
 Test-Case 'Measure-ReviewQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityTool
     Assert-Match $h.Synopsis '指摘'
