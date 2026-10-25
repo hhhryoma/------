@@ -191,3 +191,30 @@ Test-Case 'ExcelTools: Resolve-PhaseName は、「コードレビュー」のよ
     $names = @(@('コードレビュー', '詳細設計レビュー', 'DDレビュー', '製造工程', 'UT', '設計', '') | ForEach-Object { $p = Resolve-PhaseName $phases $_; if ($p) { $p.Name } else { '（読めない）' } })
     Assert-Equal @('製造', '詳細設計', '詳細設計', '製造', '単体テスト', '（読めない）', '（読めない）') $names
 }
+
+function ConvertTo-WordBlockTexts {
+    #     Word の本文（w:body の中の XML）を Get-WordBlocks で読み、「場所|文字」の一覧にする
+    param([string] $Body)
+    $doc = New-Object System.Xml.XmlDocument
+    $doc.LoadXml('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + $Body + '</w:body></w:document>')
+    $nsm = New-WordNamespaceManager $doc
+    return @(Get-WordBlocks $doc $nsm | ForEach-Object { '{0}|{1}' -f $_.Cell, $_.Text })
+}
+
+Test-Case 'ExcelTools: Get-WordBlocks は、変更履歴で移動した文字の移動元（w:moveFrom）とルビ（ふりがな。w:rt）を読まない（移動先とルビを振った文字は読む）' {
+    $p = { param($t) '<w:r><w:t>' + $t + '</w:t></w:r>' }
+    $body = '<w:p>' + (& $p '担当:') + '<w:r><w:ruby><w:rubyPr><w:hps w:val="10"/></w:rubyPr><w:rt>' + (& $p 'やまだ') + '</w:rt><w:rubyBase>' + (& $p '山田') + '</w:rubyBase></w:ruby></w:r></w:p>' +
+        '<w:p><w:moveFrom w:id="1" w:author="佐藤">' + (& $p '移動した文') + '</w:moveFrom>' + (& $p '本文') + '</w:p>' +
+        '<w:p><w:moveTo w:id="2" w:author="佐藤">' + (& $p '移動した文') + '</w:moveTo></w:p>' +
+        '<w:tbl><w:tr><w:tc><w:p>' + (& $p 'セル1') + '</w:p></w:tc><w:tc><w:p><w:moveFrom w:id="3" w:author="佐藤">' + (& $p '旧') + '</w:moveFrom>' + (& $p 'セル2') + '</w:p></w:tc></w:tr></w:tbl>'
+    Assert-Equal @('段落 1|担当:山田', '段落 2|本文', '段落 3|移動した文', '表 1 の 1 行目|セル1 | セル2') (ConvertTo-WordBlockTexts $body)
+}
+
+Test-Case 'ExcelTools: Get-WordBlocks は、表の中の内容コントロール（繰り返しセクション）の行も文書の順に数えて読み、セルの中の表の行は表の行として読まない' {
+    $row = { param($cells) '<w:tr>' + ((@($cells | ForEach-Object { '<w:tc><w:p><w:r><w:t>' + $_ + '</w:t></w:r></w:p></w:tc>' })) -join '') + '</w:tr>' }
+    $item = { param($cells) '<w:sdt><w:sdtPr/><w:sdtContent>' + (& $row $cells) + '</w:sdtContent></w:sdt>' }
+    $inner = '<w:tc><w:tbl>' + (& $row @('内側')) + '</w:tbl><w:p/></w:tc>'
+    $body = '<w:tbl>' + (& $row @('項目', '桁数')) + '<w:sdt><w:sdtPr/><w:sdtContent>' + (& $item @('受注番号', '10')) + (& $item @('受注日', '8')) + '</w:sdtContent></w:sdt>' +
+        '<w:tr><w:tc><w:p><w:r><w:t>備考</w:t></w:r></w:p></w:tc>' + $inner + '</w:tr></w:tbl><w:p><w:r><w:t>後</w:t></w:r></w:p><w:tbl>' + (& $row @('次の表')) + '</w:tbl>'
+    Assert-Equal @('表 1 の 1 行目|項目 | 桁数', '表 1 の 2 行目|受注番号 | 10', '表 1 の 3 行目|受注日 | 8', '表 1 の 4 行目|備考 | 内側', '段落 1|後', '表 2 の 1 行目|次の表') (ConvertTo-WordBlockTexts $body)
+}

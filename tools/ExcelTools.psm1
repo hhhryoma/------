@@ -173,13 +173,15 @@ function Read-PartXmlForEdit {
 }
 
 function ConvertTo-XmlString {
-    #     XmlDocument を、UTF-8 の宣言付きの文字列にする（字下げや改行は足さない）
+    #     XmlDocument を、UTF-8 の宣言付きの文字列にする（字下げや改行は足さない）。
+    #     属性の中の改行・タブ（入力規則のメッセージなどの &#10;）と文字の中の CR は文字参照で書く（そのまま書くと、読むときに空白・改行に変わる）。
+    #     文字の中の改行（LF）はそのまま書く
     param([System.Xml.XmlDocument] $Document)
 
     $settings = New-Object System.Xml.XmlWriterSettings
     $settings.Encoding = New-Object System.Text.UTF8Encoding($false)
     $settings.Indent = $false
-    $settings.NewLineHandling = [System.Xml.NewLineHandling]::None
+    $settings.NewLineHandling = [System.Xml.NewLineHandling]::Entitize
     $ms = New-Object System.IO.MemoryStream
     $writer = [System.Xml.XmlWriter]::Create($ms, $settings)
     try { $Document.Save($writer) } finally { $writer.Dispose() }
@@ -2735,11 +2737,12 @@ function Get-WordParts {
 
 function Get-WordParagraphText {
     #     段落（w:p）の文字。テキストボックス（w:txbxContent）の中と、互換用の写し（mc:Fallback）・段落の書式（タブ位置）は含めない。
-    #     削除した変更履歴の文字（w:delText）は含めない
+    #     削除した変更履歴の文字（w:delText）と、移動した変更履歴の移動元（w:moveFrom。移動先 w:moveTo に同じ文字がある）、
+    #     ルビ（ふりがな。w:rt）の文字は含めない（ルビを振った文字 w:rubyBase は含める）
     param($Paragraph, $Nsm)
     $depth = $Paragraph.SelectNodes('ancestor::w:txbxContent', $Nsm).Count
     $fallback = $Paragraph.SelectNodes('ancestor::mc:Fallback', $Nsm).Count
-    $xpath = './/*[(self::w:t or self::w:tab or self::w:br or self::w:cr) and not(ancestor::w:pPr) and count(ancestor::w:txbxContent) = {0} and count(ancestor::mc:Fallback) = {1}]' -f $depth, $fallback
+    $xpath = './/*[(self::w:t or self::w:tab or self::w:br or self::w:cr) and not(ancestor::w:pPr) and not(ancestor::w:moveFrom) and not(ancestor::w:rt) and count(ancestor::w:txbxContent) = {0} and count(ancestor::mc:Fallback) = {1}]' -f $depth, $fallback
     $sb = New-Object System.Text.StringBuilder
     foreach ($n in $Paragraph.SelectNodes($xpath, $Nsm)) {
         if ($n.LocalName -eq 't') { [void]$sb.Append($n.InnerText) }
@@ -2751,6 +2754,7 @@ function Get-WordParagraphText {
 
 function Get-WordBlocks {
     #     本文・ヘッダーなどの段落と表の行を、文書の順に場所付きで返す（内容コントロール w:sdt の中も。脚注は区切り線などを除く）。
+    #     表の行は、表の中の内容コントロール（繰り返しセクションなど。入れ子のものも）の中の行も数える。セルの中の表の行は、そのセルの文字として読む。
     #     Cell は「段落 n」（表の外の段落を上から数えた番号。空の段落も数える）と「表 n の m 行目」。どのツールでも同じ場所を指す。
     #     Text は段落の文字、表の行はセルの文字を「 | 」でつないだもの（1 行）。Cells はセルごとの文字（セルの中の段落は改行でつなぐ）、Node は w:p・w:tr
     param($Doc, $Nsm)
@@ -2779,7 +2783,9 @@ function Get-WordBlocks {
         }
         elseif ($node.LocalName -eq 'tbl') {
             $tableNo++; $rowNo = 0
-            foreach ($tr in $node.SelectNodes('w:tr', $Nsm)) {
+            # 行は w:tbl の直下のほか、表の中の内容コントロール（w:sdt/w:sdtContent）などの中にもある。セルの中の表の行（外側の w:tbl が多い）は除く
+            $tableDepth = $node.SelectNodes('ancestor-or-self::w:tbl', $Nsm).Count
+            foreach ($tr in $node.SelectNodes(('.//w:tr[count(ancestor::w:tbl) = {0}]' -f $tableDepth), $Nsm)) {
                 $rowNo++
                 $cells = @(foreach ($tc in $tr.SelectNodes('w:tc | w:sdt/w:sdtContent/w:tc', $Nsm)) {
                         # セルの中のテキストボックスは Get-WordTextBoxes で別に読む

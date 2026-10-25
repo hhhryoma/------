@@ -105,17 +105,34 @@ $xmlNs = 'http://www.w3.org/XML/1998/namespace'
 # ---------------------------------------------------------------- 文字の置換
 
 
+function ConvertFrom-OoxmlEscape {
+    #     OOXML の文字列に含まれる _xHHHH_ 形式のエスケープ（CR の _x000D_ など）を戻す（Search-Excel.ps1 と同じ）
+    param([string] $Text)
+    if ($Text.IndexOf('_x') -lt 0) { return $Text }
+    return [regex]::Replace($Text, '_x([0-9A-Fa-f]{4})_', { param($m) [string][char][Convert]::ToInt32($m.Groups[1].Value, 16) })
+}
+
+function ConvertTo-OoxmlEscape {
+    #     ConvertFrom-OoxmlEscape の逆（Excel と同じ書き方）。CR・制御文字・対になっていないサロゲートなど XML にそのまま書けない文字は _xHHHH_ にする。
+    #     もとからある「_x0041_」の形の文字は、戻したときにエスケープと読まれないよう先頭の _ を _x005F_ にする
+    #     （_xHHHH の後ろの文字が _xHHHH_ になるときも同じ）
+    param([string] $Text)
+    $Text = [regex]::Replace($Text, '_(?=x[0-9A-Fa-f]{4}(?:_|[\x00-\x08\x0B-\x1F\uD800-\uDFFF\uFFFE\uFFFF]))', '_x005F_')
+    return [regex]::Replace($Text, '[\x00-\x08\x0B-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]', { param($m) '_x{0:X4}_' -f [int][char]$m.Value })
+}
+
 function Invoke-TextReplace {
     #     文字の部分（<t> 要素）の並びに、置換の規則を順に当てる。
-    #     返り値: 置換したら @(置換前, 置換後)、一致しなければ $null
-    param($TextNodes, [switch] $PreserveSpace)
+    #     Escaped: セルの文字列・コメントのように _x000D_ などのエスケープを使う部分。Search-Excel と同じく戻した文字で一致させ、書くときにエスケープし直す
+    #     返り値: 置換したら @(置換前, 置換後)（エスケープしたままの文字）、一致しなければ $null
+    param($TextNodes, [switch] $PreserveSpace, [switch] $Escaped)
 
     $nodes = @($TextNodes)
     if ($nodes.Count -eq 0) { return $null }
     $before = -join @($nodes | ForEach-Object { $_.InnerText })
     $changed = $false
     foreach ($rule in $script:Rules) {
-        if (Invoke-RuleReplace $nodes $rule -PreserveSpace:$PreserveSpace) { $changed = $true }
+        if (Invoke-RuleReplace $nodes $rule -PreserveSpace:$PreserveSpace -Escaped:$Escaped) { $changed = $true }
     }
     if (-not $changed) { return $null }
     $after = -join @($nodes | ForEach-Object { $_.InnerText })
@@ -138,11 +155,13 @@ function Test-AnyRuleMatch {
 function Invoke-RuleReplace {
     #     文字の部分（<t> 要素）の並びをつなげた文字列で 1 つの規則の置換をし、置換後の文字を元の部分に配り直す。
     #     置換した文字は一致した箇所の先頭がある部分に入れるので、ほかの文字の書式（部分ごとの太字・色など）は変わらない。
-    #     空文字に一致した箇所と、置換後の文字の一部として一致した箇所は置換しない。返り値: 置換したか
-    param($TextNodes, $Rule, [switch] $PreserveSpace)
+    #     空文字に一致した箇所と、置換後の文字の一部として一致した箇所は置換しない。
+    #     Escaped なら、エスケープ（_x000D_ など）を戻した文字で一致させ（エスケープの途中では一致しない）、書き換えた部分だけエスケープし直す。返り値: 置換したか
+    param($TextNodes, $Rule, [switch] $PreserveSpace, [switch] $Escaped)
 
     $nodes = @($TextNodes)
     $texts = @($nodes | ForEach-Object { $_.InnerText })
+    if ($Escaped) { $texts = @($texts | ForEach-Object { ConvertFrom-OoxmlEscape $_ }) }
     $full = -join $texts
     $protected = @()
     if ($Rule.Protect) { $protected = @($Rule.Protect.Matches($full)) }
@@ -182,6 +201,7 @@ function Invoke-RuleReplace {
     for ($k = 0; $k -lt $nodes.Count; $k++) {
         $t = $out[$k].ToString()
         if ($t -ceq $texts[$k]) { continue }
+        if ($Escaped) { $t = ConvertTo-OoxmlEscape $t }
         $nodes[$k].InnerText = $t
         # 先頭・末尾の空白や改行を保つ
         if ($PreserveSpace -and $t -ne $t.Trim()) { [void]$nodes[$k].SetAttribute('space', $xmlNs, 'preserve') }
@@ -190,11 +210,11 @@ function Invoke-RuleReplace {
 }
 
 function Invoke-RichTextReplace {
-    #     <si> / <is> / コメントの <text> の中の文字を置換する。文字が変わったらふりがな（<rPh>）は位置が合わなくなるので消す
+    #     <si> / <is> / コメントの <text> の中の文字を置換する（_x000D_ などのエスケープは戻した文字で）。文字が変わったらふりがな（<rPh>）は位置が合わなくなるので消す
     param([System.Xml.XmlElement] $Element)
 
     $nodes = @($Element.SelectNodes(".//*[local-name()='t'][not(ancestor::*[local-name()='rPh'])]"))
-    $res = Invoke-TextReplace $nodes -PreserveSpace
+    $res = Invoke-TextReplace $nodes -PreserveSpace -Escaped
     if ($null -eq $res) { return $null }
     foreach ($ph in @($Element.SelectNodes("*[local-name()='rPh']"))) { [void]$Element.RemoveChild($ph) }
     return $res
@@ -359,12 +379,34 @@ function Get-TableHeaderCells {
     return $cells
 }
 
+function Get-ShapeTextLines {
+    #     図形の段落（<a:p>）の文字の部分（<a:r> と <a:fld> の <a:t>）を、段落の中の改行（<a:br>。Shift+Enter の改行）で区切った行ごとの配列にする
+    param([System.Xml.XmlElement] $Paragraph)
+    $lines = New-Object System.Collections.Generic.List[object]
+    $line = New-Object System.Collections.Generic.List[object]
+    foreach ($n in $Paragraph.ChildNodes) {
+        if ($n.LocalName -eq 'br') { $lines.Add($line.ToArray()); $line.Clear() }
+        elseif ($n.LocalName -eq 'r' -or $n.LocalName -eq 'fld') { foreach ($t in $n.SelectNodes("*[local-name()='t']")) { $line.Add($t) } }
+    }
+    $lines.Add($line.ToArray())
+    return , $lines
+}
+
+function Get-ShapeText {
+    #     図形の文字。段落と、段落の中の改行（<a:br>）を改行にしてつなぐ（Search-Excel と同じ）
+    param($Paragraphs)
+    $texts = foreach ($p in $Paragraphs) {
+        -join @(foreach ($n in $p.SelectNodes(".//*[local-name()='t' or local-name()='br']")) { if ($n.LocalName -eq 'br') { "`n" } else { $n.InnerText } })
+    }
+    return (@($texts) -join "`n").TrimEnd("`n")
+}
+
 function ConvertTo-OneLine {
     #     表示用に、OOXML のエスケープ（_x000D_ など）を戻し、改行を ↵ にした 1 行の文字列にする
     param([string] $Text)
     if ($null -eq $Text) { return '' }
     if ($Text.IndexOf('_x') -ge 0) {
-        $Text = [regex]::Replace($Text, '_x([0-9A-Fa-f]{4})_', { param($m) [string][char][Convert]::ToInt32($m.Groups[1].Value, 16) })
+        $Text = ConvertFrom-OoxmlEscape $Text
         $Text = [regex]::Replace($Text, '[\x00-\x08\x0B\x0C\x0E-\x1F]', '')
     }
     return $Text.Replace("`r`n", '↵').Replace("`n", '↵').Replace("`r", '↵')
@@ -511,7 +553,7 @@ function Get-ReplacePlan {
                     if ($wantValue -and $c.GetAttribute('t') -eq 'inlineStr') {
                         $is = $c.SelectSingleNode("*[local-name()='is']")
                         if ($is -and $sh.Headers.ContainsKey($ref)) {
-                            if (Test-AnyRuleMatch $is.InnerText) { $skippedHeaders.Add(('{0}!{1}' -f $sh.Name, $ref)) }
+                            if (Test-AnyRuleMatch (ConvertFrom-OoxmlEscape $is.InnerText)) { $skippedHeaders.Add(('{0}!{1}' -f $sh.Name, $ref)) }
                         }
                         elseif ($is) {
                             $res = Invoke-RichTextReplace $is
@@ -549,7 +591,7 @@ function Get-ReplacePlan {
                     foreach ($tc in $doc.SelectNodes("//*[local-name()='threadedComment']")) {
                         $text = $tc.SelectSingleNode("*[local-name()='text']")
                         if ($null -eq $text) { continue }
-                        $res = Invoke-TextReplace @($text)
+                        $res = Invoke-TextReplace @($text) -Escaped
                         if ($res) { $items.Add((New-ReplaceItem $sh.Name $tc.GetAttribute('ref') 'コメント' $res[0] $res[1])); $edited = $true }
                         $threaded[$tc.GetAttribute('ref')] = $true
                     }
@@ -578,17 +620,17 @@ function Get-ReplacePlan {
                     foreach ($sp in $doc.SelectNodes("//*[local-name()='sp']")) {
                         $paras = @($sp.SelectNodes("*[local-name()='txBody']/*[local-name()='p']"))
                         if ($paras.Count -eq 0) { continue }
-                        $before = (@($paras | ForEach-Object { $_.InnerText }) -join "`n").TrimEnd("`n")
+                        $before = Get-ShapeText $paras
                         $hit = $false
                         foreach ($p in $paras) {
-                            # 段落の中の文字（<a:r> と <a:fld> の <a:t>）をつなげて置換する。改行（<a:br>）をまたぐ一致は置換しない
-                            if (Invoke-TextReplace @($p.SelectNodes("*[local-name()='r' or local-name()='fld']/*[local-name()='t']"))) { $hit = $true }
+                            # 段落の中の文字（<a:r> と <a:fld> の <a:t>）を、改行（<a:br>）で区切った行ごとにつなげて置換する。改行をまたぐ一致は置換しない
+                            foreach ($line in (Get-ShapeTextLines $p)) { if (Invoke-TextReplace $line) { $hit = $true } }
                         }
                         if (-not $hit) { continue }
                         $edited = $true
                         # 互換用の代替表示（mc:Fallback）は同じ図形の写しなので、置換はするが記録はしない
                         if ($sp.SelectSingleNode("ancestor::*[local-name()='Fallback']")) { continue }
-                        $after = (@($paras | ForEach-Object { $_.InnerText }) -join "`n").TrimEnd("`n")
+                        $after = Get-ShapeText $paras
                         $shapeName = $null
                         $nv = $sp.SelectSingleNode("*[local-name()='nvSpPr']/*[local-name()='cNvPr']")
                         if ($nv) { $shapeName = $nv.GetAttribute('name') }
@@ -632,6 +674,22 @@ function Test-FileLocked {
     catch { return $true }
 }
 
+function Get-FileStamp {
+    #     ファイルの更新日時と大きさ。置換する箇所を調べた後に、ファイルが保存し直されていないかを確かめるのに使う
+    param([string] $FilePath)
+    $info = New-Object System.IO.FileInfo($FilePath)
+    return '{0}|{1}' -f $info.LastWriteTimeUtc.Ticks, $info.Length
+}
+
+function Assert-FileUnchanged {
+    #     置換する箇所を調べた後に、ほかの人の保存や OneDrive・SharePoint の同期でファイルが更新されていたら例外にする。
+    #     調べたときの内容から求めたパーツを新しい内容に書き込むと、共有文字列の番号がずれるなどして文字が変わったり、ファイルが壊れたりする
+    param([string] $FilePath, [string] $Stamp)
+    if ((Get-FileStamp $FilePath) -ne $Stamp) {
+        throw '置換する箇所を調べた後にファイルが更新されたため、書き換えていません（ほかの人の保存や OneDrive・SharePoint の同期など）。もう一度実行してください'
+    }
+}
+
 function Get-FileSignature {
     # 先頭 4 バイトで実体を判定する（パスワード付きのファイルは中身が暗号化された OLE 形式になる）
     param([string] $FilePath)
@@ -651,6 +709,9 @@ function Get-FileSignature {
 
 $files = New-Object System.Collections.Generic.List[object]
 $seen = @{}
+# -BackupDir の中（前に残したファイル）は置換しない。名前の先頭が同じだけのフォルダ（「旧版」に対する「旧版_資料」など）は置換する
+$backupPrefix = $null
+if ($BackupDir) { $backupPrefix = $BackupDir.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar }
 foreach ($p in $Path) {
     $found = @(Get-PathItem $p)
     if ($found.Count -eq 0) { Write-Warning "見つかりません: $p"; continue }
@@ -666,7 +727,7 @@ foreach ($p in $Path) {
         foreach ($f in $list) {
             if (@('.xlsx', '.xlsm', '.xltx', '.xltm') -notcontains $f.Extension.ToLowerInvariant()) { continue }
             if ($f.Name.StartsWith('~$')) { continue }
-            if ($BackupDir -and $f.FullName.StartsWith($BackupDir, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+            if ($backupPrefix -and $f.FullName.StartsWith($backupPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
             if ($OutXlsx -and [string]::Equals($f.FullName, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
             if ($seen.ContainsKey($f.FullName)) { continue }
             $seen[$f.FullName] = $true
@@ -701,6 +762,8 @@ foreach ($entry in $files) {
     Write-Progress -Activity '置換する箇所を探しています' -Status ("{0}/{1}  {2}" -f $index, $files.Count, $entry.Relative) -PercentComplete ([int](100 * $index / $files.Count))
     try {
         if ((Get-FileSignature $entry.Info.FullName) -ne 'Zip') { $results.Add((& $newResult $entry $null 'スキップ' 'パスワードで保護されているか、Excel ブックではないため読めません')); continue }
+        # 読む前の更新日時と大きさ（書き換える直前に、変わっていないかを確かめる）
+        $stamp = Get-FileStamp $entry.Info.FullName
         $plan = Get-ReplacePlan $entry.Info.FullName
         if ($plan.Items.Count -eq 0) { continue }
         if ($entry.Info.IsReadOnly) {
@@ -708,7 +771,7 @@ foreach ($entry in $files) {
             $results.Add((& $newResult $entry $null 'スキップ' ('読み取り専用のファイルです（一致した箇所: {0} か所）' -f $plan.Items.Count)))
             continue
         }
-        $plans.Add([pscustomobject]@{ Entry = $entry; Plan = $plan })
+        $plans.Add([pscustomobject]@{ Entry = $entry; Plan = $plan; Stamp = $stamp })
     }
     catch {
         $ex = $_.Exception
@@ -756,6 +819,7 @@ foreach ($p in $plans) {
     elseif ($PSCmdlet.ShouldProcess($entry.Relative, ('{0} か所を置換' -f $p.Plan.Items.Count))) {
         try {
             if (Test-FileLocked $entry.Info.FullName) { throw 'ファイルを開いているため書き換えられません（Excel で閉じてから実行してください）' }
+            Assert-FileUnchanged $entry.Info.FullName $p.Stamp
             if ($BackupDir) {
                 $dest = Join-Path $BackupDir $entry.Relative
                 if ($backupFolders.Count -gt 0) { $dest = Join-Path (Join-Path $BackupDir $backupFolders[$entry.Root]) $entry.Relative }
@@ -763,6 +827,8 @@ foreach ($p in $plans) {
                 if ($backupPath -ne $dest) { $renamed.Add($backupPath.Substring($BackupDir.Length).TrimStart('\', '/')) }
                 New-Item -ItemType Directory -Force -Path (Split-Path $backupPath -Parent) | Out-Null
                 Copy-Item -LiteralPath $entry.Info.FullName -Destination $backupPath -Force
+                # 残しているあいだに更新されたときも書き換えない
+                Assert-FileUnchanged $entry.Info.FullName $p.Stamp
             }
             Save-ZipPackage -FilePath $entry.Info.FullName -Changes $p.Plan.Changes
             $result = '置換'
@@ -830,6 +896,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     書き換えるのは置換した文字を含むパーツだけで、ほかの部分はそのままです。
 #
 #     読み取り専用のファイル、パスワード付きのファイルは書き換えません。Excel で開いているファイルは失敗として知らせます。
+#     確認を待つあいだなどにファイルが更新されたとき（ほかの人の保存や OneDrive・SharePoint の同期）も、書き換えずに失敗として知らせます。
 #
 # .PARAMETER Pattern
 #     置換する文字（正規表現）。-SimpleMatch を付けると、そのままの文字として扱います。
@@ -900,5 +967,5 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm（.xltx / .xltm）が対象で、.xls / .xlsb は置換できません。
-#     数値・日付のセル、シート名、ヘッダー／フッター、グラフの文字は置換しません。改行をまたぐ図形の文字も置換しません。
+#     数値・日付のセル、シート名、グラフの文字、名前の定義は置換しません。改行をまたぐ図形の文字も置換しません。
 #     同じフォルダに ExcelTools.psm1 が必要です。

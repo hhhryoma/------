@@ -343,6 +343,57 @@ Test-Case 'Search-Excel: -FillMerged は、結合したセルの値を範囲の�
     Assert-Equal ($topLeft + @('B3|検索する', 'B4|検索する', 'C3|一覧に表示される', 'D5|縦横に結合')) (& $cells $filled) '右の列（E2・E4・E5）には返さない'
 }
 
+Test-Case 'Search-Excel: 図形の段落の中の改行（<a:br>。Shift+Enter の改行）も、段落の区切りと同じく ↵ にする（改行をまたいでは一致しない）' {
+    $path = Join-Path (New-TestDir) '図形.xlsx'
+    New-SheetsBook $path ([ordered]@{ 'S' = @(@('項目'), @('x')) })
+    Add-TestDrawing $path @(@{ Kind = 'sp'; Name = '図1'; Text = 'X'; From = @(1, 1); To = @(4, 4) })
+    Edit-ZipText $path 'xl/drawings/drawing1.xml' { param($x) $x.Replace('<a:p><a:r><a:t>X</a:t></a:r></a:p>', '<a:p><a:r><a:t>受注</a:t></a:r><a:br/><a:r><a:t>管理システム</a:t></a:r></a:p><a:p><a:r><a:t>概要</a:t></a:r></a:p>') }
+    $hits = Invoke-Search -Pattern '管理' -Path $path -Target Shape
+    Assert-Equal @('S!B2|受注↵管理システム↵概要|図1') @($hits | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Text, $_.Name })
+    Assert-Equal 0 (Invoke-Search -Pattern '受注管理' -Path $path -Target Shape).Count '改行をまたいでは一致しない'
+}
+
+Test-Case 'Search-Excel: 曜日（aaa・aaaa）・元号（g）・和暦の年（e）だけを表示する表示形式のセルも、日付（yyyy/MM/dd）で検索される（G/標準 の表示形式は数値のまま）' {
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $path = Join-Path (New-TestDir) 'WBS.xlsx'
+    $rows = @(@('aaa', 46296), @('aaaa', 46297), @('[$-411]ggge"年"', 46298), @('[$-411]e"年"', 46299), @('G/標準"件"', 46300))
+    Export-Workbook -FilePath $path -Sheets @(@{ Name = 'WBS'; Columns = @(@{ Header = '書式'; Width = 16 }, @{ Header = '値'; Width = 8 }); Rows = @($rows | ForEach-Object { @{ Values = $_ } }) })
+    # B2〜B6 に、上の表示形式（177〜181）を順に付ける
+    Edit-ZipText $path 'xl/styles.xml' {
+        param($x)
+        $x = $x.Replace('</numFmts>', '<numFmt numFmtId="177" formatCode="aaa"/><numFmt numFmtId="178" formatCode="aaaa"/><numFmt numFmtId="179" formatCode="[$-411]ggge&quot;年&quot;"/><numFmt numFmtId="180" formatCode="[$-411]e&quot;年&quot;"/><numFmt numFmtId="181" formatCode="G/標準&quot;件&quot;"/></numFmts>')
+        $x.Replace('<cellXfs count="5">', '<cellXfs count="10">').Replace('</cellXfs>', ((@(177..181) | ForEach-Object { '<xf numFmtId="{0}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' -f $_ }) -join '') + '</cellXfs>')
+    }
+    Edit-ZipText $path 'xl/worksheets/sheet1.xml' {
+        param($x)
+        foreach ($row in 2..6) { $x = $x.Replace(('<c r="B{0}" s="2">' -f $row), ('<c r="B{0}" s="{1}">' -f $row, ($row + 3))) }
+        $x
+    }
+    $hits = Invoke-Search -Pattern '\S' -Path $path -Target Value
+    Assert-Equal @('2026/10/01', '2026/10/02', '2026/10/03', '2026/10/04', '46300') @(2..6 | ForEach-Object { $c = 'B' + $_; @($hits | Where-Object { $_.Cell -eq $c })[0].Text })
+}
+
+Test-Case 'Search-Excel: 日付のセル（t="d"。値は 2026-10-01T09:30:00 の形）はシリアル値の日付と同じ形で、1904 年からの日付のブックの時刻だけの値も時刻だけで検索される' {
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $path = Join-Path (New-TestDir) '日付.xlsx'
+    Export-Workbook -FilePath $path -Sheets @(@{ Name = '予定'; Columns = @(@{ Header = '項目'; Width = 10 }, @{ Header = '値'; Width = 20 }); Rows = @(@{ Values = @('日付', 1) }, @{ Values = @('日時', 2) }, @{ Values = @('時刻', 3) }) })
+    Edit-ZipText $path 'xl/worksheets/sheet1.xml' {
+        param($x)
+        $x.Replace('<c r="B2" s="2"><v>1</v>', '<c r="B2" s="4" t="d"><v>2026-10-01T00:00:00</v>').Replace('<c r="B3" s="2"><v>2</v>', '<c r="B3" s="4" t="d"><v>2026-10-01T09:30:00</v>').Replace('<c r="B4" s="2"><v>3</v>', '<c r="B4" s="4" t="d"><v>09:30:00</v>')
+    }
+    $hits = Invoke-Search -Pattern '\S' -Path $path -Target Value
+    Assert-Equal @('2026/10/01', '2026/10/01 09:30:00', '09:30:00') @(2..4 | ForEach-Object { $c = 'B' + $_; @($hits | Where-Object { $_.Cell -eq $c })[0].Text }) '日付のセル'
+
+    # 1904 年からの日付のブック（Mac の Excel で作ったものなど）: B2 は日付（yyyy/mm/dd）、B3 は時刻（h:mm）の表示形式
+    $path = Join-Path (New-TestDir) '1904.xlsx'
+    Export-Workbook -FilePath $path -Sheets @(@{ Name = '予定'; Columns = @(@{ Header = '項目'; Width = 10 }, @{ Header = '値'; Width = 20 }); Rows = @(@{ Values = @('日付', 44834) }, @{ Values = @('時刻', 0.375) }) })
+    Edit-ZipText $path 'xl/workbook.xml' { param($x) $x.Replace('<bookViews>', '<workbookPr date1904="1"/><bookViews>') }
+    Edit-ZipText $path 'xl/styles.xml' { param($x) $x.Replace('<cellXfs count="5">', '<cellXfs count="6">').Replace('</cellXfs>', '<xf numFmtId="20" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>') }
+    Edit-ZipText $path 'xl/worksheets/sheet1.xml' { param($x) $x.Replace('<c r="B2" s="2">', '<c r="B2" s="4">').Replace('<c r="B3" s="2">', '<c r="B3" s="5">') }
+    $hits = Invoke-Search -Pattern '\S' -Path $path -Target Value
+    Assert-Equal @('2026/10/01', '09:00:00') @(2..3 | ForEach-Object { $c = 'B' + $_; @($hits | Where-Object { $_.Cell -eq $c })[0].Text }) '1904 年からの日付のブック'
+}
+
 Test-Case 'Search-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $SearchExcel
     Assert-Match $h.Synopsis 'grep'
