@@ -112,11 +112,11 @@ function ConvertTo-DesignText {
     #     設計書を AI が読める行形式のテキストにする。
     #       「行番号| 列:値 | 列:値 ...」の形で、セル番地を AI が引用できるようにする。
     #     方眼紙の帳票ヘッダ（各シート 1〜3 行目）が前のシートと同じなら省略して文字数を節約する。
-    #     返り値: シート名 → テキスト の順序付き辞書
-    param($Cells)
+    #     Format: Rows か Markdown（省略時は -TextFormat）。返り値: シート名 → テキスト の順序付き辞書
+    param($Cells, [string] $Format = $TextFormat)
 
     if (@($Cells).Count -gt 0 -and (Test-WordPath @($Cells)[0].Path)) { return ConvertTo-WordText $Cells }
-    if ($TextFormat -eq 'Markdown') { return ConvertTo-DesignMarkdown $Cells }
+    if ($Format -eq 'Markdown') { return ConvertTo-DesignMarkdown $Cells }
 
     $sheets = [ordered]@{}
     foreach ($c in $Cells) {
@@ -244,31 +244,56 @@ function ConvertTo-DesignMarkdown {
     return $result
 }
 
+function Get-VersionlessRelative {
+    #     相対パスから版数を除いた形（区切りは / にそろえる）。サブフォルダの違う同じ名前の設計書を見分けるため
+    param([string] $Relative)
+    return Get-VersionlessName ([string]$Relative).Replace('\', '/')
+}
+
 function Find-BaselineFiles {
-    #     前の版（-Baseline）の設計書を、版数を除いたファイル名（Get-VersionlessName）で今の設計書と対応付ける。
+    #     前の版（-Baseline）の設計書を、今の設計書と対応付ける。版数を除いた相対パス（SCR001\画面設計書.xlsx など）が同じものを先に、
+    #     無ければ版数を除いたファイル名（Get-VersionlessName）が同じものに当てる（名前の同じ前の版が複数あれば、どれとも対応付けない）。
     #     戻り値: 今の設計書のパス → 前の版のパス
     param($Files)
-    $old = @{}
+    $byRelative = @{}
+    $byName = @{}
     foreach ($item in @(Get-PathItem $Baseline)) {
         $found = @($item)
-        if ($item.PSIsContainer) { $found = @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue) }
+        $root = [System.IO.Path]::GetDirectoryName($item.FullName)
+        if ($item.PSIsContainer) {
+            $found = @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue)
+            $root = $item.FullName.TrimEnd('\', '/')
+        }
         foreach ($o in $found) {
             if (@('.xlsx', '.xlsm', '.xls', '.docx', '.docm') -notcontains $o.Extension.ToLowerInvariant() -or $o.Name.StartsWith('~$')) { continue }
+            $k = Get-VersionlessRelative $o.FullName.Substring($root.Length).TrimStart('\', '/')
+            if (-not $byRelative.ContainsKey($k)) { $byRelative[$k] = $o.FullName }
             $k = Get-VersionlessName $o.Name
-            if (-not $old.ContainsKey($k)) { $old[$k] = $o.FullName }
+            if (-not $byName.ContainsKey($k)) { $byName[$k] = New-Object System.Collections.Generic.List[string] }
+            if (-not $byName[$k].Contains($o.FullName)) { $byName[$k].Add($o.FullName) }
         }
     }
     $pairs = @{}
+    $used = @{}
     foreach ($f in $Files) {
+        $k = Get-VersionlessRelative $f.Relative
+        if ($byRelative.ContainsKey($k) -and $byRelative[$k] -ne $f.Path) { $pairs[$f.Path] = $byRelative[$k]; $used[$byRelative[$k]] = $true }
+    }
+    foreach ($f in $Files) {
+        if ($pairs.ContainsKey($f.Path)) { continue }
         $k = Get-VersionlessName $f.Name
-        if ($old.ContainsKey($k) -and $old[$k] -ne $f.Path) { $pairs[$f.Path] = $old[$k] }
+        if (-not $byName.ContainsKey($k)) { continue }
+        $candidates = @($byName[$k] | Where-Object { -not $used.ContainsKey($_) -and $_ -ne $f.Path })
+        if ($candidates.Count -eq 1) { $pairs[$f.Path] = $candidates[0]; $used[$candidates[0]] = $true }
+        elseif ($candidates.Count -gt 1) { Write-Warning ("前の版に、同じ名前の設計書が複数あるため、前の版と比べません（全体を渡します）: {0}" -f $f.Relative) }
     }
     return $pairs
 }
 
 function ConvertTo-DiffText {
-    #     -Baseline: 設計書のうち、前の版から変わった行（★）と、その節の見出し（「■」の行と次の行）だけを、行の形のテキストにする。
-    #     変わったセルには前の版の値（旧: …）を添え、消えた行は「★削除（旧 n 行目）」で示す。新しいシートと、列を足した・消したシートは全部を入れる。
+    #     -Baseline: 設計書のうち、前の版から変わった行（★）と、その節の見出し（「■」の行と次の行）だけを、行の形のテキストにする（-TextFormat によらない）。
+    #     変わったセルには前の版の値（旧: …）を添え、消えた行は「★削除（旧 n 行目）」で示す。新しいシートと、列を足した・消したシートは全部を入れ、
+    #     どの行も判定するよう、すべての行・図形・コメントに ★ を付ける。
     #     Diffs は Compare-Excel.ps1 の結果。返り値: シート名 → テキスト の順序付き辞書（変わっていないシートは入れない）
     param($Cells, $Diffs)
     $rowOf = { param([string] $Cell) $m = [regex]::Match([string]$Cell, '^[A-Z]+(\d+)$'); if ($m.Success) { [int]$m.Groups[1].Value } else { 0 } }
@@ -312,8 +337,12 @@ function ConvertTo-DiffText {
     if ($removedSheets.Count -gt 0) { $result['（削除したシート）'] = "### 前の版から削除したシート`n" + (($removedSheets | ForEach-Object { "★$_" }) -join "`n") + "`n" }
     foreach ($name in $sheets.Keys) {
         if ($whole.ContainsKey($name)) {
-            $t = ConvertTo-DesignText -Cells $sheets[$name]
-            foreach ($k in $t.Keys) { $result[$k] = $t[$k].Replace("### シート: $k`n", "### シート: $k（前の版から大きく変わったため、全体）`n") }
+            # （List を @() に入れると PowerShell 7.4 では例外になるので、配列にして渡す）
+            $t = ConvertTo-DesignText -Cells $sheets[$name].ToArray() -Format Rows
+            foreach ($k in $t.Keys) {
+                $lines = @(($t[$k].TrimEnd("`n") -split "`n") | Select-Object -Skip 1 | ForEach-Object { if ($_ -match '^(\d+\||図形（|コメント（)') { '★' + $_ } else { $_ } })
+                $result[$k] = ((@("### シート: $k（前の版から大きく変わったため、全体）") + $lines) -join "`n") + "`n"
+            }
             continue
         }
         $rows = @{}
@@ -1017,22 +1046,23 @@ V03 | OK | - | - | - | -
 '@
 # Word の設計書（や参照資料）を渡すときに足す、場所の書き方
 $wordRule = '- Word の設計書は、各行が「段落 12| 文」「表 1 の 3 行目| セル | セル」の形です。場所は「本文!段落 12」「本文!表 1 の 3 行目」のように書いてください。'
+# 設計書のテキストの形の説明。Markdown の形（-TextFormat Markdown）で渡すときは、行の形の説明と置き換える
+$rowsRule = '設計書の各行は「行番号| 列:値」の形で、例えば「12| K:必須」なら K12 です。'
+$markdownRule = '設計書は Markdown で、「## 」の見出しがシート名です。箇条書きの「K12: 必須」はセル K12 です。表は 1 列目が行番号で、見出しの「K:桁数」の K が列です（例えば 12 行目の桁数なら K12）。'
 # 回答の形（引用の列があるか）。依頼の一覧に残し、-ImportOnly で前の形の依頼を読むときに使う
 $answerFormat = '引用付き'
 # プロンプトの改行は OS によらず LF にそろえる。AppendLine や CRLF のスクリプトファイルのままだと
 # Windows では 1 行ごとに 1 文字多く数えられ、同じ設計書でも依頼の分割数が変わってしまう
 $promptHeader = $promptHeader.Replace("`r`n", "`n")
-if ($TextFormat -eq 'Markdown') {
-    $promptHeader = $promptHeader.Replace('設計書の各行は「行番号| 列:値」の形で、例えば「12| K:必須」なら K12 です。',
-        '設計書は Markdown で、「## 」の見出しがシート名です。箇条書きの「K12: 必須」はセル K12 です。表は 1 列目が行番号で、見出しの「K:桁数」の K が列です（例えば 12 行目の桁数なら K12）。')
-}
 
 function New-PromptText {
-    #     Word: 設計書か参照資料に Word の文書があるとき（場所の書き方を足す）
-    param($Points, [string] $FileName, [string] $Body, [string] $PartNote, [string] $RefText, [switch] $Word)
+    #     Word: 設計書か参照資料に Word の文書があるとき（場所の書き方を足す）。
+    #     Format: 設計書のテキストの形（Rows か Markdown。-Baseline の変わった部分は、-TextFormat によらず Rows）
+    param($Points, [string] $FileName, [string] $Body, [string] $PartNote, [string] $RefText, [switch] $Word, [string] $Format = $TextFormat)
 
     $sb = New-Object System.Text.StringBuilder
     $header = $promptHeader
+    if ($Format -eq 'Markdown') { $header = $header.Replace($rowsRule, $markdownRule) }
     if ($Word) { $header = $header.Replace("`n- 設計書に書かれていないことを", "`n" + $wordRule + "`n- 設計書に書かれていないことを") }
     [void]$sb.Append($header).Append("`n")
     [void]$sb.Append("`n")
@@ -1056,7 +1086,8 @@ function New-PromptText {
 
 function Split-SheetTexts {
     #     シートのテキストを、1 つあたり Budget 文字以内のかたまりに分ける（改行は LF で数える）。
-    #     1 シートで Budget を超える場合は行単位で分ける。
+    #     1 シートで Budget を超える場合は行単位で分け、1 行で Budget を超える行は Split-LongLine で分ける。
+    #     続きのかたまりに付け直す見出し（シート名・表の見出し）も Budget に数える。
     param($SheetTexts, [int] $Budget)
 
     $chunks = New-Object System.Collections.Generic.List[string]
@@ -1068,27 +1099,105 @@ function Split-SheetTexts {
         }
         if ($text.Length -le $Budget) { [void]$current.Append($text); continue }
 
-        # 長いシートは行で分割し、続きには見出しを付け直す（Markdown の表の途中で分けたときは、表の見出しも付け直す）
+        # 長いシートは行で分割し、続きには見出しを付け直す（Markdown の表の途中で分けたときは、表の見出しも付け直す）。
+        # 見出しはシートのテキストの形に合わせる（-Baseline の変わった部分と Word の文書は、-TextFormat Markdown でも行の形）
+        $continued = "### シート: $name（続き）"
+        if ($text.StartsWith('## ')) { $continued = "## $name（続き）" }
         $prev = ''
         $tableHead = ''
+        $top = 0   # かたまりの先頭に付け直した見出しの文字数
         foreach ($line in ($text -split "`r?`n")) {
             if (-not $line) { continue }
             $isSeparator = $line -match '^\|(\s*---\s*\|)+$'
             if (-not $line.StartsWith('|')) { $tableHead = '' }
             elseif ($isSeparator) { $tableHead = $prev + "`n" + $line }
-            if ($current.Length + $line.Length + 2 -gt $Budget -and $current.Length -gt 0) {
-                $chunks.Add($current.ToString()); [void]$current.Clear()
-                if ($TextFormat -eq 'Markdown') { [void]$current.Append("## $name（続き）").Append("`n") }
-                else { [void]$current.Append("### シート: $name（続き）").Append("`n") }
-                if ($isSeparator) { [void]$current.Append($prev).Append("`n") }
-                elseif ($tableHead) { [void]$current.Append($tableHead).Append("`n") }
+            $rest = $line
+            while ($rest) {
+                if ($current.Length + $rest.Length + 2 -gt $Budget -and $current.Length -gt $top) {
+                    $chunks.Add($current.ToString()); [void]$current.Clear()
+                    [void]$current.Append($continued).Append("`n")
+                    if ($isSeparator) { [void]$current.Append($prev).Append("`n") }
+                    elseif ($tableHead) { [void]$current.Append($tableHead).Append("`n") }
+                    $top = $current.Length
+                }
+                if ($current.Length + $rest.Length + 2 -le $Budget) { [void]$current.Append($rest).Append("`n"); break }
+                # 見出しだけのかたまりにも入らない行は、入る分だけを入れ、残りは続きの行にして次のかたまりへ
+                $cut = Split-LongLine -Line $rest -Size ($Budget - $current.Length - 2)
+                [void]$current.Append($cut[0]).Append("`n")
+                $rest = $cut[1]
             }
-            [void]$current.Append($line).Append("`n")
             $prev = $line
         }
     }
     if ($current.Length -gt 0) { $chunks.Add($current.ToString()) }
     return ,$chunks
+}
+
+function Split-LongLine {
+    #     1 行を、Size 文字以内の頭と、残り（続きの行）に分ける。セルの区切り（ | ）で分け、1 つのセルが入らなければ
+    #     セル内の改行（↵・<br>）か句読点の後ろで分ける（無ければ文字数で分ける）。
+    #     続きの行には行の頭（「12| 」「段落 3| 」「| 12 | 」「- 」）を付け直し、分けたセルには列（「D:」「K12: 」）と「（続き）」を付ける。
+    #     Markdown の表の行は、列の位置が変わらないよう、頭に入れたセルの分だけ空のセルを置く。戻り値: @(頭, 続きの行)
+    param([string] $Line, [int] $Size)
+
+    if ($Line.Length -le $Size) { return , @($Line, '') }
+    $m = [regex]::Match($Line, '^(?:\| \d+ \| |- |★?\d+\| |★削除（旧 \d+ 行目）\| |(?:段落|表|テキストボックス) [^|]{0,20}\| )')
+    $lead = $m.Value
+    $body = $Line.Substring($lead.Length)
+    $table = $lead.StartsWith('| ')
+    $tail = ''
+    if ($table -and $body.EndsWith(' |')) { $tail = ' |'; $body = $body.Substring(0, $body.Length - 2) }
+    $cells = @($body -split ' \| ')
+    # 続きの行の頭（Markdown の表は、頭に入れた n 個のセルの分の空のセルを足す）
+    $nextLead = { param([int] $n) if ($table) { $lead + (' | ' * $n) } else { $lead } }
+
+    $head = $lead
+    $n = 0
+    while ($n -lt $cells.Count) {
+        $add = $cells[$n]
+        if ($n -gt 0) { $add = ' | ' + $add }
+        if ($head.Length + $add.Length + $tail.Length -gt $Size) { break }
+        $head += $add
+        $n++
+    }
+    $cell = $cells[$n]
+    $after = ''
+    if ($n + 1 -lt $cells.Count) { $after = ' | ' + ($cells[($n + 1)..($cells.Count - 1)] -join ' | ') }
+    # 入らなかったセルが、続きの行に丸ごと入るなら、セルの区切りで分ける
+    if ($n -gt 0 -and ((& $nextLead $n) + $cell + $tail).Length -le $Size) {
+        return , @(($head + $tail), ((& $nextLead $n) + $cell + $after + $tail))
+    }
+    # セルの中で分ける。列（行の形の「D:」、箇条書きの「K12: 」）は頭に残し、続きにも付ける
+    $label = ''
+    if ($lead -match '^★?(\d+|削除（旧 \d+ 行目）)\| $') { $label = [regex]::Match($cell, '^[A-Z]{1,3}:').Value }
+    elseif ($lead -eq '- ') { $label = [regex]::Match($cell, '^[A-Z]{1,3}\d+: ').Value }
+    $sep = ''
+    if ($n -gt 0) { $sep = ' | ' }
+    $room = $Size - $head.Length - $sep.Length - $tail.Length
+    # 少なくとも 10 文字は進める（Size が見出しより小さいときも、分けるたびに短くなるように）
+    $least = $label.Length + '（続き）'.Length + 10
+    if ($room -lt $least) {
+        if ($n -gt 0) { return , @(($head + $tail), ((& $nextLead $n) + $cell + $after + $tail)) }
+        $room = $least
+    }
+    if ($room -ge $cell.Length) {
+        $next = ''
+        if ($n + 1 -lt $cells.Count) { $next = (& $nextLead ($n + 1)) + ($cells[($n + 1)..($cells.Count - 1)] -join ' | ') + $tail }
+        return , @(($head + $sep + $cell + $tail), $next)
+    }
+    $piece = $cell.Substring(0, $room)
+    $at = -1
+    foreach ($rx in @('↵|<br\s*/?>', '[。．！？]', '[、，,]|\s')) {
+        $found = [regex]::Matches($piece, $rx)
+        if ($found.Count -eq 0) { continue }
+        $last = $found[$found.Count - 1]
+        if ($last.Index + $last.Length -gt $label.Length -and $last.Index + $last.Length -ge $room / 2) { $at = $last.Index + $last.Length; break }
+    }
+    if ($at -lt 0) {
+        $at = $room
+        if ([char]::IsHighSurrogate($cell[$at - 1])) { $at-- }
+    }
+    return , @(($head + $sep + $cell.Substring(0, $at) + $tail), ((& $nextLead $n) + $label + '（続き）' + $cell.Substring($at) + $after + $tail))
 }
 
 function Get-TextHash {
@@ -1101,10 +1210,27 @@ function Get-TextHash {
 # ---------------------------------------------------------------- 回答の読み取り
 
 
+function Split-AnswerLine {
+    #     回答の 1 行を列に分ける。表をコピーしたタブ区切り（「|」で始まらない行）か、「|」区切り（Markdown の表・コードブロック）。
+    #     「\|」は区切りにせず「|」に戻す。列の前後の空白は残す（引用の中の「|」で分かれた列を、元の形に戻せるように）
+    param([string] $Line)
+    if ($Line.Contains("`t") -and -not $Line.StartsWith('|')) { $fields = $Line.Split("`t") }
+    elseif ($Line.Contains('|')) {
+        $l = $Line
+        if ($l.StartsWith('|')) { $l = $l.Substring(1) }
+        if ($l.EndsWith('|') -and -not $l.EndsWith('\|')) { $l = $l.Substring(0, $l.Length - 1) }
+        $fields = [regex]::Split($l, '(?<!\\)\|')
+    }
+    else { return , @() }
+    return , @($fields | ForEach-Object { $_.Replace('\|', '|') })
+}
+
 function ConvertFrom-Answer {
     #     Copilot の回答から「観点ID | 判定 | 場所 | 引用 | 指摘内容 | 根拠」の行を取り出す。
     #     Markdown の表、コードブロック、表をコピーしたときのタブ区切りのどれでも読める。
-    #     Quote を付けないとき（前の形の依頼）と、引用の列の無い 5 列の行は「観点ID | 判定 | 場所 | 指摘内容 | 根拠」として読む
+    #     Quote を付けないとき（前の形の依頼）と、引用の列の無い 5 列の行は「観点ID | 判定 | 場所 | 指摘内容 | 根拠」として読む。
+    #     引用の付いた形で列が 6 より多い行は、引用の中の「|」（Word の表の行・コード値の「1:有効|0:無効」など、設計書から写した文字）で
+    #     分かれたとみて、多い列を引用に戻す（指摘内容と根拠は AI が書く文なので「|」はまず入らない）
     param([string] $Text, [string[]] $PointIds, [switch] $Quote)
 
     $known = @{}
@@ -1116,10 +1242,8 @@ function ConvertFrom-Answer {
         if (-not $line -or $line.StartsWith('```')) { continue }
         if ($line -match '^\|?[\s:\-|]+\|?$') { continue }   # Markdown 表の区切り行
 
-        if ($line.Contains('|')) { $fields = $line.Trim('|').Split('|') }
-        elseif ($line.Contains("`t")) { $fields = $line.Split("`t") }
-        else { continue }
-        $fields = @($fields | ForEach-Object { $_.Trim() })
+        $cols = Split-AnswerLine $line
+        $fields = @($cols | ForEach-Object { $_.Trim() })
         if ($fields.Count -lt 2) { continue }
 
         $id = $fields[0].Trim('*', ' ').ToUpperInvariant()
@@ -1131,10 +1255,14 @@ function ConvertFrom-Answer {
         else { $verdict = '要確認' }
 
         $get = { param($i) if ($fields.Count -gt $i -and $fields[$i] -ne '-' -and $fields[$i] -ne '－') { $fields[$i] } else { '' } }
-        # 指摘内容の列（引用の列があれば 1 つ右）
+        # 指摘内容の列（引用の列があれば 1 つ右。列が多ければ、多い分も引用）
         $base = 3
         $quoteText = ''
-        if ($Quote -and $fields.Count -ge 6) { $quoteText = (& $get 3).Trim('「', '」', '"', '“', '”'); $base = 4 }
+        if ($Quote -and $fields.Count -ge 6) {
+            $base = $fields.Count - 2
+            $quoteText = (($cols[3..($base - 1)] -join '|').Trim()).Trim('「', '」', '"', '“', '”')
+            if ($quoteText -eq '-' -or $quoteText -eq '－') { $quoteText = '' }
+        }
         $reason = & $get ($base + 1)
         if ($fields.Count -gt $base + 2) { $reason = ($fields[($base + 1)..($fields.Count - 1)] -join ' | ') }
 
@@ -1162,11 +1290,12 @@ function Resolve-Location {
         $cell = $cell -replace '^段落(\d+)$', '段落 $1' -replace '^表(\d+)の(\d+)行目$', '表 $1 の $2 行目' -replace '^テキストボックス(\d+)$', 'テキストボックス $1'
         return [pscustomobject]@{ Sheet = $w.Groups['sheet'].Value; Cell = $cell }
     }
-    $m = [regex]::Match($Location, "^\s*'?(?<sheet>[^!']+?)'?\s*[!！]\s*\`$?(?<col>[A-Za-z]{1,3})\`$?(?<row>\d+)")
+    # Excel の「シート名!セル番地」（セル番地の全角の英数字・＄はそろえる。シート名はそのまま比べる）
+    $m = [regex]::Match($Location, "^\s*'?(?<sheet>[^!']+?)'?\s*[!！]\s*[`$＄]?(?<col>[A-Za-zＡ-Ｚａ-ｚ]{1,3})[`$＄]?(?<row>[0-9０-９]+)")
     if ($m.Success) {
         $sheet = $m.Groups['sheet'].Value.Trim()
         if ($SheetNames -contains $sheet) {
-            return [pscustomobject]@{ Sheet = $sheet; Cell = $m.Groups['col'].Value.ToUpperInvariant() + $m.Groups['row'].Value }
+            return [pscustomobject]@{ Sheet = $sheet; Cell = ($m.Groups['col'].Value + $m.Groups['row'].Value).Normalize($nfkc).ToUpperInvariant() }
         }
         return $null
     }
@@ -1178,9 +1307,10 @@ function Resolve-Location {
 
 
 function ConvertTo-QuoteKey {
-    #     引用とセルの文字を比べる形（全角・半角をそろえ、空白・改行・末尾の … を除く）
+    #     引用とセルの文字を比べる形（全角・半角をそろえ、空白・改行・末尾の … を除く）。
+    #     改行は、行の形の ↵ も Markdown の形の <br> も除き、Markdown の表の「\|」は「|」に戻す
     param([string] $Text)
-    $t = ([string]$Text).Normalize($nfkc).Replace('↵', '') -replace '\s', ''
+    $t = ([string]$Text).Normalize($nfkc).Replace('↵', '').Replace('\|', '|') -replace '<br\s*/?>', '' -replace '\s', ''
     return ($t -replace '(…|\.\.\.)$', '')
 }
 
@@ -1302,11 +1432,11 @@ function Read-PreviousResponses {
 }
 
 function Get-ResponseKind {
-    #     対応要否の値を「要」「不要」に分ける（どちらでもなければ空）
+    #     対応要否の値を「要」「不要」に分ける（どちらでもなければ空）。「不要（誤指摘）」のような後ろの（ ）の補足は見ない
     param([string] $Text)
-    $t = ([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant()
-    if ($t -match '^(要|必要|対応要|対応する|する|あり|有|○|〇|◯|Y|YES|1)$') { return '要' }
-    if ($t -match '^(不要|対応不要|対応しない|しない|なし|無|×|✕|N|NO|0|対象外|取下げ|取り下げ|誤指摘|重複)$') { return '不要' }
+    $t = (([string]$Text).Normalize($nfkc) -replace '\s*\(.*$', '').Trim().ToUpperInvariant()
+    if ($t -match '^(要|必要|対応要|要対応|要修正|修正要|対応する|修正する|する|あり|有|○|〇|◯|Y|YES|1)$') { return '要' }
+    if ($t -match '^(不要|対応不要|修正不要|対応しない|修正しない|しない|なし|無|×|✕|N|NO|0|対象外|取下げ|取り下げ|誤指摘|重複)$') { return '不要' }
     return ''
 }
 
@@ -1356,10 +1486,65 @@ function Read-PreviousFindings {
 }
 
 function Find-CurrentFile {
-    #     前の指摘の設計書（相対パス）に当たる、今の設計書（版数を除いたファイル名で対応付ける）。無ければ $null
+    #     前の指摘の設計書（相対パス）に当たる、今の設計書。版数を除いた相対パスが同じものを先に、無ければ版数を除いたファイル名が
+    #     同じもの（1 つだけのとき）。無ければ $null
     param([string] $Document, $Files)
-    $key = Get-VersionlessName ([System.IO.Path]::GetFileName($Document))
-    return @($Files | Where-Object { (Get-VersionlessName $_.Name) -eq $key })[0]
+    $key = Get-VersionlessRelative $Document
+    $same = @($Files | Where-Object { (Get-VersionlessRelative $_.Relative) -eq $key })
+    if ($same.Count -gt 0) { return $same[0] }
+    $key = Get-VersionlessName ([System.IO.Path]::GetFileName($Document.Replace('\', '/')))
+    $same = @($Files | Where-Object { (Get-VersionlessName $_.Name) -eq $key })
+    if ($same.Count -eq 1) { return $same[0] }
+    return $null
+}
+
+function ConvertTo-ToolShape {
+    #     ツールの指摘内容の形。数（か所の数・版数・日付など）は # にして、数だけが違う指摘を同じとみる（「」の中は名前なので変えない）。空白は見ない
+    param([string] $Text)
+    $t = ([string]$Text).Replace('↵', '') -replace '\s', ''
+    return [regex]::Replace($t, '「[^」]*」|\d+(?:\.\d+)*', [System.Text.RegularExpressions.MatchEvaluator] { param($m) if ($m.Value.StartsWith('「')) { $m.Value } else { '#' } })
+}
+
+function Find-SameToolFindings {
+    #     -Recheck: 前のツールの指摘（Previous）が、今のツールの指摘（Current。Invoke-ToolChecks の Findings）に残っているか。
+    #     同じ確認・同じ設計書の指摘のうち、近いものから順に 1 対 1 で当てる。
+    #       1. 同じ場所で同じ指摘内容  2. 同じ指摘内容（行を足して場所がずれた）
+    #       3. 同じ場所で、数だけが違う指摘内容（版数・か所の数など）  4. 同じ場所で、「」の中（名前・残っている文言など）が同じ指摘内容
+    #       5. 数だけが違う指摘内容で、場所の無い指摘か、表記ゆれ（場所は最初に出てくるセルなので、そこを直すと動く）
+    #     戻り値: 前の指摘No → 今の指摘
+    param($Previous, $Current)
+    $key = { param([string] $Text) ([string]$Text).Replace('↵', '') -replace '\s', '' }
+    $quotes = { param([string] $Text) (@([regex]::Matches([string]$Text, '「[^」]*」') | ForEach-Object { $_.Value }) -join '') }
+    $now = @($Current | ForEach-Object {
+            $location = $_.Sheet
+            if ($_.Sheet -and $_.Cell) { $location = '{0}!{1}' -f $_.Sheet, $_.Cell }
+            [pscustomobject]@{ Finding = $_; Rule = $_.Rule; Path = $_.Path; Location = (& $key $location); Detail = (& $key $_.Detail); Shape = (ConvertTo-ToolShape $_.Detail); Quotes = (& $quotes $_.Detail) }
+        })
+    $before = @($Previous | ForEach-Object {
+            [pscustomobject]@{ No = $_.No; Rule = $_.Rule; Path = $_.Target; Location = (& $key $_.Location); Detail = (& $key $_.Finding); Shape = (ConvertTo-ToolShape $_.Finding); Quotes = (& $quotes $_.Finding) }
+        })
+    $level = {
+        param($x, $y)
+        $here = $x.Location -and $x.Location -eq $y.Location
+        if ($here -and $x.Detail -eq $y.Detail) { return 5 }
+        if ($x.Detail -eq $y.Detail) { return 4 }
+        if ($here -and $x.Shape -eq $y.Shape) { return 3 }
+        if ($here -and $x.Quotes -eq $y.Quotes) { return 2 }
+        if ($x.Shape -eq $y.Shape -and ((-not $x.Location -and -not $y.Location) -or $x.Rule -eq '表記ゆれ')) { return 1 }
+        return 0
+    }
+    $found = @{}
+    $used = @{}
+    foreach ($min in 5, 4, 3, 2, 1) {
+        foreach ($x in $before) {
+            if ($found.ContainsKey($x.No)) { continue }
+            for ($i = 0; $i -lt $now.Count; $i++) {
+                if ($used.ContainsKey($i) -or $now[$i].Rule -ne $x.Rule -or $now[$i].Path -ne $x.Path) { continue }
+                if ((& $level $x $now[$i]) -ge $min) { $found[$x.No] = $now[$i].Finding; $used[$i] = $true; break }
+            }
+        }
+    }
+    return $found
 }
 
 function New-RecheckRequests {
@@ -1377,7 +1562,10 @@ function New-RecheckRequests {
         foreach ($x in $mine) {
             $loc = Resolve-Location -Location $x.Location -SheetNames @($all.Keys)
             $x | Add-Member -NotePropertyName Sheet -NotePropertyValue $(if ($loc) { $loc.Sheet } else { '' }) -Force
-            $x | Add-Member -NotePropertyName Row -NotePropertyValue $(if ($loc -and $loc.Cell -match '^[A-Z]+(\d+)$') { [int]$Matches[1] } else { 0 }) -Force
+            # 指摘の行（Excel は行番号、Word は「段落 12」などの場所）。分けた部分のうち、この行のあるものに入れる
+            $place = ''
+            if ($loc -and $loc.Cell -match '^[A-Z]+(\d+)$') { $place = $Matches[1] } elseif ($loc) { $place = $loc.Cell }
+            $x | Add-Member -NotePropertyName Place -NotePropertyValue $place -Force
             if ($loc) { $wanted[$loc.Sheet] = $true } else { foreach ($k in $all.Keys) { $wanted[$k] = $true } }
         }
         $texts = [ordered]@{}
@@ -1387,6 +1575,8 @@ function New-RecheckRequests {
         $build = {
             param($xs, [string] $Body, [string] $PartNote)
             $h = $recheckHeader
+            # 設計書の形の説明（Word の文書は -TextFormat によらず段落・表の行の形）
+            if ($TextFormat -eq 'Markdown' -and -not $word) { $h = $h.Replace($rowsRule, $markdownRule) }
             if ($word) { $h = $h.Replace("`n- 引用には", "`n" + $wordRule + "`n- 引用には") }
             $h + "`n`n" + (& $listText $xs) + "`n【設計書】" + $f.Name + $PartNote + "`n" + $Body
         }
@@ -1396,15 +1586,16 @@ function New-RecheckRequests {
         $budget = [math]::Max(1000, $MaxChars - $fixedLen)
         if ((& $build $mine '' '').Length + $docLength -le $MaxChars) { $chunks = Split-SheetTexts -SheetTexts $texts -Budget ([int]::MaxValue) }
         else { $chunks = Split-SheetTexts -SheetTexts $texts -Budget $budget }
-        # 部分ごとの、シート → 行（その部分にある行）
+        # 部分ごとの、シート → 行（その部分にある行）。シートの見出しは行の形「### シート: 」か Markdown の「## 」、
+        # 行は行の形「12| 」、Word の「段落 12| 」「表 1 の 3 行目| 」、Markdown の表「| 12 | 」・箇条書き「- K12: 」
         $parts = @()
         foreach ($c in $chunks) {
             $rows = @{}; $sheet = ''
             foreach ($line in ($c -split "`n")) {
-                $hm = [regex]::Match($line, '^### シート: (.+?)(?:（続き）)?$')
+                $hm = [regex]::Match($line, '^(?:### シート: |## )(.+?)(?:（続き）)?$')
                 if ($hm.Success) { $sheet = $hm.Groups[1].Value; if (-not $rows.ContainsKey($sheet)) { $rows[$sheet] = @{} }; continue }
-                $rm = [regex]::Match($line, '^(\d+)\|')
-                if ($rm.Success -and $sheet) { $rows[$sheet][[int]$rm.Groups[1].Value] = $true }
+                $rm = [regex]::Match($line, '^(?:(?<p>\d+|段落 \d+|表 \d+ の \d+ 行目|テキストボックス \d+)\||\| (?<p>\d+) \||- [A-Z]{1,3}(?<p>\d+): )')
+                if ($rm.Success -and $sheet) { $rows[$sheet][$rm.Groups['p'].Value] = $true }
             }
             $parts += , $rows
         }
@@ -1414,7 +1605,7 @@ function New-RecheckRequests {
             for ($i = 0; $i -lt $parts.Count; $i++) {
                 if (-not $x.Sheet -or -not $parts[$i].ContainsKey($x.Sheet)) { continue }
                 if ($at -lt 0) { $at = $i }
-                if ($x.Row -gt 0 -and $parts[$i][$x.Sheet].ContainsKey($x.Row)) { $at = $i; break }
+                if ($x.Place -and $parts[$i][$x.Sheet].ContainsKey($x.Place)) { $at = $i; break }
             }
             if ($at -lt 0) { $at = 0 }
             if (-not $assigned.ContainsKey($at)) { $assigned[$at] = New-Object System.Collections.Generic.List[object] }
@@ -1438,14 +1629,15 @@ function New-RecheckRequests {
 }
 
 function ConvertFrom-RecheckAnswer {
-    #     再確認の回答から「指摘No | 判定 | 場所 | 引用 | 説明」の行を取り出す（判定は 解消・未解消・要確認）
+    #     再確認の回答から「指摘No | 判定 | 場所 | 引用 | 説明」の行を取り出す（判定は 解消・未解消・要確認）。
+    #     列が 5 より多い行は、ConvertFrom-Answer と同じく、多い列を引用に戻す
     param([string] $Text, [string[]] $Nos)
     $entries = New-Object System.Collections.Generic.List[object]
     foreach ($raw in ($Text -split "`r?`n")) {
         $line = $raw.Trim()
         if (-not $line -or $line.StartsWith('```') -or $line -match '^\|?[\s:\-|]+\|?$') { continue }
-        if ($line.Contains('|')) { $fields = $line.Trim('|').Split('|') } elseif ($line.Contains("`t")) { $fields = $line.Split("`t") } else { continue }
-        $fields = @($fields | ForEach-Object { $_.Trim() })
+        $cols = Split-AnswerLine $line
+        $fields = @($cols | ForEach-Object { $_.Trim() })
         if ($fields.Count -lt 2) { continue }
         $no = ($fields[0].Trim('*', ' ') -replace '^(No\.?|NO\.?|№)\s*', '').Normalize($nfkc)
         if ($Nos -notcontains $no) { continue }
@@ -1454,9 +1646,14 @@ function ConvertFrom-RecheckAnswer {
         elseif ($v -match '^(解消|対応済|OK|○|〇|直)') { $verdict = '解消' }
         else { $verdict = '要確認' }
         $get = { param($i) if ($fields.Count -gt $i -and $fields[$i] -ne '-' -and $fields[$i] -ne '－') { $fields[$i] } else { '' } }
+        $quote = & $get 3
         $note = & $get 4
-        if ($fields.Count -gt 5) { $note = ($fields[4..($fields.Count - 1)] -join ' | ') }
-        $entries.Add([pscustomobject]@{ No = $no; Verdict = $verdict; Location = (& $get 2); Quote = (& $get 3).Trim('「', '」', '"', '“', '”'); Note = $note })
+        if ($fields.Count -gt 5) {
+            $quote = ($cols[3..($fields.Count - 2)] -join '|').Trim()
+            $note = & $get ($fields.Count - 1)
+        }
+        if ($quote -eq '-' -or $quote -eq '－') { $quote = '' }
+        $entries.Add([pscustomobject]@{ No = $no; Verdict = $verdict; Location = (& $get 2); Quote = $quote.Trim('「', '」', '"', '“', '”'); Note = $note })
     }
     return , $entries
 }
@@ -1492,7 +1689,10 @@ function New-ReviewRequests {
         # -Baseline: 前の版から変わっていない設計書は依頼しない。変わった設計書は、変わった部分だけを渡す
         if ($f.Diff -eq '変更なし') { continue }
         $diffNote = ''
+        # 設計書のテキストの形（前の版から変わった部分は、-TextFormat によらず行の形）
+        $format = $TextFormat
         if ($f.Diff -eq '変更あり') {
+            $format = 'Rows'
             $null = & $getText $f
             $sheetTexts = $f.DiffText
             $diffNote = '（前の版から変わった部分だけです。★の付いた行・図形・コメントだけを判定し、★の無い行は判定の参考にしてください。（旧: …）は前の版の値です。省いた部分にあるかもしれないことは指摘せず、判断できなければ要確認にしてください）'
@@ -1522,7 +1722,7 @@ function New-ReviewRequests {
         $word = (Test-WordPath $f.Path) -or @($files | Where-Object { $_.Path -ne $f.Path -and (Test-WordPath $_.Path) -and (Test-NameLike $_.Name $allRefs) }).Count -gt 0
         $allRefText = ''
         if ($allRefs.Count -gt 0) { $allRefText = & $getRefText $allRefs }
-        $allFixed = (New-PromptText -Points $targetPoints -FileName $f.Name -Body '' -PartNote $diffNote -RefText $allRefText -Word:$word).Length
+        $allFixed = (New-PromptText -Points $targetPoints -FileName $f.Name -Body '' -PartNote $diffNote -RefText $allRefText -Word:$word -Format $format).Length
         if ($allFixed + $docLength -le $MaxChars) {
             $groups['*'] = [pscustomobject]@{ Points = $targetPoints; RefText = $allRefText }
         }
@@ -1542,7 +1742,7 @@ function New-ReviewRequests {
             $gp = $groups[$key].Points
             $refText = $groups[$key].RefText
 
-            $fixedLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote ($diffNote + '（9/9 の一部。他の部分は別途確認するため、この部分だけで判定してください）') -RefText $refText -Word:$word).Length
+            $fixedLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote ($diffNote + '（9/9 の一部。他の部分は別途確認するため、この部分だけで判定してください）') -RefText $refText -Word:$word -Format $format).Length
             $budget = $MaxChars - $fixedLen
             if ($budget -lt 1000) {
                 Write-Warning ("{0}: 観点と参照資料だけで {1} 文字あり、-MaxChars {2} に収まりません。-MaxChars を増やすか、参照設計書を絞ってください（観点 {3}）" -f $f.Relative, $fixedLen, $MaxChars, (($gp | ForEach-Object { $_.Id }) -join ', '))
@@ -1550,7 +1750,7 @@ function New-ReviewRequests {
             }
 
             # 1 回に収まるなら分けない（分けたときの「n/m の一部」の注記の分を見込んで、収まるのに分けてしまわないよう）
-            $wholeLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote $diffNote -RefText $refText -Word:$word).Length + $docLength
+            $wholeLen = (New-PromptText -Points $gp -FileName $f.Name -Body '' -PartNote $diffNote -RefText $refText -Word:$word -Format $format).Length + $docLength
             if ($wholeLen -le $MaxChars) { $chunks = Split-SheetTexts -SheetTexts $sheetTexts -Budget ([int]::MaxValue) }
             else { $chunks = Split-SheetTexts -SheetTexts $sheetTexts -Budget $budget }
             for ($i = 0; $i -lt $chunks.Count; $i++) {
@@ -1559,7 +1759,7 @@ function New-ReviewRequests {
                     $partNote += '（{0}/{1} の一部。他の部分は別途確認するため、この部分だけで判定してください）' -f ($i + 1), $chunks.Count
                 }
                 $no++
-                $prompt = New-PromptText -Points $gp -FileName $f.Name -Body $chunks[$i] -PartNote $partNote -RefText $refText -Word:$word
+                $prompt = New-PromptText -Points $gp -FileName $f.Name -Body $chunks[$i] -PartNote $partNote -RefText $refText -Word:$word -Format $format
                 $requests.Add([pscustomobject]@{
                     Id         = 'R{0:000}' -f $no
                     File       = $f.Path
@@ -1612,6 +1812,16 @@ if ($ImportOnly) {
             foreach ($r in $requests) {
                 if (@($designFiles | Where-Object { $_.Path -eq $r.File }).Count -eq 0) { $designFiles.Add([pscustomobject]@{ Path = $r.File; Name = [System.IO.Path]::GetFileName($r.File); Relative = $r.Relative }) }
             }
+        }
+    }
+    elseif ($manifest.PSObject.Properties['Files']) {
+        # -Path を付けても、依頼を作ったときに前の版と比べた結果（-Baseline の変更なしなど）は、依頼の一覧のものを使う
+        $saved = @{}
+        foreach ($f in @($manifest.Files)) { $saved[[string]$f.Path] = $f }
+        foreach ($f in $designFiles) {
+            if (-not $saved.ContainsKey($f.Path)) { continue }
+            $f | Add-Member -NotePropertyName Diff -NotePropertyValue ([string]$saved[$f.Path].Diff) -Force
+            $f | Add-Member -NotePropertyName Baseline -NotePropertyValue ([string]$saved[$f.Path].Baseline) -Force
         }
     }
 }
@@ -1693,7 +1903,14 @@ else {
 
     Write-Host ''
     if ($requests.Count -eq 0 -and $Recheck) { Write-Host 'AI に確かめてもらう指摘はありません。' }
-    elseif ($requests.Count -eq 0) { Write-Host 'AI に依頼する観点はありません（どの観点も、確かめ方がツールです）。' }
+    elseif ($requests.Count -eq 0) {
+        # 依頼の無いわけ（AI に依頼する観点が無い・AI の観点が当たる設計書が無い・その設計書が前の版から変わっていない）
+        $aiFiles = @($designFiles | Where-Object { $df = $_; @($points | Where-Object { $_.ByAi -and (Test-NameLike $df.Name $_.Targets) }).Count -gt 0 })
+        if (@($points | Where-Object { $_.ByAi }).Count -eq 0) { Write-Host 'AI に依頼する観点はありません（どの観点も、確かめ方がツールです）。' }
+        elseif ($aiFiles.Count -eq 0) { Write-Host 'AI に依頼する観点はありません（AI で確かめる観点の対象設計書に当たる設計書がありません）。' }
+        elseif (@($aiFiles | Where-Object { [string]$_.Diff -ne '変更なし' }).Count -eq 0) { Write-Host 'AI に依頼する設計書はありません（前の版から変わった設計書がありません）。' }
+        else { Write-Host 'AI に依頼するものはありません。' }
+    }
     else { Write-Host ("依頼 {0} 件を作成しました（1 件あたり最大 {1} 文字）: {2}" -f $requests.Count, (($requests | Measure-Object Chars -Maximum).Maximum), $promptDir) }
 }
 
@@ -1850,13 +2067,15 @@ if ($Recheck) {
         }
         $requestRows.Add(@{ Values = @($r.Id, $r.Relative, $r.Part, (@($r.FindingNos) -join ', '), $r.Chars, $state, "prompts\$($r.Id).txt") })
     }
-    # ツールの指摘: 今の設計書をツールで確かめ直し、同じ確認・同じ内容の指摘が残っているか
+    # ツールの指摘: 今の設計書をツールで確かめ直し、同じ確認の同じ指摘（数だけが違うものも）が残っているか
     $toolNow = $null
+    $sameTool = @{}
     $files = @($designFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_.Path) })
     if (@($recheckFindings | Where-Object { $_.Rule -and $_.Target }).Count -gt 0) {
         Write-Host ''
         Write-Host 'ツールで確かめ直しています...'
         $toolNow = Invoke-ToolChecks -Points @($points | Where-Object { $_.ByTool }) -Files $files
+        $sameTool = Find-SameToolFindings @($recheckFindings | Where-Object { $_.Rule -and $_.Target }) $toolNow.Findings
     }
     $rows = New-Object System.Collections.Generic.List[object]
     $counts = [ordered]@{ '解消' = 0; '未解消' = 0; '要確認' = 0; '未回答' = 0; '設計書なし' = 0 }
@@ -1864,18 +2083,20 @@ if ($Recheck) {
     foreach ($x in $recheckFindings) {
         $verdict = '未回答'; $location = ''; $quote = ''; $note = ''; $requestId = ''; $loc = $null
         $cur = @($files | Where-Object { $_.Path -eq $x.Target })[0]
-        if (-not $cur) { $verdict = '設計書なし'; $note = '今の設計書に、この設計書（版数を除いた名前）が見つかりません' }
+        if (-not $cur) { $verdict = '設計書なし'; $note = '今の設計書に、この設計書（版数を除いた相対パス・名前）が見つからないか、同じ名前の設計書が複数あります' }
         elseif ($x.Rule) {
             $requestId = 'ツール'
             if (-not $toolNow -or $toolNow.Failed.ContainsKey($x.Rule)) { $note = 'ツールで確かめられませんでした' }
             else {
-                $same = @($toolNow.Findings | Where-Object { $_.Rule -eq $x.Rule -and $_.Path -eq $cur.Path -and $_.Detail -eq $x.Finding })[0]
+                $same = $sameTool[$x.No]
                 if ($same) {
                     $verdict = '未解消'
                     $location = $same.Sheet
                     if ($same.Cell) { $location = '{0}!{1}' -f $same.Sheet, $same.Cell }
                     $loc = Resolve-Location -Location $location -SheetNames @($same.Sheet)
                     $note = '機械のチェック（{0}）で、同じ指摘がまだあります' -f $x.Rule
+                    # 数などが変わったときは、今の指摘内容も出す
+                    if (($same.Detail -replace '\s', '') -ne (([string]$x.Finding).Replace('↵', '') -replace '\s', '')) { $note += '（今: {0}）' -f $same.Detail }
                 }
                 else { $verdict = '解消'; $note = '機械のチェック（{0}）で、同じ指摘が無くなりました' -f $x.Rule }
             }
@@ -1972,6 +2193,7 @@ $newCoverage = {
     }
     return $coverage[$key]
 }
+$droppedPoints = New-Object System.Collections.Generic.List[string]
 foreach ($r in $requests) {
     $ansPath = Join-Path $answerDir "$($r.Id).txt"
     $state = '未回答'
@@ -1983,6 +2205,11 @@ foreach ($r in $requests) {
     $requestRows.Add(@{ Values = @($r.Id, $r.Relative, $r.Part, ($r.PointIds -join ', '), $r.Chars, $state, "prompts\$($r.Id).txt") })
 
     foreach ($pointId in $r.PointIds) {
+        # 依頼を作ったあとで観点表から無くした・無効にした観点は、回答があっても入れない
+        if (-not $pointById.ContainsKey($pointId)) {
+            if (-not $droppedPoints.Contains($pointId)) { $droppedPoints.Add($pointId) }
+            continue
+        }
         $cv = & $newCoverage $r.File $r.Relative $pointId
         $cv.Requests.Add($r.Id)
         $mine = @($entries | Where-Object PointId -eq $pointId)
@@ -1995,6 +2222,8 @@ foreach ($r in $requests) {
         }
     }
 }
+
+if ($droppedPoints.Count -gt 0) { Write-Warning ("観点表で有効でない観点の回答は、レビュー結果に入れません: {0}" -f ($droppedPoints -join ', ')) }
 
 # ツールの指摘は、その確認を書いた観点のうち、観点表で先にあって設計書が対象のものに入れる。
 # 対象の観点が無ければ（設計書どうしの食い違いを、一覧ではなく設計書の側で見つけたときなど）、その確認を書いた観点に入れる
@@ -2285,7 +2514,7 @@ Write-Host "レビュー結果: $reportPath"
 #     表記ゆれ（ツールの確認）で使う用語集の CSV（正しい表記・揺れ）。Test-ExcelTerms.ps1 の -Glossary と同じです。
 #
 # .PARAMETER Baseline
-#     前の版の設計書のフォルダ（またはファイル）。版数を除いたファイル名で今の設計書と対応付け（Compare-Excel.ps1 で比べ）、
+#     前の版の設計書のフォルダ（またはファイル）。版数を除いた相対パス（無ければファイル名）で今の設計書と対応付け（Compare-Excel.ps1 で比べ）、
 #     AI には前の版から変わった行（★。前の版の値を「旧: …」で添える）と、その節の見出しの行だけを渡します。
 #     変わっていない設計書は AI に依頼しません（観点消化状況は「変更なし」）。版数・更新日・改訂履歴だけの変更は除きます。
 #     ツールの確認は、変わっていない設計書も含めて行います。
@@ -2300,7 +2529,7 @@ Write-Host "レビュー結果: $reportPath"
 #     前のレビュー結果（レビュー結果.xlsx か、それのあるフォルダ）。設計書を直したあとに、前の NG・要確認の指摘
 #     （対応要否が不要のものを除く）が直ったかを確かめます。AI の指摘は、指摘のあったシートと一緒に AI に渡して
 #     解消／未解消／要確認を判定させ、ツールの指摘はツールで確かめ直します。結果は「再確認」のシートに出します。
-#     設計書は、版数を除いたファイル名で前の指摘と対応付けます。-OutDir には前のレビューとは別のフォルダを指定します。
+#     設計書は、版数を除いた相対パス（無ければファイル名）で前の指摘と対応付けます。-OutDir には前のレビューとは別のフォルダを指定します。
 #     -Baseline とは同時に使えません。
 #
 # .PARAMETER TextFormat
