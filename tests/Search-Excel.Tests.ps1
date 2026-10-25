@@ -343,6 +343,25 @@ Test-Case 'Search-Excel: -FillMerged は、結合したセルの値を範囲の�
     Assert-Equal ($topLeft + @('B3|検索する', 'B4|検索する', 'C3|一覧に表示される', 'D5|縦横に結合')) (& $cells $filled) '右の列（E2・E4・E5）には返さない'
 }
 
+Test-Case 'Search-Excel: 値が数のセル（日付の書式は除く）は、表示しない Number が $true（結合したセルの下の行・読み取り結果の使い回しの写しも。-OutCsv には出さない）' {
+    $dir = New-TestDir
+    $path = Join-Path $dir '番号.xlsx'
+    New-SheetsBook $path ([ordered]@{ '日報' = @(@('WBS番号', '日付', '時間'), @([double]1.1, [datetime]'2026-10-05', '1.10'), @('', '', '')) })
+    Edit-ZipText $path 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('<pageMargins', '<mergeCells count="1"><mergeCell ref="A2:A3"/></mergeCells><pageMargins') }
+    $cells = { param($hits) @($hits | Sort-Object Cell | ForEach-Object { '{0}|{1}|{2}' -f $_.Cell, $_.Text, $_.Number }) }
+    $expected = @('A1|WBS番号|False', 'A2|1.1|True', 'A3|1.1|True', 'B1|日付|False', 'B2|2026/10/05|False', 'C1|時間|False', 'C2|1.10|False')
+    $global:ExcelToolsSearchCache = @{ '__Reused' = 0 }
+    try {
+        Assert-Equal $expected (& $cells (Invoke-Search -Pattern '\S' -Path $path -Target Value -FillMerged))
+        Assert-Equal $expected (& $cells (Invoke-Search -Pattern '\S' -Path $path -Target Value -FillMerged)) '使い回しの写しも'
+        Assert-True ($global:ExcelToolsSearchCache['__Reused'] -ge 1) ([string]$global:ExcelToolsSearchCache['__Reused'])
+    }
+    finally { Remove-Variable -Name ExcelToolsSearchCache -Scope Global -ErrorAction SilentlyContinue }
+    $csv = Join-Path $dir '結果.csv'
+    $null = Invoke-Search -Pattern '1\.1' -Path $path -Target Value -OutCsv $csv
+    Assert-Equal 'ファイル,シート,セル,種類,内容,名前,フルパス' ((Get-Content -LiteralPath $csv -Encoding UTF8)[0] -replace '"', '')
+}
+
 Test-Case 'Search-Excel: 図形の段落の中の改行（<a:br>。Shift+Enter の改行）も、段落の区切りと同じく ↵ にする（改行をまたいでは一致しない）' {
     $path = Join-Path (New-TestDir) '図形.xlsx'
     New-SheetsBook $path ([ordered]@{ 'S' = @(@('項目'), @('x')) })

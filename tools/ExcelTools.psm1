@@ -1242,9 +1242,11 @@ function Read-InputCsv {
 function ConvertTo-DesignBooks {
     #     Search-Excel.ps1 の結果（-Pattern '\S' -Target Value）を、ファイル → シート → 行番号 → 列番号 → 文字 の形にまとめる
     #     戻り値: パス → @{ File; Path; Sheets = シート名 → シート }（ファイル・シートは読んだ順）
-    #     シート: @{ Cells = 行番号 → @{ 列番号 → 文字 }; Rows = 行番号（昇順）; Cols = 行番号 → 列番号（昇順）; Labels = 行番号 → @{ 列番号 → ConvertTo-Label 済みの文字 } }
+    #     シート: @{ Cells = 行番号 → @{ 列番号 → 文字 }; Rows = 行番号（昇順）; Cols = 行番号 → 列番号（昇順）; Labels = 行番号 → @{ 列番号 → ConvertTo-Label 済みの文字 };
+    #             Numbers = 行番号 → @{ 列番号 → $true }（値が数のセル。Search-Excel の Number。日付・時刻の書式のものは除く） }
     param($Hits)
     $books = [ordered]@{}
+    $numbers = @{}   # パスとシート名 → 行番号 → @{ 列番号 → $true }
     foreach ($h in $Hits) {
         $m = [regex]::Match([string]$h.Cell, '^([A-Z]+)(\d+)$')
         if (-not $m.Success) { continue }
@@ -1253,7 +1255,14 @@ function ConvertTo-DesignBooks {
         if (-not $sheets.Contains($h.Sheet)) { $sheets[$h.Sheet] = @{} }
         $row = [int]$m.Groups[2].Value
         if (-not $sheets[$h.Sheet].ContainsKey($row)) { $sheets[$h.Sheet][$row] = @{} }
-        $sheets[$h.Sheet][$row][(Get-ColumnIndex $m.Groups[1].Value)] = [string]$h.Text
+        $col = Get-ColumnIndex $m.Groups[1].Value
+        $sheets[$h.Sheet][$row][$col] = [string]$h.Text
+        if ($h.Number) {
+            $key = $h.Path + '|' + $h.Sheet
+            if (-not $numbers.ContainsKey($key)) { $numbers[$key] = @{} }
+            if (-not $numbers[$key].ContainsKey($row)) { $numbers[$key][$row] = @{} }
+            $numbers[$key][$row][$col] = $true
+        }
     }
     # 見出しを探すたびに比べる形へ変換しないよう、先に変換しておく
     foreach ($book in $books.Values) {
@@ -1270,7 +1279,9 @@ function ConvertTo-DesignBooks {
                 foreach ($col in $c) { $l[$col] = ($cells[$r][$col].Normalize($script:Nfkc) -replace '\s', '') }
                 $labels[$r] = $l
             }
-            $book.Sheets[$name] = [pscustomobject]@{ Cells = $cells; Rows = $rows; Cols = $cols; Labels = $labels }
+            $nums = $numbers[$book.Path + '|' + $name]
+            if (-not $nums) { $nums = @{} }
+            $book.Sheets[$name] = [pscustomobject]@{ Cells = $cells; Rows = $rows; Cols = $cols; Labels = $labels; Numbers = $nums }
         }
     }
     return $books
@@ -1694,14 +1705,65 @@ function ConvertTo-Hours {
 # 合計・小計の行の値（ConvertTo-Label 済みの値の全体で比べる。「設計」は違う）
 $script:TotalLabelPattern = '^(総?合計|小計|総計|計|(sub|grand)?total)$'
 
+# 工数実績のファイル名のうち、担当の名前でない部分（年月・日付と、工数実績・日報などのことば）。前から順に除く
+$script:FileOwnerNoise = @(
+    '(令和|平成)\s*(元|\d{1,2})\s*年度?(\s*\d{1,2}\s*月(\s*\d{1,2}\s*日)?)?(度|分)?',
+    '(?<!\d)\d{4}\s*年度?(\s*\d{1,2}\s*月(\s*\d{1,2}\s*日)?)?(度|分)?',
+    '(?<!\d)\d{4}\s*[/\-._]\s*\d{1,2}(\s*[/\-._]\s*\d{1,2})?(?!\d)',
+    '(?<!\d)(19|20)\d{2}(0[1-9]|1[0-2])((0[1-9]|[12]\d|3[01]))?(?!\d)',
+    '(?<!\d)(19|20)\d{2}(?!\d)',
+    '(?<!\d)\d{1,2}\s*月(\s*\d{1,2}\s*日)?(度|分)?',
+    '工数(実績|管理|報告|入力|集計)?(表|書)?',
+    '作業(実績|日報|報告|記録|時間)(表|書)?',
+    '(勤務|稼働)(実績)?表?',
+    '日報|週報|月報|実績表?|報告書|タイムシート|(?i:time\s*sheet|copy)|コピー')
+
+function Get-FileNameOwner {
+    #     担当の列が無い工数実績の、ファイル名の担当（人ごとの日報・工数表。Read-EffortLog）。
+    #     年月・日付（2026年10月・令和8年10月・2026-10・202610・20261001・10月度 など）と、工数実績・工数・日報・実績・勤務表などのことば、
+    #     区切り（_・-・空白・括弧など）を除いた残りにする（工数実績_佐藤_202610.xlsx・日報(佐藤)2026年10月分.xlsx は 佐藤）。
+    #     Owners（WBS の担当）のうち、名前（Get-OwnerKey）が残りに含まれる人が 1 人なら、WBS の書き方にする。残りが無ければファイル名（拡張子を除く）
+    param([string] $File, [string[]] $Owners)
+    $name = [System.IO.Path]::GetFileNameWithoutExtension((Get-LeafName $File))
+    $t = $name.Replace('㋿', '令和').Replace('㍻', '平成').Normalize($script:Nfkc)
+    foreach ($p in $script:FileOwnerNoise) { $t = [regex]::Replace($t, $p, ' ') }
+    $rest = (@($t -split '[\s_\-~～.,、。・()\[\]{}【】「」『』〔〕<>]+' | Where-Object { $_ }) -join ' ')
+    if (-not $rest) { return $name }
+    # 名前は区切りの「・」も除いて比べる（ジョン・スミス）
+    $restKey = (Get-OwnerKey $rest) -replace '・', ''
+    $found = @{}   # 名前 → 書き方
+    foreach ($o in $Owners) { $k = (Get-OwnerKey $o) -replace '・', ''; if ($k -and $restKey.Contains($k) -and -not $found.ContainsKey($k)) { $found[$k] = $o } }
+    # ほかの名前の一部の名前（山田 太郎 の 山田）は除く
+    $keys = @($found.Keys | Where-Object { $k = $_; @($found.Keys | Where-Object { $_.Length -gt $k.Length -and $_.Contains($k) }).Count -eq 0 })
+    if ($keys.Count -eq 1) { return $found[$keys[0]] }
+    return $rest
+}
+
+function Test-SameOwner {
+    #     工数実績の担当（Name）が、タスクの担当（Owner。「山田、佐藤」のように複数でもよい）のだれかと同じ人か（Read-EffortLog・Measure-Effort.ps1）。
+    #     Get-OwnerKey で比べ、名字だけと氏名（山田・山田 太郎）も同じ人とみなす。どちらかが空なら $false
+    param([string] $Name, [string] $Owner)
+    $key = Get-OwnerKey $Name
+    if (-not $key) { return $false }
+    foreach ($o in @(([string]$Owner) -split '[、,，/／;；・]')) {
+        $k = Get-OwnerKey $o
+        if ($k -and ($k -eq $key -or $k.StartsWith($key) -or $key.StartsWith($k))) { return $true }
+    }
+    return $false
+}
+
 function Read-EffortLog {
     #     工数実績の表（1 行が日付・担当・WBS 番号かタスク・工数）を読む（Measure-Effort.ps1・New-WeeklyReport.ps1）。
     #     その表が無いブック・CSV は、日付を列に並べた工数表（Read-EffortMatrix）として読む（1 つのファイルを両方の形では読まない）
     #       Headers: 見出しの候補の CSV。Tasks: Measure-Progress.ps1 のタスク（WBS 番号、無ければタスク名で対応付ける）
     #       WBS 番号は番号の部分で比べる（「ＷＢＳ１．１」「No.1.1」「1.1 画面設計」「1-1」は 1.1）。同じ番号のタスクが複数あれば
-    #       （シートごとに番号を振り直した WBS など）タスク名で選び、決まらなければ対応付けずに警告する
+    #       （シートごとに番号を振り直した WBS など）タスク名で選び、決まらなければ対応付けずに警告する。
+    #       数のセル（Excel は 1.10 と入れると 1.1 にする）と CSV の WBS 番号 1.1 は、WBS に 1.10 もあればどちらか分からないので、
+    #       タスク名、次に担当（Test-SameOwner）の同じタスクで選び、決まらなければ対応付けずに警告する（WBS に 1.1 が無ければ 1.10）
     #       工数は時間で読む（見出しに「人日」があれば HoursPerDay を掛ける）。AsOf より後の日付の行と、合計・小計の行は数えない
-    #       日付・担当が空の行は同じ表の上の行のもの。担当の列が無い表は、シート名（表が複数のブック）かファイル名を担当にする
+    #       日付・担当が空の行は同じ表の上の行のもの。担当の列が無い表は、シート名（表が複数のブック。10月 など月の名前のシートは除く）か、
+    #       ファイル名から年月・工数実績などのことばを除いた名前（Get-FileNameOwner。WBS の担当がファイル名にあればその人）を担当にし、
+    #       読み取り結果の読んだ項目に書く
     #     戻り値: @{ Entries = @(@{ Date; Owner; WbsNo; TaskName; Hours; Task（Tasks の位置。対応しなければ -1）; Place }); Unreadable; Future }
     param($Inputs, [string] $Headers, $Tasks, [datetime] $AsOf, [double] $HoursPerDay = 8, $Skip, [string] $Exclude, [switch] $NoRecurse, [switch] $NoExcel, $ReadLog)
     # WBS 番号の比べる形（番号の前の WBS・No.・# と、番号の後ろのタスク名などを除く。番号で始まらなければ全体）
@@ -1724,6 +1786,23 @@ function Read-EffortLog {
         $k = ConvertTo-NameKey $list[$i].Task
         if ($byName.ContainsKey($k)) { $byName[$k] = -1 } else { $byName[$k] = $i }   # 同じ名前のタスクが複数あれば名前では対応付けない
     }
+    # 数のセルの 1.1 が指すかもしれない番号（小数点が 1 つで、後ろが 0 の WBS 番号。1.1 → 1.10・1.100、2 → 2.0）
+    $zeroNos = @{}
+    foreach ($no in @($byWbs.Keys)) {
+        if ($no -notmatch '^\d+\.\d*0$') { continue }
+        $short = $no.TrimEnd('0').TrimEnd('.')
+        if (-not $zeroNos.ContainsKey($short)) { $zeroNos[$short] = New-Object System.Collections.Generic.List[string] }
+        $zeroNos[$short].Add($no)
+    }
+    # WBS の担当（「山田、佐藤」は 1 人ずつも）。担当の列が無い表のファイル名と比べる
+    $ownerNames = New-Object System.Collections.Generic.List[string]
+    foreach ($t in $list) {
+        $o = ([string]$t.Owner).Trim()
+        if (-not $o) { continue }
+        foreach ($n in @(@($o) + @($o -split '[、,，/／;；・]'))) { $n = $n.Trim(); if ($n -and -not $ownerNames.Contains($n)) { $ownerNames.Add($n) } }
+    }
+    $fileOwners = @{}   # ファイルのパス → ファイル名の担当
+    $derived = @{}      # ファイル|シート → 読み取り結果に書く担当（ファイル名・シート名から決めたもの）
     $fields = @('日付', '担当', 'WBS番号', 'タスク', '工数')
     $candidates = Read-HeaderCandidates $Headers $fields
     # OnNoTable のスクリプトブロックは Read-HeaderRecords の中で呼ぶので、この関数の変数は名前の重ならない $matrixArgs で渡す
@@ -1731,9 +1810,12 @@ function Read-EffortLog {
     $records = Read-HeaderRecords -Inputs $Inputs -Candidates $candidates -Fields $fields -Need @('工数', @('WBS番号', 'タスク')) `
         -Key @('工数') -What '工数実績' -Skip $Skip -Exclude $Exclude -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $ReadLog `
         -OnNoTable { param($Book) Read-EffortMatrix -Book $Book @matrixArgs }
+    $monthSheets = @{}  # 月の名前のシート（10月・2026年10月）。人ごとのブックを月でシートに分けたものなので、担当にしない
+    foreach ($rec in $records) { $name = [string]$rec.Sheet; if (-not $monthSheets.ContainsKey($name)) { $monthSheets[$name] = [bool]($name -and (Get-YearMonth $name -Whole)) } }
     $entries = New-Object System.Collections.Generic.List[object]
     $unreadable = 0; $future = 0
     $ambiguous = New-Object System.Collections.Generic.List[string]; $ambiguousRows = 0
+    $zeroAmbiguous = New-Object System.Collections.Generic.List[string]; $zeroRows = 0
     $last = @{}   # 表ごとの前の行の日付・担当（結合したセルや、同じ日の 2 行目以降の空欄を埋める）
     foreach ($rec in $records) {
         $v = $rec.Values
@@ -1752,23 +1834,46 @@ function Read-EffortLog {
         $owner = ([string]$v['担当']).Trim()
         if ($owner) { $last[$table].Owner = $owner }
         elseif ($rec.Labels['担当']) { $owner = $last[$table].Owner }
-        elseif ($rec.SheetCount -gt 1) { $owner = $rec.Sheet }
-        else { $owner = [System.IO.Path]::GetFileNameWithoutExtension($rec.File) }
+        elseif ($rec.SheetCount -gt 1 -and -not $monthSheets[[string]$rec.Sheet]) {
+            $owner = $rec.Sheet
+            $derived['{0}|{1}' -f $rec.File, $rec.Sheet] = 'シート名から「{0}」' -f $owner
+        }
+        else {
+            if (-not $fileOwners.ContainsKey($rec.Path)) { $fileOwners[$rec.Path] = Get-FileNameOwner $rec.File $ownerNames.ToArray() }
+            $owner = $fileOwners[$rec.Path]
+            $derived['{0}|{1}' -f $rec.File, $rec.Sheet] = 'ファイル名から「{0}」' -f $owner
+        }
         $wbsNo = & $wbsKey $v['WBS番号']
         $taskName = ([string]$v['タスク']).Trim()
         $task = -1
-        if ($wbsNo -and $byWbs.ContainsKey($wbsNo)) {
-            $found = $byWbs[$wbsNo]
-            if ($found.Count -eq 1) { $task = $found[0] }
+        $found = New-Object System.Collections.Generic.List[int]
+        if ($wbsNo -and $byWbs.ContainsKey($wbsNo)) { $found.AddRange($byWbs[$wbsNo]) }
+        # 数のセル（CSV は文字か数か分からない）の 1.1 は、WBS の 1.10 かもしれない
+        $zero = $false
+        if ($wbsNo -and $zeroNos.ContainsKey($wbsNo)) {
+            $zero = $true
+            if ($null -ne $rec.Numbers) {
+                $col = $rec.Columns['WBS番号']
+                $numberCols = $rec.Numbers[$rec.Row]
+                $zero = [bool]($col -and $numberCols -and $numberCols.ContainsKey($col))
+            }
+            if ($zero) { foreach ($no in $zeroNos[$wbsNo]) { $found.AddRange($byWbs[$no]) } }
+        }
+        if ($found.Count -eq 1) { $task = $found[0] }
+        elseif ($found.Count -gt 1) {
+            # 同じ番号のタスクが複数あれば、タスク名の同じものを選ぶ。1.1 と 1.10 は、次に担当の同じものを選ぶ。決まらなければ、どれかに決めつけない
+            $nameKey = ConvertTo-NameKey $taskName
+            $same = @($found | Where-Object { $taskName -and (ConvertTo-NameKey $list[$_].Task) -eq $nameKey })
+            if ($same.Count -ne 1 -and $zero) { $same = @($found | Where-Object { Test-SameOwner $owner $list[$_].Owner }) }
+            if ($same.Count -eq 1) { $task = $same[0] }
+            elseif ($zero) {
+                $zeroRows++
+                $nos = (@($wbsNo) + $zeroNos[$wbsNo].ToArray()) -join '/'
+                if (-not $zeroAmbiguous.Contains($nos)) { $zeroAmbiguous.Add($nos) }
+            }
             else {
-                # 同じ番号のタスクが複数あれば、タスク名の同じものを選ぶ。決まらなければ、どれかに決めつけない
-                $nameKey = ConvertTo-NameKey $taskName
-                $same = @($found | Where-Object { $taskName -and (ConvertTo-NameKey $list[$_].Task) -eq $nameKey })
-                if ($same.Count -eq 1) { $task = $same[0] }
-                else {
-                    $ambiguousRows++
-                    if (-not $ambiguous.Contains($wbsNo)) { $ambiguous.Add($wbsNo) }
-                }
+                $ambiguousRows++
+                if (-not $ambiguous.Contains($wbsNo)) { $ambiguous.Add($wbsNo) }
             }
         }
         elseif ($taskName -and $byName.ContainsKey((ConvertTo-NameKey $taskName))) { $task = $byName[(ConvertTo-NameKey $taskName)] }
@@ -1781,6 +1886,18 @@ function Read-EffortLog {
     }
     if ($ambiguous.Count -gt 0) {
         Write-Warning ('同じ WBS 番号のタスクが複数あり、タスク名でも決まらない工数 {0} 行は、WBS のタスクに対応付けていません（WBS 番号 {1}{2}）' -f $ambiguousRows, (@($ambiguous | Select-Object -First 5) -join '・'), $(if ($ambiguous.Count -gt 5) { ' ほか' } else { '' }))
+    }
+    if ($zeroAmbiguous.Count -gt 0) {
+        Write-Warning ('WBS 番号が数のセル（または CSV）で 1.1 か 1.10 か分からず、タスク名・担当でも決まらない工数 {0} 行は、WBS のタスクに対応付けていません（WBS 番号 {1}{2}）。WBS 番号の列を文字列の書式にして入れ直すか、タスク名も書いてください' -f $zeroRows, (@($zeroAmbiguous | Select-Object -First 5) -join '・'), $(if ($zeroAmbiguous.Count -gt 5) { ' ほか' } else { '' }))
+    }
+    # 担当の列が無い表は、ファイル名・シート名から決めた担当を、読み取り結果の読んだ項目に書く
+    if ($null -ne $ReadLog) {
+        foreach ($l in $ReadLog) {
+            $note = $derived['{0}|{1}' -f $l.File, $l.Sheet]
+            if ($l.What -ne '工数実績' -or -not $note -or @($l.Found | Where-Object { $_ -match '^担当' }).Count -gt 0) { continue }
+            $l.Found = @(@($l.Found | Where-Object { $_ -match '^日付' }) + @('担当（{0}）' -f $note) + @($l.Found | Where-Object { $_ -notmatch '^日付' }))
+            $l.Missing = @($l.Missing | Where-Object { $_ -ne '担当' })
+        }
     }
     return [pscustomobject]@{ Entries = $entries; Unreadable = $unreadable; Future = $future }
 }
@@ -2058,7 +2175,7 @@ function Read-EffortMatrix {
                 foreach ($f in $v.Keys) { $values[$f] = $v[$f] }
                 $values['日付'] = $d.Date.ToString('yyyy/MM/dd', $invariant)
                 $values['工数'] = $text
-                $records.Add([pscustomobject]@{ Values = $values; Labels = $labelMap; Columns = $t.Cols; File = $Book.File; Path = $Book.Path; Sheet = $t.Sheet; Row = $r; Column = $d.Col; SheetCount = $sheetCount })
+                $records.Add([pscustomobject]@{ Values = $values; Labels = $labelMap; Columns = $t.Cols; File = $Book.File; Path = $Book.Path; Sheet = $t.Sheet; Row = $r; Column = $d.Col; SheetCount = $sheetCount; Numbers = $grid.Numbers })
             }
         }
         Add-ReadLog $ReadLog $What $Book.File $t.Sheet $t.Row $count $labelMap $fields ''
@@ -2145,7 +2262,8 @@ function Read-HeaderRecords {
     #       OnNoTable: 表が見つからないブック（ConvertTo-DesignBooks の 1 ブック。CSV は 1 行目を見出しの行にした同じ形）を渡して呼ぶ
     #       スクリプトブロック。ほかの形の表として読んだら同じ形の行の一覧（読み取り結果も足す）を、読めなければ $null を返す
     #     戻り値: @{ Values = 項目 → 文字; Labels = 項目 → 見出し; Columns = 項目 → 列番号（CSV は 0）; File; Path; Sheet; Row;
-    #             Column（Key の列）; SheetCount（そのブックで表のあるシートの数） }
+    #             Column（Key の列）; SheetCount（そのブックで表のあるシートの数）;
+    #             Numbers（そのシートの値が数のセル。ConvertTo-DesignBooks の Numbers。CSV は文字か数か分からないので $null） }
     param($Inputs, [hashtable] $Candidates, [string[]] $Fields, [object[]] $Need, [string[]] $Key, [string] $What, $Skip, [string] $Exclude, [switch] $NoRecurse, [switch] $NoExcel, $ReadLog, [scriptblock] $OnNoTable)
     $records = New-Object System.Collections.Generic.List[object]
     $test = {
@@ -2199,7 +2317,7 @@ function Read-HeaderRecords {
                     foreach ($dr in $t.Rows) {
                         $v = @{}
                         foreach ($f in $map.Keys) { $v[$f] = [string]$dr.Cells[$cols[$f]] }
-                        $records.Add([pscustomobject]@{ Values = $v; Labels = $map; Columns = $cols; File = $book.File; Path = $book.Path; Sheet = $entry.Sheet; Row = $dr.Row; Column = $cols[$keyField]; SheetCount = $found.Count })
+                        $records.Add([pscustomobject]@{ Values = $v; Labels = $map; Columns = $cols; File = $book.File; Path = $book.Path; Sheet = $entry.Sheet; Row = $dr.Row; Column = $cols[$keyField]; SheetCount = $found.Count; Numbers = $entry.Grid.Numbers })
                     }
                 }
             }
@@ -2223,6 +2341,7 @@ function Read-HeaderRecords {
                     }
                 }
                 $book = @((ConvertTo-DesignBooks $cells).Values)[0]
+                foreach ($sheet in @($book.Sheets.Values)) { $sheet.Numbers = $null }   # CSV は文字か数か分からない
                 $more = & $OnNoTable $book
                 if ($null -ne $more) { foreach ($r in $more) { $records.Add($r) }; continue }
             }
@@ -2238,7 +2357,7 @@ function Read-HeaderRecords {
             $v = @{}
             foreach ($f in $map.Keys) { $v[$f] = [string]$r.($map[$f]) }
             if (-not ([string]$v[$keyField]).Trim()) { continue }
-            $records.Add([pscustomobject]@{ Values = $v; Labels = $map; Columns = @{}; File = $c.Name; Path = $c.FullName; Sheet = ''; Row = $line; Column = 0; SheetCount = 1 })
+            $records.Add([pscustomobject]@{ Values = $v; Labels = $map; Columns = @{}; File = $c.Name; Path = $c.FullName; Sheet = ''; Row = $line; Column = 0; SheetCount = 1; Numbers = $null })
         }
         Add-ReadLog $ReadLog $What $c.Name '' 1 ($records.Count - $before) $map $Fields ''
     }
