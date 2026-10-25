@@ -160,6 +160,92 @@ Test-Case 'Test-TestSpec: -DesignPath の必須の印（●・◎・✓）と、
         '境界値のテストが無い|SCR010 の入力項目「単価」（7 桁。画面設計書_SCR010.xlsx 画面項目定義 6 行目）の桁数の境界（7 桁・8 桁）を確かめるケースが見つかりません') @($issues | ForEach-Object { '{0}|{1}' -f $_.Item, $_.Detail })
 }
 
+Test-Case 'Test-TestSpec: -DesignPath の画面ID が全角（ＳＣＲ０１０）でもケースの画面と突き合わせ、半角で書いたシートと同じ画面として項目名の揺れを見る' {
+    $dir = New-TestDir
+    $design = Join-Path $dir 'design'
+    $null = New-Item -ItemType Directory -Path $design
+    $columns = @('No', '項目名', '入出力', '型', '桁数', '必須')
+    New-SheetsBook (Join-Path $design '画面設計書_SCR010.xlsx') ([ordered]@{
+            '画面項目定義' = @(@('画面ID', 'ＳＣＲ０１０', '画面名', '顧客登録', '', ''), @(), $columns, @('1', '顧客名', 'I', '全角', '20', '○'))
+            '画面項目定義2' = @(@('画面ID', 'SCR010', '画面名', '顧客登録', '', ''), @(), $columns, @('2', '顧客名称', 'I', '全角', '40', ''))
+        })
+    $path = Join-Path $dir 'UT_顧客登録.xlsx'
+    New-SpecBook $path @('No', '機能', '区分', '前提条件', '手順', '入力値', '期待結果', '結果') @(
+        @('1', 'SCR010', '正常', '', '顧客名を入れて登録する', '', '登録される', 'OK'),
+        @('2', '', '正常', '', '顧客名称を入れて登録する', '', '登録される', 'OK'))
+    $issues = @(& $TestSpecTool -Path $path -DesignPath $design 6>$null)
+    Assert-Equal @(
+        '必須のテストが無い|ＳＣＲ０１０ の必須の入力項目「顧客名」（画面設計書_SCR010.xlsx 画面項目定義 4 行目）を未入力にするケースが見つかりません',
+        '境界値のテストが無い|ＳＣＲ０１０ の入力項目「顧客名」（20 桁。画面設計書_SCR010.xlsx 画面項目定義 4 行目）の桁数の境界（20 桁・21 桁）を確かめるケースが見つかりません',
+        '境界値のテストが無い|SCR010 の入力項目「顧客名称」（40 桁。画面設計書_SCR010.xlsx 画面項目定義2 4 行目）の桁数の境界（40 桁・41 桁）を確かめるケースが見つかりません') @($issues | ForEach-Object { '{0}|{1}' -f $_.Item, $_.Detail }) '同じ画面の「顧客名」「顧客名称」は揺れにしない'
+}
+
+Test-Case 'Test-TestSpec: 区分として読んだ列の値が正常・異常などでない（観点の列の「必須チェック」など）か空欄の機能は、期待結果の言葉から異常系を推定する' {
+    $dir = New-TestDir
+    $rows = @(
+        @('1', 'SCR002', '必須チェック', '受注日を空欄にして登録する', 'E0001 が表示される'),
+        @('2', '', '必須チェック', '顧客コードを空欄にして登録する', 'E0001 が表示される'),
+        @('3', '', '桁数チェック', '備考に 501 文字を入れて登録する', 'E0002 が表示される'),
+        @('4', '', '型チェック', '顧客コードに全角を入れて登録する', 'E0003 が表示される'),
+        @('5', '', '正常登録', '全項目を入れて登録する', 'I0001 が表示され、受注が登録される'),
+        @('6', 'SCR003', '', '備考に 501 文字を入れて更新する', 'E0002 が表示される'),
+        @('7', '', '', '希望納品日に存在しない日付を入れて更新する', 'E0004 が表示される'),
+        @('8', '', '', '他のユーザーが更新した後で更新する', 'E0006 が表示される'),
+        @('9', '', '', '配送時間帯を変えて更新する', 'I0002 が表示される'),
+        @('10', '', '', 'キャンセルボタンを押す', 'Q0002 が表示される'))
+    $path = Join-Path $dir 'UT_受注.xlsx'
+    New-SpecBook $path @('No', '機能', '観点', '手順', '期待結果') $rows
+    $out = Join-Path $dir 'spec-check.xlsx'
+    $issues = @(& $TestSpecTool -Path $path -OutXlsx $out 6>$null)
+    Assert-Equal 0 $issues.Count (@($issues | ForEach-Object { $_.Detail }) -join ' / ')
+    $functions = Read-XlsxSheet -Path $out -Index 2
+    Assert-Equal @('SCR002|5|4|期待結果の言葉から推定', 'SCR003|5|3|期待結果の言葉から推定') @(2, 3 | ForEach-Object { '{0}|{1}|{2}|{3}' -f $functions.Rows[$_]['A'], $functions.Rows[$_]['B'], $functions.Rows[$_]['C'], $functions.Rows[$_]['E'] })
+}
+
+Test-Case 'Test-TestSpec: -DesignPath の型・境界値のケースは確認内容・期待結果・手順などの列から探し、テストID や予定日の数字を桁数・日付と読まない' {
+    $dir = New-TestDir
+    $design = Join-Path $dir 'design'
+    $null = New-Item -ItemType Directory -Path $design
+    New-SheetsBook (Join-Path $design '画面設計書_SCR010.xlsx') ([ordered]@{ '画面項目定義' = @(@('画面ID', 'SCR010', '画面名', '顧客登録', '', ''), @(), @('No', '項目名', '入出力', '型', '桁数', '必須'),
+                @('1', '登録日', 'I', '日付', '10', ''), @('2', '顧客コード', 'I', '半角英数', '10', '')) })
+    $path = Join-Path $dir 'UT_顧客登録.xlsx'
+    New-SpecBook $path @('No', '機能', '区分', '手順', '期待結果', '予定日') @(, @('10', 'SCR010', '正常', '登録日と顧客コードを入れて登録する', '登録される', '2026/12/30'))
+    $issues = @(& $TestSpecTool -Path $path -DesignPath $design 6>$null | Where-Object { $_.Item -match '^(型|境界値)' })
+    Assert-Equal @(
+        '型のテストが無い|SCR010 の入力項目「登録日」（型 日付。画面設計書_SCR010.xlsx 画面項目定義 4 行目）に、日付として正しくない値を入れるケースが見つかりません',
+        '型のテストが無い|SCR010 の入力項目「顧客コード」（型 半角英数。画面設計書_SCR010.xlsx 画面項目定義 5 行目）に、半角として正しくない値を入れるケースが見つかりません',
+        '境界値のテストが無い|SCR010 の入力項目「顧客コード」（10 桁。画面設計書_SCR010.xlsx 画面項目定義 5 行目）の桁数の境界（10 桁・11 桁）を確かめるケースが見つかりません') @($issues | ForEach-Object { '{0}|{1}' -f $_.Item, $_.Detail }) 'No の 10、予定日の 12/30（2/30）'
+}
+
+Test-Case 'Test-TestSpec: -DesignPath のメッセージの文言は、セル内の改行の違いを見ない' {
+    $dir = New-TestDir
+    $design = Join-Path $dir 'design'
+    $null = New-Item -ItemType Directory -Path $design
+    New-SheetsBook (Join-Path $design 'メッセージ一覧.xlsx') ([ordered]@{ 'メッセージ一覧' = @(@('メッセージID', 'メッセージ'), @('E0001', "{0}は必須入力です。`n入力してください。"), @('E0002', '{0}は{1}文字以内で入力してください。')) })
+    $rows = @(
+        @('1', 'SCR002', '異常', '受注日を未入力で登録する', 'E0001「受注日は必須入力です。入力してください。」が表示される'),
+        @('2', '', '異常', '備考に 501 文字を入れて登録する', "E0002「備考は500文字以内で`n入力してください。」が表示される"),
+        @('3', '', '異常', '数量を未入力で登録する', 'E0001「数量は必須入力です。」が表示される'))
+    $path = Join-Path $dir 'UT_受注登録.xlsx'
+    New-SpecBook $path @('No', '機能', '区分', '手順', '期待結果') $rows
+    $issues = @(& $TestSpecTool -Path $path -DesignPath $design 6>$null | Where-Object { $_.Item -match 'メッセージ' })
+    Assert-Equal @('メッセージの文言が違う|テストケース!E4|「数量は必須入力です。」が、メッセージ一覧の E0001「{0}は必須入力です。↵入力してください。」（メッセージ一覧.xlsx メッセージ一覧 2 行目） と合いません') @($issues | ForEach-Object { '{0}|{1}|{2}' -f $_.Item, $_.Location, $_.Detail })
+}
+
+Test-Case 'Test-TestSpec: -DesignPath のメッセージの指摘は、ケースの列を項目の順（確認内容・期待結果・手順・前提条件・入力値）に見て並べる（実行ごとに変わらない）' {
+    $dir = New-TestDir
+    $design = Join-Path $dir 'design'
+    $null = New-Item -ItemType Directory -Path $design
+    New-SheetsBook (Join-Path $design 'メッセージ一覧.xlsx') ([ordered]@{ 'メッセージ一覧' = @(@('メッセージID', 'メッセージ'), @('E0001', '{0}は必須入力です。'), @('E0006', '他のユーザーにより更新されています。再度検索してから操作してください。')) })
+    $path = Join-Path $dir 'UT_受注登録.xlsx'
+    New-SpecBook $path @('No', '機能', '確認内容', '期待結果', '手順', '前提条件', '入力値') @(, @('1', 'SCR002', '受注日の必須チェック（E9991）', 'E0001「受注日を入力してください。」が表示される（E9992）', '受注日を空にして登録する（E9993）', 'E0006「他のユーザーにより更新されています。」が出た状態（E9994）', '空欄（E9995）'))
+    $issues = @(& $TestSpecTool -Path $path -DesignPath $design 6>$null | Where-Object { $_.Item -match 'メッセージ' })
+    $defined = 'E0001「{0}は必須入力です。」（メッセージ一覧.xlsx メッセージ一覧 2 行目）・E0006「他のユーザーにより更新されています。再度検索してから操作してください。」（メッセージ一覧.xlsx メッセージ一覧 3 行目）'
+    Assert-Equal @(@(1..5 | ForEach-Object { 'メッセージIDが一覧に無い|メッセージ ID E999{0} がメッセージ一覧にありません（誤記か、一覧への追加漏れ）' -f $_ }) + @(
+            ('メッセージの文言が違う|「受注日を入力してください。」が、メッセージ一覧の {0} と合いません' -f $defined),
+            ('メッセージの文言が違う|「他のユーザーにより更新されています。」が、メッセージ一覧の {0} と合いません' -f $defined))) @($issues | ForEach-Object { '{0}|{1}' -f $_.Item, $_.Detail })
+}
+
 Test-Case 'Test-TestSpec: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestSpecTool
     Assert-Match $h.Synopsis 'テスト仕様書'
