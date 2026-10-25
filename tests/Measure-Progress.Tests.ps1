@@ -188,6 +188,21 @@ Test-Case 'Measure-Progress: 進捗率の「済み」「完了済」「完了済
     Assert-Equal @('1.1|1|完了', '1.2|1|完了', '1.3|1|完了', '1.4|1|完了', '1.5|0|遅延') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.WbsNo, $_.Progress, $_.Status })
 }
 
+Test-Case 'Measure-Progress: 担当者別の集計は、全角・半角、英字の大文字・小文字と空白の違い（山田 太郎・山田　太郎・山田太郎、Nguyen・NGUYEN）をそろえて 1 人にまとめる' {
+    $dir = New-TestDir
+    $wbs = Join-Path $dir 'WBS.xlsx'
+    New-SheetsBook $wbs ([ordered]@{ 'WBS' = @(@('WBS', 'タスク名', '担当者', '予定開始日', '予定終了日', '進捗率', '予定工数'),
+            @('1.1', '画面設計', '山田 太郎', '2026/10/05', '2026/10/09', '100%', '5'),
+            @('1.2', 'テーブル設計', '山田　太郎', '2026/10/05', '2026/10/09', '100%', '5'),
+            @('1.3', 'IF 設計', '山田太郎', '2026/10/12', '2026/10/16', '50%', '5'),
+            @('1.4', '帳票設計', 'Nguyen', '2026/10/05', '2026/10/09', '100%', '5'),
+            @('1.5', 'バッチ設計', 'NGUYEN', '2026/10/12', '2026/10/16', '0%', '5')) })
+    $out = Join-Path $dir '進捗.xlsx'
+    $null = @(& $ProgressTool -Path $wbs -AsOf '2026-10-14' -OutXlsx $out 6>$null)
+    $owners = Read-XlsxSheet -Path $out -Index 2
+    Assert-Equal @('Nguyen|2', '山田 太郎|3') @(2..$owners.Rows.Count | ForEach-Object { '{0}|{1}' -f $owners.Rows[$_]['A'], $owners.Rows[$_]['B'] }) '表示は最初に出てきた書き方'
+}
+
 Test-Case 'Measure-Progress: Get-Help でヘルプが表示される' {
     $h = Get-Help $ProgressTool
     Assert-Match $h.Synopsis 'WBS'

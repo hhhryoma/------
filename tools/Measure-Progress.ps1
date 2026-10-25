@@ -337,9 +337,10 @@ if ($null -ne $sumAC) { $cpi = Get-Ratio $sumEVwithAC $sumAC }
 $delayed = @($tasks | Where-Object { $_.Status -eq '遅延' } | Sort-Object @{ e = { $_.Delay }; Descending = $true }, PlanEnd)
 
 $owners = New-Object System.Collections.Generic.List[object]
-foreach ($g in @($tasks | Group-Object Owner | Sort-Object Name)) {
+# 担当者は、全角・半角、英字の大文字・小文字と空白の違いをそろえてまとめる（Get-OwnerKey。表示は最初に出てきた書き方。名前の順）
+foreach ($g in @($tasks | Group-InOrder { Get-OwnerKey $_.Owner } | Sort-Object @{ e = { $_.Group[0].Owner } }, Index)) {
     $pv = ($g.Group | Measure-Object PV -Sum).Sum; $ev = ($g.Group | Measure-Object EV -Sum).Sum
-    $owners.Add([pscustomobject]@{ Owner = $g.Name; Tasks = $g.Count; PV = $pv; EV = $ev; SPI = (Get-Ratio $ev $pv); Delayed = @($g.Group | Where-Object Status -eq '遅延').Count })
+    $owners.Add([pscustomobject]@{ Owner = $g.Group[0].Owner; Tasks = $g.Count; PV = $pv; EV = $ev; SPI = (Get-Ratio $ev $pv); Delayed = @($g.Group | Where-Object Status -eq '遅延').Count })
 }
 
 # 週ごとの計画完了・実績完了（月曜始まり）
