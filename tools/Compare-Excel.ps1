@@ -889,6 +889,130 @@ function Find-RowAnchors {
     return , $anchors
 }
 
+function Find-SimilarMoves {
+    #     削除と追加に残った行（Removed・Added。同じ内容の行の移動を除いたあと）から、移動した行の組を探す（Compare-Sheet）。
+    #     似ている行どうしの対応付け（Find-SimilarRows）は順序を保つので、ほかの行を追い越して移動した行は組にならない。
+    #     移動と同時に No などの番号を振り直したり、セルを 1 つ変えたりした行は、同じ内容の行でもないので、削除と追加になってしまう。
+    #     そこで、次のどちらも満たす行どうしを移動とする。
+    #       1) 同じ列に同じ語（項目名・項目 ID など。Test-HistoryTerm）があり、その語がその列に、旧・新のシートのどちらでも 1 回しか出てこない。
+    #          そのような語でつながる相手が、互いに 1 つだけ（番号だけの行や、「○」「テキスト」などありふれた値だけが同じ行は組にしない）
+    #       2) 振り直した番号のセルを除いて、違うセルが無いか、1 つだけ。1 つだけのときは、同じセルが 2 つ以上あり、
+    #          違うセルが行を見分ける語（その列に旧・新のどちらでも 1 回しか出てこない語。項目名など）どうしでない（変えたのが項目名なら別の行とみなす）
+    #     振り直した番号のセルは、対応付けた行（Pairs）で整数が別の整数に変わった列の、旧・新とも整数で、上か下の行と 1 違いのセル。
+    #     返り値: Pairs（旧行, 新行）、Numbers（組にした行の、振り直した番号のセル。@(列, 新行)。列は OldView・NewView の列番地）
+    param($OldView, $NewView, $Removed, $Added, $Pairs)
+
+    $moves = New-Object System.Collections.Generic.List[object]
+    $numbers = New-Object System.Collections.Generic.List[object]
+    $result = [pscustomobject]@{ Pairs = $moves; Numbers = $numbers }
+    $Removed = @($Removed); $Added = @($Added)
+    if ($Removed.Count -eq 0 -or $Added.Count -eq 0) { return $result }
+
+    # 行ごとの「列と語」（文字は序数で比べる）と、削除と追加に残った行のどちらにもあるもの
+    $oldKeys = @{}; $newKeys = @{}
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $inOld = New-Object 'System.Collections.Generic.HashSet[string]'
+    $shared = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($r in $Removed) {
+        $v = $OldView.Rows[$r].V; $list = New-Object System.Collections.Generic.List[string]
+        foreach ($c in $v.Keys) { if (Test-HistoryTerm $v[$c]) { $k = $c + "`t" + $v[$c]; $list.Add($k); [void]$inOld.Add($k); [void]$seen.Add($k) } }
+        $oldKeys[$r] = $list
+    }
+    foreach ($t in $Added) {
+        $v = $NewView.Rows[$t].V; $list = New-Object System.Collections.Generic.List[string]
+        foreach ($c in $v.Keys) { if (Test-HistoryTerm $v[$c]) { $k = $c + "`t" + $v[$c]; $list.Add($k); [void]$seen.Add($k); if ($inOld.Contains($k)) { [void]$shared.Add($k) } } }
+        $newKeys[$t] = $list
+    }
+    if ($shared.Count -eq 0) { return $result }
+
+    # その「列と語」が、旧・新のシートのそれぞれで何回出てくるか。両方で 1 回だけの語は、その語のある行どうしをつなぐ
+    $countIn = {
+        param($Sheet)
+        $n = New-Object 'System.Collections.Generic.Dictionary[string,int]'
+        foreach ($row in $Sheet.Rows.Values) {
+            foreach ($c in $row.V.Keys) {
+                $k = $c + "`t" + $row.V[$c]
+                if ($seen.Contains($k)) { if ($n.ContainsKey($k)) { $n[$k] = $n[$k] + 1 } else { $n.Add($k, 1) } }
+            }
+        }
+        return , $n
+    }
+    $oldCount = & $countIn $OldView; $newCount = & $countIn $NewView
+    # 行を見分ける語か（その列に 1 回しか出てこない語）
+    $isLabel = { param($Count, [string] $Col, [string] $Text) (Test-HistoryTerm $Text) -and $Count.ContainsKey($Col + "`t" + $Text) -and $Count[$Col + "`t" + $Text] -eq 1 }
+    $oldAt = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    $newAt = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    foreach ($r in $Removed) { foreach ($k in $oldKeys[$r]) { if ($shared.Contains($k) -and $oldCount[$k] -eq 1 -and $newCount[$k] -eq 1) { $oldAt[$k] = $r } } }
+    foreach ($t in $Added) { foreach ($k in $newKeys[$t]) { if ($shared.Contains($k) -and $oldCount[$k] -eq 1 -and $newCount[$k] -eq 1) { $newAt[$k] = $t } } }
+    # 語でつながる相手（語によって違う相手につながる行は、相手を決めない）
+    $partner = {
+        param($Keys, $At)
+        $to = $null
+        foreach ($k in $Keys) {
+            if (-not $At.ContainsKey($k)) { continue }
+            if ($null -eq $to) { $to = $At[$k] } elseif ($to -ne $At[$k]) { return $null }
+        }
+        return $to
+    }
+    $cand = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $Removed) {
+        $t = & $partner $oldKeys[$r] $newAt
+        if ($null -ne $t -and (& $partner $newKeys[$t] $oldAt) -eq $r) { $cand.Add(@($r, $t)) }
+    }
+    if ($cand.Count -eq 0) { return $result }
+
+    # 振り直した番号の列: 組の候補で旧・新とも整数で違う列のうち、対応付けた行でも整数が別の整数に変わった列
+    $numPattern = '^-?[0-9]{1,18}$'
+    $check = @{}
+    foreach ($p in $cand) {
+        $a = $OldView.Rows[$p[0]].V; $b = $NewView.Rows[$p[1]].V
+        foreach ($c in $a.Keys) { if ([string]$a[$c] -match $numPattern -and [string]$b[$c] -match $numPattern -and $a[$c] -ne $b[$c]) { $check[$c] = $true } }
+    }
+    $numCols = @{}
+    if ($check.Count -gt 0) {
+        foreach ($p in $Pairs) {
+            $a = $OldView.Rows[$p[0]].V; $b = $NewView.Rows[$p[1]].V
+            foreach ($c in $check.Keys) { if ([string]$a[$c] -match $numPattern -and [string]$b[$c] -match $numPattern -and $a[$c] -ne $b[$c]) { $numCols[$c] = $true } }
+            if ($numCols.Count -eq $check.Count) { break }
+        }
+    }
+    # 番号のセルか（整数で、上か下の行の同じ列が 1 違いの整数）
+    $isNumber = {
+        param($Sheet, [string] $Row, [string] $Col)
+        $x = [string]$Sheet.Rows[$Row].V[$Col]
+        if ($x -notmatch $numPattern) { return $false }
+        foreach ($d in @(-1, 1)) {
+            $near = $Sheet.Rows[[string]([int]$Row + $d)]
+            if ($near -and [string]$near.V[$Col] -match $numPattern -and [long]$near.V[$Col] -eq [long]$x + $d) { return $true }
+        }
+        return $false
+    }
+
+    # 振り直した番号のセルを除いて、違うセルが無いか、1 つだけ（同じセルが 2 つ以上で、項目名などを変えたのではない）の組を移動とする
+    foreach ($p in $cand) {
+        $r = $p[0]; $t = $p[1]
+        $o = $OldView.Rows[$r]; $n = $NewView.Rows[$t]
+        $cols = @{}
+        foreach ($c in @($o.V.Keys) + @($o.F.Keys) + @($n.V.Keys) + @($n.F.Keys)) { $cols[$c] = $true }
+        $same = 0; $diff = 0; $changed = $null
+        $nums = New-Object System.Collections.Generic.List[string]
+        foreach ($c in $cols.Keys) {
+            $of = $o.F[$c]; $nf = $n.F[$c]
+            if ($null -ne $of) { $of = Get-RelativeFormula $of ([int]$r) }
+            if ($null -ne $nf) { $nf = Get-RelativeFormula $nf ([int]$t) }
+            if (-not [string]::Equals($of, $nf, $ordinal)) { $diff++; $changed = $c }
+            elseif ([string]::Equals($o.V[$c], $n.V[$c], $ordinal)) { $same++ }
+            elseif ($numCols.ContainsKey($c) -and (& $isNumber $OldView $r $c) -and (& $isNumber $NewView $t $c)) { $nums.Add($c) }
+            else { $diff++; $changed = $c }
+        }
+        if ($diff -gt 1 -or ($diff -eq 1 -and $same -lt 2)) { continue }
+        if ($diff -eq 1 -and (& $isLabel $oldCount $changed $o.V[$changed]) -and (& $isLabel $newCount $changed $n.V[$changed])) { continue }
+        $moves.Add(@($r, $t))
+        foreach ($c in $nums) { $numbers.Add(@($c, $t)) }
+    }
+    return $result
+}
+
 # ---------------------------------------------------------------- 差分の出力
 
 
@@ -1364,6 +1488,7 @@ function Compare-Sheet {
         $addedBySig[$sig].Add($r)
     }
     $movedNew = @{}
+    $restRemoved = New-Object System.Collections.Generic.List[string]
     foreach ($r in $map.Removed) {
         $sig = Get-RowSignature $oldView.Rows[$r] ([int]$r)
         if ($addedBySig.ContainsKey($sig) -and $addedBySig[$sig].Count -gt 0) {
@@ -1371,9 +1496,24 @@ function Compare-Sheet {
             $moved.Add(@($r, $to)); $movedNew[$to] = $true
             $pairs.Add(@($r, $to))
         }
-        else { $removed.Add($r) }
+        else { $restRemoved.Add($r) }
     }
+    # 移動と同時に No などの番号を振り直した行や、セルを 1 つ変えた行も、ほかの行と取り違えるおそれがなければ移動とする（Find-SimilarMoves）。
+    # その行の振り直した番号のセルは、ほかの行の番号と同じく「連番の振り直し」にする（Merge-Renumbering）
+    $movedOld = @{}; $movedNumbers = @{}
+    if (-not $NoRowAlign) {
+        $sm = Find-SimilarMoves -OldView $oldView -NewView $newView -Removed $restRemoved -Added @($map.Added | Where-Object { -not $movedNew.ContainsKey($_) }) -Pairs $pairs
+        foreach ($mv in $sm.Pairs) { $moved.Add($mv); $pairs.Add($mv); $movedOld[$mv[0]] = $true; $movedNew[$mv[1]] = $true }
+        foreach ($x in $sm.Numbers) { $movedNumbers[(& $L $x[0]) + $x[1]] = $true }
+    }
+    foreach ($r in $restRemoved) { if (-not $movedOld.ContainsKey($r)) { $removed.Add($r) } }
     foreach ($r in $map.Added) { if (-not $movedNew.ContainsKey($r)) { $added.Add($r) } }
+
+    # 移動した行は、その行のセルの差分より前に出す（同じ行の差分は、移動・番号・セルの変更の順に並ぶ）。
+    # @() で囲む（移動した行が 1 つだけのとき、旧・新の行の組がほどけないように）
+    foreach ($mv in @($moved | Sort-Object { [int]$_[1] })) {
+        Add-Diff $Sheet "A$($mv[1])" "A$($mv[0])" '行' '移動' (Format-RowContent $oldView.Rows[$mv[0]]) (Format-RowContent $newView.Rows[$mv[1]])
+    }
 
     # ---- 対応付けた行のセルを比べる
     $rowMap = @{}
@@ -1396,10 +1536,6 @@ function Compare-Sheet {
                 else { Add-Diff $Sheet $newCell $oldCell $kind[1] '変更' $ov $nv }
             }
         }
-    }
-    # @() で囲む（移動した行が 1 つだけのとき、旧・新の行の組がほどけないように）
-    foreach ($mv in @($moved | Sort-Object { [int]$_[1] })) {
-        Add-Diff $Sheet "A$($mv[1])" "A$($mv[0])" '行' '移動' (Format-RowContent $oldView.Rows[$mv[0]]) (Format-RowContent $newView.Rows[$mv[1]])
     }
     foreach ($r in ($added | Sort-Object { [int]$_ })) {
         Add-Diff $Sheet "A$r" $null '行' '追加' $null (Format-RowContent $NewSheet.Rows[$r])
@@ -1474,7 +1610,7 @@ function Compare-Sheet {
             if (-not $NewSheet.Shapes.ContainsKey($name)) { Add-Diff $Sheet $null $OldSheet.Shapes[$name].Cell '図形' '削除' $OldSheet.Shapes[$name].Text $null }
         }
     }
-    Merge-Renumbering -From $firstDiff
+    Merge-Renumbering -From $firstDiff -Numbers $movedNumbers
     Sort-SheetDiff -From $firstDiff
     $script:OldSheetName = $null
 }
@@ -1768,8 +1904,9 @@ function Compare-SheetFormat {
 
 function Merge-Renumbering {
     #     行の挿入・削除で No などの連番が振り直されると、番号のセルが 1 つずつ「変更」になってしまう。
-    #     同じ列で、新の行が連続し、旧の番号も連続していて、どれも同じだけずれた整数のセルの変更（2 個以上）を 1 件にまとめる
-    param([int] $From)
+    #     同じ列で、新の行が連続し、旧の番号も連続していて、どれも同じだけずれた整数のセルの変更（2 個以上）を 1 件にまとめる。
+    #     Numbers（新のセル番地 → $true）は、移動した行の振り直した番号のセル（Find-SimilarMoves）。1 個だけでも「連番の振り直し」にする
+    param([int] $From, [hashtable] $Numbers = @{})
 
     $items = $script:Diffs.GetRange($From, $script:Diffs.Count - $From).ToArray()
     # 番号は半角の数字で 18 桁まで（全角の数字や、long に収まらない桁の多い数字で止まらないように）
@@ -1782,7 +1919,7 @@ function Merge-Renumbering {
         $m = [regex]::Match($d.Cell, '^([A-Z]+)(\d+)$')
         $col = $m.Groups[1].Value
         if (-not $byCol.ContainsKey($col)) { $byCol[$col] = New-Object System.Collections.Generic.List[object] }
-        $byCol[$col].Add([pscustomobject]@{ Index = $i; Diff = $d; Row = [int]$m.Groups[2].Value; OldNumber = [long]$d.Old; Delta = [long]$d.New - [long]$d.Old })
+        $byCol[$col].Add([pscustomobject]@{ Index = $i; Diff = $d; Row = [int]$m.Groups[2].Value; OldNumber = [long]$d.Old; Delta = [long]$d.New - [long]$d.Old; Moved = $Numbers.ContainsKey($d.Cell) })
     }
     foreach ($col in $byCol.Keys) {
         $cur = New-Object System.Collections.Generic.List[object]
@@ -1790,12 +1927,12 @@ function Merge-Renumbering {
             # 行も番号も 1 ずつ増え、ずれ幅が同じあいだを 1 つの連番とみなす（金額などがたまたま同じだけ増えたものはまとめない）
             $prev = if ($cur.Count -gt 0) { $cur[$cur.Count - 1] } else { $null }
             if ($prev -and ($x.Row -ne $prev.Row + 1 -or $x.Delta -ne $prev.Delta -or $x.OldNumber -ne $prev.OldNumber + 1)) {
-                if ($cur.Count -ge 2) { $runs.Add($cur) }
+                if ($cur.Count -ge 2 -or $cur[0].Moved) { $runs.Add($cur) }
                 $cur = New-Object System.Collections.Generic.List[object]
             }
             $cur.Add($x)
         }
-        if ($cur.Count -ge 2) { $runs.Add($cur) }
+        if ($cur.Count -ge 2 -or $cur[0].Moved) { $runs.Add($cur) }
     }
     if ($runs.Count -eq 0) { return }
 
@@ -1804,17 +1941,19 @@ function Merge-Renumbering {
     foreach ($run in $runs) {
         $first = $run[0].Diff; $last = $run[$run.Count - 1].Diff
         foreach ($x in $run) { $drop[$x.Index] = $true }
-        # 場所は範囲（A20:A26）で表す。旧の場所は、行がずれている場合だけ
+        # 場所は範囲（A20:A26）で表す（移動した行の番号 1 個だけなら、そのセル）。旧の場所は、行がずれている場合だけ
         $range = '{0}:{1}' -f $first.Cell, $last.Cell
         $oldCell = { param($d) if ($d.OldLocation) { $d.OldLocation.Substring($d.OldLocation.LastIndexOf('!') + 1) } else { $d.Cell } }
         $oldRange = '{0}:{1}' -f (& $oldCell $first), (& $oldCell $last)
+        $oldText = '{0}～{1}' -f $first.Old, $last.Old; $newText = '{0}～{1}' -f $first.New, $last.New
+        if ($run.Count -eq 1) { $range = $first.Cell; $oldRange = & $oldCell $first; $oldText = $first.Old; $newText = $first.New }
         $oldLocation = ''
         if ($oldRange -ne $range -or $first.OldSheet -ne $first.Sheet) { $oldLocation = '{0}!{1}' -f $first.OldSheet, $oldRange }
         $summary = [pscustomobject]@{
             File = $first.File; Location = ('{0}!{1}' -f $first.Sheet, $range); Sheet = $first.Sheet; Cell = $range
             OldLocation = $oldLocation; OldSheet = $first.OldSheet; Kind = '連番'; Change = '変更'
-            Old = '{0}～{1}' -f $first.Old, $last.Old; New = '{0}～{1}' -f $first.New, $last.New
-            Detail = '連番の振り直し: {0}～{1} → {2}～{3}（{4} 個）' -f $first.Old, $last.Old, $first.New, $last.New, $run.Count
+            Old = $oldText; New = $newText
+            Detail = '連番の振り直し: {0} → {1}（{2} 個）' -f $oldText, $newText, $run.Count
             Path = $first.Path; OldPath = $first.OldPath; Segments = $null; NewCell = $range; OldCell = $oldRange
             # ほかの差分と同じく分類（Set-DiffTags が付ける。改訂履歴のシートなら版情報）と図形の欄を持つ
             Tag = ''; Shape = $null
@@ -2520,10 +2659,13 @@ function Get-DiffMarks {
                 if ($d.Change -eq '追加') { $kind = 'Added'; $line = '追加した列' }
             }
             '連番' {
-                $mm = [regex]::Match($d.Cell, '^([A-Z]+)(\d+):[A-Z]+(\d+)$')
+                # 範囲（A20:A26）か、移動した行の番号のセル 1 つ（A5）
+                $mm = [regex]::Match($d.Cell, '^([A-Z]+)(\d+)(?::[A-Z]+(\d+))?$')
                 if ($mm.Success) {
                     $table = $m.Cells; $kind = 'Changed'; $line = $d.Detail
-                    $keys = @([int]$mm.Groups[2].Value..[int]$mm.Groups[3].Value | ForEach-Object { $mm.Groups[1].Value + $_ })
+                    $end = $mm.Groups[2].Value
+                    if ($mm.Groups[3].Success) { $end = $mm.Groups[3].Value }
+                    $keys = @([int]$mm.Groups[2].Value..[int]$end | ForEach-Object { $mm.Groups[1].Value + $_ })
                 }
             }
         }
@@ -3231,8 +3373,9 @@ if ($OutHistory) {
 #     同じ内容の行・列どうしを対応付けてから比べます（-NoRowAlign で無効にできます）。対応の付かない行は、似ている行どうしを、順序を保って
 #     似ている度合いの合計が最大になるよう組にします（行を削除して No を振り直した表でも、すぐ下の似た行と取り違えません）。
 #     行・列の挿入・削除でセルと一緒にずれただけの相対参照の数式（=B3*C3 → =B4*C4）は、変更にしません。
-#     内容が同じまま場所が変わった行は「移動」、中身がよく似たシートの名前が変わった場合は「名前変更」として出力します。
-#     行の挿入・削除で No などの連番が振り直された場合は、番号のセルの変更を「連番の振り直し」1 件にまとめます。
+#     場所が変わった行は「移動」、中身がよく似たシートの名前が変わった場合は「名前変更」として出力します。
+#     移動と同時に No などの番号を振り直した行や、セルを 1 つ変えた行も、項目名などその列に 1 回しか出てこない語が同じなら「移動」とします（変えたセルは「変更」）。
+#     行の挿入・削除・移動で No などの連番が振り直された場合は、番号のセルの変更を「連番の振り直し」1 件にまとめます。
 #     長い文字列の変更は、変わった部分だけを「…受注を[-登録-]{+更新+}する…」の形で示します。
 #     -CompareFormat を付けると、文字の書式（太字・斜体・下線・取り消し線・文字色）と塗りつぶし、文字列の一部だけの書式も比べます。
 #     全角・半角などの表記だけの変更と、版数・更新日・改訂履歴の変更には分類（表記・版情報）を付け、-Ignore で外せます。
