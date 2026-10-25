@@ -13,6 +13,8 @@ param(
     [ValidateSet('Value', 'Formula', 'Comment', 'Shape', 'SheetName', 'HeaderFooter', 'DefinedName', 'Validation')]
     [string[]] $Target = @('Value', 'Formula', 'Comment', 'Shape', 'SheetName', 'HeaderFooter', 'DefinedName', 'Validation'),
 
+    [switch] $FillMerged,
+
     [switch] $NoRecurse,
     [switch] $SkipHiddenSheets,
 
@@ -400,6 +402,10 @@ function Search-WorksheetCells {
     $idx        = 0
     # 共有数式の番号 → @(先頭のセルの数式, 行, 列)
     $sharedFormulas = @{}
+    # -FillMerged: 値のヒットのセル → 文字と、結合したセルの範囲（mergeCells はセルの後ろにあるので、シートを読み終えてから返す）
+    $fill = $FillMerged -and $wantValue
+    $filled = @{}
+    $merges = New-Object System.Collections.Generic.List[string]
 
     # セルごとの処理は回数が多いため、関数呼び出しを避けて直接書いている
 
@@ -487,6 +493,7 @@ function Search-WorksheetCells {
                         if (Test-TextMatch $v.Text) { New-Hit -Kind '入力規則' -Sheet $SheetName -Cell $first -Text $v.Text -Name ('{0}（{1}）' -f $v.Name, $range) }
                     }
                 }
+                elseif ($fill -and $name -eq 'mergeCell') { $merges.Add($reader.GetAttribute('ref')) }
             }
             elseif ($nodeType -eq $endType -and $inCell -and $reader.LocalName -eq 'c') {
                 $inCell = $false
@@ -506,7 +513,10 @@ function Search-WorksheetCells {
                     if ($type -eq 's') {
                         if ([int]::TryParse($value, [ref]$idx) -and $idx -ge 0 -and $idx -lt $sstStrings.Count) {
                             # 回数が多いので New-Hit を呼ばずに作る（共有文字列は読むときに 1 行にしてある）
-                            if ($sstHits[$idx]) { [SearchExcelHit]::new($file, $SheetName + '!' + $ref, $SheetName, $ref, '値', $sstOneLine[$idx], '', $path) }
+                            if ($sstHits[$idx]) {
+                                if ($fill) { $filled[$ref] = $sstOneLine[$idx] }
+                                [SearchExcelHit]::new($file, $SheetName + '!' + $ref, $SheetName, $ref, '値', $sstOneLine[$idx], '', $path)
+                            }
                         }
                         continue
                     }
@@ -530,6 +540,7 @@ function Search-WorksheetCells {
                         if ($normalize) { $probe = $probe.Normalize($nfkc) }
                         if ($rx.IsMatch($probe)) {
                             if ($text.IndexOf([char]10) -ge 0 -or $text.IndexOf([char]13) -ge 0) { $text = ConvertTo-OneLine $text }
+                            if ($fill) { $filled[$ref] = $text }
                             [SearchExcelHit]::new($file, $SheetName + '!' + $ref, $SheetName, $ref, '値', $text, '', $path)
                         }
                     }
@@ -539,6 +550,19 @@ function Search-WorksheetCells {
     }
     finally {
         $reader.Dispose()
+    }
+
+    # -FillMerged: 結合したセルの左上の値を、範囲の最初の列の下の行のセルにも返す（縦に結合した値を、一覧の表の各行の値として読むため）。
+    # 設計書は見出しの右のセルを値として読むので、右の列には返さない。値のあるセルはそのまま
+    foreach ($m in $merges) {
+        $g = [regex]::Match([string]$m, '^([A-Z]+)(\d+):[A-Z]+(\d+)$')
+        if (-not $g.Success) { continue }
+        $topLeft = $g.Groups[1].Value + $g.Groups[2].Value
+        if (-not $filled.ContainsKey($topLeft)) { continue }
+        for ($r = [int]$g.Groups[2].Value + 1; $r -le [int]$g.Groups[3].Value; $r++) {
+            $cell = $g.Groups[1].Value + $r
+            if (-not $filled.ContainsKey($cell)) { [SearchExcelHit]::new($file, $SheetName + '!' + $cell, $SheetName, $cell, '値', $filled[$topLeft], '', $path) }
+        }
     }
 }
 
@@ -1191,7 +1215,7 @@ $stopwatch  = [System.Diagnostics.Stopwatch]::StartNew()
 # 同じファイル（パス・更新日時・サイズ）を同じ条件で検索したときは、ファイルを読み直さずに前の結果を使う
 $cache = $null
 if ($global:ExcelToolsSearchCache -is [hashtable]) { $cache = $global:ExcelToolsSearchCache }
-$cacheOptions = @($Pattern, [bool]$SimpleMatch, [bool]$CaseSensitive, [bool]$IgnoreWidth, (@($Target | Sort-Object) -join ','), [bool]$SkipHiddenSheets, $SheetNamePattern, $SheetNameExclude, [bool]$NoExcel) -join "`n"
+$cacheOptions = @($Pattern, [bool]$SimpleMatch, [bool]$CaseSensitive, [bool]$IgnoreWidth, (@($Target | Sort-Object) -join ','), [bool]$SkipHiddenSheets, $SheetNamePattern, $SheetNameExclude, [bool]$NoExcel, [bool]$FillMerged) -join "`n"
 
 try {
     $index = 0
@@ -1344,6 +1368,11 @@ if ($Open -and $allHits.Count -gt 0) { Show-HitPicker -Hits $allHits }
 #     / Validation（入力規則のリスト・条件・メッセージ）から複数指定できます。既定はすべて。
 #     共有数式（コピーした数式）は、写しのセルも位置をずらした数式で検索します。
 #     HeaderFooter・DefinedName・Validation は xlsx / xlsm だけが対象です（.xls / .xlsb では検索しません）。
+#
+# .PARAMETER FillMerged
+#     結合したセルの値を、結合した範囲の最初の列の、下の行のセルにも返します（Target の Value）。
+#     縦に結合した手順・期待結果などを、一覧の表の各行の値として読むときに使います。右の列のセルには返しません。
+#     付けなければ、結合したセルは左上のセルだけを返します。Excel で読むファイル（.xls / .xlsb）も左上のセルだけです。
 #
 # .PARAMETER NoRecurse
 #     サブフォルダを検索しません。

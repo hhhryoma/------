@@ -272,6 +272,18 @@ Test-Case 'Measure-TestQuality: 基準値の CSV のテスト密度・バグ密�
     Assert-Equal 'SCR001|10|基準内' ('{0}|{1}|{2}' -f $r[0].Function, $r[0].TestDensity, $r[0].TestJudgement) 'テスト密度の基準値（8〜12）と比べる'
 }
 
+Test-Case 'Measure-TestQuality: 「■」で始まるグループの見出しの行で表を終えず、その下のケースも数える（「■」で始まる確認内容のケースも数える）' {
+    $dir = New-TestDir
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'SCR001'; Header = @('No', '確認内容', '実施日', '結果'); Rows = @(
+                @('1', '画面が表示される', '2026/11/02', 'OK'),
+                @('', '■登録', '', ''),
+                @('2', '登録できる', '2026/11/02', 'NG'),
+                @('■確認', '', '', ''),
+                @('3', '■確認メッセージが出る', '2026/11/02', 'OK')) })
+    $r = @(& $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -AsOf '2026-11-06' 6>$null 3>$null)
+    Assert-Equal 'UT|3|3|1' ('{0}|{1}|{2}|{3}' -f $r[0].Function, $r[0].Cases, $r[0].Executed, $r[0].NG) 'グループの見出しの行（値がすべて「■」で始まる行）だけを飛ばす'
+}
+
 Test-Case 'Measure-TestQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestQualityTool
     Assert-Match $h.Synopsis 'テスト'
