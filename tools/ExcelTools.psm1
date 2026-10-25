@@ -2494,18 +2494,39 @@ function Read-QualityReportConfig {
     return $settings
 }
 
+function ConvertTo-ReportDay {
+    #     報告の基準日の書き方を日付にする（読めなければ $null）。2026/10/23・令和8年10月23日などの日付か、曜日（金曜日・金曜・金・(金)）。
+    #     曜日は、Today か、その前のいちばん近いその曜日（金曜日なら、金曜日に作れば今日、日曜日・月曜日に作れば前の金曜日）
+    param([string] $Text, [datetime] $Today = (Get-Date).Date)
+    $t = ([string]$Text).Normalize($script:Nfkc).Trim() -replace '^\((.*)\)$', '$1'
+    if (-not $t) { return $null }
+    $m = [regex]::Match($t, '^([日月火水木金土])(曜日?)?$')
+    if ($m.Success) {
+        $back = ([int]$Today.DayOfWeek - '日月火水木金土'.IndexOf($m.Groups[1].Value) + 7) % 7
+        return $Today.Date.AddDays(-$back)
+    }
+    return ConvertTo-DateValue $t $Today
+}
+
 function Read-WeeklyReportConfig {
     #     週次報告の設定の CSV（項目・値）を、New-WeeklyReport.ps1 のパラメーター → 値 にする。
-    #     Path がフォルダなら、その中の「週次報告の設定.csv」を読む。出力先が無ければ設定ファイルのフォルダの「週次報告」
+    #     Path がフォルダなら、その中の「週次報告の設定.csv」を読む。出力先が無ければ設定ファイルのフォルダの「週次報告」。
+    #     基準日（日付か曜日）は日付にする（ConvertTo-ReportDay。曜日は今日か、その前のいちばん近いその曜日）
     param([string] $Path)
     $keys = [ordered]@{
         '出力先' = @('OutDir', $false, $true); 'タイトル' = @('Title', $false, $false); 'WBS' = @('Wbs', $true, $true); '休日' = @('Holidays', $false, $true)
         '指摘管理表' = @('Findings', $true, $true); '障害管理表' = @('BugList', $true, $true); '課題管理表' = @('IssueList', $true, $true); '工数実績' = @('EffortLog', $true, $true)
         '工数の単位' = @('Unit', $false, $false); '1日の時間' = @('HoursPerDay', $false, $false); '実績' = @('HistoryCsv', $false, $true)
+        '基準日' = @('AsOf', $false, $false)
     }
     $read = Read-SettingsFile $Path '週次報告の設定.csv' $keys '週次報告の設定' 'tools\weekly-report\週次報告の設定_ひな形.csv'
     $settings = $read.Settings
     if (-not $settings.Contains('OutDir')) { $settings['OutDir'] = Join-Path $read.BaseDir '週次報告' }
+    if ($settings.Contains('AsOf')) {
+        $day = ConvertTo-ReportDay $settings['AsOf']
+        if (-not $day) { throw ("週次報告の設定の基準日が読めません: {0}（2026/10/23 のような日付か、金曜日のような曜日を書いてください）" -f $settings['AsOf']) }
+        $settings['AsOf'] = $day
+    }
     return $settings
 }
 

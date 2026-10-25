@@ -63,6 +63,8 @@ if ($Wbs) {
     $progressArgs = @{ Path = $Wbs; AsOf = $AsOf }
     if ($Holidays) { $progressArgs['Holidays'] = $Holidays }
     if ($NoExcel) { $progressArgs['NoExcel'] = $true }
+    # 前に保存した結果（-OutXlsx）は、WBS のフォルダにあっても WBS として読まない
+    if ($OutXlsx) { $progressArgs['Exclude'] = @($OutXlsx) }
     $tasks = @(& (Join-Path $PSScriptRoot 'Measure-Progress.ps1') @progressArgs 6>$null)
     # Measure-Progress は WBS のフォルダのサブフォルダを読まないため、同じ範囲を工数実績として読まない
     $wbsFiles = Get-FilePathSet $Wbs -NoRecurse
@@ -86,11 +88,13 @@ if ($entries.Count -eq 0) { Write-Warning '工数実績が見つかりません�
 $results = New-Object System.Collections.Generic.List[object]
 $hoursOf = New-Object double[] ([math]::Max(1, $tasks.Count))
 foreach ($e in $entries) { if ($e.Task -ge 0) { $hoursOf[$e.Task] += $e.Hours } }
+# 予定工数のあるタスクの実績の合計（CPI の分母）は、丸める前の値で足す（New-WeeklyReport.ps1 と同じ。表示の Actual は 0.01 に丸める）
+$sumActual = 0.0
 for ($i = 0; $i -lt $tasks.Count; $i++) {
     $t = $tasks[$i]
     $actual = $hoursOf[$i] / $perUnit
     $planned = $null
-    if ($null -ne $t.Effort -and $t.Effort -gt 0) { $planned = [double]$t.Effort }
+    if ($null -ne $t.Effort -and $t.Effort -gt 0) { $planned = [double]$t.Effort; $sumActual += $actual }
     $eac = $null
     if ($t.Done) { $eac = $actual } elseif ($t.Progress -gt 0) { $eac = $actual / $t.Progress } elseif ($null -ne $planned) { $eac = [math]::Max($planned, $actual) }
     $rate = $null
@@ -161,7 +165,6 @@ $totalHours = ($entries | Measure-Object Hours -Sum).Sum
 $matchedTotal = (@($entries | Where-Object { $_.Task -ge 0 }) | Measure-Object Hours -Sum).Sum
 $withPlan = @($results | Where-Object { $null -ne $_.Planned })
 $sumPlanned = ($withPlan | Measure-Object Planned -Sum).Sum
-$sumActual = ($withPlan | Measure-Object Actual -Sum).Sum
 $sumEv = ($withPlan | Measure-Object EV -Sum).Sum
 $cpi = $null
 if ($sumActual -gt 0) { $cpi = [math]::Round($sumEv / $sumActual, 2, $away) }

@@ -125,6 +125,11 @@ if ($Wbs) {
     $progressArgs = @{ Path = $Wbs; AsOf = $AsOf }
     if ($Holidays) { $progressArgs['Holidays'] = $Holidays }
     if ($NoExcel) { $progressArgs['NoExcel'] = $true }
+    # 結果のフォルダの報告（タイトル_yyyyMMdd.xlsx。タスクのシートがある）は、WBS のフォルダと同じでも WBS として読まない。
+    # 結果のフォルダに置いた WBS は読む（Measure-Progress も、報告・進捗の結果のブックを見分けて読まない）
+    $reports = @($outFiles | Where-Object { [System.IO.Path]::GetFileName($_) -match ('^{0}_\d{{8}}\.xlsx$' -f [regex]::Escape($Title)) })
+    if ($outXlsx) { $reports += $outXlsx }
+    if ($reports.Count -gt 0) { $progressArgs['Exclude'] = [string[]]$reports }
     $tasks = @(& (Join-Path $PSScriptRoot 'Measure-Progress.ps1') @progressArgs 6>$null)
 }
 foreach ($t in $tasks) { $t | Add-Member -NotePropertyName OwnerKey -NotePropertyValue (Add-OwnerName $t.Owner) -Force }
@@ -437,6 +442,12 @@ if ($HistoryCsv -and (Test-Path -LiteralPath $HistoryCsv)) {
     $historyDates = @($history | ForEach-Object { [string]$_.'時点' } | Where-Object { $_ -lt $dateText } | Sort-Object -Unique)
     if ($historyDates.Count -gt 0) {
         $previousDate = $historyDates[-1]
+        # 前回から 7 日たっていない（金曜日の報告を、土日や翌週の月曜日に基準日を変えずに作り直したなど）ときは知らせる。
+        # この報告の数字も実績に残り、次の報告の前回になるため
+        $previousDay = [datetime]::MinValue
+        if ([datetime]::TryParseExact($previousDate, 'yyyy/MM/dd', $invariant, [System.Globalization.DateTimeStyles]::None, [ref]$previousDay) -and ($AsOf - $previousDay).Days -lt 7) {
+            Write-Warning ('前回の報告（{0}）から {1} 日しかたっていません。この報告の数字も {2} の数字として実績の CSV に残り、次の報告の前回になります。前の報告を作り直すときは、-AsOf（週次報告の設定では「基準日」。金曜日のような曜日も書けます）にその報告の日を指定してください' -f $previousDate, ($AsOf - $previousDay).Days, $dateText)
+        }
         $before = @{}
         foreach ($h in @($history | Where-Object { ([string]$_.'時点') -eq $previousDate })) { $before[('{0}|{1}' -f $h.'区分', $h.'項目')] = [string]$h.'値' }
         foreach ($m in $metrics) {
@@ -751,8 +762,9 @@ if ($HistoryCsv) {
 #     メールやチャットに貼る文章（.txt）を保存します。-HistoryCsv を指定すると毎週の数字を残し、前回と比べます。
 #
 # .PARAMETER Config
-#     週次報告の設定ファイル（または、それを置いた案件のフォルダ）。WBS・指摘管理表・障害管理表・課題管理表・休日・出力先・実績を書いておきます。
+#     週次報告の設定ファイル（または、それを置いた案件のフォルダ）。WBS・指摘管理表・障害管理表・課題管理表・休日・出力先・実績・基準日を書いておきます。
 #     ひな形は tools\weekly-report\週次報告の設定_ひな形.csv。コマンドで指定したパラメーターのほうを使います。
+#     基準日は日付か曜日（金曜日など。今日か、その前のいちばん近いその曜日）で書けます。
 #
 # .PARAMETER Wbs
 #     WBS のファイルまたはフォルダ（Excel・CSV。複数可）。読み方は Measure-Progress.ps1 と同じです。
@@ -777,7 +789,7 @@ if ($HistoryCsv) {
 #     1 人日の時間。既定は 8。
 #
 # .PARAMETER AsOf
-#     報告の基準日。既定は今日。
+#     報告の基準日。既定は今日（設定ファイルに基準日があれば、その日）。
 #
 # .PARAMETER Since
 #     「今週」の始まりの日。既定は -AsOf の 6 日前（-AsOf までの 7 日）。
@@ -786,13 +798,15 @@ if ($HistoryCsv) {
 #     休日の CSV（1 列目が日付。内閣府の syukujitsu.csv をそのまま使えます）。遅れの営業日の計算に使います。
 #
 # .PARAMETER OutDir
-#     報告の Excel（タイトル_yyyyMMdd.xlsx）と文章（タイトル_yyyyMMdd.txt）、担当者ごとの文章（タイトル_yyyyMMdd_担当者別）を保存するフォルダ。このフォルダのファイルは表として読みません。
+#     報告の Excel（タイトル_yyyyMMdd.xlsx）と文章（タイトル_yyyyMMdd.txt）、担当者ごとの文章（タイトル_yyyyMMdd_担当者別）を保存するフォルダ。このフォルダのファイルは表として読みません
+#     （WBS は読みます。報告の Excel は WBS として読みません）。
 #
 # .PARAMETER Title
 #     報告のタイトルとファイル名。既定は「週次報告」。
 #
 # .PARAMETER HistoryCsv
 #     毎週の数字を残す CSV（時点・区分・項目・値）。前回の数字と比べ、報告の Excel に推移とグラフを足します。
+#     前回から 7 日たっていない基準日で作ると警告を出します（その日の数字も残り、次の報告の前回になるため）。
 #
 # .PARAMETER NoRecurse
 #     指摘管理表・障害管理表・課題管理表のフォルダの、サブフォルダを読みません。

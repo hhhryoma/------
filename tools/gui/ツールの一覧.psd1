@@ -306,7 +306,7 @@
             Id = 'Weekly'; Label = '週次報告を作る'; Group = '見積もり・進捗'; Tool = 'New-WeeklyReport.ps1'
             Summary = 'WBS・指摘管理表・障害管理表・課題管理表・工数実績から週次報告（進捗・指摘・障害と担当者ごとのやること）を作り、メールに貼れる文章と Excel に保存します。'
             Main = @('Config', 'Wbs', 'Findings', 'BugList', 'AsOf', 'OutDir')
-            Labels = @{ Config = '週次報告の設定（CSV か、それを置いた案件のフォルダ）'; Wbs = 'WBS'; Findings = '指摘管理表'; BugList = '障害管理表'; AsOf = '報告の基準日（空欄なら今日）'; OutDir = '報告の保存先のフォルダ' }
+            Labels = @{ Config = '週次報告の設定（CSV か、それを置いた案件のフォルダ）'; Wbs = 'WBS'; Findings = '指摘管理表'; BugList = '障害管理表'; AsOf = '報告の基準日（空欄なら設定の基準日か今日）'; OutDir = '報告の保存先のフォルダ' }
             Open = @('OutDir'); Keywords = '週報 報告'
         }
 

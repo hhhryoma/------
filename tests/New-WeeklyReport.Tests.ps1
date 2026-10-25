@@ -149,6 +149,56 @@ Test-Case 'New-WeeklyReport: 案件のフォルダの「週次報告の設定.cs
     Assert-Throws { & $WeeklyReport (Join-Path $dir 'テスト') 6>$null } '週次報告の設定ファイルが見つかりません'
 }
 
+Test-Case 'New-WeeklyReport: -OutDir が WBS のフォルダと同じでも、前の週の報告と Measure-Progress の結果（タスクのシートがある）は WBS として読まない' {
+    $dir = New-TestDir
+    $p = New-WeeklyProject $dir
+    $null = & $WeeklyReport -Wbs $dir -AsOf '2026-10-16' -OutDir $dir 6>$null 3>$null
+    $null = & (Join-Path $script:ToolsDir 'Measure-Progress.ps1') -Path $p.Wbs -AsOf '2026-10-16' -OutXlsx (Join-Path $dir '進捗_20261016.xlsx') 6>$null
+    $text = Get-HostText { $null = & $WeeklyReport -Wbs $dir -AsOf '2026-10-23' -OutDir $dir 3>$null }
+    Assert-Match $text '・タスク 6 件: 完了 2・遅延 1・予定どおり 1・未着手 2 / SPI '
+    Assert-True (Test-Path -LiteralPath (Join-Path $dir '週次報告_20261016.xlsx')) '前の週の報告は WBS のフォルダにある'
+}
+
+Test-Case 'New-WeeklyReport: 週次報告の設定の「基準日」（日付か、金曜日のような曜日）を基準日にする。コマンドの -AsOf が優先し、読めない基準日は知らせる' {
+    $dir = New-TestDir
+    $null = New-WeeklyProject $dir
+    $config = Join-Path $dir '週次報告の設定.csv'
+    @('項目,値', 'WBS,WBS.xlsx', '基準日,2026/10/23') | Set-Content -LiteralPath $config -Encoding UTF8
+    $text = Get-HostText { $null = & $WeeklyReport $dir }
+    Assert-Match $text '週次報告（2026/10/17～2026/10/23）'
+    Assert-True (Test-Path -LiteralPath (Join-Path $dir '週次報告/週次報告_20261023.xlsx')) '基準日の名前で保存する'
+    $text = Get-HostText { $null = & $WeeklyReport $dir -AsOf '2026-10-16' }
+    Assert-Match $text '週次報告（2026/10/10～2026/10/16）' 'コマンドの -AsOf が優先'
+
+    # 曜日は、今日か、その前のいちばん近いその曜日
+    @('項目,値', 'WBS,WBS.xlsx', '基準日,金曜日') | Set-Content -LiteralPath $config -Encoding UTF8
+    $today = (Get-Date).Date
+    $friday = $today.AddDays(-(([int]$today.DayOfWeek - 5 + 7) % 7))
+    $text = Get-HostText { $null = & $WeeklyReport $dir }
+    Assert-Match $text ('週次報告（{0}～{1}）' -f $friday.AddDays(-6).ToString('yyyy/MM/dd', [System.Globalization.CultureInfo]::InvariantCulture), $friday.ToString('yyyy/MM/dd', [System.Globalization.CultureInfo]::InvariantCulture))
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $sunday = [datetime]'2026-10-25'
+    Assert-Equal '2026/10/23|2026/10/23|2026/10/23|2026/10/23|2026/10/25|2026/10/19|2026/10/23|2026/10/23|' ((@('金曜日', '金曜', '金', '（金）', '日曜日', '月', '2026-10-23', '令和8年10月23日', '来週') | ForEach-Object { $d = ConvertTo-ReportDay $_ $sunday; if ($d) { $d.ToString('yyyy/MM/dd', [System.Globalization.CultureInfo]::InvariantCulture) } else { '' } }) -join '|') '日曜日に作れば、金曜日は前の金曜日、日曜日は今日'
+    Assert-Equal ([datetime]'2026-10-23') (ConvertTo-ReportDay '金曜日' ([datetime]'2026-10-23')) '金曜日に作れば今日'
+
+    @('項目,値', 'WBS,WBS.xlsx', '基準日,来週') | Set-Content -LiteralPath $config -Encoding UTF8
+    Assert-Throws { & $WeeklyReport $dir 6>$null } '週次報告の設定の基準日が読めません: 来週'
+}
+
+Test-Case 'New-WeeklyReport: 前回の報告から 7 日たっていない基準日で作ると、その日の数字も実績に残り次の報告の前回になることを警告する' {
+    $dir = New-TestDir
+    $p = New-WeeklyProject $dir
+    $out = Join-Path $dir 'out'
+    $history = Join-Path $dir '実績.csv'
+    $warnings = { param($Day) @(& $WeeklyReport -Wbs $p.Wbs -AsOf $Day -OutDir $out -HistoryCsv $history 6>$null 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message }) }
+    Assert-Equal 0 (& $warnings '2026-10-16').Count '前回なし'
+    Assert-Equal 0 (& $warnings '2026-10-23').Count '7 日後'
+    Assert-Equal 0 (& $warnings '2026-10-23').Count '同じ日に作り直す（前回は 10/16）'
+    $w = @(& $warnings '2026-10-25')
+    Assert-Equal 1 $w.Count
+    Assert-Match $w[0] '^前回の報告（2026/10/23）から 2 日しかたっていません。この報告の数字も 2026/10/25 の数字として実績の CSV に残り、次の報告の前回になります。前の報告を作り直すときは、-AsOf（週次報告の設定では「基準日」'
+}
+
 Test-Case 'New-WeeklyReport: 課題・QA の管理表の未完了・期限切れを報告し、担当者ごとのやることに入れる' {
     $dir = New-TestDir
     Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking

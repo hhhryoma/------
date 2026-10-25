@@ -17,6 +17,8 @@ param(
 
     [string] $OutXlsx,
 
+    [string[]] $Exclude,
+
     [switch] $NoExcel
 )
 
@@ -31,6 +33,8 @@ foreach ($name in @('Headers', 'Holidays', 'FillTemplate', 'OutFile', 'OutXlsx')
     if ($v) { Set-Variable -Name $name -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($v) }
 }
 if ($OutXlsx -and [System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw "-OutXlsx の拡張子は .xlsx にしてください: $OutXlsx" }
+# 読まないファイル（週次報告の前の週の報告など。フォルダならその中のすべて）
+$excludeSet = Get-FilePathSet $Exclude
 if ($FillTemplate) {
     if (-not (Test-Path -LiteralPath $FillTemplate)) { throw "テンプレートが見つかりません: $FillTemplate" }
     if (-not $OutFile) { throw '-FillTemplate には、書き込んだテンプレートの保存先（-OutFile）も指定してください' }
@@ -428,8 +432,22 @@ function Read-GanttBars {
     return @{ Dates = $result; Skip = $skip; Actual = ($actualOf.Count -gt 0); Step = $step }
 }
 
+function Test-OutputBook {
+    #     WBS ではないブックか: このツール（-OutXlsx）・週次報告の結果（「WBS の場所」の列がある「タスク」のシート）と、
+    #     スケジュール遅延リカバリ計画のテンプレート（「02_遅延状況」「08_週次モニタリング」のシート。-FillTemplate で書き込んだものも）。
+    #     WBS と同じフォルダに置いても、タスク（記入例の行も）として読まない
+    param($Book)
+    if ($Book.Sheets.Contains('02_遅延状況') -and $Book.Sheets.Contains('08_週次モニタリング')) { return $true }
+    if ($Book.Sheets.Contains('タスク')) {
+        $grid = $Book.Sheets['タスク']
+        if ($grid.Rows.Count -gt 0 -and @($grid.Labels[$grid.Rows[0]].Values) -contains 'WBSの場所') { return $true }
+    }
+    return $false
+}
+
 $files = New-Object System.Collections.Generic.List[string]
 $csvFiles = New-Object System.Collections.Generic.List[object]
+$outputBooks = New-Object System.Collections.Generic.List[string]
 foreach ($p in $Path) {
     $items = @(Get-PathItem $p)
     if ($items.Count -eq 0) { Write-Warning "見つかりません: $p"; continue }
@@ -443,9 +461,10 @@ if ($files.Count -gt 0) {
     $searchArgs = @{ Pattern = '\S'; Path = $files.ToArray(); Target = 'Value'; NoRecurse = $true }
     if ($SheetNamePattern) { $searchArgs['SheetNamePattern'] = $SheetNamePattern }
     if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-    $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not (($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) -or ($OutFile -and [string]::Equals($_.Path, $OutFile, [System.StringComparison]::OrdinalIgnoreCase)) -or ($FillTemplate -and [string]::Equals($_.Path, $FillTemplate, [System.StringComparison]::OrdinalIgnoreCase))) })
+    $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($excludeSet.Contains([string]$_.Path) -or ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) -or ($OutFile -and [string]::Equals($_.Path, $OutFile, [System.StringComparison]::OrdinalIgnoreCase)) -or ($FillTemplate -and [string]::Equals($_.Path, $FillTemplate, [System.StringComparison]::OrdinalIgnoreCase))) })
     $books = ConvertTo-DesignBooks $hits
     foreach ($book in $books.Values) {
+        if (Test-OutputBook $book) { $outputBooks.Add($book.File); continue }
         foreach ($sheetName in $book.Sheets.Keys) {
             $grid = $book.Sheets[$sheetName]
             $header = $null; $map = $null; $prev = 0
@@ -502,6 +521,7 @@ if ($files.Count -gt 0) {
     }
 }
 foreach ($c in $csvFiles) {
+    if ($excludeSet.Contains($c.FullName)) { continue }
     $data = Read-InputCsv $c.FullName 'WBS'
     if ($data.Count -eq 0) { continue }
     $names = @($data[0].PSObject.Properties | ForEach-Object { $_.Name })
@@ -520,6 +540,7 @@ foreach ($c in $csvFiles) {
 if ($rows.Count -eq 0) {
     $hint = ''
     if ($ganttNoBars.Count -gt 0) { $hint = '。日付の見出しの下に、セルを塗りつぶしたバーがありません（条件付き書式で描いたバーは読めません）: {0}' -f ($ganttNoBars -join '・') }
+    if ($outputBooks.Count -gt 0) { $hint += '。進捗・週次報告の結果とリカバリ計画のテンプレートは読みません: {0}' -f ($outputBooks -join '・') }
     Write-Warning ('WBS（タスク・予定開始・予定終了の見出しのある表）が見つかりませんでした' + $hint)
     return
 }
@@ -559,6 +580,10 @@ foreach ($r in $rows) {
         $rate = 0.0
         if ($AsOf -ge $from) { $rate = (Get-BusinessDays $from $AsOf) / [math]::Max(1, (Get-BusinessDays $from $actualEnd)) }
         $done = $false; $forecastEnd = $actualEnd; $actualEnd = $null
+    }
+    elseif ($actualStart -and $actualStart -gt $AsOf -and -not $actualEnd) {
+        # 基準日より後に始めたタスクは、基準日には始めていないので進捗率を 0 にする（記入された進捗率・完了は後の状態のため）
+        $rate = 0.0; $done = $false
     }
     if ($done) { $rate = 1.0 }
     if ($null -eq $rate) { $rate = 0.0 }
@@ -673,9 +698,11 @@ if ($FillTemplate) {
         $parts = Get-WorkbookSheetParts $pkg
         $written = @{}
         $plans = @(
-            @{ Sheet = '02_遅延状況'; Labels = @('No', 'WBS No', '工程・タスク名', '担当', '当初開始日', '当初終了日', '実績／見込開始日', '実績／見込終了日', '進捗率'); Items = $delayed
+            # テンプレートの遅延日数（実績／見込終了日 − 当初終了日）は土日・休日も数える暦日のため、このツール・週次報告と同じ営業日の遅れを備考に書く
+            @{ Sheet = '02_遅延状況'; Labels = @('No', 'WBS No', '工程・タスク名', '担当', '当初開始日', '当初終了日', '実績／見込開始日', '実績／見込終了日', '進捗率'); Optional = @('備考'); Items = $delayed
                 Values = { param($t, $i) @{ 'No' = [double]$i; 'WBS No' = $t.WbsNo; '工程・タスク名' = $t.Task; '担当' = $t.Owner; '当初開始日' = (ConvertTo-ExcelDate $t.PlanStart); '当初終了日' = (ConvertTo-ExcelDate $t.PlanEnd)
-                        '実績／見込開始日' = (ConvertTo-ExcelDate $t.ActualStart); '実績／見込終了日' = $(if ($t.ExpectedEnd) { ConvertTo-ExcelDate $t.ExpectedEnd } else { $null }); '進捗率' = [double]$t.Progress } } },
+                        '実績／見込開始日' = (ConvertTo-ExcelDate $t.ActualStart); '実績／見込終了日' = $(if ($t.ExpectedEnd) { ConvertTo-ExcelDate $t.ExpectedEnd } else { $null }); '進捗率' = [double]$t.Progress
+                        '備考' = ('遅れ {0} 営業日（土日・休日を除く）' -f $t.Delay) } } },
             @{ Sheet = '08_週次モニタリング'; Labels = @('週No', '対象週（月曜）', '計画完了タスク数', '実績完了タスク数'); Items = $weeks
                 Values = { param($wk, $i) @{ '週No' = $wk.No; '対象週（月曜）' = (ConvertTo-ExcelDate $wk.Monday); '計画完了タスク数' = [double]$wk.Planned; '実績完了タスク数' = [double]$wk.Done } } }
         )
@@ -684,6 +711,11 @@ if ($FillTemplate) {
             $grid = $tplBook.Sheets[$plan.Sheet]
             $h = Find-HeaderColumns $grid $plan.Labels
             if (-not $h) { Write-Warning ("テンプレートの「{0}」に見出し（{1}）が見つかりません" -f $plan.Sheet, ($plan.Labels -join '・')); continue }
+            # 無くてもよい見出し（備考）は、あれば書く
+            $labels = @($plan.Labels)
+            foreach ($l in @($plan.Optional | Where-Object { $_ })) {
+                foreach ($c in $grid.Cols[$h.Row]) { if ($grid.Labels[$h.Row][$c] -eq (ConvertTo-Label $l) -and @($h.Cols.Values) -notcontains $c) { $h.Cols[$l] = $c; $labels += $l; break } }
+            }
             $doc = Read-PartXmlForEdit $pkg $parts.Sheets[$plan.Sheet]
             # 書く行: 見出しの下で、2 列目（WBS No・対象週）が空の行から（記入例の行は残す）
             $keyCol = $h.Cols[$plan.Labels[1]]
@@ -697,7 +729,7 @@ if ($FillTemplate) {
                 $i++
                 $vals = & $plan.Values $item $i
                 $rowEl = Get-SheetRowElement $doc $row -Create
-                foreach ($l in $plan.Labels) {
+                foreach ($l in $labels) {
                     $cell = Get-SheetCellElement $doc $rowEl $row $h.Cols[$l] -Create
                     Set-SheetCellValue $doc $cell $vals[$l]
                 }
@@ -755,6 +787,7 @@ if ($null -ne $sumAC) { $line += ' / AC {0:0.##} / CPI {1:0.00}' -f $sumAC, $cpi
 Write-Host $line
 if ($delayed.Count -gt 0) { Write-Host ('遅延 {0} 件（最大 {1} 営業日: {2}）' -f $delayed.Count, $delayed[0].Delay, $delayed[0].Task) }
 foreach ($l in $ganttLog) { Write-Host $l }
+if ($outputBooks.Count -gt 0) { Write-Host ('読まなかったブック（進捗・週次報告の結果とリカバリ計画のテンプレート）: {0}' -f ($outputBooks -join '・')) }
 if ($FillTemplate) { Write-Host ('テンプレートに書き込みました: {0}（02_遅延状況 {1} 件・08_週次モニタリング {2} 週）' -f $OutFile, $written['02_遅延状況'], $written['08_週次モニタリング']) }
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
@@ -772,12 +805,17 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 #       遅れ        完了したタスクは予定終了日との差、見込終了日（基準日以降のもの）があればその差、予定終了日を過ぎていれば
 #                   その日数に残りの作業の日数（（1 − 進捗率）× 予定の営業日）を足したもの、それ以外は予定の進捗率との差を
-#                   日数にしたもの（土日と -Holidays の休日を除く営業日）。基準日より後に終わったタスクは、基準日には未完了とします
+#                   日数にしたもの（土日と -Holidays の休日を除く営業日）。基準日より後に終わったタスクは、基準日には未完了とし、
+#                   基準日より後に始めたタスクは、基準日には進捗率 0 とします。基準日のあとも続いているタスクの進捗率は、記入された値のままです
 #       PV / EV     予定工数（無ければ予定の営業日数）× 予定の進捗率 / 進捗率。SPI = EV / PV
 #       AC / CPI    実績工数の列があれば、CPI = EV / AC
 #
 #     -FillTemplate にスケジュール遅延リカバリ計画のテンプレートを渡すと、遅延タスクを「02_遅延状況」に、
-#     週ごとの計画完了・実績完了の数を「08_週次モニタリング」に書き込んで、-OutFile に保存します。
+#     週ごとの計画完了・実績完了の数を「08_週次モニタリング」に書き込んで、-OutFile に保存します。テンプレートの遅延日数は
+#     暦日（土日・休日も数える）のため、遅延タスクの備考に、このツールの遅れ（営業日）を書きます。
+#
+#     このツール・New-WeeklyReport.ps1 の結果のブックと、スケジュール遅延リカバリ計画のテンプレート（書き込んだものも）は、
+#     WBS のフォルダに置いても読みません。
 #
 # .PARAMETER Path
 #     WBS のファイルまたはフォルダ（Excel・CSV。複数可・ワイルドカード可）。
@@ -802,6 +840,9 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER OutXlsx
 #     結果を xlsx に保存します（タスク・担当者別・週次。タスクから WBS の該当行へのリンク付き）。
+#
+# .PARAMETER Exclude
+#     読まないファイルまたはフォルダ（複数可。WBS のフォルダに置いたほかの表など）。
 #
 # .PARAMETER NoExcel
 #     Excel を起動しません（.xls / .xlsb は読まなくなります）。
