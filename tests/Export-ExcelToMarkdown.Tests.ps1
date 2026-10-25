@@ -78,6 +78,24 @@ Test-Case 'Export-ExcelToMarkdown: -TextConv は Markdown だけを UTF-8 で標
     Assert-Equal $expected.TrimEnd() $text.TrimEnd()
 }
 
+Test-Case 'Export-ExcelToMarkdown: -OutDir で、拡張子だけが違う同じ名前の Excel は .md の名前に拡張子も含めて別々に保存する' {
+    $src = New-TestDir
+    Copy-Item -LiteralPath $scr001 -Destination (Join-Path $src '設計書.xlsx')
+    Copy-Item -LiteralPath (Join-Path $script:Fixtures 'grep/sub/inline.xlsx') -Destination (Join-Path $src '設計書.xlsm')
+    Copy-Item -LiteralPath $scr001 -Destination (Join-Path $src '画面設計書.xlsx')
+    $out = Join-Path (New-TestDir) 'md'
+    $text = Get-HostText { & $MarkdownTool -Path $src -OutDir $out }
+    Assert-Match $text '3 ファイルを Markdown にしました（Excel より新しい \.md があり変換しなかったもの 0 ファイル）'
+    Assert-Equal 3 @(Get-ChildItem -LiteralPath $out -File).Count '.md の数'
+    foreach ($name in @('設計書.xlsx', '設計書.xlsm')) {
+        $md = [System.IO.File]::ReadAllText((Join-Path $out ($name + '.md')), [System.Text.Encoding]::UTF8)
+        Assert-Match $md ('^# ' + [regex]::Escape($name) + '\n')
+    }
+    Assert-True (Test-Path -LiteralPath (Join-Path $out '画面設計書.md')) '重ならない名前はそのまま'
+    $text = Get-HostText { & $MarkdownTool -Path $src -OutDir $out }
+    Assert-Match $text '0 ファイルを Markdown にしました（Excel より新しい \.md があり変換しなかったもの 3 ファイル）'
+}
+
 Test-Case 'Export-ExcelToMarkdown: Get-Help でヘルプが表示される' {
     $h = Get-Help $MarkdownTool
     Assert-Match $h.Synopsis 'Markdown'

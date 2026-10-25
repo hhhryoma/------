@@ -54,9 +54,12 @@ function ConvertTo-SafeFileName {
 }
 
 function Get-UniquePath {
-    param([string] $CandidatePath)
+    #     この実行で使った出力先（$Used）と重ならないパスを返し、$Used に加える。
+    #     前の実行で残った PDF は避けずに上書きする（実行し直すたびに「(2)」の付いた PDF が増えないように）。
+    #     この実行の中で重なるとき（記号を _ にすると同じ名前になるシートなど）だけ「名前(2).pdf」のように連番を付ける
+    param([string] $CandidatePath, $Used)
 
-    if (-not (Test-Path -LiteralPath $CandidatePath)) { return $CandidatePath }
+    if ($Used.Add($CandidatePath)) { return $CandidatePath }
 
     $dir  = [System.IO.Path]::GetDirectoryName($CandidatePath)
     $base = [System.IO.Path]::GetFileNameWithoutExtension($CandidatePath)
@@ -64,9 +67,20 @@ function Get-UniquePath {
 
     for ($n = 2; $n -lt 1000; $n++) {
         $try = Join-Path $dir ("{0}({1}){2}" -f $base, $n, $ext)
-        if (-not (Test-Path -LiteralPath $try)) { return $try }
+        if ($Used.Add($try)) { return $try }
     }
     throw "出力先の連番が上限に達しました: $CandidatePath"
+}
+
+function Get-PdfOutputDirectory {
+    #     元のファイルの PDF を出力するフォルダ。-OutputRoot があれば、走査元からのフォルダ構成を再現する。
+    #     スクリプトスコープの $root / $OutputRoot を参照する
+    param($File)
+
+    if (-not $OutputRoot) { return $File.DirectoryName }
+    $relDir = $File.DirectoryName.Substring($root.Length).TrimStart('\', '/')
+    if ([string]::IsNullOrEmpty($relDir)) { return $OutputRoot }
+    return (Join-Path $OutputRoot $relDir)
 }
 
 function Test-SheetNameMatch {
@@ -129,9 +143,33 @@ function Get-PdfMediaBoxSize {
     }
 }
 
+function Get-PdfPageMatches {
+    #     PDF のページのオブジェクト（/Type /Page）の位置を、オブジェクト番号ごとに 1 つ（ファイルの中で最後の定義）だけ返す。
+    #     承認印・注釈・電子署名などを追記保存した PDF では、書き換えたページが同じ番号のオブジェクトとして末尾に足され、
+    #     後ろの定義が有効になる（前の定義もファイルに残る）。並びは、その番号が最初に現れた順
+    param([string] $Text)
+
+    $headers = [regex]::Matches($Text, '(\d+)\s+\d+\s+obj\b')
+    $order = New-Object System.Collections.Generic.List[string]
+    $last  = @{}
+    $h = -1
+    foreach ($m in [regex]::Matches($Text, '/Type\s*/Page(?![sA-Za-z])')) {
+        # このページを含むオブジェクトの番号（直前の「N G obj」）
+        while ($h + 1 -lt $headers.Count -and $headers[$h + 1].Index -lt $m.Index) { $h++ }
+        if ($h -ge 0) { $key = $headers[$h].Groups[1].Value } else { $key = '@' + $m.Index }
+        if (-not $last.ContainsKey($key)) { $order.Add($key) }
+        $last[$key] = $m
+    }
+
+    $result = New-Object System.Collections.Generic.List[object]
+    foreach ($key in $order) { $result.Add($last[$key]) }
+    return , $result.ToArray()
+}
+
 function Get-PdfPageSizes {
     #     PDF を解析し、ページごとの用紙サイズ（mm）と面積を返す。
     #     ページ個別に /MediaBox が無い場合はページツリー側の値を継承する。
+    #     追記保存で同じページが複数ある場合は、最後に保存したものだけを数える（Get-PdfPageMatches）。
     #     解析できなければ $null。
     param([string] $PdfPath)
 
@@ -139,7 +177,7 @@ function Get-PdfPageSizes {
         $bytes = [System.IO.File]::ReadAllBytes($PdfPath)
         $text  = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
 
-        $pageMatches = [regex]::Matches($text, '/Type\s*/Page(?![sA-Za-z])')
+        $pageMatches = Get-PdfPageMatches -Text $text
         if ($pageMatches.Count -eq 0) { return $null }
 
         # 継承元（/Type /Pages 側）の既定サイズ
@@ -181,7 +219,7 @@ function Get-PdfPageCountFallback {
         $bytes = [System.IO.File]::ReadAllBytes($PdfPath)
         $text  = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
 
-        $pageMatches = [regex]::Matches($text, '/Type\s*/Page(?![sA-Za-z])')
+        $pageMatches = Get-PdfPageMatches -Text $text
         if ($pageMatches.Count -gt 0) { return $pageMatches.Count }
 
         $max = 0
@@ -305,6 +343,37 @@ function Initialize-WorkbookOpenMode {
     }
 }
 
+function Start-ExcelApplication {
+    #     PDF 出力用の Excel を起動して $script:excel に入れる。PDF を出力するファイルが初めて出てきたときに呼ぶので、
+    #     -WhatIf のときや、-SkipExisting ですべてスキップしたときは起動しない。
+    #     既存の EXCEL プロセスを覚えておき、後始末では自分が起動した分（$script:ownPids）だけを終了させる
+    $pidsBefore = @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    try {
+        $script:excel = New-Object -ComObject Excel.Application
+    }
+    catch {
+        throw "Excel を起動できません。デスクトップ版 Excel がインストールされているか確認してください。 詳細: $($_.Exception.Message)"
+    }
+
+    $pidsAfter = @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    $script:ownPids = @($pidsAfter | Where-Object { $pidsBefore -notcontains $_ })
+
+    $xl = $script:excel
+    $xl.Visible            = $false
+    $xl.DisplayAlerts      = $false
+    $xl.AskToUpdateLinks   = $false
+    $xl.EnableEvents       = $false
+    $xl.ScreenUpdating     = $false
+    try {
+        $xl.AutomationSecurity = $msoAutomationSecurityForceDisable
+    }
+    catch {
+        Write-Warning ("AutomationSecurity を設定できませんでした（マクロが無効化されません）: {0}" -f $_.Exception.Message)
+    }
+
+    Initialize-WorkbookOpenMode -Excel $xl -Requested $OpenMode
+}
+
 function Open-WorkbookReadOnly {
     param($Excel, [string] $FilePath)
 
@@ -426,8 +495,8 @@ function Write-RunSummary {
 
 # ---------------------------------------------------------------- 入力の検証
 
-if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
-    throw "フォルダが見つかりません: $Path"
+if (-not (Test-Path -LiteralPath $Path)) {
+    throw "フォルダまたはファイルが見つかりません: $Path"
 }
 
 # 正規表現は実行前に検証しておく（全ファイル処理してから落ちるのを防ぐ）
@@ -439,6 +508,13 @@ foreach ($item in @(@{ Name = 'SheetNamePattern'; Value = $SheetNamePattern },
     }
 }
 $root = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd('\')
+
+# -Path にファイルを 1 つ指定したとき（「送る」の PDF にする）は、そのファイルだけを対象にし、そのフォルダを走査元とする
+$singleFile = $null
+if (Test-Path -LiteralPath $root -PathType Leaf) {
+    $singleFile = Get-Item -LiteralPath $root -Force
+    $root = $singleFile.DirectoryName.TrimEnd('\')
+}
 
 if ($OutputRoot) {
     if (-not (Test-Path -LiteralPath $OutputRoot)) {
@@ -464,16 +540,23 @@ if ($CountOnly) {
     }
 }
 
-$gci = @{
-    LiteralPath   = $root
-    File          = $true
-    ErrorAction   = 'SilentlyContinue'
-    ErrorVariable = 'scanErrors'
+$scanErrors = $null
+if ($singleFile) {
+    $found = @($singleFile)
 }
-if (-not $NoRecurse) { $gci['Recurse'] = $true }
+else {
+    $gci = @{
+        LiteralPath   = $root
+        File          = $true
+        ErrorAction   = 'SilentlyContinue'
+        ErrorVariable = 'scanErrors'
+    }
+    if (-not $NoRecurse) { $gci['Recurse'] = $true }
+    $found = @(Get-ChildItem @gci)
+}
 
 $files = @(
-    Get-ChildItem @gci |
+    $found |
         Where-Object {
             $Extensions -contains $_.Extension.ToLowerInvariant() -and
             $_.Name -notlike '~$*'
@@ -486,7 +569,8 @@ if ($scanErrors) {
 }
 
 if ($files.Count -eq 0) {
-    if ($CountOnly) { Write-Warning "PDF が見つかりません: $root" }
+    if ($singleFile) { Write-Warning ("対象の拡張子（{0}）のファイルではありません: {1}" -f ($Extensions -join ' '), $singleFile.FullName) }
+    elseif ($CountOnly) { Write-Warning "PDF が見つかりません: $root" }
     else { Write-Warning "対象ファイルがありません: $root" }
     return
 }
@@ -527,54 +611,60 @@ if ($CountOnly) {
     return
 }
 
-# ---------------------------------------------------------------- Excel 起動
+# ---------------------------------------------------------------- PDF 出力
 
-# 既存の EXCEL プロセスを覚えておき、後始末では自分が起動した分だけを終了させる
-$pidsBefore = @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+# PDF の名前は元のファイル名から拡張子を除いたもの。同じ出力先に拡張子だけが違う同じ名前のブック
+# （設計書.xls と 設計書.xlsx など）を出力するときは、重ならないよう拡張子も含める（設計書.xls.pdf・設計書.xlsx.pdf）
+$sameName = @{}
+foreach ($file in $files) {
+    $key = (Join-Path (Get-PdfOutputDirectory $file) ($file.BaseName + '.pdf')).ToUpperInvariant()
+    $sameName[$key] = 1 + [int]$sameName[$key]
+}
+# この実行で出力する PDF（Get-UniquePath）。前の実行で残った PDF は上書きする
+$usedPdfPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 
+# Excel は PDF を出力するファイルが初めて出てきたときに起動する（Start-ExcelApplication）
 $excel   = $null
 $ownPids = @()
 
 try {
-    try {
-        $excel = New-Object -ComObject Excel.Application
-    }
-    catch {
-        throw "Excel を起動できません。デスクトップ版 Excel がインストールされているか確認してください。 詳細: $($_.Exception.Message)"
-    }
-
-    $pidsAfter = @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
-    $ownPids   = @($pidsAfter | Where-Object { $pidsBefore -notcontains $_ })
-
-    $excel.Visible            = $false
-    $excel.DisplayAlerts      = $false
-    $excel.AskToUpdateLinks   = $false
-    $excel.EnableEvents       = $false
-    $excel.ScreenUpdating     = $false
-    try {
-        $excel.AutomationSecurity = $msoAutomationSecurityForceDisable
-    }
-    catch {
-        Write-Warning ("AutomationSecurity を設定できませんでした（マクロが無効化されません）: {0}" -f $_.Exception.Message)
-    }
-
-    Initialize-WorkbookOpenMode -Excel $excel -Requested $OpenMode
-
     $index = 0
     foreach ($file in $files) {
         $index++
         Write-Progress -Activity 'PDF 出力' -Status ("{0}/{1}  {2}" -f $index, $files.Count, $file.Name) -PercentComplete ([int](100 * $index / $files.Count))
 
-        # 出力先フォルダを決める
-        if ($OutputRoot) {
-            $srcDir = [System.IO.Path]::GetDirectoryName($file.FullName)
-            $relDir = $srcDir.Substring($root.Length).TrimStart('\', '/')
-            if ([string]::IsNullOrEmpty($relDir)) { $outDir = $OutputRoot }
-            else { $outDir = Join-Path $OutputRoot $relDir }
+        $outDir  = Get-PdfOutputDirectory $file
+        $pdfName = $file.BaseName
+        if ($sameName[(Join-Path $outDir ($pdfName + '.pdf')).ToUpperInvariant()] -gt 1) { $pdfName = $file.Name }
+
+        if ($PerSheet) {
+            # シート単位の PDF（名前_シート名.pdf）は、ブックを開くまで名前が分からない
+            $pdfPath = Join-Path $outDir ($pdfName + '_*.pdf')
         }
         else {
-            $outDir = $file.DirectoryName
+            $pdfPath = Get-UniquePath (Join-Path $outDir ($pdfName + '.pdf')) $usedPdfPaths
+
+            # ブック単位のときは、開く前にスキップ判定して無駄な起動を避ける
+            if ($SkipExisting -and (Test-Path -LiteralPath $pdfPath)) {
+                $pdfItem = Get-Item -LiteralPath $pdfPath
+                if ($pdfItem.LastWriteTime -ge $file.LastWriteTime) {
+                    $pi = Measure-PdfPages -PdfPath $pdfPath -IgnoreSmall:$IgnoreSmallPages -SmallRatio $SmallPageRatio
+                    $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath $pdfPath `
+                        -Status 'スキップ' -Detail '既存PDFが新しい' `
+                        -PageCount $pi.Counted -SmallPages $pi.Small -Seconds 0))
+                    continue
+                }
+            }
         }
+
+        if (-not $PSCmdlet.ShouldProcess($file.FullName, 'PDF 出力')) {
+            # -WhatIf: Excel を起動せず、対象のファイルと出力先の PDF を一覧にする
+            $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath $pdfPath `
+                -Status 'WhatIf' -Detail '' -PageCount $null -Seconds 0))
+            continue
+        }
+
+        if ($null -eq $excel) { Start-ExcelApplication }
 
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $wb = $null
@@ -585,27 +675,6 @@ try {
                 if ($PSCmdlet.ShouldProcess($outDir, '出力フォルダを作成')) {
                     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
                 }
-            }
-
-            # ブック単位のときは、開く前にスキップ判定して無駄な起動を避ける
-            if (-not $PerSheet) {
-                $pdfPath = Join-Path $outDir ($file.BaseName + '.pdf')
-                if ($SkipExisting -and (Test-Path -LiteralPath $pdfPath)) {
-                    $pdfItem = Get-Item -LiteralPath $pdfPath
-                    if ($pdfItem.LastWriteTime -ge $file.LastWriteTime) {
-                        $pi = Measure-PdfPages -PdfPath $pdfPath -IgnoreSmall:$IgnoreSmallPages -SmallRatio $SmallPageRatio
-                        $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath $pdfPath `
-                            -Status 'スキップ' -Detail '既存PDFが新しい' `
-                            -PageCount $pi.Counted -SmallPages $pi.Small -Seconds 0))
-                        continue
-                    }
-                }
-            }
-
-            if (-not $PSCmdlet.ShouldProcess($file.FullName, 'PDF 出力')) {
-                $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath $outDir `
-                    -Status 'WhatIf' -Detail '' -PageCount $null -Seconds 0))
-                continue
             }
 
             $wb = Open-WorkbookReadOnly -Excel $excel -FilePath $file.FullName
@@ -622,7 +691,8 @@ try {
                     if (-not (Test-SheetNameMatch $sh.Name)) { continue }
                     if (-not (Test-HasPrintableContent $sh)) { continue }
 
-                    $sheetPdf = Join-Path $outDir ("{0}_{1}.pdf" -f $file.BaseName, (ConvertTo-SafeFileName $sh.Name))
+                    # この実行のほかのシート・ブックの PDF と重なるときだけ連番を付ける（前の実行の PDF は上書きする）
+                    $sheetPdf = Get-UniquePath (Join-Path $outDir ("{0}_{1}.pdf" -f $pdfName, (ConvertTo-SafeFileName $sh.Name))) $usedPdfPaths
 
                     if ($SkipExisting -and (Test-Path -LiteralPath $sheetPdf)) {
                         $existing = Get-Item -LiteralPath $sheetPdf
@@ -637,9 +707,6 @@ try {
                             })
                             continue
                         }
-                    }
-                    else {
-                        $sheetPdf = Get-UniquePath $sheetPdf
                     }
 
                     $sh.ExportAsFixedFormat($xlTypePDF, $sheetPdf, $xlQualityStandard, $true, $false, [Type]::Missing, [Type]::Missing, $false)
@@ -672,6 +739,7 @@ try {
                 # シート選択 API を使わずに出力範囲を限定できる。
                 # 読み取り専用で開いており保存しないので、元ファイルは変更されない。
                 $noSheetMatch = $false
+                $notHidden = New-Object System.Collections.Generic.List[string]
                 if ($SheetNamePattern -or $SheetNameExclude) {
                     $matched = 0
                     foreach ($sh in $wb.Sheets) {
@@ -688,6 +756,8 @@ try {
                             if ($sh.Visible -eq $xlSheetVisible -and -not (Test-SheetNameMatch $sh.Name)) {
                                 try { $sh.Visible = $xlSheetHidden }
                                 catch { Write-Verbose ("シートを非表示にできませんでした: {0}" -f $sh.Name) }
+                                # ブックの保護（シート構成の保護）があると、Excel は表示・非表示を変えない
+                                if ($sh.Visible -eq $xlSheetVisible) { $notHidden.Add([string]$sh.Name) }
                             }
                         }
                     }
@@ -697,7 +767,7 @@ try {
                 $printableSheets = New-Object System.Collections.Generic.List[object]
                 if (-not $noSheetMatch) {
                     foreach ($sh in $wb.Sheets) {
-                        if ($sh.Visible -eq $xlSheetVisible -and (Test-HasPrintableContent $sh)) {
+                        if ($sh.Visible -eq $xlSheetVisible -and (Test-SheetNameMatch $sh.Name) -and (Test-HasPrintableContent $sh)) {
                             $printableSheets.Add($sh)
                         }
                     }
@@ -707,6 +777,10 @@ try {
                     $results.Add((New-ResultRecord -SourcePath $file.FullName -PdfPath '' `
                         -Status 'スキップ' -Detail $(if ($SheetNamePattern -or $SheetNameExclude) { '条件に一致する印刷対象シートなし' } else { '印刷対象なし（空ブック／全シート非表示）' }) `
                         -PageCount $null -Seconds $sw.Elapsed.TotalSeconds))
+                }
+                elseif ($notHidden.Count -gt 0) {
+                    # このまま出力すると対象外のシートも PDF とページ数に入るので、出力せずに失敗とする
+                    throw ('ブックの保護のため、対象外のシートを非表示にできません: {0}（-PerSheet ならシートごとに出力できます）' -f ($notHidden.ToArray() -join ', '))
                 }
                 else {
                     $wb.ExportAsFixedFormat($xlTypePDF, $pdfPath, $xlQualityStandard, $true, $false, [Type]::Missing, [Type]::Missing, $false)
@@ -789,13 +863,18 @@ if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 
 #     Excel COM で開き、ExportAsFixedFormat で PDF に出力します。
 #     処理後に、ファイルごとの出力先とページ数の一覧を表示します。
 #
+#     PDF の名前は「元のファイル名.pdf」（-PerSheet は「ファイル名_シート名.pdf」）で、前に出力した PDF は上書きします。
+#     同じフォルダの、拡張子だけが違う同じ名前のブック（設計書.xls と 設計書.xlsx など）を一緒に出力するときは、
+#     PDF が重ならないよう名前に拡張子も含めます（設計書.xls.pdf・設計書.xlsx.pdf）。
+#
 #     - マクロは強制無効で開くため、xlsm を安全に処理できます
 #     - 元ファイルは読み取り専用で開き、保存しません
 #     - 既に起動しているユーザーの Excel は操作せず、専用インスタンスを使います
 #     - パスワード保護ファイルは入力待ちで止まらず、エラーとして記録します
 #
 # .PARAMETER Path
-#     走査するフォルダ。
+#     走査するフォルダ、または Excel ファイル（1 つ）。ファイルを指定したときはそのファイルだけを出力し、
+#     PDF は同じフォルダ（-OutputRoot を指定したときはその直下）に保存します。
 #
 # .PARAMETER OutputRoot
 #     PDF の出力先ルート。省略時は元ファイルと同じ場所に出力します。
@@ -806,6 +885,7 @@ if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 
 #
 # .PARAMETER PerSheet
 #     ブック単位ではなくシート単位で出力します（ファイル名_シート名.pdf）。
+#     ファイル名に使えない記号を _ にすると同じ名前になるシートは、2 つめから「(2)」などを付けます。
 #
 # .PARAMETER SkipExisting
 #     出力先 PDF が既に存在し、元ファイルより新しい場合はスキップします。
@@ -822,6 +902,8 @@ if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 
 #     指定すると、一致するシートだけを PDF 出力し、ページ数もそのシートのみ数えます。
 #     ブック単位の出力では、対象外のシートを一時的に非表示にして出力範囲から外します
 #     （読み取り専用で開いており保存しないため、元ファイルは変更されません）。
+#     ブックの保護（シート構成の保護）で非表示にできないブックは、対象外のシートまで出力されるため、
+#     出力せずに失敗として記録します（-PerSheet ならシートごとに出力できます）。
 #     例: -SheetNamePattern '^(画面|帳票)'
 #
 # .PARAMETER SheetNameExclude
@@ -831,7 +913,8 @@ if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 
 # .PARAMETER CountOnly
 #     PDF を出力せず、フォルダ配下にある既存の PDF のページ数を数えるだけのモードです。
 #     Excel を起動しないため高速で、Excel がインストールされていない環境でも動作します。
-#     このモードでは Path 配下の *.pdf が対象になります（Excel ファイルは見ません）。
+#     このモードでは Path 配下の *.pdf が対象になります（Excel ファイルは見ません。PDF ファイルも指定できます）。
+#     承認印・注釈などを追記保存した PDF でも、同じページを重ねて数えません。
 #
 # .PARAMETER IgnoreSmallPages
 #     用紙サイズが極端に小さいページをページ数の集計から除外します。
@@ -873,9 +956,13 @@ if (@($results | Where-Object { $_.結果 -eq '失敗' }).Count -gt 0) { exit 1 
 #     .\Export-ExcelToPdf.ps1 -Path D:\Pdf -CountOnly
 #
 # .EXAMPLE
-#     # 何が出力されるかだけ確認する
+#     # 1 つのファイルだけを PDF にする（同じフォルダに 基本設計書.pdf を保存）
+#     .\Export-ExcelToPdf.ps1 -Path D:\Docs\基本設計書.xlsx
+#
+# .EXAMPLE
+#     # 何が出力されるかだけ確認する（Excel は起動しません）
 #     .\Export-ExcelToPdf.ps1 -Path D:\Docs -WhatIf
 #
 # .NOTES
-#     要件: Windows + Excel（デスクトップ版）がインストールされていること。
+#     要件: Windows + Excel（デスクトップ版）がインストールされていること（-CountOnly と -WhatIf は Excel 不要）。
 #           対話的なデスクトップセッションで実行してください。
