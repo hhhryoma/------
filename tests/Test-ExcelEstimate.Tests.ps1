@@ -1,4 +1,5 @@
-﻿#     Test-ExcelEstimate.ps1 のテスト。フィクスチャは tests\fixtures\estimate（make_fixtures.py で生成）
+﻿#     Test-ExcelEstimate.ps1 のテスト。フィクスチャは tests\fixtures\estimate（make_fixtures.py で生成）。
+#     数式のある小さな見積書はテストの中で作る（New-SheetsBook・Edit-ZipText は Invoke-Tests.ps1）
 
 $EstimateTool = Join-Path $script:ToolsDir 'Test-ExcelEstimate.ps1'
 $estDir = Join-Path $script:Fixtures 'estimate'
@@ -11,6 +12,17 @@ function Invoke-Estimate {
 function Get-EstimateKeys {
     param($Issues)
     return @($Issues | ForEach-Object { '{0}|{1}|{2}' -f $_.Level, $_.Item, $_.Location } | Sort-Object)
+}
+
+function New-EstimateBook {
+    #     数式のある見積書を一時フォルダに作る（New-SheetsBook の表で、= で始まる文字のセルを数式にする）。返り値: ファイルのパス
+    param($Sheets)
+    $path = Join-Path (New-TestDir) '見積書.xlsx'
+    New-SheetsBook $path $Sheets
+    for ($i = 1; $i -le $Sheets.Count; $i++) {
+        Edit-ZipText $path "xl/worksheets/sheet$i.xml" { param($t) $t -replace '<c r="([A-Z]+\d+)" s="2" t="inlineStr"><is><t xml:space="preserve">=([^<]*)</t></is></c>', '<c r="$1"><f>$2</f></c>' }
+    }
+    return $path
 }
 
 $expectedEstimate = @(
@@ -81,6 +93,43 @@ Test-Case 'Test-ExcelEstimate: Excel で開いている（書き込みでロッ�
     try { $issues = Invoke-Estimate @{ Path = $file } }
     finally { $lock.Dispose() }
     Assert-Equal $expectedEstimate (Get-EstimateKeys $issues)
+}
+
+Test-Case 'Test-ExcelEstimate: 率を掛ける数式（*20%・*8%）は、換算の日数・時間とみなさない' {
+    # 人月の換算は 21 日、人時の換算は 7.5 時間にそろっている。PM 管理の 20%・8% は換算ではない
+    $file = New-EstimateBook ([ordered]@{ '見積' = @(
+        @('工程', '人日', '人月', '金額', '人時'),
+        @('設計', 42, '=B2/21', '=C2*800000', '=B2*7.5'),
+        @('製造', 63, '=B3/21', '=C3*800000', '=B3*7.5'),
+        @('PM 管理', '', '', '=SUM(D2:D3)*20%', '=SUM(E2:E3)*8%'),
+        @('合計', '', '', '=SUM(D2:D4)', '=SUM(E2:E4)')) })
+    $issues = Invoke-Estimate @{ Path = $file }
+    Assert-Equal 0 $issues.Count ((Get-EstimateKeys $issues) -join ', ')
+}
+
+Test-Case 'Test-ExcelEstimate: 合計の範囲の外でも、合計の数式が使っているセル（値引きを引く =SUM(B2:B3)-B4 など）は入れ忘れとみなさない' {
+    # 案A・案B は値引きの 2 行を数式で引いている。案C は 4 行目の値引きを引き忘れている（条件!D4 はほかのシートのセル）
+    $file = New-EstimateBook ([ordered]@{ '見積' = @(
+        @('項目', '案A', '案B', '案C'),
+        @('設計', 100, 100, 100),
+        @('製造', 200, 200, 200),
+        @('値引き', 10, 10, 10),
+        @('端数値引き', 1, 1, 1),
+        @('合計', '=SUM(B2:B3)-B4-$B$5', '=SUM(C2:C3)-SUM(C4:C5)', '=SUM(D2:D3)*(1-条件!D4)-D5')) })
+    $issues = Invoke-Estimate @{ Path = $file }
+    Assert-Equal '警告|合計の範囲|見積!D6' ((Get-EstimateKeys $issues) -join ', ')
+    Assert-Match $issues[0].Detail '範囲に D4 が入っていません'
+}
+
+Test-Case 'Test-ExcelEstimate: 合計の範囲の上にある表の見出し（年度の数値・月の日付）は、入れ忘れとみなさない' {
+    # 年度別: 1 行目は表題で、2 行目の見出しに年度（数値）。月別: 「2026年度」の下の 2 行目に月（日付）。明細: 2 行目の設計を合計に入れ忘れている
+    $file = New-EstimateBook ([ordered]@{
+        '年度別' = @(@('要員計画', '', ''), @('要員', 2026, 2027), @('PM', 1, 1), @('SE', 2, 3), @('PG', 3, 4), @('合計', '=SUM(B3:B5)', '=SUM(C3:C5)'))
+        '月別' = @(@('要員', '2026年度', ''), @('', [datetime]'2026-04-01', [datetime]'2026-05-01'), @('PM', 1, 1), @('SE', 2, 3), @('PG', 3, 4), @('合計', '=SUM(B3:B5)', '=SUM(C3:C5)'))
+        '明細' = @(@('項目', '金額'), @('設計', 100), @('製造', 200), @('テスト', 300), @('合計', '=SUM(B3:B4)')) })
+    $issues = Invoke-Estimate @{ Path = $file }
+    Assert-Equal '警告|合計の範囲|明細!B5' ((Get-EstimateKeys $issues) -join ', ') '見出しではない、範囲のすぐ上の数値は指摘する'
+    Assert-Match $issues[0].Detail '範囲に B2 が入っていません'
 }
 
 Test-Case 'Test-ExcelEstimate: Get-Help でヘルプが表示される' {

@@ -109,6 +109,34 @@ function Read-SharedStringList {
     return , $list
 }
 
+# 組み込みの表示形式のうち日付・時刻のもの（27〜36, 50〜58 は日本語ロケールの和暦・年月日）
+$builtinDateFormatIds = @(14..22) + @(27..36) + @(45..47) + @(50..58)
+
+function Read-DateStyleList {
+    #     styles.xml の cellXfs を読み、書式の番号ごとに日付・時刻の表示形式かを返す（Search-Excel.ps1 の Read-DateStyles と同じ判定）。
+    #     ユーザー定義の形式は、文字（"..."・\x）や [赤]・[$-411] などを除いて y/m/d/h/s が残れば日付とみなす。経過時間（[h]:mm）は除く
+    param($Package, [string] $PartName)
+    $list = New-Object System.Collections.Generic.List[bool]
+    $doc = $null
+    if ($PartName) { $doc = Read-PartXml -Package $Package -PartName $PartName }
+    if ($null -eq $doc) { return , $list }
+    $custom = @{}
+    $id = 0
+    foreach ($nf in $doc.SelectNodes("//*[local-name()='numFmts']/*[local-name()='numFmt']")) {
+        if (-not [int]::TryParse($nf.GetAttribute('numFmtId'), [ref]$id)) { continue }
+        $code = $nf.GetAttribute('formatCode')
+        $s = $code.Split(';')[0]
+        foreach ($rx in @('"[^"]*"', '\\.', '[_*].', '\[[^\]]*\]', '(?i)General', '[Ee][+-]')) { $s = [regex]::Replace($s, $rx, '') }
+        $custom[$id] = ($code -notmatch '\[(h+|m+|s+)\]') -and ($s -match '[ymdhs]')
+    }
+    foreach ($xf in $doc.SelectNodes("//*[local-name()='cellXfs']/*[local-name()='xf']")) {
+        $id = 0
+        [void][int]::TryParse($xf.GetAttribute('numFmtId'), [ref]$id)
+        if ($custom.ContainsKey($id)) { $list.Add($custom[$id]) } else { $list.Add($builtinDateFormatIds -contains $id) }
+    }
+    return , $list
+}
+
 function Read-SheetCells {
     #     シートのセルを読む。返り値: 行番号 → (列番号 → セル)。共有数式の写しのセルにも、元の数式から求めた数式を入れる
     param($Package, [string] $PartName, $Strings)
@@ -125,7 +153,7 @@ function Read-SheetCells {
         $advance = $true
         $take = {
             if (-not $script:readCell) {
-                $script:readCell = [pscustomobject]@{ Ref = $open[0]; Row = $open[1]; Col = $open[2]; Type = $open[3]; Raw = $null; Text = $null; Formula = $null; R1C1 = $null; SharedIndex = $null }
+                $script:readCell = [pscustomobject]@{ Ref = $open[0]; Row = $open[1]; Col = $open[2]; Type = $open[3]; Style = $open[4]; Raw = $null; Text = $null; Formula = $null; R1C1 = $null; SharedIndex = $null }
                 if (-not $rows.ContainsKey($open[1])) { $rows[$open[1]] = @{} }
                 $rows[$open[1]][$open[2]] = $script:readCell
             }
@@ -146,7 +174,7 @@ function Read-SheetCells {
                         if ($ref) { $colNo = Get-ColumnIndex $ref } else { $colNo++; $ref = (ConvertTo-ColumnName $colNo) + $rowNo }
                         $open = $null
                         $script:readCell = $null
-                        if (-not $reader.IsEmptyElement) { $open = @($ref, $rowNo, $colNo, [string]$reader.GetAttribute('t')) }
+                        if (-not $reader.IsEmptyElement) { $open = @($ref, $rowNo, $colNo, [string]$reader.GetAttribute('t'), [string]$reader.GetAttribute('s')) }
                     }
                     'f' {
                         if ($open) {
@@ -208,6 +236,14 @@ function Test-TextCell {
     return $Cell -and (@('s', 'inlineStr') -contains $Cell.Type) -and ([string]$Cell.Text).Trim()
 }
 
+function Test-DateCell {
+    #     日付・時刻の表示形式のセルか（月の見出しなど。DateStyles は Read-DateStyleList）。値は日付のシリアル値で読まれる
+    param($Cell, $DateStyles)
+    $i = 0
+    if ($Cell.Style) { [void][int]::TryParse($Cell.Style, [ref]$i) }
+    return $i -lt $DateStyles.Count -and $DateStyles[$i]
+}
+
 function Format-Number {
     param([string] $Raw)
     $d = 0.0
@@ -217,6 +253,22 @@ function Format-Number {
 
 # ---------------------------------------------------------------- シートごとのチェック
 
+
+# 数式の中の、同じシートのセル・範囲の参照（A1・$A$1・A1:B5）。文字列（"..."）とシート名（'...'）は飛ばし、ほかのシートの参照（内訳!A1）には一致させない
+$rangeRx = New-Object System.Text.RegularExpressions.Regex('"[^"]*"|''[^'']*''|(?<![A-Za-z0-9_.!:$])\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?(?![A-Za-z0-9_(!])')
+
+function Test-FormulaUsesCell {
+    #     数式が、同じシートのセル（行・列）をセルの参照か範囲で使っているか（=SUM(D2:D4)-D5 の D5 など）
+    param([string] $Formula, [int] $Row, [int] $Col)
+    foreach ($m in $rangeRx.Matches($Formula)) {
+        if (-not $m.Groups[1].Success) { continue }
+        $r0 = [int]$m.Groups[2].Value; $c0 = Get-ColumnIndex $m.Groups[1].Value
+        $r1 = $r0; $c1 = $c0
+        if ($m.Groups[3].Success) { $r1 = [int]$m.Groups[4].Value; $c1 = Get-ColumnIndex $m.Groups[3].Value }
+        if ($Row -ge [math]::Min($r0, $r1) -and $Row -le [math]::Max($r0, $r1) -and $Col -ge [math]::Min($c0, $c1) -and $Col -le [math]::Max($c0, $c1)) { return $true }
+    }
+    return $false
+}
 
 function Test-Sheet {
     param([string] $Sheet, $Rows, $Book)
@@ -246,14 +298,18 @@ function Test-Sheet {
                     $missing = @()
                     if ($c0 -eq $c1 -and $c0 -eq $cell.Col -and $r1 -lt $cell.Row) {
                         # 縦の合計
-                        for ($k = $r1 + 1; $k -lt $cell.Row; $k++) { $x = & $cellAt $k $c0; if ((Test-NumberCell $x) -and $x.Formula -notmatch '(?i)SUM\(') { $missing += $x.Ref } }
+                        for ($k = $r1 + 1; $k -lt $cell.Row; $k++) { $x = & $cellAt $k $c0; if ((Test-NumberCell $x) -and $x.Formula -notmatch '(?i)SUM\(') { $missing += $x } }
+                        # 範囲のすぐ上。表の見出しの行（列のいちばん上の値。年度など）と日付（月の見出しなど）は合計する値ではない
                         $above = & $cellAt ($r0 - 1) $c0
-                        if ((Test-NumberCell $above) -and -not $above.Formula -and (Test-NumberCell (& $cellAt ($r0) $c0))) { $missing += $above.Ref }
+                        if ((Test-NumberCell $above) -and -not $above.Formula -and (Test-NumberCell (& $cellAt ($r0) $c0)) -and -not (Test-DateCell $above $Book.DateStyles) -and
+                            @($rowNos | Where-Object { $_ -lt $above.Row } | ForEach-Object { & $cellAt $_ $c0 } | Where-Object { (Test-NumberCell $_) -or (Test-TextCell $_) }).Count -gt 0) { $missing += $above }
                     }
                     elseif ($r0 -eq $r1 -and $r0 -eq $cell.Row -and $c1 -lt $cell.Col) {
                         # 横の合計
-                        for ($k = $c1 + 1; $k -lt $cell.Col; $k++) { $x = & $cellAt $r0 $k; if ((Test-NumberCell $x) -and $x.Formula -notmatch '(?i)SUM\(') { $missing += $x.Ref } }
+                        for ($k = $c1 + 1; $k -lt $cell.Col; $k++) { $x = & $cellAt $r0 $k; if ((Test-NumberCell $x) -and $x.Formula -notmatch '(?i)SUM\(') { $missing += $x } }
                     }
+                    # 合計の数式がほかで使っているセル（=SUM(D2:D4)-D5 で引く値引きなど）は入れ忘れではない
+                    $missing = @($missing | Where-Object { -not (Test-FormulaUsesCell $cell.Formula $_.Row $_.Col) } | ForEach-Object { $_.Ref })
                     if ($missing.Count -gt 0) {
                         Add-Issue '警告' '合計の範囲' ("合計（={0}）の範囲に {1} が入っていません" -f $cell.Formula, ($missing -join '、')) $Sheet $cell.Ref
                     }
@@ -303,9 +359,9 @@ function Test-Sheet {
                 }
             }
 
-            # 換算・端数処理・単価はブック全体で比べるので集めておく
+            # 換算・端数処理・単価はブック全体で比べるので集めておく（*20% などの率は換算ではない）
             if ($cell.Formula) {
-                foreach ($m in [regex]::Matches($cell.Formula, '[*/]\s*(\d+(?:\.\d+)?)(?![\d.])')) {
+                foreach ($m in [regex]::Matches($cell.Formula, '[*/]\s*(\d+(?:\.\d+)?)(?![\d.%])')) {
                     $n = [double]::Parse($m.Groups[1].Value, $invariant)
                     if (@(19, 20, 21, 22) -contains $n) { $Book.Days.Add([pscustomobject]@{ Value = $n; Where = ('{0}!{1}' -f $Sheet, $cell.Ref); Sheet = $Sheet; Cell = $cell.Ref }) }
                     elseif (@(7.5, 7.75, 8) -contains $n) { $Book.Hours.Add([pscustomobject]@{ Value = $n; Where = ('{0}!{1}' -f $Sheet, $cell.Ref); Sheet = $Sheet; Cell = $cell.Ref }) }
@@ -364,15 +420,17 @@ function Test-Book {
         $wbDoc = Read-PartXml -Package $pkg -PartName $wbPart
         if ($null -eq $wbDoc) { throw 'Excel ブックではありません（workbook.xml が見つかりません）' }
         $relById = @{}
-        $sstPart = $null
+        $sstPart = $null; $stylesPart = $null
         foreach ($rel in (Get-PartRelationships -Package $pkg -PartName $wbPart)) {
             $relById[$rel.Id] = $rel
             if ($rel.Kind -eq 'sharedStrings') { $sstPart = $rel.Target }
+            elseif ($rel.Kind -eq 'styles') { $stylesPart = $rel.Target }
         }
         $strings = Read-SharedStringList $pkg $sstPart
         $book = [pscustomobject]@{
             Days = New-Object System.Collections.Generic.List[object]; Hours = New-Object System.Collections.Generic.List[object]
             Rounding = New-Object System.Collections.Generic.List[object]; Prices = [ordered]@{}
+            DateStyles = (Read-DateStyleList $pkg $stylesPart)
         }
         foreach ($s in $wbDoc.SelectNodes("//*[local-name()='sheets']/*[local-name()='sheet']")) {
             $rel = $relById[(Get-RelationshipIdAttribute $s)]
