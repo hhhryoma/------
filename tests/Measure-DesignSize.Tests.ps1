@@ -26,7 +26,7 @@ Test-Case 'Measure-DesignSize: 詳細設計サンプルの画面・テーブル�
     $s = @(& $MeasureSize -Path $sampleDir -Summary 6>$null 3>$null)[0]
     Assert-Equal 20.1 $s.TotalDays '15 + 2 + 2 + 16×0.05 + 15×0.02'
     Assert-Equal 140 $s.FpIndicative '35 × テーブル 4'
-    Assert-Equal 61 $s.FpEstimated '7×4 + 4×EI 2 + 5×EO 1 + 4×EQ 5'
+    Assert-Equal 65 $s.FpEstimated '7×4 + 4×EI 3 + 5×EO 1 + 4×EQ 5（SCR003 の更新の T_ORDER(R,U) も外部入力）'
 }
 
 Test-Case 'Measure-DesignSize: イベントの使用テーブルで外部入力・外部照会を分け、IF の向き・帳票・他システムのテーブルを FP に入れる' {
@@ -113,6 +113,72 @@ Test-Case 'Measure-DesignSize: -Actuals の実績の工数を難易度ごとに�
     Assert-Equal 'SCR001|6' (@(& $MeasureSize -Path $sampleDir -Coefficients $coef 6>$null | Where-Object Kind -eq '画面')[0] | ForEach-Object { '{0}|{1}' -f $_.Id, $_.Days })
     Assert-True ($summary.TotalDays -gt 0)
     Assert-Throws { & $MeasureSize -Path $sampleDir -OutCoefficients $coef 6>$null } 'Actuals'
+}
+
+Test-Case 'Measure-DesignSize: 使用テーブルの CRUD を「(R,U)」「（Ｃ，Ｕ）」「(C・U)」のように区切って書いても、外部入力・外部照会を分ける' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir '画面設計書_S10_受注変更.xlsx') ([ordered]@{
+            '画面項目定義' = @(@('画面ID', 'S10', '画面名', '受注変更'), @('項目名', '項目ID'), @('受注番号', 'orderNo'))
+            'イベント定義' = @(@('イベントID', 'イベント名', '使用テーブル'),
+                @('EV01', '更新', 'T_ORDER(R,U)'), @('EV02', '登録', 'T_ORDER（Ｃ，Ｕ）'), @('EV03', '取消', 'T_ORDER(C・U)、M_USER(R)'),
+                @('EV04', '検索', 'T_ORDER( R )'), @('EV05', 'コードの表示', 'M_CODE(コード)'), @('EV06', '照会', 'T_ORDER(R)、M_USER(Read)'))
+        })
+    $r = Invoke-Measure @{ Path = $dir }
+    Assert-Equal 'S10 受注変更|3|2' @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.EI, $_.EQ }) 'EV01〜EV03 は登録・更新があるので外部入力、EV04・EV06 は参照だけなので外部照会。EV05 の括弧は CRUD ではない'
+}
+
+Test-Case 'Measure-DesignSize: 非表示のシート（New-DesignDocument の -TemplateSheet の雛形・使わなくなったシートなど）は数えない' {
+    $dir = New-TestDir
+    $book = Join-Path $dir 'DD03_テーブル定義書.xlsx'
+    $columns = @(@('論理名', '物理名', 'データ型'), @('受注番号', 'ORDER_NO', 'CHAR'), @('受注日', 'ORDER_DATE', 'DATE'))
+    New-SheetsBook $book ([ordered]@{
+            'T_ORDER'    = @(, @('テーブルID', 'T_ORDER', 'テーブル名', '受注')) + $columns
+            'T_ORDER_旧' = @(, @('テーブルID', 'T_ORDER_OLD', 'テーブル名', '受注（旧）')) + $columns
+            '雛形'       = @(@('テーブルID', '{{テーブルID}}', 'テーブル名', '{{テーブル名}}'), @('論理名', '物理名', 'データ型'))
+        })
+    Edit-ZipText $book 'xl/workbook.xml' { param($t) $t -replace '(<sheet name="(T_ORDER_旧|雛形)")', '$1 state="hidden"' }
+    $r = Invoke-Measure @{ Path = $dir }
+    Assert-Equal 'テーブル|T_ORDER 受注|カラム数 2' @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Kind, $_.Name, $_.Measures })
+    $s = @(& $MeasureSize -Path $dir -Summary 6>$null 3>$null)[0]
+    Assert-Equal '1|35|7' ('{0}|{1}|{2}' -f $s.ILF, $s.FpIndicative, $s.FpEstimated) '非表示のシートのテーブルは ILF にしない'
+    Assert-Equal 0.5 $s.TotalDays
+}
+
+Test-Case 'Measure-DesignSize: 表がどれも見出しだけ（行が無い）のテーブル・画面（雛形など）は、警告だけで数えない' {
+    $dir = New-TestDir
+    $columns = @('論理名', '物理名', 'データ型')
+    New-SheetsBook (Join-Path $dir 'DD03_テーブル定義書.xlsx') ([ordered]@{
+            'T_ORDER' = @(@('テーブルID', 'T_ORDER', 'テーブル名', '受注'), $columns, @('受注番号', 'ORDER_NO', 'CHAR'))
+            'T_SHIP'  = @(@('テーブルID', 'T_SHIP', 'テーブル名', '出荷'), $columns)
+        })
+    # 設計書のフォルダに置いたままの画面設計書の雛形（New-DesignDocument の -Template）と、イベントをまだ書いていない画面
+    $events = @(, @('イベントID', 'イベント名', '使用テーブル'))
+    New-SheetsBook (Join-Path $dir '画面設計書_雛形.xlsx') ([ordered]@{ '画面項目定義' = @(@('画面ID', '{{画面ID}}', '画面名', '{{画面名}}'), @('項目名', '項目ID')); 'イベント定義' = $events })
+    New-SheetsBook (Join-Path $dir '画面設計書_S20_出荷.xlsx') ([ordered]@{ '画面項目定義' = @(@('画面ID', 'S20', '画面名', '出荷'), @('項目名', '項目ID'), @('出荷番号', 'shipNo')); 'イベント定義' = $events })
+    $w = $null
+    $r = @(& $MeasureSize -Path $dir -WarningVariable w -WarningAction SilentlyContinue 6>$null)
+    Assert-Equal @('画面|S20 出荷|項目数 1・イベント数 0', 'テーブル|T_ORDER 受注|カラム数 1') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Kind, $_.Name, $_.Measures }) '行のある表が 1 つでもあれば数える'
+    $text = ($w | ForEach-Object { $_.Message }) -join "`n"
+    Assert-Match $text 'DD03_テーブル定義書\.xlsx: テーブル「T_SHIP 出荷」のカラム数が 0 件です.*数えません'
+    Assert-Match $text '画面設計書_雛形\.xlsx: 画面「\{\{画面ID\}\} \{\{画面名\}\}」の項目数・イベント数が 0 件です.*数えません'
+    $s = @(& $MeasureSize -Path $dir -Summary 6>$null 3>$null)[0]
+    Assert-Equal '1|35|7' ('{0}|{1}|{2}' -f $s.ILF, $s.FpIndicative, $s.FpEstimated) 'T_SHIP は ILF にしない'
+    Assert-Equal 3.5 $s.TotalDays '画面 S20（簡易）3 + T_ORDER 0.5'
+}
+
+Test-Case 'Measure-DesignSize: -Actuals で同じ対象の行（工程ごとの実績など）は足してから平均し、読めない工数を警告する' {
+    $dir = New-TestDir
+    $actuals = Join-Path $dir 'actuals.csv'
+    @('種類,ID,工程,工数（人日）', '画面,SCR001,設計,2', '画面,SCR001,製造,3', '画面,SCR002,設計,6', '画面,SCR003,設計,4', '画面,SCR003,製造,4',
+        'テーブル,T_ORDER,設計,1.5人日', 'テーブル,M_CUSTOMER,設計,約1', 'テーブル,M_PRODUCT,設計,') | Set-Content -LiteralPath $actuals -Encoding UTF8
+    $coef = Join-Path $dir 'coef.csv'
+    $w = $null
+    $null = & $MeasureSize -Path $sampleDir -Actuals $actuals -OutCoefficients $coef -WarningVariable w -WarningAction SilentlyContinue 6>$null
+    $byKey = @{}
+    foreach ($r in @(Import-Csv -LiteralPath $coef -Encoding UTF8)) { $byKey['{0}|{1}' -f $r.'種類', $r.'難易度'] = $r }
+    Assert-Equal '6.33|3' ('{0}|{1}' -f $byKey['画面|普通'].'工数', $byKey['画面|普通'].'実績件数') '画面ごとに足した 5・6・8 人日の平均。実績件数は画面の数'
+    Assert-Equal '1.5|1' ('{0}|{1}' -f $byKey['テーブル|簡易'].'工数', $byKey['テーブル|簡易'].'実績件数') '「1.5人日」も読む。読めない M_CUSTOMER と空の M_PRODUCT は数えない'
+    Assert-Match (@($w | ForEach-Object { $_.Message }) -join ' / ') '工数を数として読めない行 1 件.*M_CUSTOMER「約1」'
 }
 
 Test-Case 'Measure-DesignSize: Get-Help でヘルプが表示される' {

@@ -80,7 +80,8 @@ foreach ($c in (Read-CsvFile $Coefficients @('種類', '難易度', '基準', '�
 
 function Read-DesignBooks {
     param([string[]] $Paths)
-    $searchArgs = @{ Pattern = '\S'; Path = $Paths; Target = 'Value' }
+    # 非表示のシート（New-DesignDocument.ps1 -TemplateSheet の雛形のシートなど）は読まない
+    $searchArgs = @{ Pattern = '\S'; Path = $Paths; Target = 'Value'; SkipHiddenSheets = $true }
     if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
     if ($NoExcel) { $searchArgs['NoExcel'] = $true }
     $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
@@ -115,6 +116,8 @@ function Get-IfDirection {
 
 # 行の内容を比べるとき（-Baseline）に除く列（行を挿入すると振り直される番号）
 $numberHeader = '^(No|NO|№|項番|番号|行番号)\.?$'
+# 使用テーブルの CRUD（「T_ORDER(C,U)」の括弧の中）。文字は「,」「、」「・」「/」や空白で区切ってもよい（全角は NFKC で半角にしてから探す）
+$crudPattern = '\(\s*([CRUDcrud](?:[\s,、・/]*[CRUDcrud])*)\s*\)'
 
 function Get-SizeItems {
     #     設計書を数え、対象（画面・テーブル…）ごとの規模を返す。Rows には、数えた行の「数える列の値 → 行の内容」を入れる（-Baseline で比べる）
@@ -165,7 +168,7 @@ function Get-SizeItems {
                     if ($rule.CrudHeader -and $t.ColumnOf.ContainsKey($rule.CrudHeader)) {
                         $crudCol = $t.ColumnOf[$rule.CrudHeader]
                         foreach ($dr in $t.Rows) {
-                            $letters = (@([regex]::Matches(([string]$dr.Cells[$crudCol]).Normalize($nfkc), '\(([CRUDcrud]+)\)') | ForEach-Object { $_.Groups[1].Value }) -join '').ToUpperInvariant()
+                            $letters = ((@([regex]::Matches(([string]$dr.Cells[$crudCol]).Normalize($nfkc), $crudPattern) | ForEach-Object { $_.Groups[1].Value }) -join '') -replace '[^CRUDcrud]', '').ToUpperInvariant()
                             if ($letters -match '[CUD]') { $item.EI++ } elseif ($letters -match 'R') { $item.EQ++ }
                         }
                     }
@@ -194,7 +197,8 @@ $items = Get-SizeItems $books
 
 
 function ConvertTo-SizeResult {
-    #     対象の規模から、係数表で難易度と工数を決めた結果をつくる
+    #     対象の規模から、係数表で難易度と工数を決めた結果をつくる。
+    #     表がどれも見出しだけ（行が無い）の対象は、結果を返さない（雛形のシート・ファイルなどを 1 つと数えないように）
     param($Item, [switch] $Quiet)
     $coefs = @($coefList | Where-Object { $_.Kind -eq $Item.Kind })
     $level = ''; $days = $null
@@ -214,9 +218,14 @@ function ConvertTo-SizeResult {
     $display = $Item.Name
     if ($Item.Id -and $Item.Name -and $Item.Id -ne $Item.Name) { $display = '{0} {1}' -f $Item.Id, $Item.Name } elseif ($Item.Id) { $display = $Item.Id }
     if ($Item.Unit -eq '行') { $display = '{0}（{1}）' -f $Item.File, $Item.Sheet }
-    if (-not $Quiet -and @($Item.Counts.Values | Where-Object { $_ -eq 0 }).Count -gt 0) {
-        Write-Warning ("{0}: {1}「{2}」の{3}が 0 件です（見出しの下に行がありません）" -f $Item.File, $Item.Kind, $display, (@($Item.Counts.Keys | Where-Object { $Item.Counts[$_] -eq 0 }) -join '・'))
+    $zero = @($Item.Counts.Keys | Where-Object { $Item.Counts[$_] -eq 0 })
+    $empty = $zero.Count -eq $Item.Counts.Count
+    if (-not $Quiet -and $zero.Count -gt 0) {
+        $note = ''
+        if ($empty) { $note = '。この{0}は数えません' -f $Item.Kind }
+        Write-Warning ("{0}: {1}「{2}」の{3}が 0 件です（見出しの下に行がありません）{4}" -f $Item.File, $Item.Kind, $display, ($zero -join '・'), $note)
     }
+    if ($empty) { return }
     $isExternal = $Item.Kind -eq 'テーブル' -and $ExternalTables -and (("{0} {1}" -f $Item.Id, $Item.Name) -match $ExternalTables)
     $r = [pscustomobject]@{
         Kind = $Item.Kind; Name = $display; Measures = $measures; Size = $size; Level = $level; Days = $days
@@ -228,7 +237,7 @@ function ConvertTo-SizeResult {
 }
 
 $results = New-Object System.Collections.Generic.List[object]
-foreach ($item in $items.Values) { $results.Add((ConvertTo-SizeResult $item)) }
+foreach ($item in $items.Values) { $r = ConvertTo-SizeResult $item; if ($r) { $results.Add($r) } }
 # 規模の数え方の種類の順、ファイル・名前の順に並べる
 $kindOrder = @{}
 foreach ($rule in $ruleList) { if (-not $kindOrder.ContainsKey($rule.Kind)) { $kindOrder[$rule.Kind] = $kindOrder.Count } }
@@ -280,6 +289,7 @@ if ($Baseline) {
     $baseByKey = @{}
     foreach ($bi in (Get-SizeItems (Read-DesignBooks $Baseline)).Values) {
         $br = ConvertTo-SizeResult $bi -Quiet
+        if (-not $br) { continue }
         $baseList.Add($br)
         foreach ($k in (Get-MatchKeys $br)) { if (-not $baseByKey.ContainsKey($k)) { $baseByKey[$k] = New-Object System.Collections.Generic.List[object] }; $baseByKey[$k].Add($br) }
     }
@@ -343,14 +353,29 @@ if ($Actuals) {
     if ($actualRows.Count -gt 0) { $columns = @($actualRows[0].PSObject.Properties | ForEach-Object { $_.Name }) }
     $daysCol = @('工数（人日）', '実績工数', '工数', '実績（人日）', '人日' | Where-Object { $columns -contains $_ })[0]
     if (-not $daysCol -or ($columns -notcontains 'ID' -and $columns -notcontains '名前')) { throw "実績の工数の CSV には「ID」か「名前」と、「工数」（または「工数（人日）」）の列が必要です: $Actuals" }
+    # 同じ対象の行（工程ごとの行など）は足してから、対象ごとに平均する（実績の件数は対象の数）
     $matched = New-Object System.Collections.Generic.List[object]
+    $matchedOf = @{}
+    $unreadable = New-Object System.Collections.Generic.List[string]
     foreach ($a in $actualRows) {
+        # 工数は全角を半角にし、桁区切り・空白と後ろの「人日」を除いて読む（空の行は数えない）
+        $text = ([string]$a.$daysCol).Normalize($nfkc) -replace '[,\s]', ''
+        if (-not $text) { continue }
         $d = 0.0
-        if (-not [double]::TryParse(([string]$a.$daysCol).Trim(), [ref]$d)) { continue }
+        if (-not [double]::TryParse(($text -replace '人日$', ''), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$d)) {
+            $unreadable.Add(('{0}「{1}」' -f ((@($a.'ID', $a.'名前') | Where-Object { $_ }) -join ' '), ([string]$a.$daysCol).Trim()))
+            continue
+        }
         $idKey = ConvertTo-Label ([string]$a.'ID'); $nameKey = ConvertTo-Label ([string]$a.'名前'); $kind = ([string]$a.'種類').Trim()
         $r = @($results | Where-Object { (-not $kind -or $_.Kind -eq $kind) -and (($idKey -and (ConvertTo-Label $_.Id) -eq $idKey) -or ($nameKey -and ((ConvertTo-Label $_.Title) -eq $nameKey -or (ConvertTo-Label $_.Name) -eq $nameKey))) })[0]
         if (-not $r) { Write-Warning ("実績の「{0}」に当たる設計書が見つかりません" -f (@($a.'ID', $a.'名前') | Where-Object { $_ }) -join ' '); continue }
-        $matched.Add([pscustomobject]@{ Result = $r; Actual = $d })
+        if (-not $matchedOf.ContainsKey($r)) { $matchedOf[$r] = [pscustomobject]@{ Result = $r; Actual = 0.0 }; $matched.Add($matchedOf[$r]) }
+        $matchedOf[$r].Actual += $d
+    }
+    if ($unreadable.Count -gt 0) {
+        $examples = @($unreadable | Select-Object -First 3) -join '、'
+        if ($unreadable.Count -gt 3) { $examples += ' など' }
+        Write-Warning ('実績の工数を数として読めない行 {0} 件は数えていません: {1}' -f $unreadable.Count, $examples)
     }
     foreach ($c in $coefList) {
         $bucket = @($matched | Where-Object { $_.Result.Kind -eq $c.Kind -and $_.Result.Level -eq $c.Level })
@@ -470,6 +495,7 @@ if ($OutXlsx) {
 #
 #     表は見出し（「項目名」「項目ID」など）がそろっている行を探し、その下で「数える列」に値のある行を、
 #     次の節（「■」で始まる行）まで数えます。見出しが見つからない設計書や、0 件の表は警告します。
+#     非表示のシート（雛形のシートなど）は読まず、表がどれも 0 件のもの（雛形のファイルなど）は数えません。
 #
 #     係数表（CSV）で、規模（項目数など）から難易度（簡易・普通・複雑）を決め、1 つあたりの工数を掛けて工数の目安を出します。
 #     あわせて FP を NESMA の概算法（35 × ILF + 15 × EIF）と試算法（7 × ILF + 5 × EIF + 4 × EI + 5 × EO + 4 × EQ）で出します。
@@ -516,6 +542,7 @@ if ($OutXlsx) {
 # .PARAMETER Actuals
 #     実績の工数の CSV（ID または 名前、工数（人日）。種類の列があれば種類も合わせる）。設計書の対象と対応付け、
 #     係数表の難易度ごとに実績の平均を出します（単位が「件」の行は 1 件あたりの平均）。
+#     同じ対象の行（工程ごとの行など）は足してから平均します。工数を数として読めない行は警告します。
 #
 # .PARAMETER OutCoefficients
 #     -Actuals の実績の平均で工数を置き換えた係数表を、CSV（UTF-8 BOM 付き）に保存します。
