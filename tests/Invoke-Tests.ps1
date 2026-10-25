@@ -251,7 +251,7 @@ $script:TestPng = @{
 
 function Add-TestDrawing {
     #     ブックの Sheet 番目のシートに図形・画像を置く（テスト用）。Items の要素（列・行は 0 から数える）:
-    #       @{ Kind = 'pic'; Name; Png（$script:TestPng のキー）; From = @(列, 行); To = @(列, 行) }
+    #       @{ Kind = 'pic'; Name; Png（$script:TestPng のキー）; From = @(列, 行); To = @(列, 行); Descr（代替テキスト。省略可） }
     #       @{ Kind = 'sp'; Name; Text（省略可）; From; To }
     #       @{ Kind = 'grpSp'; Name; From; To; Children = @( @{ Kind; Name; Text; Png; Off = @(x, y); Ext = @(cx, cy) } ) }（中の座標は 0〜1000）
     #       Hidden = $true で非表示にする。シートに置いたものは Ext = @(幅, 高さ)（ピクセル）で表示の大きさ（xfrm）を書く
@@ -269,6 +269,7 @@ function Add-TestDrawing {
                 $media.Add($it.Png)
                 $crop = ''
                 if ($it.Crop) { $crop = '<a:srcRect l="{0}" t="{1}" r="{2}" b="{3}"/>' -f $it.Crop[0], $it.Crop[1], $it.Crop[2], $it.Crop[3] }
+                if ($it.Descr) { $id = '{0}" descr="{1}' -f $id, $it.Descr }
                 '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{0}" name="{1}"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdImg{2}"/>{4}<a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>{3}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>' -f $id, $it.Name, $media.Count, $Xfrm, $crop
             }
             'sp' {

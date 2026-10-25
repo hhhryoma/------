@@ -96,6 +96,51 @@ Test-Case 'Export-ExcelToMarkdown: -OutDir で、拡張子だけが違う同じ�
     Assert-Match $text '0 ファイルを Markdown にしました（Excel より新しい \.md があり変換しなかったもの 3 ファイル）'
 }
 
+Test-Case 'Export-ExcelToMarkdown: 2 行の見出し（「予定」の下に「開始」「終了」）、No が続く表の途中の空の行、見出しの列より右の備考も表にする' {
+    $file = Join-Path (New-TestDir) '表.xlsx'
+    New-SheetsBook $file ([ordered]@{
+            'WBS' = @(@('No', 'タスク', '予定', '', '実績', ''), @('', '', '開始', '終了', '開始', '終了'), @('1', '設計', '10/1', '10/5', '10/1', '10/6'), @('2', '製造', '10/6', '10/20', '', ''))
+            '項目' = @(@('No', '項目名', '桁数', ''), @('1', '受注番号', '12', ''), @('', '', '', ''), @('2', '受注日', '8', '※要確認'), @('3', '顧客名', '40', ''), @('', '', '', ''), @('※ 桁数はバイト数', '', '', ''))
+            '帳票' = @(@('画面設計書', 'システム名', '受注管理', '', '', '作成者', '山田'), @('', '画面ID', 'SCR001', '画面名', '受注一覧', '更新者', '山田'))
+        })
+    $md = Invoke-Markdown @{ Path = $file }
+    Assert-Match $md '(?m)^## WBS\n\n\| No \| タスク \| 予定 開始 \| 予定 終了 \| 実績 開始 \| 実績 終了 \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| 1 \| 設計 \| 10/1 \| 10/5 \| 10/1 \| 10/6 \|\n\| 2 \| 製造 \| 10/6 \| 10/20 \|  \|  \|\n' '2 行の見出し'
+    Assert-Match $md '(?m)^\| No \| 項目名 \| 桁数 \|  \|\n\| --- \| --- \| --- \| --- \|\n\| 1 \| 受注番号 \| 12 \|  \|\n\| 2 \| 受注日 \| 8 \| ※要確認 \|\n\| 3 \| 顧客名 \| 40 \|  \|\n\n- ※ 桁数はバイト数$' '空の行と右の備考。表の下の注記は表に入れない'
+    # 帳票の上の欄（2 行目の値が見出しの列の間にある）は、表にしない
+    Assert-Match $md '(?m)^- 画面設計書 \| システム名 \| 受注管理 \| 作成者 \| 山田\n- 画面ID \| SCR001 \| 画面名 \| 受注一覧 \| 更新者 \| 山田$'
+    $addr = Invoke-Markdown @{ Path = $file; CellAddress = $true }
+    Assert-Match $addr '(?m)^\| 2 \| 1 \| 受注番号 \| 12 \|  \|\n\| 4 \| 2 \| 受注日 \| 8 \| ※要確認 \|$' '空の行をはさんだ行も、行番号はそのまま'
+}
+
+Test-Case 'Export-ExcelToMarkdown: 画像を名前・代替テキスト・大きさ・中身の目印で書く。-OutDir では .assets フォルダに画像を書き出してリンクし、無くなった画像は消す' {
+    $dir = New-TestDir
+    $file = Join-Path $dir '画面設計書.xlsx'
+    New-SheetsBook $file ([ordered]@{ '画面イメージ' = @(@('■ 画面イメージ'), @('以上')) })
+    Add-TestDrawing $file @(@{ Kind = 'pic'; Name = '図 1'; Png = 'Screen'; Descr = '受注一覧の画面'; From = @(1, 2); To = @(6, 12) }, @{ Kind = 'pic'; Name = '図 2'; Png = 'Old'; From = @(7, 2); To = @(9, 4); Hidden = $true })
+    $md = Invoke-Markdown @{ Path = $file }
+    Assert-Match $md '(?m)^### 画像\n\n- 図 1: 受注一覧の画面（画像 400×300・[0-9a-f]{8}）\n- 図 2（画像 40×30・[0-9a-f]{8}・非表示）$'
+    Assert-NotMatch $md '!\[' '-OutDir でなければ画像のファイルは書かない'
+    Assert-Match (Invoke-Markdown @{ Path = $file; CellAddress = $true }) '(?m)^- 図 1（B3 付近）: 受注一覧の画面（画像 400×300・'
+
+    # 画像を差し替えると、中身の目印が変わる（git diff に出る）
+    $other = Join-Path $dir '差し替え.xlsx'
+    New-SheetsBook $other ([ordered]@{ '画面イメージ' = @(@('■ 画面イメージ'), @('以上')) })
+    Add-TestDrawing $other @(@{ Kind = 'pic'; Name = '図 1'; Png = 'Screen'; Descr = '受注一覧の画面'; From = @(1, 2); To = @(6, 12) }, @{ Kind = 'pic'; Name = '図 2'; Png = 'New'; From = @(7, 2); To = @(9, 4); Hidden = $true })
+    $mark = { param($text) [regex]::Match($text, '図 2（画像 40×30・([0-9a-f]{8})').Groups[1].Value }
+    Assert-True ((& $mark $md) -ne (& $mark (Invoke-Markdown @{ Path = $other }))) '差し替えた画像は目印が違う'
+
+    $out = Join-Path $dir 'md'
+    $null = & $MarkdownTool -Path $file -OutDir $out 6>$null
+    $saved = [System.IO.File]::ReadAllText((Join-Path $out '画面設計書.md'))
+    Assert-Match $saved '(?m)^- 図 1: 受注一覧の画面（画像 400×300・[0-9a-f]{8}）\n  !\[図 1\]\(<画面設計書\.assets/image1_1\.png>\)$'
+    Assert-Equal @('image1_1.png', 'image1_2.png') @(Get-ChildItem -LiteralPath (Join-Path $out '画面設計書.assets') | ForEach-Object { $_.Name } | Sort-Object)
+    # 画像を消したブックを変換し直すと、書き出した画像とフォルダも消す
+    New-SheetsBook $file ([ordered]@{ '画面イメージ' = @(@('■ 画面イメージ'), @('以上')) })
+    $null = & $MarkdownTool -Path $file -OutDir $out -Force 6>$null
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $out '画面設計書.assets'))) '.assets フォルダを消す'
+    Assert-NotMatch ([System.IO.File]::ReadAllText((Join-Path $out '画面設計書.md'))) '### 画像'
+}
+
 Test-Case 'Export-ExcelToMarkdown: Get-Help でヘルプが表示される' {
     $h = Get-Help $MarkdownTool
     Assert-Match $h.Synopsis 'Markdown'
