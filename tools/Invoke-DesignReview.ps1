@@ -858,7 +858,8 @@ function Add-TableRuleFindings {
     foreach ($r in (Read-CsvFile (Join-Path $ddl '型の対応.csv') @('定義書の型') '型の対応')) {
         $key = (([string]$r.'定義書の型').Normalize($nfkc) -replace '\s', '').ToUpperInvariant()
         $templates = @($r.PSObject.Properties | Where-Object { $_.Name -ne '定義書の型' } | ForEach-Object { [string]$_.Value })
-        if (@($templates | Where-Object { $_.Contains('{n}') }).Count -gt 0) { $needLength[$key] = $true }
+        # […] の中の {n}（日時の秒の小数部の桁数 TIMESTAMP[({n})] など）は省けるので、桁数の要る型にしない
+        if (@($templates | Where-Object { ($_ -replace '\[[^\[\]]*\]', '').Contains('{n}') }).Count -gt 0) { $needLength[$key] = $true }
         if (@($templates | Where-Object { $_.Contains('{s}') }).Count -gt 0) { $needScale[$key] = $true }
     }
     foreach ($book in $Books.Values) {
