@@ -92,6 +92,42 @@ Test-Case 'New-QualityLimits: 実績が 1 件・値がすべて同じ組は、�
     Assert-Equal '0.25|' ('{0}|{1}' -f $d[0].Density, $d[0].Judgement)
 }
 
+Test-Case 'New-QualityLimits: 平均 − σ が 0 以下の組は下限を空にして知らせ（下限 0 にしない）、Measure-TestQuality はテストケースの無い機能を「少ない」にする' {
+    $dir = New-TestDir
+    $csv = Join-Path $dir '実績.csv'
+    # ばらつきが大きい（平均 73.75・標準偏差 84.8）
+    @('プロジェクト,時点,区分,指標,分母,工程,値', 'A,2026/03/31,テスト,テスト密度,KLOC,,20', 'B,2026/03/31,テスト,テスト密度,KLOC,,30', 'C,2026/03/31,テスト,テスト密度,KLOC,,45', 'D,2026/03/31,テスト,テスト密度,KLOC,,200') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $out = Join-Path $dir '基準値.csv'
+    $text = Get-HostText { $script:noLowLimits = @(& $LimitsTool $csv -OutCsv $out) }
+    Assert-Equal '|158.541' ('{0}|{1}' -f $script:noLowLimits[0].Low, $script:noLowLimits[0].High)
+    Assert-Match $text '平均 − 1σ が 0 以下になる組は、下限を空にしました.*-Method Percentile も試してください: テスト密度/KLOC'
+    $row = @(Import-Csv -LiteralPath $out -Encoding UTF8)[0]
+    Assert-Equal '|158.541' ('{0}|{1}' -f $row.'下限', $row.'上限') '下限を 0 と書かない'
+    Assert-Match $row.'備考' '平均 − 1σ が 0 以下のため、下限なし'
+
+    # 規模があるのにテストケースの無い機能（SCR002）は、下限が空でも「少ない」。ケースのある機能は基準内
+    @('No,機能,確認内容,結果', '1,SCR001,確認 1,OK', '2,SCR001,確認 2,OK') | Set-Content -LiteralPath (Join-Path $dir 'cases.csv') -Encoding UTF8
+    @('機能,KLOC', 'SCR001,0.05', 'SCR002,0.05') | Set-Content -LiteralPath (Join-Path $dir 'kloc.csv') -Encoding UTF8
+    $r = @(& (Join-Path $script:ToolsDir 'Measure-TestQuality.ps1') -Path (Join-Path $dir 'cases.csv') -SizeCsv (Join-Path $dir 'kloc.csv') -Limits $out -AsOf '2026-10-20' 3>$null 6>$null | Where-Object { $_.PSObject.TypeNames -contains 'TestQuality.Function' })
+    Assert-Equal @('SCR001|40|基準内', 'SCR002|0|少ない') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Function, $_.TestDensity, $_.TestJudgement })
+}
+
+Test-Case 'New-QualityLimits: 同じプロジェクトの名前がいくつもの CSV にあれば知らせ、出力先のフォルダの名前（品質報告）は CSV ごとに別のプロジェクトとして数える' {
+    $dir = New-TestDir
+    # 以前の New-QualityReport.ps1 で -Project を省いて作った、2 つの案件の実績（どちらもプロジェクトが「品質報告」）
+    @('プロジェクト,時点,区分,指標,分母,工程,値', '品質報告,2026/09/30,レビュー,指摘密度,ページ数,,0.5', '品質報告,2026/10/15,レビュー,指摘密度,ページ数,,1.0') | Set-Content -LiteralPath (Join-Path $dir '実績_案件A.csv') -Encoding UTF8
+    @('プロジェクト,時点,区分,指標,分母,工程,値', '品質報告,2026/10/10,レビュー,指摘密度,ページ数,,2.0') | Set-Content -LiteralPath (Join-Path $dir '実績_案件B.csv') -Encoding UTF8
+    $r = @(& $LimitsTool $dir -MinSamples 1 -WarningVariable script:limitWarnings -WarningAction SilentlyContinue 6>$null)
+    Assert-Equal '2|1.5' ('{0}|{1}' -f $r[0].Count, $r[0].Mean) '案件A は最後の時点の 1.0、案件B は 2.0'
+    Assert-Match ($script:limitWarnings -join ' ') 'プロジェクト「品質報告」が、いくつもの実績の CSV（実績_案件A\.csv・実績_案件B\.csv）にあります。出力先のフォルダの名前なので、ファイルごとに別のプロジェクトとして数えます'
+
+    # ほかの名前は同じプロジェクトとして数え、知らせる
+    foreach ($f in @('実績_案件A.csv', '実績_案件B.csv')) { $p = Join-Path $dir $f; [System.IO.File]::WriteAllText($p, ([System.IO.File]::ReadAllText($p) -replace '品質報告', '受注'), (New-Object System.Text.UTF8Encoding($true))) }
+    $r = @(& $LimitsTool $dir -MinSamples 1 -WarningVariable script:limitWarnings -WarningAction SilentlyContinue 6>$null)
+    Assert-Equal '1|1' ('{0}|{1}' -f $r[0].Count, $r[0].Mean) '受注の最後の時点（10/15）の 1.0'
+    Assert-Match ($script:limitWarnings -join ' ') 'プロジェクト「受注」が、いくつもの実績の CSV（実績_案件A\.csv・実績_案件B\.csv）にあります。同じプロジェクトとして'
+}
+
 Test-Case 'New-QualityLimits: Get-Help でヘルプが表示される' {
     $h = Get-Help $LimitsTool
     Assert-Match $h.Synopsis '基準値'

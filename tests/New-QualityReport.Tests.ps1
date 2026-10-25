@@ -324,3 +324,97 @@ Test-Case 'New-QualityReport: 実績の CSV の時点を日付として読み、
     Assert-Equal $count $rows.Count '同じ時点の行を置き換えずに足している'
     Assert-Equal @('2026/10/06', '2026/10/20') @($rows | ForEach-Object { $_.'時点' } | Sort-Object -Unique)
 }
+
+Test-Case 'New-QualityReport: 同じ時点のブックを作り直すと、記入した定性分析（原因）・対策と要対応の担当・期限を引き継ぐ（引き継げないものは知らせて前のブックを残す）' {
+    $dir = New-TestDir
+    New-ReportData $dir
+    $out = Join-Path $dir '報告'
+    $base = @{ OutDir = $out; Findings = (Join-Path $dir 'レビュー'); BugList = (Join-Path $dir '障害管理表.xlsx'); AsOf = '2026-10-20' }
+    $null = & $ReportTool @base -TestPath (Join-Path $dir 'テスト') 3>$null 6>$null
+    $report = Join-Path $out '品質評価_20261020.xlsx'
+    $rowOf = { param($sheet, $col, $text) @($sheet.Rows.Keys | Where-Object { $sheet.Rows[$_][$col] -eq $text })[0] }
+    $book = Read-XlsxSheet -Path $report
+    $overdueRow = & $rowOf $book 'B' '期限切れの指摘'
+    $progressRow = & $rowOf $book 'B' '消化率'
+    # 会議の前に記入した（セルの中の改行も）
+    Set-CellValues $report '品質評価' @{ "F$overdueRow" = "レビューの遅れ`n担当の不在"; "G$overdueRow" = '週次で確認する'; "F$progressRow" = '環境の遅れ' }
+    $todo = Read-XlsxSheet -Path $report -Index 2
+    $leakRow = & $rowOf $todo 'A' '工程'
+    Assert-Match $todo.Rows[$leakRow]['C'] '1 件が後の工程で見つかった'
+    Set-CellValues $report '要対応' @{ "E$leakRow" = '山田'; "F$leakRow" = '2026/10/30' }
+
+    # 障害管理表を直し（流出が 2 件になり、要対応の内容が変わる）、テスト仕様書を渡さずに同じ日に作り直す
+    New-ReportBook (Join-Path $dir '障害管理表.xlsx') '障害' @('障害番号', '障害内容', '起票日', '機能', '混入工程', '摘出工程', '状態') @(
+        , @('B001', '一覧の件数が違う', '2026/10/01', 'SCR001', '製造', '単体テスト', '完了')
+        , @('B002', '登録できない', '2026/10/04', 'SCR002', '詳細設計', '単体テスト', '対応中')
+        , @('B003', '検索できない', '2026/10/05', 'SCR001', '詳細設計', '単体テスト', '対応中'))
+    $text = Get-HostText { & $ReportTool @base -WarningVariable script:carryWarnings -WarningAction SilentlyContinue | Out-Null }
+    Assert-Match $text '同じ時点の前の品質評価から、定性分析（原因）・対策 1 件（期限切れの指摘）と、要対応の担当・期限 1 件を引き継ぎました'
+    $book = Read-XlsxSheet -Path $report
+    $overdueRow = & $rowOf $book 'B' '期限切れの指摘'
+    Assert-Equal "レビューの遅れ`n担当の不在|週次で確認する" ('{0}|{1}' -f $book.Rows[$overdueRow]['F'], $book.Rows[$overdueRow]['G']) '定性分析・対策を引き継ぐ'
+    $todo = Read-XlsxSheet -Path $report -Index 2
+    $leakRow = & $rowOf $todo 'A' '工程'
+    Assert-Match $todo.Rows[$leakRow]['C'] '2 件が後の工程で見つかった'
+    Assert-Equal ('山田|{0}' -f ([datetime]'2026-10-30').ToOADate()) ('{0}|{1}' -f $todo.Rows[$leakRow]['E'], $todo.Rows[$leakRow]['F']) '内容の数が変わっても、区分と対象で担当・期限（日付のセル）を引き継ぐ'
+
+    # 今回の品質評価に無い指標（テスト仕様書を渡さなかったので消化率が無い）の記入は、知らせて前のブックを残す
+    $kept = Join-Path $out '品質評価_20261020_前の版.xlsx'
+    Assert-Match ($script:carryWarnings -join ' ') '引き継げませんでした: 定性分析・対策（消化率）。前のブックを残しました: .*品質評価_20261020_前の版\.xlsx'
+    $old = Read-XlsxSheet -Path $kept
+    Assert-Equal '環境の遅れ' $old.Rows[(& $rowOf $old 'B' '消化率')]['F']
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    Assert-Equal $report (Find-QualityBook $out) '定性分析には、前の版ではなく品質評価のブックを使う'
+}
+
+Test-Case 'New-QualityReport: -Project を省くと、出力先が「品質報告」なら案件のフォルダの名前にし（-Config と同じ）、実績の CSV に別の名前の行だけがあれば知らせる' {
+    $root = Join-Path (New-TestDir) '受注システム'
+    New-Item -ItemType Directory -Path $root | Out-Null
+    New-ReportData $root
+    $history = Join-Path $root '品質報告/実績.csv'
+    & $ReportTool -OutDir (Join-Path $root '品質報告') -Findings (Join-Path $root 'レビュー') -HistoryCsv $history -AsOf '2026-10-06' 3>$null 6>$null | Out-Null
+    Assert-Equal @('受注システム') @(Import-Csv -LiteralPath $history | ForEach-Object { $_.'プロジェクト' } | Sort-Object -Unique)
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    Assert-Equal '受注システム' (Get-ProjectName (Join-Path $root 'Output')) '出力先によく付ける名前（大文字・小文字は問わない）'
+    Assert-Equal '週次品質' (Get-ProjectName (Join-Path $root '週次品質'))
+    # 設定ファイルで作っても同じプロジェクトになり、前回と比べる
+    @('項目,値', '指摘管理表,レビュー', '実績,品質報告\実績.csv') | Set-Content -LiteralPath (Join-Path $root '品質評価の設定.csv') -Encoding UTF8
+    $text = Get-HostText { & $ReportTool -Config $root -AsOf '2026-10-20' 3>$null | Out-Null }
+    Assert-Match $text 'プロジェクト「受注システム」・2026/10/20。前回 2026/10/06 と比べました'
+
+    # 以前の既定の名前（品質報告）で残した実績だけがあれば、知らせる
+    $old = Join-Path $root '以前の実績.csv'
+    [System.IO.File]::WriteAllText($old, ([System.IO.File]::ReadAllText($history) -replace '"受注システム"', '"品質報告"'), (New-Object System.Text.UTF8Encoding($true)))
+    $null = & $ReportTool -OutDir (Join-Path $root '品質報告') -Findings (Join-Path $root 'レビュー') -HistoryCsv $old -AsOf '2026-10-27' -WarningVariable script:projectWarnings -WarningAction SilentlyContinue 6>$null
+    Assert-Match ($script:projectWarnings -join ' ') 'プロジェクト「品質報告」の行だけがあり、今回のプロジェクト「受注システム」の行がありません'
+}
+
+Test-Case 'New-QualityReport: 全体のテスト密度・バグ密度で除いた規模の無い機能のケース・バグの件数を判定の考え方に書き、要対応に並べる。設計書の FP は「FP（トランザクション）」と書き、以前の「FP」の実績と比べる' {
+    $dir = New-TestDir
+    New-Item -ItemType Directory -Path (Join-Path $dir 'テスト') | Out-Null
+    @('No,機能,確認内容,結果', '1,SCR001,確認 1,OK', '2,SCR001,確認 2,OK', '3,SCR002,確認 3,OK', '4,SCR003,確認 4,NG') | Set-Content -LiteralPath (Join-Path $dir 'テスト/cases.csv') -Encoding UTF8
+    @('障害番号,障害内容,機能,起票日,状態', 'B1,一覧の誤り,SCR001,2026/10/01,完了', 'B2,登録の誤り,SCR003,2026/10/02,対応中', 'B3,共通部品の誤り,,2026/10/03,対応中') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    @('機能,KLOC', 'SCR001,1.0', 'SCR002,1.0') | Set-Content -LiteralPath (Join-Path $dir 'kloc.csv') -Encoding UTF8
+    $out = Join-Path $dir '報告'
+    $r = @(& $ReportTool -OutDir $out -TestPath (Join-Path $dir 'テスト') -BugList (Join-Path $dir 'bugs.csv') -SizeCsv (Join-Path $dir 'kloc.csv') -AsOf '2026-10-20' 3>$null 6>$null)
+    Assert-Equal '1.5|0.5' ('{0}|{1}' -f @($r | Where-Object Name -eq 'テスト密度（全体）')[0].Value, @($r | Where-Object Name -eq 'バグ密度（全体）')[0].Value) '規模のある SCR001・SCR002（2 KLOC）のケース 3 件・バグ 1 件'
+    $book = Read-XlsxSheet -Path (Join-Path $out '品質評価_20261020.xlsx')
+    $basis = @{}
+    foreach ($row in $book.Rows.Values) { $basis[$row['B']] = $row['E'] }
+    Assert-Equal 'ケース 3 件 ÷ 2 KLOC。規模の無い機能のケース 1 件は除く' $basis['テスト密度（全体）']
+    Assert-Equal 'バグ 1 件 ÷ 2 KLOC。規模の無い機能のバグ 2 件は除く' $basis['バグ密度（全体）']
+    $todo = Read-XlsxSheet -Path (Join-Path $out '品質評価_20261020.xlsx') -Index 2
+    $todoText = @($todo.Rows.Values | ForEach-Object { '{0}|{1}|{2}' -f $_['A'], $_['B'], $_['C'] })
+    Assert-True ($todoText -contains 'テスト|SCR003|規模が無いため、全体のテスト密度・バグ密度に入れていない（ケース 1 件・バグ 1 件）') ($todoText -join "`n")
+    Assert-True ($todoText -contains 'テスト|（機能なし）|規模が無いため、全体のテスト密度・バグ密度に入れていない（ケース 0 件・バグ 1 件）') ($todoText -join "`n")
+
+    # 設計書の FP（4 × EI + 5 × EO + 4 × EQ）は「FP（トランザクション）」。以前の実績の「FP」の行を前回として比べる
+    $history = Join-Path $dir '実績.csv'
+    @('プロジェクト,時点,区分,指標,分母,工程,値', 'A,2026/10/06,テスト,テスト密度,FP,,0.05') | Set-Content -LiteralPath $history -Encoding UTF8
+    $r = @(& $ReportTool -OutDir (Join-Path $dir '報告2') -TestPath (Join-Path $dir 'テスト') -DesignPath $reportDesignDir -HistoryCsv $history -Project 'A' -AsOf '2026-10-20' 3>$null 6>$null)
+    $book = Read-XlsxSheet -Path (Join-Path $dir '報告2/品質評価_20261020.xlsx')
+    $density = @($book.Rows.Values | Where-Object { $_['B'] -eq 'テスト密度（全体）' })[0]
+    Assert-Match $density['G'] '÷ \d+ FP（トランザクション）'
+    Assert-Equal '0.05' $density['D'] '以前の分母「FP」の値を前回にする'
+    Assert-Equal 'FP（トランザクション）' @(Import-Csv -LiteralPath $history | Where-Object { $_.'指標' -eq 'テスト密度' -and $_.'時点' -eq '2026/10/20' })[0].'分母'
+}

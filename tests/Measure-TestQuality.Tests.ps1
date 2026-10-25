@@ -162,7 +162,8 @@ Test-Case 'Measure-TestQuality: -DesignPath では画面・IF などだけを機
     $got = @($r | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Function, $_.Cases, $_.Bugs, $_.Size, $_.Unit })
     # テーブル定義書・メッセージ一覧・コード定義書は機能にしない。SCR002 は対応表で「受注登録」「受注登録画面」と設計書をそろえる
     # FP = 4 × EI + 5 × EO + 4 × EQ（SCR001: EQ 2 → 8、SCR002: EI 1・EQ 2 → 12、SCR003: EI 2・EQ 1 → 12、IF001: EO 1 → 5）
-    Assert-Equal @('SCR001|1|0|8|FP', 'SCR002|2|1|12|FP', 'SCR003 受注詳細|0|0|12|FP', 'IF001 出荷指示データ|0|0|5|FP') $got
+    # 分母の名前は「FP（トランザクション）」（Measure-DesignSize.ps1 の NESMA の FP と見分ける）
+    Assert-Equal @('SCR001|1|0|8|FP（トランザクション）', 'SCR002|2|1|12|FP（トランザクション）', 'SCR003 受注詳細|0|0|12|FP（トランザクション）', 'IF001 出荷指示データ|0|0|5|FP（トランザクション）') $got
     $r = @(& $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -DesignPath $design -DesignUnit '規模' -AsOf '2026-10-20' 3>$null 6>$null)
     Assert-Equal '17|規模' ('{0}|{1}' -f @($r | Where-Object Function -eq 'SCR001')[0].Size, @($r | Where-Object Function -eq 'SCR001')[0].Unit)
 }
@@ -282,6 +283,33 @@ Test-Case 'Measure-TestQuality: 「■」で始まるグループの見出しの
                 @('3', '■確認メッセージが出る', '2026/11/02', 'OK')) })
     $r = @(& $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -AsOf '2026-11-06' 6>$null 3>$null)
     Assert-Equal 'UT|3|3|1' ('{0}|{1}|{2}|{3}' -f $r[0].Function, $r[0].Cases, $r[0].Executed, $r[0].NG) 'グループの見出しの行（値がすべて「■」で始まる行）だけを飛ばす'
+}
+
+Test-Case 'Measure-TestQuality: 時点より後に起票したバグは数えず（その番号は障害管理表に無い番号にしない）、後に完了したバグは未完了に数える' {
+    $dir = New-TestDir
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'SCR201'; Header = @('項番', 'テスト項目', '実施日', '判定', '障害番号'); Rows = @(
+                @('1', '確認 1', '2026/11/02', 'NG', 'B001'),
+                @('2', '確認 2', '2026/11/02', 'NG', 'B002'),
+                @('3', '確認 3', '2026/11/03', 'OK', 'B003')) })
+    @('障害番号,件名,起票日,完了日,状態', 'B001,障害 1,2026/11/02,2026/11/04,完了', 'B002,障害 2,2026/11/02,2026/11/09,完了', 'B003,障害 3,2026/11/08,,対応中') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $out = Join-Path $dir 'test-quality.xlsx'
+    $text = Get-HostText { & $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'bugs.csv') -AsOf '2026-11-06' -OutXlsx $out 3>$null | Out-Null }
+    Assert-Match $text 'バグ 2 件（未完了 1 件。'
+    Assert-Match $text '時点（2026/11/06）より後に起票したバグ 1 件は数えていません'
+    Assert-Match $text '食い違い: 1 件（再テストの結果が無い 1）' 'B003 を障害管理表に無いバグ番号にしない。B002 は時点では未完了なので再テストの結果は要らない'
+}
+
+Test-Case 'Measure-TestQuality: 基準値の CSV に「FP（トランザクション）」の行が無ければ、以前の名前の「FP」の行で判定する' {
+    $dir = New-TestDir
+    $design = Join-Path $script:RepoRoot 'docs/design-sample'
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'ケース'; Header = @('No', '機能', '確認内容', '結果'); Rows = @(1..8 | ForEach-Object { , @([string]$_, 'SCR001', "確認 $_", 'OK') }) })
+    $limits = Join-Path $dir 'limits.csv'
+    @('指標,分母,工程,下限,上限', 'テスト密度,FP,,2,3') | Set-Content -LiteralPath $limits -Encoding UTF8
+    $r = @(& $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -DesignPath $design -Limits $limits -AsOf '2026-10-20' 3>$null 6>$null | Where-Object Function -eq 'SCR001')
+    Assert-Equal '1|少ない' ('{0}|{1}' -f $r[0].TestDensity, $r[0].TestJudgement) 'SCR001 は 8 ケース ÷ 8 FP'
+    @('指標,分母,工程,下限,上限', 'テスト密度,FP,,2,3', 'テスト密度,FP（トランザクション）,,0.5,1.5') | Set-Content -LiteralPath $limits -Encoding UTF8
+    $r = @(& $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -DesignPath $design -Limits $limits -AsOf '2026-10-20' 3>$null 6>$null | Where-Object Function -eq 'SCR001')
+    Assert-Equal '1|基準内' ('{0}|{1}' -f $r[0].TestDensity, $r[0].TestJudgement) '「FP（トランザクション）」の行を先に使う'
 }
 
 Test-Case 'Measure-TestQuality: Get-Help でヘルプが表示される' {

@@ -210,10 +210,11 @@ try {
         'Analysis' {
             if ($targets.Count -ne 1) { throw "品質評価のブックか、それを置いたフォルダを 1 つ選んでください（$($targets.Count) 件選ばれています）" }
             & $tool -Path $targets[0] | Format-Table No, Judgement, Name, Cause -AutoSize -Wrap | Out-Host
-            # 書き込んだブック（フォルダなら、その中で一番新しい xlsx。書き込むと更新日時が新しくなる）
+            # 書き込んだブック（フォルダなら、Invoke-QualityAnalysis.ps1 と同じく、品質評価のブックのうち名前の日付が一番新しいもの）
             $out = $targets[0]
             if (Test-Path -LiteralPath $out -PathType Container) {
-                $out = @(Get-ChildItem -LiteralPath $targets[0] -Filter '*.xlsx' -File | Where-Object { $_.Name -notlike '~$*' } | Sort-Object LastWriteTime -Descending | ForEach-Object { $_.FullName })[0]
+                Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
+                $out = Find-QualityBook $targets[0]
             }
         }
         'Terms' {

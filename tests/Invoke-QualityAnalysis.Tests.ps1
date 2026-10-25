@@ -127,6 +127,29 @@ Test-Case 'Invoke-QualityAnalysis: -ImportOnly は、依頼を作ったときの
     Assert-Equal 'レビュー時間が短かった|再レビューする' ('{0}|{1}' -f $sheet.Rows[3]['F'], $sheet.Rows[3]['G'])
 }
 
+Test-Case 'Invoke-QualityAnalysis: 要対応の行がいくつあっても、すべて依頼に入れる。フォルダでは、名前の日付が一番新しい品質評価のブックを使う' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $metricColumns = @(@('区分', '指標', '実績', '判定', '判定の考え方', '定性分析（原因）', '対策') | ForEach-Object { @{ Header = $_; Width = 14 } })
+    $actionColumns = @(@('区分', '対象', '内容', '対応の例', '担当', '期限') | ForEach-Object { @{ Header = $_; Width = 14 } })
+    foreach ($b in @(@('20261022', [double]0.8), @('20261015', [double]0.5))) {
+        Export-Workbook -FilePath (Join-Path $dir ('品質評価_{0}.xlsx' -f $b[0])) -Sheets @(
+            @{ Name = '品質評価'; Columns = $metricColumns; Rows = @(@{ Values = @('テスト', '消化率', $b[1], '×', '100% 以上なら ○', '', '') }) },
+            @{ Name = '要対応'; Columns = $actionColumns; Rows = @(
+                    @{ Values = @('テスト', 'SCR001', 'ゾーン: テスト不足', 'テストケースを追加する', '', '') },
+                    @{ Values = @('テスト', 'SCR002', 'ゾーン: 品質に問題', '原因を分析する', '', '') },
+                    @{ Values = @('工程', '詳細設計', '流出 2 件', 'レビューの観点を見直す', '', '') }) })
+    }
+    # 前の週のブックを、あとで直して保存した（更新日時は今週のブックより新しい）
+    (Get-Item -LiteralPath (Join-Path $dir '品質評価_20261015.xlsx')).LastWriteTime = (Get-Date).AddMinutes(5)
+    $text = Get-HostText { & $QualityAnalysis $dir -PromptOnly | Out-Null }
+    Assert-Match $text '依頼を作りました: .*品質評価_20261022_定性分析の依頼\.txt' '名前の日付が一番新しいブック'
+    $prompt = [System.IO.File]::ReadAllText((Join-Path $dir '品質評価_20261022_定性分析の依頼.txt'))
+    Assert-Match $prompt '\| テスト \| 消化率 \| 0\.8 \|'
+    Assert-Match $prompt '# 要対応'
+    foreach ($row in @('\| テスト \| SCR001 \| ゾーン: テスト不足 \|', '\| テスト \| SCR002 \| ゾーン: 品質に問題 \|', '\| 工程 \| 詳細設計 \| 流出 2 件 \|')) { Assert-Match $prompt $row '要対応のすべての行' }
+}
+
 Test-Case 'Invoke-QualityAnalysis: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityAnalysis
     Assert-Match $h.Synopsis '定性分析（原因）と対策の下書き'

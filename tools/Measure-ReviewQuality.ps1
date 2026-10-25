@@ -100,6 +100,7 @@ function ConvertTo-DocKey {
 
 $findings = New-Object System.Collections.Generic.List[object]
 $excluded = 0
+$later = 0       # 時点（-AsOf）より後に起票した指摘（数えない）
 $lastDoc = @{}   # 表ごとの上の行の設計書
 
 function Add-Finding {
@@ -109,18 +110,23 @@ function Add-Finding {
     # 設計書はグループの最初の行だけに書くことがある（縦に結合したセルも左上だけに値がある）ので、空なら同じ表の上の行の設計書
     $doc = ([string]$Values['設計書']).Trim()
     if ($doc) { $lastDoc[$Table] = $doc } elseif ($lastDoc.ContainsKey($Table)) { $doc = $lastDoc[$Table] }
+    # 時点より後に起票した指摘は数えず、時点より後に完了した指摘は時点では未完了とする
+    # （前の時点の評価を後から作るとき。New-WeeklyReport.ps1 と同じ数え方）
+    $opened = ConvertTo-DateValue $Values['起票日'] $AsOf
+    if ($opened -and $opened -gt $AsOf) { $script:later++; return }
     $status = ([string]$Values['状態']).Trim()
     $required = ([string]$Values['対応要否']).Trim()
     if ($status -match $excludedPattern) { $script:excluded++; return }
     $closedOn = ConvertTo-DateValue $Values['完了日'] $AsOf
     $closed = (Test-ClosedStatus $status $closedPattern) -or ($required -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)
+    if ($closed -and $closedOn -and $closedOn -gt $AsOf) { $closed = $false; $closedOn = $null }
     $due = ConvertTo-DateValue $Values['期限'] $AsOf
     if (-not $doc) { $doc = '（設計書なし）' }
     $findings.Add([pscustomobject]@{
         Document = $doc; Key = (ConvertTo-DocKey $doc); Content = ([string]$Values['指摘内容']).Trim()
         Category = ([string]$Values['分類']).Trim(); Severity = ([string]$Values['重要度']).Trim(); Status = $status
         Owner = ([string]$Values['対応者']).Trim(); Process = ([string]$Values['工程']).Trim()
-        Opened = (ConvertTo-DateValue $Values['起票日'] $AsOf); Due = $due; ClosedOn = $closedOn; Closed = [bool]$closed
+        Opened = $opened; Due = $due; ClosedOn = $closedOn; Closed = [bool]$closed
         Overdue = ((-not $closed) -and $due -and $due -lt $AsOf); Place = $Place
     })
 }
@@ -641,6 +647,7 @@ Write-Host ''
 $open = @($findings | Where-Object { -not $_.Closed }).Count
 $overdue = @($findings | Where-Object Overdue).Count
 Write-Host ('指摘 {0} 件（未完了 {1} 件・うち期限切れ {2} 件。取下げなどで数えなかったもの {3} 件）/ 設計書 {4} 件（{5} 時点）' -f $findings.Count, $open, $overdue, $excluded, $results.Count, $AsOf.ToString('yyyy/MM/dd', $invariant))
+if ($later -gt 0) { Write-Host ('時点より後に起票した指摘 {0} 件は数えていません（時点より後に完了した指摘は未完了として数えます）' -f $later) }
 foreach ($p in @(@('重要度', 'Severity'), @('分類', 'Category'))) {
     $text = Format-Breakdown $findings $p[1]
     if ($text) { Write-Host ('{0}: {1}' -f $p[0], $text) }
@@ -714,7 +721,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     指定した CSV に無い項目は、既定の CSV の候補を使います。
 #
 # .PARAMETER AsOf
-#     期限切れを判定する日。既定は今日。
+#     集計の時点（期限切れを判定する日）。時点より後に起票した指摘は数えず、時点より後に完了した指摘は未完了として数えます
+#     （前の時点の評価を後から作るとき。New-WeeklyReport.ps1 と同じ）。既定は今日。
 #
 # .PARAMETER NoRecurse
 #     フォルダを指定したとき、サブフォルダを見ません。

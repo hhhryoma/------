@@ -20,16 +20,10 @@ Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChe
 
 if ($PromptOnly -and $ImportOnly) { throw '-PromptOnly と -ImportOnly は同時に指定できません。' }
 
-# 品質評価のブック（フォルダなら、その中で品質評価のシートがある一番新しい xlsx）
+# 品質評価のブック（フォルダなら、その中で品質評価のシートがある xlsx のうち、名前の日付が一番新しいもの）
 $Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
 if (Test-Path -LiteralPath $Path -PathType Container) {
-    $files = @(Get-ChildItem -LiteralPath $Path -Filter '*.xlsx' -File | Where-Object { $_.Name -notlike '~$*' } | Sort-Object @{ e = 'LastWriteTime'; Descending = $true }, Name)
-    $book = $null
-    foreach ($f in $files) {
-        $pkg = Open-ZipPackage $f.FullName
-        try { $hasSheet = (Get-WorkbookSheetParts $pkg).Sheets.Contains('品質評価') } finally { $pkg.Zip.Dispose() }
-        if ($hasSheet) { $book = $f.FullName; break }
-    }
+    $book = Find-QualityBook $Path
     if (-not $book) { throw "品質評価のブック（「品質評価」のシートがある xlsx）が見つかりません: $Path" }
     $Path = $book
 }
@@ -98,8 +92,10 @@ if ($Previous) {
 $actionFields = @('区分', '対象', '内容')
 $actionCandidates = @{}
 foreach ($f in $actionFields) { $actionCandidates[$f] = @(ConvertTo-Label $f) }
-$actions = @(Read-HeaderRecords -Inputs $inputs -Candidates $actionCandidates -Fields $actionFields -Need @('区分', '対象', '内容') -Key @('内容') -What '要対応' -NoExcel:$NoExcel |
-        Where-Object { $_.Sheet -eq '要対応' -and ([string]$_.Values['内容']).Trim() })
+# Read-HeaderRecords は行の一覧を 1 つの値として返す（パイプラインに渡すと一覧が 1 つで来る）ので、foreach で 1 行ずつ見る
+$actions = @(foreach ($rec in (Read-HeaderRecords -Inputs $inputs -Candidates $actionCandidates -Fields $actionFields -Need @('区分', '対象', '内容') -Key @('内容') -What '要対応' -NoExcel:$NoExcel)) {
+        if ($rec.Sheet -eq '要対応' -and ([string]$rec.Values['内容']).Trim()) { $rec }
+    })
 
 # 下書きを書く指標: 判定が × か △（記入済みの行は -Force のときだけ）
 $targets = @($metrics | Where-Object { @('×', '△') -contains $_.Judgement -and ($Force -or (-not $_.Cause -and -not $_.Measure)) })
@@ -333,7 +329,8 @@ Write-Host 'AI の下書きです。会議の前に、事実と合っている�
 #     前回の品質評価のブック（同じフォルダの、名前の日付が前のもの）に定性分析・対策があれば、今回の実績と並べて依頼に入れます。
 #
 # .PARAMETER Path
-#     品質評価のブック（品質評価_日付.xlsx）。フォルダを指定すると、その中で「品質評価」のシートがある一番新しい xlsx を使います。
+#     品質評価のブック（品質評価_日付.xlsx）。フォルダを指定すると、その中で「品質評価」のシートがある xlsx のうち、
+#     名前の日付が一番新しいものを使います（日付が同じか、名前に日付が無ければ、更新日時の新しいもの）。
 #
 # .PARAMETER PromptOnly
 #     依頼のファイルを作るだけにします（クリップボードが使えないとき）。回答を「_定性分析の回答.txt」に保存してから -ImportOnly を実行します。
