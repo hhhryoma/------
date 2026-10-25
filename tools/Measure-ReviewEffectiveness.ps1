@@ -131,16 +131,17 @@ if ($unreadCount -gt 0) { Write-Warning ('混入工程を工程として読め�
 
 # バグの設計書・機能を、レビューの設計書に対応付ける。設計書の欄、機能の欄の順に、対応表で同じ機能になるもの、同じ名前、
 # どちらかがもう一方を含む名前の順に探し、設計書がただ 1 つに決まったものにする。設計書の欄を含む名前で探すときは、機能も含む
-# 設計書に限る（「画面設計書」のような設計書の種類で、ほかの機能の設計書に対応付けないため）。設計書の無い指摘のまとまりには対応付けない
+# 設計書に限る（「画面設計書」のような設計書の種類で、ほかの機能の設計書に対応付けないため）。設計書の無い指摘のまとまりには対応付けない。
+# 名前は版数も除いて比べる（ConvertTo-DocNameKey。レビューした …_v1.0 の指摘と、版を上げたあとの …_v1.1 で書いたバグを対応付ける）
 $docIndexes = @(for ($i = 0; $i -lt $docs.Count; $i++) { if ($docs[$i].Document -ne $noDocument) { $i } })
-$docKeys = @($docs | ForEach-Object { ConvertTo-NameKey $_.Document })
+$docKeys = @($docs | ForEach-Object { ConvertTo-DocNameKey $_.Document })
 $docCanonical = @($docs | ForEach-Object { Resolve-FunctionName $functionNames $_.Document })
 foreach ($b in $bugs) {
     foreach ($pair in @(@($b.DocName, $b.Function), @($b.Function, ''))) {
         if (-not $pair[0] -or $b.Document) { continue }
         $canonical = Resolve-FunctionName $functionNames $pair[0]
-        $key = ConvertTo-NameKey $pair[0]
-        $also = ConvertTo-NameKey $pair[1]
+        $key = ConvertTo-DocNameKey $pair[0]
+        $also = ConvertTo-DocNameKey $pair[1]
         $hit = @()
         if ($canonical) { $hit = @(foreach ($i in $docIndexes) { if ($docCanonical[$i] -eq $canonical) { $i } }) }
         if ($hit.Count -ne 1) { $hit = @(foreach ($i in $docIndexes) { if ($docKeys[$i] -eq $key) { $i } }) }

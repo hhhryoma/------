@@ -3058,6 +3058,23 @@ function Export-MarkedCopy {
     Save-ZipPackage -FilePath $SourcePath -Changes $changes -NewParts $newParts -OutPath $OutPath
 }
 
+function Test-CompareOutputBook {
+    #     このツールが前に保存したブックか: 印を付けた写し（-OutMarkedDir。最後のシートが「差分一覧」）と、差分の一覧（-OutXlsx。差分一覧・ファイル別のシート）。
+    #     比べるフォルダの中に保存した前の結果を、設計書として比べないため（.xlsx / .xlsm だけ見る。読めないブックは比べる側に回す）
+    param([string] $FilePath)
+    if (@('.xlsx', '.xlsm') -notcontains [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()) { return $false }
+    try {
+        $pkg = Open-ZipPackage $FilePath
+        try { $names = @((Get-WorkbookSheetParts $pkg).Sheets.Keys) }
+        finally { $pkg.Zip.Dispose() }
+    }
+    catch { return $false }
+    if ($names.Count -eq 0) { return $false }
+    if ($names[$names.Count - 1] -match '^差分一覧( \(\d+\))?$') { return $true }
+    return ($names -contains '差分一覧' -and $names -contains 'ファイル別')
+}
+
+$script:SkippedOutputs = New-Object System.Collections.Generic.List[string]
 function Get-ExcelFiles {
     param([string] $Dir)
     $map = [ordered]@{}
@@ -3067,9 +3084,39 @@ function Get-ExcelFiles {
         if ($f.Name.StartsWith('~$')) { continue }
         if ($OutXlsx -and [string]::Equals($f.FullName, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
         $rel = $f.FullName.Substring($root.Length).TrimStart('\', '/')
+        # 前に比べるフォルダの中へ保存した結果（-OutMarkedDir の写し・-OutXlsx）は比べない（同じ名前の写しを、追加したファイルや同じ文書と見ないように）
+        if (Test-CompareOutputBook $f.FullName) { $script:SkippedOutputs.Add($rel); continue }
         $map[$rel.ToLowerInvariant()] = [pscustomobject]@{ Relative = $rel; Path = $f.FullName }
     }
     return $map
+}
+
+function Remove-OldVersions {
+    #     フォルダのファイル（Get-ExcelFiles の結果）から、同じフォルダに同じ文書の版（版数だけが違う名前）が複数あるものの古い版を取り除き、
+    #     取り除いたもの（相対パスの小文字 → @{ Entry; Latest（いちばん新しい版の相対パス） }）を返す。
+    #     版を上げたあとの作業中のフォルダ（前の版のファイルが残っている）を、ほかのフォルダと比べるときに、いちばん新しい版と比べるため。
+    #     いちばん大きい版数のファイルが複数あるときは、それらを残す
+    param($Files)
+    $groups = @{}
+    foreach ($k in @($Files.Keys)) {
+        $name = [System.IO.Path]::GetFileName($Files[$k].Relative)
+        $v = Get-NameVersion $name
+        if ($null -eq $v) { continue }
+        $gk = '{0}|{1}' -f [System.IO.Path]::GetDirectoryName($k), (Get-VersionlessName $name)
+        if (-not $groups.ContainsKey($gk)) { $groups[$gk] = New-Object System.Collections.Generic.List[object] }
+        $groups[$gk].Add([pscustomobject]@{ Key = $k; Version = $v })
+    }
+    $removed = [ordered]@{}
+    foreach ($g in $groups.Values) {
+        if ($g.Count -lt 2) { continue }
+        $latest = @($g | Sort-Object Version)[-1]
+        foreach ($x in $g) {
+            if ($x.Version -ge $latest.Version) { continue }
+            $removed[$x.Key] = [pscustomobject]@{ Entry = $Files[$x.Key]; Latest = $Files[$latest.Key].Relative }
+        }
+    }
+    foreach ($k in $removed.Keys) { $Files.Remove($k) }
+    return $removed
 }
 
 $pairs = New-Object System.Collections.Generic.List[object]
@@ -3087,6 +3134,16 @@ function Add-ComparePairs {
     if ($oldItem.PSIsContainer) {
         $oldFiles = Get-ExcelFiles $oldItem.FullName
         $newFiles = Get-ExcelFiles $newItem.FullName
+        # 同じフォルダに同じ文書の版が複数あれば（版を上げたあとに前の版のファイルが残った作業中のフォルダなど）、いちばん新しい版を比べ、
+        # 古い版は比べずに「古い版」と知らせる（前の版と同じ名前のファイルどうしを比べて、新しい版を追加したファイルにしないように）
+        $staleOld = Remove-OldVersions $oldFiles
+        $staleNew = Remove-OldVersions $newFiles
+        foreach ($stale in @(@('旧', $staleOld), @('新', $staleNew))) {
+            if ($stale[1].Count -eq 0) { continue }
+            $names = @($stale[1].Values | Select-Object -First 5 | ForEach-Object { '{0}（新しい版: {1}）' -f $_.Entry.Relative, [System.IO.Path]::GetFileName($_.Latest) })
+            if ($stale[1].Count -gt 5) { $names += 'ほか {0} 件' -f ($stale[1].Count - 5) }
+            Write-Warning ('{0}のフォルダに、同じ文書の版が複数あります。いちばん新しい版を比べ、古い版 {1} 件は比べません（前の版のファイルが残っていませんか）: {2}' -f $stale[0], $stale[1].Count, ($names -join '・'))
+        }
         # 同じ相対パスが無いファイルは、版数（_v1.0 など）を除いた名前が 1 つずつ一致すれば対応付ける
         $byVersionless = @{}
         foreach ($side in @('Old', 'New')) {
@@ -3112,6 +3169,15 @@ function Add-ComparePairs {
         }
         foreach ($k in $oldFiles.Keys) {
             if (-not $newFiles.Contains($k) -and -not $renamedOld.ContainsKey($k)) { $pairs.Add([pscustomobject]@{ Relative = $oldFiles[$k].Relative + $suffix; Name = $oldFiles[$k].Relative; Label = $Label; Old = $oldFiles[$k].Path; New = $null }) }
+        }
+        # 古い版（比べない。両方のフォルダに同じ名前の古い版があれば 1 行にする）
+        foreach ($k in $staleNew.Keys) {
+            $o = $null
+            if ($staleOld.Contains($k)) { $o = $staleOld[$k].Entry.Path }
+            $pairs.Add([pscustomobject]@{ Relative = $staleNew[$k].Entry.Relative + $suffix; Name = $staleNew[$k].Entry.Relative; Label = $Label; Old = $o; New = $staleNew[$k].Entry.Path; Stale = $true })
+        }
+        foreach ($k in $staleOld.Keys) {
+            if (-not $staleNew.Contains($k)) { $pairs.Add([pscustomobject]@{ Relative = $staleOld[$k].Entry.Relative + $suffix; Name = $staleOld[$k].Entry.Relative; Label = $Label; Old = $staleOld[$k].Entry.Path; New = $null; Stale = $true }) }
         }
     }
     else {
@@ -3160,9 +3226,17 @@ else {
     $newItem = $r.New
 }
 
+if ($script:SkippedOutputs.Count -gt 0) {
+    $skipped = @($script:SkippedOutputs | Select-Object -Unique)
+    $names = @($skipped | Select-Object -First 5)
+    if ($skipped.Count -gt 5) { $names += 'ほか {0} 件' -f ($skipped.Count - 5) }
+    Write-Warning ('このツールが前に保存した結果（印を付けた写し・差分の一覧）{0} 件は比べません: {1}' -f $skipped.Count, ($names -join '・'))
+}
+
 $summary = New-Object System.Collections.Generic.List[object]
 $index = 0
 $markedCount = 0
+$overwritten = New-Object System.Collections.Generic.List[string]   # 版情報のほかに違いの無い版の組（-Versions）
 foreach ($p in $pairs) {
     $index++
     Write-Progress -Activity 'Excel を比較中' -Status ("{0}/{1}  {2}" -f $index, $pairs.Count, $p.Relative) -PercentComplete ([int](100 * $index / $pairs.Count))
@@ -3172,14 +3246,27 @@ foreach ($p in $pairs) {
     $before = $script:Diffs.Count
     $state = ''
     try {
-        if (-not $p.Old) {
+        # 同じフォルダに新しい版のある古い版は比べない（Remove-OldVersions）
+        if ($p.Stale) { $state = '古い版' }
+        elseif (-not $p.Old) {
             Add-Diff '' $null $null 'ファイル' '追加' $null $p.Relative; $state = '追加'
             if ($OutHistory) { $script:HistoryDrafts.Add([pscustomobject]@{ File = $p.Relative; Section = '全体'; Description = '新規作成'; Location = '' }) }
         }
         elseif (-not $p.New) { Add-Diff '' $null $null 'ファイル' '削除' $p.Relative $null; $state = '削除' }
         else {
+            $ignoredBefore = @{ '表記' = $script:IgnoredCounts['表記']; '版情報' = $script:IgnoredCounts['版情報'] }
             Compare-Book -OldPath $p.Old -NewPath $p.New
             if ($script:Diffs.Count -eq $before) { $state = '同じ' } else { $state = '差分あり' }
+            # 版を続けて比べたとき（-Versions）、版数の違う 2 つの版が、版情報（表紙の版数・改訂履歴など。-Ignore で外したものも）のほかに違わなければ、
+            # 前の版のファイルを直してから版を上げた（前の版が新しい内容で上書きされた）疑いがある
+            $oldVersion = Get-NameVersion ([System.IO.Path]::GetFileName($p.Old))
+            $newVersion = Get-NameVersion ([System.IO.Path]::GetFileName($p.New))
+            if ($p.Label -and $null -ne $oldVersion -and $null -ne $newVersion -and $oldVersion -ne $newVersion) {
+                $added = @($script:Diffs.GetRange($before, $script:Diffs.Count - $before).ToArray())
+                $versionInfo = @($added | Where-Object { $_.Tag -eq '版情報' }).Count + $script:IgnoredCounts['版情報'] - $ignoredBefore['版情報']
+                $others = @($added | Where-Object { $_.Tag -ne '版情報' }).Count + $script:IgnoredCounts['表記'] - $ignoredBefore['表記']
+                if ($versionInfo -gt 0 -and $others -eq 0) { $overwritten.Add(('{0} → {1}' -f [System.IO.Path]::GetFileName($p.Old), [System.IO.Path]::GetFileName($p.New))) }
+            }
         }
     }
     catch {
@@ -3208,6 +3295,9 @@ foreach ($p in $pairs) {
     $summary.Add([pscustomobject]@{ File = $p.Relative; State = $state; Count = $script:Diffs.Count - $before; Old = $p.Old; New = $p.New })
 }
 Write-Progress -Activity 'Excel を比較中' -Completed
+if ($overwritten.Count -gt 0) {
+    Write-Warning ('版情報（表紙の版数・改訂履歴など）のほかに違いの無い版があります。前の版のファイルが新しい内容で上書きされていませんか（前の版のファイルを直してから版を上げた など。変更は、前に納品した版などと比べて確かめてください）: {0}' -f ($overwritten -join '・'))
+}
 
 $script:Diffs
 
@@ -3336,11 +3426,16 @@ if ($OutHistory) {
 #
 # .PARAMETER New
 #     比較先（変更後）のファイルまたはフォルダ。
+#     フォルダどうしでは、同じ相対パスのファイルと、版数（_v1.0・第1.0版 など）だけが違う名前のファイルを比べます。
+#     同じフォルダに同じ文書の版が複数あれば（版を上げたあとに前の版が残った作業中のフォルダなど）、いちばん新しい版を比べ、
+#     古い版は比べずに「古い版」とします。前に比べるフォルダの中へ保存したこのツールの結果（印を付けた写し・差分の一覧）は比べません。
 #
 # .PARAMETER Versions
 #     版を続けて比べます（-Old / -New の代わり）。版のファイル・フォルダを 3 つ以上並べると v1.0 → v1.1 → v1.2 のように隣どうしを比べ、
 #     結果を 1 つの一覧・HTML にまとめます（どれも版数が付いていれば版数の順、そうでなければ指定した順）。
 #     フォルダを 1 つだけ指定すると、その中の版数（_v1.0・第1.0版 など）だけが違う名前のファイルを版数の順に比べます。
+#     版数の違う 2 つの版が版情報（表紙の版数・改訂履歴など）のほかに違わなければ、前の版のファイルが新しい内容で
+#     上書きされていないか、警告で知らせます。
 #
 # .PARAMETER KeyColumn
 #     行をキーの値で対応付ける表の、キー列の見出し（複数指定可）。例: -KeyColumn '物理名', '項目ID'

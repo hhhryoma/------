@@ -469,6 +469,65 @@ Test-Case 'Compare-Excel: フォルダどうしでは、版数だけが違う名
     Assert-Equal @('DD03_テーブル定義書_v1.1.xlsx|Data|受注番号（ORDER_NO）: 桁数を 10 → 12 に変更', 'DD04_コード定義書_v1.0.xlsx|全体|新規作成') @(Import-Csv -LiteralPath $csv -Encoding UTF8 | ForEach-Object { '{0}|{1}|{2}' -f $_.'ファイル', $_.'改訂箇所', $_.'改訂内容' })
 }
 
+Test-Case 'Compare-Excel: フォルダに同じ文書の版が複数あれば、いちばん新しい版と比べ、古い版は比べない（版を上げたあとの作業中のフォルダ）' {
+    # 納品した v1.0 と、v1.0 のファイルを直してから版を上げた作業中のフォルダ（v1.0 は新しい内容のまま残っている）
+    $dir = New-TestDir
+    $delivered = Join-Path $dir '納品/v1.0'; $work = Join-Path $dir '設計書'
+    $null = New-Item -ItemType Directory -Path $delivered, $work
+    $book = {
+        param([string] $Path, [string] $Version, [bool] $Changed)
+        $rows = @(@('No', '項目名', '桁数'), @('1', '受注番号', '10'))
+        $history = @(@('版数', '改訂内容'), @('1.0', '新規作成'))
+        if ($Changed) { $rows += , @('2', '顧客名', '40') }
+        if ($Version -eq '1.1') { $history += , @('1.1', '顧客名を追加') }
+        New-SheetsBook $Path ([ordered]@{ '表紙' = @(@('版数', $Version), @('更新日', '2026/10/01')); '画面項目定義' = $rows; '改訂履歴' = $history })
+    }
+    & $book (Join-Path $delivered '画面設計書_v1.0.xlsx') '1.0' $false
+    & $book (Join-Path $work '画面設計書_v1.0.xlsx') '1.0' $true
+    & $book (Join-Path $work '画面設計書_v1.1.xlsx') '1.1' $true
+    New-TableBook (Join-Path $delivered 'コード定義書_v1.0.xlsx') @('区分', '名称') @(, @('C001', '受注区分'))
+    New-TableBook (Join-Path $work 'コード定義書_v1.0.xlsx') @('区分', '名称') @(, @('C001', '受注区分'))
+    $out = Join-Path $dir 'diff.xlsx'
+    $text = Get-HostText { $script:d = @(& $CompareExcel $delivered $work -CheckHistory -OutXlsx $out) }
+    Assert-Equal @('画面設計書_v1.1.xlsx|画面項目定義!A3|行|追加') @($script:d | Where-Object { -not $_.Tag } | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.File, $_.Location, $_.Kind, $_.Change }) '納品した v1.0 と新しい版 v1.1 を比べる（古い版を前の版と比べて「記載なし」、新しい版を「追加」にしない）'
+    Assert-Match $text '3 ファイル: 同じ 1 / 差分あり 1 / 古い版 1 /'
+    Assert-Match $text '新のフォルダに、同じ文書の版が複数あります。いちばん新しい版を比べ、古い版 1 件は比べません.*画面設計書_v1\.0\.xlsx（新しい版: 画面設計書_v1\.1\.xlsx）'
+    $files = Read-XlsxSheet -Path $out -Index 2
+    Assert-True (@($files.Rows.Values | Where-Object { $_['A'] -eq '画面設計書_v1.0.xlsx' -and $_['B'] -eq '古い版' }).Count -eq 1) 'ファイル別のシートに「古い版」'
+
+    # 両方のフォルダに古い版があれば 1 行にする。古い版の無いフォルダどうしは、これまでどおり
+    $text = Get-HostText { $script:d = @(& $CompareExcel $work $work) }
+    Assert-Match $text '3 ファイル: 同じ 2 / 古い版 1 /'
+    $text = Get-HostText { $script:d = @(& $CompareExcel $delivered $delivered) }
+    Assert-NotMatch $text '古い版'
+
+    # 版を続けて比べると（作業中のフォルダ 1 つ）、版情報のほかに違いの無い版を、前の版の上書きの疑いとして知らせる（-Ignore 版情報 でも）
+    foreach ($ignore in @(@(), @('版情報'))) {
+        $options = @{ Versions = @($work) }
+        if ($ignore) { $options['Ignore'] = $ignore }
+        $text = Get-HostText { $null = & $CompareExcel @options }
+        Assert-Match $text '版情報（表紙の版数・改訂履歴など）のほかに違いの無い版があります。前の版のファイルが新しい内容で上書きされていませんか.*画面設計書_v1\.0\.xlsx → 画面設計書_v1\.1\.xlsx' "-Ignore $ignore"
+    }
+    $text = Get-HostText { $null = & $CompareExcel -Versions (Join-Path $delivered '画面設計書_v1.0.xlsx'), (Join-Path $work '画面設計書_v1.1.xlsx') }
+    Assert-NotMatch $text '上書き' '中身も変えた版は知らせない'
+}
+
+Test-Case 'Compare-Excel: 比べるフォルダの中に前に保存した結果（-OutMarkedDir の写し・-OutXlsx）は比べない' {
+    $dir = New-TestDir
+    $old = Join-Path $dir 'old'; $new = Join-Path $dir 'new'
+    $null = New-Item -ItemType Directory -Path $old, $new
+    New-TableBook (Join-Path $old '画面設計書.xlsx') @('項目', '桁数') @(, @('受注番号', '10'))
+    New-TableBook (Join-Path $new '画面設計書.xlsx') @('項目', '桁数') @(, @('受注番号', '12'))
+    # 「差分一覧」のシートが途中にあるだけの設計書は比べる
+    New-SheetsBook (Join-Path $new '変更管理.xlsx') ([ordered]@{ '差分一覧' = @(@('No', '内容'), @('1', '桁数の変更')); '表紙' = @(@('版数', '1.0'), @('更新日', '2026/10/01')) })
+    $null = Invoke-Compare @{ Old = $old; New = $new; OutMarkedDir = (Join-Path $new '差分の印'); OutXlsx = (Join-Path $new '差分.xlsx') }
+    Assert-True (Test-Path -LiteralPath (Join-Path $new '差分の印/画面設計書.xlsx')) '印を付けた写し'
+    $text = Get-HostText { $script:d = @(& $CompareExcel $old $new) }
+    Assert-Equal @(@('画面設計書.xlsx|Data!B2|値|変更', '変更管理.xlsx||ファイル|追加') | Sort-Object) (Get-DiffKeys $script:d)
+    Assert-Match $text 'このツールが前に保存した結果（印を付けた写し・差分の一覧）2 件は比べません'
+    Assert-Match $text '2 ファイル:'
+}
+
 Test-Case 'Compare-Excel: -OutHtml で、シートの値・列幅・結合セルと差分を入れた、差分を見る HTML を保存する' {
     $dir = New-TestDir
     $out = Join-Path $dir '差分.html'

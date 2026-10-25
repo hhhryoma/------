@@ -128,7 +128,7 @@ function Read-Findings {
         $document = $documentText
         if ($document -match '\.(xlsx|xlsm|xls|xlsb|pdf)$') { $document = [System.IO.Path]::GetFileNameWithoutExtension($document) }
         $list.Add([pscustomobject]@{
-            Source = $Source; Document = $document; DocKey = (ConvertTo-NameKey $documentText); Content = ([string]$v['指摘内容']).Trim()
+            Source = $Source; Document = $document; DocKey = (ConvertTo-DocNameKey $documentText); Content = ([string]$v['指摘内容']).Trim()
             Location = $location; SheetKey = (ConvertTo-Label $sheet).ToUpperInvariant(); Row = $row; Col = $col
             PointId = ([string]$v['観点ID']).Trim(); Category = ([string]$v['分類']).Trim(); Severity = ([string]$v['重要度']).Trim()
             # Invoke-DesignReview.ps1 のツールの確認の指摘（判定元が「ツール（…）」）
@@ -187,7 +187,7 @@ $results = New-Object System.Collections.Generic.List[object]
 foreach ($p in $pairs) { $results.Add((New-Pair '一致' $p.Ai $p.Human $p.Basis $p.Similarity $results.Count)) }
 foreach ($a in @($ai | Where-Object { -not $_.Matched })) { $results.Add((New-Pair 'AI だけ' $a $null '' $null $results.Count)) }
 foreach ($h in @($human | Where-Object { -not $_.Matched })) { $results.Add((New-Pair '人だけ' $null $h '' $null $results.Count)) }
-$sorted = @($results | Sort-Object @{ e = { ConvertTo-NameKey $_.Document } }, @{ e = { @{ '一致' = 0; 'AI だけ' = 1; '人だけ' = 2 }[$_.Status] } }, Seq)
+$sorted = @($results | Sort-Object @{ e = { ConvertTo-DocNameKey $_.Document } }, @{ e = { @{ '一致' = 0; 'AI だけ' = 1; '人だけ' = 2 }[$_.Status] } }, Seq)
 $sorted
 
 # ---------------------------------------------------------------- 集計

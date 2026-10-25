@@ -165,6 +165,19 @@ Test-Case 'Compare-ReviewFindings: 「IF001 B6」「画面項目定義（AB12）
         '07_基本設計書|一致|場所', '08_基本設計書|一致|場所', '09_基本設計書|AI だけ|', '09_基本設計書|人だけ|') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Document, $_.Status, $_.Basis })
 }
 
+Test-Case 'Compare-ReviewFindings: 設計書の名前の版数（_v1.0・_v1.1）は除いて同じ設計書とみなす（版を上げたあとの名前で書いた指摘管理表）' {
+    $dir = New-TestDir
+    New-FindingSheets $dir
+    # AI は v1.0 のファイルをレビューし、人は版を上げたあとのファイル名で指摘管理表を書いた
+    $ai = Join-Path $dir 'レビュー結果.xlsx'
+    Edit-ZipText $ai 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('DD02_画面設計書_SCR001_受注一覧.xlsx', 'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx') }
+    $human = Join-Path $dir '指摘管理表.xlsx'
+    Edit-ZipText $human 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('DD02_画面設計書_SCR001_受注一覧', 'DD02_画面設計書_SCR001_受注一覧_v1.1.xlsx') }
+    $text = Get-HostText { $script:r = @(& $CompareFindings $ai $human) }
+    Assert-Match $text 'AI の指摘 5 件: 人と一致 2（40\.0%）・AI だけ 3'
+    Assert-Equal 2 @($script:r | Where-Object Status -eq '一致').Count
+}
+
 Test-Case 'Compare-ReviewFindings: Get-Help でヘルプが表示される' {
     $h = Get-Help $CompareFindings
     Assert-Match $h.Synopsis 'AI'

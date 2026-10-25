@@ -409,6 +409,39 @@ Test-Case 'Measure-ReviewQuality: 時点より後に起票した指摘は数え�
     Assert-Match $weekly '・未完了: 3 件・うち期限切れ 1 件'
 }
 
+Test-Case 'Measure-ReviewQuality: 設計書の名前の版数を除いて規模と対応付け、版が複数あればいちばん新しい版の規模を使う。規模の数え方に無い設計書は「規模を数えない」' {
+    # 指摘はレビューした v1.0 の名前。設計書のフォルダは版を上げたあと（SCR002 は v1.0 が残り、v1.1 で項目を足した）
+    $dir = New-TestDir
+    $design = Join-Path $dir '設計書'
+    New-Item -ItemType Directory -Path $design | Out-Null
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD02_画面設計書_SCR002_受注登録.xlsx') -Destination (Join-Path $design 'DD02_画面設計書_SCR002_受注登録_v1.0.xlsx')
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD02_画面設計書_SCR002_受注登録.xlsx') -Destination (Join-Path $design 'DD02_画面設計書_SCR002_受注登録_v1.1.xlsx')
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD05_メッセージ一覧.xlsx') -Destination (Join-Path $design 'DD05_メッセージ一覧_v1.1.xlsx')
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD01_画面一覧.xlsx') -Destination (Join-Path $design 'DD01_画面一覧_v1.0.xlsx')
+    $book = Join-Path $dir '指摘管理表.xlsx'
+    New-FindingBook $book '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況') @(
+        @('1', '2026/10/01', 'DD02_画面設計書_SCR002_受注登録_v1.0.xlsx', '桁数が違う', '完了'),
+        @('2', '2026/10/01', 'DD02_画面設計書_SCR002_受注登録_v1.0.xlsx', 'イベントの漏れ', '完了'),
+        @('3', '2026/10/01', 'DD05_メッセージ一覧_v1.0.xlsx', '句読点', '完了'),
+        @('4', '2026/10/02', 'DD01_画面一覧_v1.0.xlsx', '画面名の誤り', '対応中'),
+        @('5', '2026/10/02', 'DD09_帳票設計書_v1.0.xlsx', '帳票の誤り', '対応中'))
+    $text = Get-HostText { $script:r = @(& $QualityTool -Path $book -DesignPath $design -AsOf '2026-10-20') }
+    Assert-Equal @(
+        'DD02_画面設計書_SCR002_受注登録_v1.0.xlsx|2|19|0.105|基準内',
+        'DD01_画面一覧_v1.0.xlsx|1|||規模を数えない',
+        'DD05_メッセージ一覧_v1.0.xlsx|1|16|0.062|基準内',
+        'DD09_帳票設計書_v1.0.xlsx|1|||規模なし') @($script:r | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Document, $_.Findings, $_.Size, $_.Density, $_.Judgement }) '古い版の規模を足さない（19 × 2 にしない）'
+    Assert-Match $text '古い版 1 件は数えていません: DD02_画面設計書_SCR002_受注登録_v1\.0\.xlsx'
+    Assert-Match $text '規模を数えない設計書: 1 件（.*）: DD01_画面一覧_v1\.0\.xlsx'
+    Assert-Match $text '設計書 4 件'
+
+    # ページ数の CSV でも、版数を除いて対応付け、いちばん新しい版のページ数を使う
+    $csv = Join-Path $dir 'pages.csv'
+    @('"ファイル","ページ数"', '"DD02_画面設計書_SCR002_受注登録_v1.1.pdf","5"', '"DD02_画面設計書_SCR002_受注登録_v1.0.pdf","4"', '"DD05_メッセージ一覧_v1.1.pdf","2"') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $r = @(& $QualityTool -Path $book -SizeCsv $csv -AsOf '2026-10-20' 6>$null 3>$null)
+    Assert-Equal @('DD02_画面設計書_SCR002_受注登録_v1.0.xlsx|5|0.4', 'DD05_メッセージ一覧_v1.0.xlsx|2|0.5') @($r | Where-Object { $null -ne $_.Size } | ForEach-Object { '{0}|{1}|{2}' -f $_.Document, $_.Size, $_.Density })
+}
+
 Test-Case 'Measure-ReviewQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityTool
     Assert-Match $h.Synopsis '指摘'

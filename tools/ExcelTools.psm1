@@ -2598,6 +2598,9 @@ function Resolve-FunctionName {
     if (-not $Map -or $Map.Count -eq 0 -or -not ([string]$Name).Trim()) { return $null }
     $k = ConvertTo-NameKey $Name
     if ($Map.ContainsKey($k)) { return $Map[$k] }
+    # 版数の付いた設計書の名前（DD02_画面設計書_SCR001_受注一覧_v1.1.xlsx）は、版数を除いた名前でも探す
+    $k = ConvertTo-DocNameKey $Name
+    if ($k -and $Map.ContainsKey($k)) { return $Map[$k] }
     return $null
 }
 
@@ -2616,6 +2619,18 @@ function ConvertTo-NameKey {
     param([string] $Name)
     $n = Get-LeafName $Name
     if ($n -match '\.(xlsx|xlsm|xls|xlsb|csv|pdf|docx?)$') { $n = [System.IO.Path]::GetFileNameWithoutExtension($n) }
+    return (ConvertTo-Label $n).ToUpperInvariant()
+}
+
+function ConvertTo-DocNameKey {
+    #     設計書（ファイル）の名前を比べる形。ConvertTo-NameKey と同じく、フォルダと拡張子を除いて全角・半角と空白をそろえ、
+    #     さらに版数（_v1.0・Ver1.0・第1.0版 など。Get-VersionlessName と同じ形）も除く。
+    #     版を上げてファイル名の版数が変わっても（…_v1.0.xlsx → …_v1.1.xlsx）、指摘・バグ・規模の設計書を対応付けるため。
+    #     機能・タスクの名前には使わない（名前の一部を版数として除かないように）
+    param([string] $Name)
+    $n = Get-LeafName $Name
+    if ($n -match '\.(xlsx|xlsm|xls|xlsb|csv|pdf|docx?|docm|pptx?)$') { $n = [System.IO.Path]::GetFileNameWithoutExtension($n) }
+    $n = (Get-VersionlessName $n) -replace '[_\-\s]*\{v\}', ''
     return (ConvertTo-Label $n).ToUpperInvariant()
 }
 
@@ -3043,6 +3058,72 @@ function Get-VersionlessName {
     #     ファイル名（相対パス）から版数（_v1.0・Ver1.0・第1.0版 など）を除いた形（版数だけが違うファイルどうしを対応付けるため）
     param([string] $Name)
     return [regex]::Replace($Name.Normalize($script:Nfkc).ToLowerInvariant(), '(?<![a-z])v(?:er)?\.?\s*\d+(?:\.\d+)*(?:版)?|第\s*\d+(?:\.\d+)*\s*版', '{v}')
+}
+
+function Get-OldNewOrder {
+    #     2 つのパス（ファイルどうしか、フォルダどうし）を旧・新の順に並べる（「送る」の差分と、画面の旧・新の欄）。
+    #     ファイル: 両方の名前に版数があって違えば版数で（Get-NameVersion）、そうでなければ更新日時で決める。
+    #     フォルダ: 名前の版数（納品\v1.0・納品\v1.1）→ 中のファイルの版数（版数だけが違うファイルの組で、新しい版の多い方を新に）→
+    #       中でいちばん新しいファイルの更新日時、の順に決める。フォルダそのものの更新日時は使わない（旧のフォルダのファイルを Excel で開くだけで、
+    #       「~$」のファイルができて消え、フォルダの更新日時が新しくなるため）。「~$」で始まるファイルは見ない。
+    #     戻り値: Old・New（パス）・Swapped（入れ替えたか）・Rule（決め方の説明）・ByTime（更新日時で決めたか）
+    param([string] $First, [string] $Second)
+    $a = Get-Item -LiteralPath $First
+    $b = Get-Item -LiteralPath $Second
+    $swap = $false; $rule = ''; $byTime = $false
+    $va = Get-NameVersion $a.Name
+    $vb = Get-NameVersion $b.Name
+    if ($null -ne $va -and $null -ne $vb -and $va -ne $vb) {
+        $swap = $va -gt $vb
+        $rule = '名前の版数'
+    }
+    elseif ($a.PSIsContainer -and $b.PSIsContainer) {
+        # フォルダの中の Excel・Word のファイル（Compare-Excel.ps1 で比べるもの）
+        $extensions = @('.xlsx', '.xlsm', '.xltx', '.xltm', '.xls', '.xlsb', '.docx')
+        $sides = @(foreach ($item in @($a, $b)) {
+                $root = $item.FullName.TrimEnd('\', '/')
+                $files = @(Get-ChildItem -LiteralPath $root -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() -and -not $_.Name.StartsWith('~$') })
+                # 版数を除いた相対パス → いちばん大きい版数
+                $versions = @{}
+                foreach ($f in $files) {
+                    $v = Get-NameVersion $f.Name
+                    if ($null -eq $v) { continue }
+                    $k = Get-VersionlessName $f.FullName.Substring($root.Length).TrimStart('\', '/')
+                    if (-not $versions.ContainsKey($k) -or $versions[$k] -lt $v) { $versions[$k] = $v }
+                }
+                $latest = $null
+                if ($files.Count -gt 0) { $latest = @($files | Sort-Object LastWriteTime)[-1].LastWriteTime }
+                [pscustomobject]@{ Versions = $versions; Latest = $latest; Count = $files.Count }
+            })
+        $newerA = 0; $newerB = 0
+        foreach ($k in $sides[0].Versions.Keys) {
+            if (-not $sides[1].Versions.ContainsKey($k)) { continue }
+            if ($sides[0].Versions[$k] -gt $sides[1].Versions[$k]) { $newerA++ }
+            elseif ($sides[0].Versions[$k] -lt $sides[1].Versions[$k]) { $newerB++ }
+        }
+        if ($newerA -ne $newerB) {
+            $swap = $newerA -gt $newerB
+            $rule = 'フォルダの中のファイルの版数（版数の違うファイル {0} 組のうち {1} 組）' -f ($newerA + $newerB), [math]::Max($newerA, $newerB)
+        }
+        else {
+            # 中にファイルが無いフォルダは、フォルダの更新日時
+            $ta = $sides[0].Latest; if ($null -eq $ta) { $ta = $a.LastWriteTime }
+            $tb = $sides[1].Latest; if ($null -eq $tb) { $tb = $b.LastWriteTime }
+            $swap = $ta -gt $tb
+            $byTime = $true
+            $times = @($ta, $tb | ForEach-Object { $_.ToString('yyyy/MM/dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) })
+            if ($swap) { [array]::Reverse($times) }
+            $rule = 'フォルダの中でいちばん新しいファイルの更新日時（旧 {0}・新 {1}）' -f $times[0], $times[1]
+        }
+    }
+    else {
+        $swap = $a.LastWriteTime -gt $b.LastWriteTime
+        $byTime = $true
+        $rule = '更新日時'
+    }
+    $old = $a.FullName; $new = $b.FullName
+    if ($swap) { $old = $b.FullName; $new = $a.FullName }
+    return [pscustomobject]@{ Old = $old; New = $new; Swapped = [bool]$swap; Rule = $rule; ByTime = $byTime }
 }
 
 function ConvertTo-ExcelDate {
