@@ -111,9 +111,9 @@ foreach ($m in $targets) { $i++; $m.No = $i }
 
 
 function ConvertTo-Cell {
-    #     表のセルに入れる文字（改行と | を除く）
+    #     表のセルに入れる文字（改行・セル内の改行（Search-Excel の ↵）と | を除く）
     param([string] $Text)
-    return ($Text -replace '\r?\n', ' ' -replace '\|', '／').Trim()
+    return ($Text -replace '\r?\n|↵', ' ' -replace '\|', '／').Trim()
 }
 
 function New-AnalysisPrompt {

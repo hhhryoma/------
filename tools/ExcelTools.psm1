@@ -1942,12 +1942,13 @@ function New-ReadLogSheet {
 }
 
 function Write-ReadLogSummary {
-    #     読み取り結果の要約を表示する（表が見つからないファイルと、見出しが無い項目）
+    #     読み取り結果の要約を表示する（表が見つからないファイルと、見出しが無い項目）。
+    #     備考のあるもののうち、行を読んだもの（レビューの記録票の形など）は読んだ表として数える
     param($ReadLog)
     foreach ($g in @($ReadLog | Group-InOrder What)) {
-        $tables = @($g.Group | Where-Object { -not $_.Note })
+        $tables = @($g.Group | Where-Object { -not $_.Note -or $_.Rows -gt 0 })
         $files = @($tables | ForEach-Object { $_.File } | Select-Object -Unique)
-        $notFound = @($g.Group | Where-Object { $_.Note } | ForEach-Object { $_.File } | Select-Object -Unique)
+        $notFound = @($g.Group | Where-Object { $_.Note -and $_.Rows -eq 0 } | ForEach-Object { $_.File } | Select-Object -Unique)
         $line = '読み取り（{0}）: {1} ファイル・{2} 行' -f $g.Name, $files.Count, (($tables | Measure-Object -Property Rows -Sum).Sum + 0)
         $missingCounts = [ordered]@{}
         foreach ($t in $tables) { foreach ($m in $t.Missing) { if (-not $missingCounts.Contains($m)) { $missingCounts[$m] = 0 }; $missingCounts[$m]++ } }

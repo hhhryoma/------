@@ -160,6 +160,13 @@ if ($PSCmdlet.ParameterSetName -eq 'Create') {
     if (@('.xlsx', '.xlsm') -notcontains [System.IO.Path]::GetExtension($Template).ToLowerInvariant()) { throw "雛形は .xlsx / .xlsm にしてください: $Template" }
     if (-not (Test-Path -LiteralPath $List)) { throw "一覧が見つかりません: $List" }
     if (-not $FileName) { $FileName = [System.IO.Path]::GetFileName($Template) }
+    # 作る設計書の拡張子は雛形と同じにする（Excel の拡張子が無ければ雛形の拡張子を付ける。違う拡張子では Excel で開けず、差し込み欄も置き換えられない）
+    $templateExt = [System.IO.Path]::GetExtension($Template)
+    $nameExt = [System.IO.Path]::GetExtension($FileName)
+    if ($nameExt -match '^\.(xlsx|xlsm|xltx|xltm|xls|xlsb)$') {
+        if ($nameExt -ne $templateExt) { throw ("-FileName の拡張子は雛形と同じ {0} にしてください: {1}" -f $templateExt, $FileName) }
+    }
+    else { $FileName += $templateExt }
 
     # 雛形とファイル名の差し込み欄
     $tplHits = @(& $searchScript -Pattern '\{\{[^{}]+\}\}' -Path ([System.Management.Automation.WildcardPattern]::Escape($Template)) -Target Value, Comment, Shape, HeaderFooter -NoExcel 6>$null)
@@ -754,6 +761,7 @@ foreach ($f in $files) {
 #
 # .PARAMETER FileName
 #     作るファイルの名前。例: 'DD02_画面設計書_{{画面ID}}_{{画面名}}.xlsx'。既定は雛形のファイル名（差し込み欄が必要です）。
+#     拡張子は雛形と同じにします（Excel の拡張子が無ければ、雛形の拡張子を付けます）。
 #
 # .PARAMETER OutDir
 #     作ったファイルを保存するフォルダ。既定はカレントフォルダ。
@@ -821,4 +829,4 @@ foreach ($f in $files) {
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。Excel は不要です。同じフォルダに ExcelTools.psm1・Search-Excel.ps1・Replace-Excel.ps1 が必要です。
-#     ヘッダー／フッター・シート名の差し込み欄は置き換えません。
+#     シート名の差し込み欄は置き換えません（ヘッダー／フッターの差し込み欄は置き換えます）。

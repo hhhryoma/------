@@ -368,6 +368,25 @@ Test-Case 'Measure-ReviewQuality: 「■」で始まる指摘内容の行で表�
     Assert-Equal 'DD03_テーブル定義書|4|1' ('{0}|{1}|{2}' -f $r[0].Document, $r[0].Findings, $r[0].Open) '指摘 4 件・未完了 1 件（■索引 の指摘だけ）'
 }
 
+Test-Case 'Measure-ReviewQuality: 読み取りの要約で、記録票の形で読んだレビュー記録を「表が見つからない」にしない。-SizeCsv の小数は地域の設定によらず読む' {
+    $dir = New-TestDir
+    New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '対象成果物', '指摘内容', '対応状況') @(, @('1', 'DD03_テーブル定義書', '型が違う', '完了'))
+    $logDir = Join-Path $dir 'レビュー記録'
+    New-Item -ItemType Directory -Path $logDir | Out-Null
+    New-FindingBook (Join-Path $logDir 'DD03記録票.xlsx') '記録票' @('レビュー記録票', '') @(@('対象成果物', 'DD03_テーブル定義書'), @('レビュー時間', '2'), @('参加者', '山田'))
+    @('ファイル,ページ数', 'DD03_テーブル定義書.xlsx,2.5') | Set-Content -LiteralPath (Join-Path $dir 'ページ数.csv') -Encoding UTF8
+    # 小数の区切りが「,」の地域の設定（de-DE）でも、CSV の 2.5 を 2.5 と読む
+    $saved = [System.Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = New-Object System.Globalization.CultureInfo('de-DE')
+        $text = Get-HostText { $script:sizeResult = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -ReviewLog $logDir -SizeCsv (Join-Path $dir 'ページ数.csv') -AsOf '2026-10-20') }
+    }
+    finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $saved }
+    Assert-Match $text '読み取り（レビュー記録）: 1 ファイル・1 行'
+    Assert-NotMatch $text '表が見つからないファイル: DD03記録票'
+    Assert-Equal '1|2.5|0.4' ('{0}|{1}|{2}' -f $script:sizeResult[0].Findings, $script:sizeResult[0].Size, $script:sizeResult[0].Density)
+}
+
 Test-Case 'Measure-ReviewQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityTool
     Assert-Match $h.Synopsis '指摘'

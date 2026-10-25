@@ -85,6 +85,18 @@ Test-Case 'Invoke-QualityAnalysis: 回答が無い・読めないときと、品
     Assert-Throws { & $QualityAnalysis $book -ImportOnly 6>$null } '読み取れませんでした'
 }
 
+Test-Case 'Invoke-QualityAnalysis: 依頼の表のセルの、セル内の改行は空白にする' {
+    $dir = New-TestDir
+    $book = Join-Path $dir '品質評価_20261022.xlsx'
+    New-QualityBook $book
+    # 判定の考え方のセルの中で改行する（Alt+Enter）
+    Edit-ZipText $book 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('0.8 以上が ○、0.5 以上が △', "0.8 以上が ○、`n0.5 以上が △") }
+    $null = Get-HostText { & $QualityAnalysis $dir -PromptOnly | Out-Null }
+    $prompt = [System.IO.File]::ReadAllText((Join-Path $dir '品質評価_20261022_定性分析の依頼.txt'))
+    Assert-Match $prompt '\| × \| 0\.8 以上が ○、 0\.5 以上が △ \|'
+    Assert-True (-not $prompt.Contains('↵')) '↵ を書かない'
+}
+
 Test-Case 'Invoke-QualityAnalysis: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityAnalysis
     Assert-Match $h.Synopsis '定性分析（原因）と対策の下書き'
