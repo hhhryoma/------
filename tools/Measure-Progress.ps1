@@ -59,6 +59,7 @@ foreach ($f in @('タスク', '予定開始', '予定終了')) { if ($candidates
 
 function ConvertTo-Date {
     #     日付の文字（2026/10/1・2026-10-01・2026年10月1日・10/1(水)）を日付にする（無ければ $null）。年の無い日付は -AsOf の前後半年の年にする
+    #     読めない文字は ExcelTools.psm1 の ConvertTo-DateValue でも読む（和暦の令和8年10月1日・R8.10.1 など）
     param([string] $Text)
     $t = ([string]$Text).Normalize($nfkc).Trim()
     if (-not $t) { return $null }
@@ -73,7 +74,7 @@ function ConvertTo-Date {
         }
     }
     catch { }
-    return $null
+    return ConvertTo-DateValue $Text $AsOf
 }
 
 function ConvertTo-Number {
@@ -85,16 +86,25 @@ function ConvertTo-Number {
 }
 
 function ConvertTo-Rate {
-    #     進捗率（45%・0.45・45・完了）を 0～1 にする
+    #     進捗率（45%・0.45・45・完了・完了済み・済み）を 0～1 にする
     param([string] $Text)
     $t = ([string]$Text).Normalize($nfkc).Trim()
     if (-not $t) { return $null }
-    if ($t -match '^(完了|済)$') { return 1.0 }
+    if ($t -match '^(完了(済み?)?|済み?)$') { return 1.0 }
     $percent = $t.EndsWith('%')
     $n = ConvertTo-Number ($t.TrimEnd('%'))
     if ($null -eq $n) { return $null }
     if ($percent -or $n -gt 1) { $n = $n / 100 }
     return [math]::Max(0.0, [math]::Min(1.0, $n))
+}
+
+function Test-TotalRow {
+    #     合計・小計の行か（WBS 番号かタスクが「合計」「小計」「計」「Total」など。「設計」のように計を含むだけのものは違う）
+    param($Values)
+    foreach ($text in @($Values['WBS番号'], $Values['タスク'])) {
+        if ((([string]$text).Normalize($nfkc) -replace '\s', '') -match '^(総?合計|小計|総計|計|(sub|grand)?total)$') { return $true }
+    }
+    return $false
 }
 
 $holidaySet = New-Object 'System.Collections.Generic.HashSet[datetime]'
@@ -231,24 +241,21 @@ if ($rows.Count -eq 0) { Write-Warning 'WBS（タスク・予定開始・予定�
 # ---------------------------------------------------------------- タスクごとの計算
 
 
-# 親のタスク（下に 1.1 などの子のタスクがある 1）は数えない
-$wbsNumbers = @{}
+# 親のタスク（下に 1.1 などの子のタスクがある 1）は数えない。工程ごとのシートで番号を振り直した WBS もあるので、ファイル・シートごとに見る
+$parents = @{}
 foreach ($r in $rows) {
     $n = (([string]$r.Values['WBS番号']).Normalize($nfkc).Trim() -replace '[\-_]', '.').TrimEnd('.')
     $r | Add-Member -NotePropertyName Wbs -NotePropertyValue $n
-    if ($n) { $wbsNumbers[$n] = $true }
-}
-$parents = @{}
-foreach ($n in $wbsNumbers.Keys) {
     $i = $n.LastIndexOf('.')
-    while ($i -gt 0) { $parents[$n.Substring(0, $i)] = $true; $i = $n.LastIndexOf('.', $i - 1) }
+    while ($i -gt 0) { $parents['{0}|{1}|{2}' -f $r.Place.Path, $r.Place.Sheet, $n.Substring(0, $i)] = $true; $i = $n.LastIndexOf('.', $i - 1) }
 }
 
 $tasks = New-Object System.Collections.Generic.List[object]
 $skipped = 0
 foreach ($r in $rows) {
-    if ($r.Wbs -and $parents.ContainsKey($r.Wbs)) { continue }
+    if ($r.Wbs -and $parents.ContainsKey(('{0}|{1}|{2}' -f $r.Place.Path, $r.Place.Sheet, $r.Wbs))) { continue }
     $v = $r.Values
+    if (Test-TotalRow $v) { continue }
     $start = ConvertTo-Date $v['予定開始']
     $end = ConvertTo-Date $v['予定終了']
     if (-not $start -or -not $end) { $skipped++; continue }
@@ -258,22 +265,35 @@ foreach ($r in $rows) {
     $forecastEnd = ConvertTo-Date $v['見込終了']
     $rate = ConvertTo-Rate $v['進捗率']
     $done = [bool]$actualEnd -or ($rate -eq 1.0)
+    if ($actualEnd -and $actualEnd -gt $AsOf) {
+        # 基準日より後に終わったタスクは、基準日には未完了とし、実績終了日を見込終了日にする。記入された進捗率は後の状態のため、
+        # 実績開始日（無ければ予定開始日）から実績終了日までの営業日のうち、基準日までの割合を進捗率にする
+        $from = $actualStart
+        if (-not $from) { $from = $start }
+        $rate = 0.0
+        if ($AsOf -ge $from) { $rate = (Get-BusinessDays $from $AsOf) / [math]::Max(1, (Get-BusinessDays $from $actualEnd)) }
+        $done = $false; $forecastEnd = $actualEnd; $actualEnd = $null
+    }
     if ($done) { $rate = 1.0 }
     if ($null -eq $rate) { $rate = 0.0 }
+    # 基準日より前の見込終了日は古い（予定終了日を入れたままのものなど）ので、未完了のタスクには使わない
+    if (-not $done -and $forecastEnd -and $forecastEnd -lt $AsOf) { $forecastEnd = $null }
     $planDays = [math]::Max(1, (Get-BusinessDays $start $end))
     $planned = 0.0
     if ($AsOf -ge $end) { $planned = 1.0 } elseif ($AsOf -ge $start) { $planned = (Get-BusinessDays $start $AsOf) / $planDays }
+    # PV・EV の重みは予定工数（0 のマイルストーンなどは 0）。予定工数が空なら予定の営業日数
     $effort = ConvertTo-Number $v['予定工数']
     $weight = $effort
-    if ($null -eq $weight -or $weight -le 0) { $weight = [double]$planDays }
+    if ($null -eq $weight -or $weight -lt 0) { $weight = [double]$planDays }
 
-    # 遅れ（営業日）: 完了は予定終了日との差、見込終了日があればその差、予定終了日を過ぎていれば今日までの日数、
+    # 遅れ（営業日）: 完了は予定終了日との差、見込終了日（基準日以降のもの）があればその差、予定終了日を過ぎていれば
+    # 過ぎた日数に残りの作業の日数（（1 − 進捗率）× 予定の営業日）を足したもの（進まなければ毎日増える）、
     # それ以外は予定の進捗との差を日数にしたもの
     $delay = 0
     if ($done -and $actualEnd) { $delay = Get-BusinessDayDiff $end $actualEnd }
     elseif (-not $done) {
         if ($forecastEnd) { $delay = Get-BusinessDayDiff $end $forecastEnd }
-        elseif ($AsOf -gt $end) { $delay = Get-BusinessDayDiff $end $AsOf }
+        elseif ($AsOf -gt $end) { $delay = (Get-BusinessDayDiff $end $AsOf) + [int][math]::Round((1 - $rate) * $planDays) }
         elseif ($planned -gt $rate) { $delay = [int][math]::Round(($planned - $rate) * $planDays) }
     }
     if ($done) { $status = '完了' }
@@ -297,6 +317,7 @@ foreach ($r in $rows) {
     $tasks.Add($task)
 }
 if ($skipped -gt 0) { Write-Warning ('予定開始日・予定終了日が読めないタスク {0} 件は数えていません' -f $skipped) }
+if ($tasks.Count -eq 0) { Write-Warning 'WBS に、予定開始日・予定終了日の読めるタスクがありませんでした'; return }
 $tasks
 
 # ---------------------------------------------------------------- 集計
@@ -409,11 +430,12 @@ if ($FillTemplate) {
 }
 
 if ($OutXlsx) {
+    # 日付は日付のセルにする（Excel で並べ替え・計算ができる）
     $taskRows = New-Object System.Collections.Generic.List[object]
     foreach ($t in $tasks) {
         $exp = ''
-        if ($t.ExpectedEnd) { $exp = $t.ExpectedEnd.ToString('yyyy/MM/dd', $invariant) }
-        $row = @{ Values = @($t.WbsNo, $t.Task, $t.Owner, $t.PlanStart.ToString('yyyy/MM/dd', $invariant), $t.PlanEnd.ToString('yyyy/MM/dd', $invariant), $exp, [double]$t.Progress, [double]$t.PlannedProgress, [double]$t.Delay, $t.Status, [double][math]::Round($t.PV, 2), [double][math]::Round($t.EV, 2), ('{0} {1}' -f $t.Place.File, $t.Place.Cell)) }
+        if ($t.ExpectedEnd) { $exp = $t.ExpectedEnd.Date }
+        $row = @{ Values = @($t.WbsNo, $t.Task, $t.Owner, $t.PlanStart.Date, $t.PlanEnd.Date, $exp, [double]$t.Progress, [double]$t.PlannedProgress, [double]$t.Delay, $t.Status, [double][math]::Round($t.PV, 2), [double][math]::Round($t.EV, 2), ('{0} {1}' -f $t.Place.File, $t.Place.Cell)) }
         if ($t.Place.Sheet) { $row.Link = @{ Column = 12; Path = $t.Place.Path; Location = ("'{0}'!{1}" -f $t.Place.Sheet.Replace("'", "''"), $t.Place.Cell) } }
         $taskRows.Add($row)
     }
@@ -424,7 +446,7 @@ if ($OutXlsx) {
         $ownerRows.Add(@{ Values = @($o.Owner, [double]$o.Tasks, [double][math]::Round($o.PV, 2), [double][math]::Round($o.EV, 2), $spiV, [double]$o.Delayed) })
     }
     $weekRows = New-Object System.Collections.Generic.List[object]
-    foreach ($wk in $weeks) { $weekRows.Add(@{ Values = @($wk.No, $wk.Monday.ToString('yyyy/MM/dd', $invariant), [double]$wk.Planned, [double]$wk.Done, [double]$wk.TotalPlanned, [double]$wk.TotalDone) }) }
+    foreach ($wk in $weeks) { $weekRows.Add(@{ Values = @($wk.No, $wk.Monday.Date, [double]$wk.Planned, [double]$wk.Done, [double]$wk.TotalPlanned, [double]$wk.TotalDone) }) }
     try {
         Export-Workbook -FilePath $OutXlsx -Sheets @(
             @{ Name = 'タスク'; Columns = @(@{ Header = 'WBS'; Width = 8 }, @{ Header = 'タスク'; Width = 30 }, @{ Header = '担当'; Width = 10 }, @{ Header = '予定開始'; Width = 11 }, @{ Header = '予定終了'; Width = 11 }, @{ Header = '実績／見込終了'; Width = 13 }, @{ Header = '進捗率'; Width = 7 }, @{ Header = '予定の進捗率'; Width = 10 }, @{ Header = '遅れ（営業日）'; Width = 12 }, @{ Header = '状態'; Width = 10 }, @{ Header = 'PV'; Width = 8 }, @{ Header = 'EV'; Width = 8 }, @{ Header = 'WBS の場所'; Width = 30 }); Rows = $taskRows },
@@ -455,8 +477,9 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     WBS の表を見出しの文字で読み（「予定」「実績」の下に「開始」「終了」がある 2 行の見出しも読めます）、
 #     子のタスクの無いタスクごとに、-AsOf の時点の予定の進捗率・遅れ（営業日）・状態を出します。
 #
-#       遅れ        完了したタスクは予定終了日との差、見込終了日があればその差、予定終了日を過ぎていればその日数、
-#                   それ以外は予定の進捗率との差を日数にしたもの（土日と -Holidays の休日を除く営業日）
+#       遅れ        完了したタスクは予定終了日との差、見込終了日（基準日以降のもの）があればその差、予定終了日を過ぎていれば
+#                   その日数に残りの作業の日数（（1 − 進捗率）× 予定の営業日）を足したもの、それ以外は予定の進捗率との差を
+#                   日数にしたもの（土日と -Holidays の休日を除く営業日）。基準日より後に終わったタスクは、基準日には未完了とします
 #       PV / EV     予定工数（無ければ予定の営業日数）× 予定の進捗率 / 進捗率。SPI = EV / PV
 #       AC / CPI    実績工数の列があれば、CPI = EV / AC
 #
@@ -499,4 +522,5 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに ExcelTools.psm1 と Search-Excel.ps1 が必要です。
-#     親のタスクは WBS 番号（1・1.1・1.1.1 など）で見分けます。WBS 番号の列が無いときは、すべての行をタスクとして数えます。
+#     親のタスクは、ファイル・シートごとに WBS 番号（1・1.1・1.1.1 など）で見分けます。WBS 番号の列が無いときは、すべての行をタスクとして数えます。
+#     合計・小計の行（WBS 番号かタスクが「合計」「小計」「Total」など）は数えません。

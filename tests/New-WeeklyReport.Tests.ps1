@@ -112,7 +112,7 @@ Test-Case 'New-WeeklyReport: 実績の CSV で前回と比べ、推移とグラ�
     $null = & $WeeklyReport -Wbs $p.Wbs -Findings $p.Findings -BugList $p.Bugs -AsOf '2026-10-23' -OutDir $out -HistoryCsv $history 6>$null
     $text = Get-HostText { $null = & $WeeklyReport -Wbs $p.Wbs -Findings $p.Findings -BugList $p.Bugs -AsOf '2026-10-23' -Since '2026-10-19' -OutDir $out -HistoryCsv $history }
     Assert-Match $text '週次報告（2026/10/19～2026/10/23）'
-    Assert-Match $text '・遅延: 1 件（前回 0）'
+    Assert-Match $text '・遅延: 1 件（前回 1）' '10/16 には、10/22 に終わった 1.2 は未完了で 1 営業日の遅れ'
     Assert-Match $text '・未完了: 3 件（前回 1）・うち期限切れ 1 件（前回 0）'
     Assert-Match $text '前回 2026/10/16 と比べました'
     $dates = @(Get-Content -LiteralPath $history -Encoding UTF8 | Select-Object -Skip 1 | ForEach-Object { ($_ -replace '"', '').Split(',')[0] } | Sort-Object -Unique)
@@ -121,7 +121,7 @@ Test-Case 'New-WeeklyReport: 実績の CSV で前回と比べ、推移とグラ�
     $summary = Read-XlsxSheet -Path $xlsx -Index 1
     Assert-Equal '前回（2026/10/16）' $summary.Rows[1]['D']
     $delay = @($summary.Rows.Values | Where-Object { $_['A'] -eq '進捗' -and $_['B'] -eq '遅延' })[0]
-    Assert-Equal '1|0|1' ('{0}|{1}|{2}' -f $delay['C'], $delay['D'], $delay['E']) '今回・前回・増減'
+    Assert-Equal '1|1|0' ('{0}|{1}|{2}' -f $delay['C'], $delay['D'], $delay['E']) '今回・前回・増減'
     $trend = Read-XlsxSheet -Path $xlsx -Index 6
     Assert-Equal 3 $trend.Rows.Count '見出しと 2 回'
     Assert-Equal '2026/10/16' $trend.Rows[2]['A']
