@@ -169,7 +169,7 @@ function Format-ExcelNumber {
 }
 
 function Format-ExcelDate {
-    #     シリアル値を日付文字列にする。整数部が 0 なら時刻のみ、小数部が 0 なら日付のみ。
+    #     シリアル値を日付文字列にする。整数部が 0 なら時刻のみ（1904 年からの日付のブックでも同じ）、小数部が 0 なら日付のみ。
     param([double] $Serial, [bool] $Date1904)
 
     try {
@@ -184,13 +184,30 @@ function Format-ExcelDate {
         # 浮動小数点の誤差で 12:59:59.999 のようになるのを防ぐため秒に丸める
         $dt = New-Object DateTime ([long]([math]::Round($dt.Ticks / 1e7)) * 10000000L)
 
-        if ([math]::Floor($Serial) -eq 0 -and -not $Date1904) { return $dt.ToString('HH:mm:ss', $invariant) }
+        if ([math]::Floor($Serial) -eq 0) { return $dt.ToString('HH:mm:ss', $invariant) }
         if ($dt.TimeOfDay.Ticks -eq 0) { return $dt.ToString('yyyy/MM/dd', $invariant) }
         return $dt.ToString('yyyy/MM/dd HH:mm:ss', $invariant)
     }
     catch {
         return (Format-ExcelNumber $Serial)
     }
+}
+
+function ConvertFrom-IsoDate {
+    #     日付のセル（t="d"）の値（ISO 8601 の 2026-10-01T09:30:00・2026-10-01、時刻だけの 09:30:00）を、ブックの日付の方式のシリアル値にする。
+    #     読めなければ $null
+    param([string] $Value, [bool] $Date1904)
+
+    $styles = [System.Globalization.DateTimeStyles]::RoundtripKind -bor [System.Globalization.DateTimeStyles]::NoCurrentDateDefault
+    $dt = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse($Value, $invariant, $styles, [ref]$dt)) { return $null }
+    # 時刻だけの値（日付は 0001/01/01 になる）は、整数部が 0 のシリアル値にする
+    if ($dt.Date -eq [DateTime]::MinValue) { return $dt.TimeOfDay.TotalDays }
+    if ($Date1904) { return ($dt - (New-Object DateTime 1904, 1, 1)).TotalDays }
+    # Excel は 1900/2/29 を実在扱いするため、それより前の日付のシリアル値は 1 小さい（Format-ExcelDate の逆）
+    $serial = $dt.ToOADate()
+    if ($serial -ge 1 -and $serial -lt 61) { $serial -= 1 }
+    return $serial
 }
 
 function Format-ExcelElapsed {
@@ -224,8 +241,8 @@ function Format-ExcelElapsed {
 
 function Test-DateFormatCode {
     #     ユーザー定義の表示形式が日付・時刻か判定する。
-    #     文字列リテラル（"..."）・エスケープ（\x）・[色] や [$-411] などの [...] を除いてから
-    #     y/m/d/h/s が残っていれば日付とみなす。経過時間 [h]:mm は日付扱いしない。
+    #     文字列リテラル（"..."）・エスケープ（\x）・[色] や [$-411] などの [...]・General（日本語の G/標準）を除いてから
+    #     y/m/d/h/s、日本語の曜日の a（aaa）、元号の g（ggge）、和暦の年の e が残っていれば日付とみなす。経過時間 [h]:mm は日付扱いしない。
     param([string] $Code)
 
     if ([string]::IsNullOrEmpty($Code)) { return $false }
@@ -236,9 +253,9 @@ function Test-DateFormatCode {
     $s = [regex]::Replace($s, '\\.', '')
     $s = [regex]::Replace($s, '[_*].', '')
     $s = [regex]::Replace($s, '\[[^\]]*\]', '')
-    $s = [regex]::Replace($s, 'General', '', 'IgnoreCase')
+    $s = [regex]::Replace($s, 'General|G/標準', '', 'IgnoreCase')
     $s = [regex]::Replace($s, '[Ee][+-]', '')
-    return ($s -match '[yYmMdDhHsS]')
+    return ($s -match '[yYmMdDhHsSaAgGeE]')
 }
 
 # ---------------------------------------------------------------- xlsx（Open XML）の読み取り
@@ -522,7 +539,12 @@ function Search-WorksheetCells {
                     }
                     elseif ($type -eq 'inlineStr') { $text = $inline }
                     elseif ($type -eq 'b') { if ($value -eq '1') { $text = 'TRUE' } elseif ($null -ne $value) { $text = 'FALSE' } }
-                    elseif ($type -eq 'str' -or $type -eq 'e' -or $type -eq 'd') { $text = ConvertFrom-OoxmlEscape $value }
+                    elseif ($type -eq 'str' -or $type -eq 'e') { $text = ConvertFrom-OoxmlEscape $value }
+                    elseif ($type -eq 'd') {
+                        # 日付のセル（値は ISO 8601 の文字）は、シリアル値にして日付の表示形式のセルと同じ形にする
+                        $serial = ConvertFrom-IsoDate $value $Date1904
+                        if ($null -ne $serial) { $text = Format-ExcelDate -Serial $serial -Date1904 $Date1904 } else { $text = ConvertFrom-OoxmlEscape $value }
+                    }
                     elseif ($value) {
                         if ([double]::TryParse($value, $numStyle, $invariant, [ref]$num)) {
                             if ($style -lt $dateCount -and $DateStyles[$style]) {
@@ -625,8 +647,11 @@ function Search-SheetShapes {
 
             $paragraphs = New-Object System.Collections.Generic.List[string]
             foreach ($p in $sp.SelectNodes("*[local-name()='txBody']/*[local-name()='p']")) {
+                # 段落の中の改行（<a:br>。Shift+Enter の改行）も改行にする
                 $sb = New-Object System.Text.StringBuilder
-                foreach ($t in $p.SelectNodes(".//*[local-name()='t']")) { [void]$sb.Append($t.InnerText) }
+                foreach ($t in $p.SelectNodes(".//*[local-name()='t' or local-name()='br']")) {
+                    if ($t.LocalName -eq 'br') { [void]$sb.Append("`n") } else { [void]$sb.Append($t.InnerText) }
+                }
                 $paragraphs.Add($sb.ToString())
             }
             $text = ($paragraphs -join "`n").TrimEnd("`n")

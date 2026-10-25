@@ -265,6 +265,100 @@ Test-Case 'Replace-Excel: -BackupDir には、別々のフォルダの同じ名�
     Assert-Match $text '番号を付けて残し.*仕様書 \(2\)\.xlsx'
 }
 
+Test-Case 'Replace-Excel: 書き換えたシートの、属性の中の改行・タブ（入力規則のメッセージなど）と文字の中の CR は変えない（文字の中の改行は改行のまま書く）' {
+    $file = Join-Path (New-TestDir) '入力規則.xlsx'
+    New-SheetsBook $file ([ordered]@{ 'S' = @(@('状態'), @('x')) })
+    # Excel は属性の中の改行を &#10; と書く。一致するのはヘッダーだけで、シート全体を書き直す
+    Edit-ZipText $file 'xl/worksheets/sheet1.xml' {
+        param($x)
+        $x = $x.Replace('<t xml:space="preserve">x</t>', "<t>1行目`n2行目&#13;`n3行目</t>")
+        $x = $x.Replace('<pageMargins', '<dataValidations count="1"><dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" prompt="1行目&#10;2行目" error="一覧&#9;から選ぶ" sqref="A2"><formula1>"未着手,完了"</formula1></dataValidation></dataValidations><pageMargins')
+        $x.Replace('</worksheet>', '<headerFooter><oddHeader>&amp;L受注管理システム</oddHeader></headerFooter></worksheet>')
+    }
+    $r = Invoke-Replace @{ Pattern = '受注管理システム'; Replacement = '販売管理システム'; Path = $file; SimpleMatch = $true; Force = $true }
+    Assert-Equal @('S|ヘッダー・フッター|置換') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Kind, $_.Result })
+    $hits = @(& $SearchExcel -Pattern '行目|一覧' -Path ([System.Management.Automation.WildcardPattern]::Escape($file)) -Target Validation 6>$null)
+    Assert-Equal @('入力時メッセージ（A2）|1行目↵2行目', "エラーメッセージ（A2）|一覧`tから選ぶ") @($hits | ForEach-Object { '{0}|{1}' -f $_.Name, $_.Text })
+    $sheet = Read-PartText $file 'xl/worksheets/sheet1.xml'
+    Assert-Match $sheet 'prompt="1行目&#xA;2行目" error="一覧&#x9;から選ぶ"'
+    Assert-True ($sheet.Contains("<t>1行目`n2行目&#xD;`n3行目</t>")) 'セルの文字の改行は改行のまま（&#xA; にしない）、CR は文字参照で書く'
+    Assert-WellFormed $file
+}
+
+Test-Case 'Replace-Excel: 置換する箇所を調べた後にファイルが保存し直されたら（ほかの人の保存・OneDrive などの同期）、古い内容から求めた置換は書き込まず失敗として知らせる' {
+    $dir = Copy-Fixture 'replace'
+    $file = Join-Path $dir 'shared.xlsx'
+    # 新しい版: ほかの人が文字列を足して保存した（共有文字列の番号が 1 つずれる）
+    $newer = Join-Path (New-TestDir) 'newer.xlsx'
+    Copy-Item -LiteralPath $file -Destination $newer
+    Edit-ZipText $newer 'xl/sharedStrings.xml' { param($x) $x.Replace('uniqueCount="5"><si>', 'uniqueCount="6"><si><t>新しい行</t></si><si>') }
+    foreach ($part in @('xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml')) {
+        Edit-ZipText $newer $part { param($x) [regex]::Replace($x, '(t="s"><v>)(\d+)', { param($m) $m.Groups[1].Value + ([int]$m.Groups[2].Value + 1) }) }
+    }
+    $hash = (Get-FileHash -LiteralPath $newer).Hash
+    $backup = Join-Path (New-TestDir) 'backup'
+    # 置換する箇所を調べ終えて確認を待つあいだに、新しい版が保存される（ツールからは関数が優先して見える）
+    function Write-Progress { param($Activity, $Status, $PercentComplete, [switch] $Completed) if ($Completed) { Copy-Item -LiteralPath $newer -Destination $file -Force } }
+    $r = Invoke-Replace @{ Pattern = '受注管理システム'; Replacement = '販売管理システム'; Path = $file; SimpleMatch = $true; Force = $true; BackupDir = $backup }
+    Assert-Equal @('失敗') @($r | ForEach-Object { $_.Result } | Sort-Object -Unique)
+    Assert-Match $r[0].Detail '更新され'
+    Assert-Equal $hash (Get-FileHash -LiteralPath $file).Hash '新しい版のまま'
+    Assert-True (-not (Test-Path -LiteralPath $backup)) '書き換えないファイルは -BackupDir に残さない'
+}
+
+Test-Case 'Replace-Excel: セルの文字の _x000D_（CR）などのエスケープは、Search-Excel と同じく元の文字に戻してから置換し、書くときにエスケープし直す' {
+    $file = Join-Path (New-TestDir) 'escape.xlsx'
+    New-SheetsBook $file ([ordered]@{ 'S' = @(@('項目'), @('a'), @('b'), @('c'), @('d')) })
+    # Excel はセルの中の CR を _x000D_、制御文字を _x0007_、もとからある「_x0041_」の形の文字を _x005F_x0041_ と書く
+    Edit-ZipText $file 'xl/worksheets/sheet1.xml' {
+        param($x)
+        $x = $x.Replace('<t xml:space="preserve">a</t>', "<t>ORDER_ID_x000D_`n受注番号</t>").Replace('<t xml:space="preserve">b</t>', "<t>TODO_x000D_`n確認</t>")
+        $x.Replace('<t xml:space="preserve">c</t>', '<t>KEY_x005F_x0041_</t>').Replace('<t xml:space="preserve">d</t>', '<t>BEL_x0007__END</t>')
+    }
+    $r = Invoke-Replace @{ Pattern = '_'; Replacement = '-'; Path = $file; SimpleMatch = $true; Force = $true }
+    Assert-Equal @('S!A2|ORDER-ID↵受注番号', 'S!A4|KEY-x0041-', 'S!A5|BEL-END') @($r | ForEach-Object { '{0}|{1}' -f $_.Location, $_.After }) 'エスケープの途中では一致させない'
+    $r = Invoke-Replace @{ Pattern = 'TODO\s+確認'; Replacement = '確認済み'; Path = $file; Force = $true }
+    Assert-Equal @('S!A3|TODO↵確認 → 確認済み') @($r | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Change }) 'Search-Excel で見つかる CR・改行にも一致する'
+    $r = Invoke-Replace @{ Pattern = 'KEY'; Replacement = '_x0042_'; Path = $file; SimpleMatch = $true; Force = $true }
+    Assert-Equal @('S!A4|_x0042_-x0041-') @($r | ForEach-Object { '{0}|{1}' -f $_.Location, $_.After }) '置換後の文字の「_x0042_」は文字のまま'
+    Assert-Equal @('S!A2=ORDER-ID↵受注番号', 'S!A3=確認済み', 'S!A4=_x0042_-x0041-', "S!A5=BEL`a-END") @(Get-Texts $file '^(?!項目)')
+    $sheet = Read-PartText $file 'xl/worksheets/sheet1.xml'
+    Assert-True ($sheet.Contains("<t>ORDER-ID_x000D_`n受注番号</t>")) 'CR は _x000D_ に戻す'
+    Assert-Match $sheet '<t>_x005F_x0042_-x0041-</t>'
+    Assert-Match $sheet '<t>BEL_x0007_-END</t>'
+    Assert-WellFormed $file
+}
+
+Test-Case 'Replace-Excel: 図形の段落の中の改行（<a:br>。Shift+Enter の改行）をまたぐ文字は置換せず、改行の位置も変えない' {
+    $file = Join-Path (New-TestDir) '図形.xlsx'
+    New-SheetsBook $file ([ordered]@{ 'S' = @(@('項目'), @('x')) })
+    Add-TestDrawing $file @(@{ Kind = 'sp'; Name = '図1'; Text = 'X'; From = @(1, 1); To = @(4, 4) })
+    Edit-ZipText $file 'xl/drawings/drawing1.xml' { param($x) $x.Replace('<a:p><a:r><a:t>X</a:t></a:r></a:p>', '<a:p><a:r><a:t>受注</a:t></a:r><a:br/><a:r><a:t>管理システム</a:t></a:r></a:p><a:p><a:r><a:t>受注管理</a:t></a:r></a:p>') }
+    $r = Invoke-Replace @{ Pattern = '受注管理'; Replacement = '販売管理'; Path = $file; SimpleMatch = $true; Force = $true }
+    Assert-Equal @('S!B2|受注↵管理システム↵受注管理 → 受注↵管理システム↵販売管理') @($r | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Change })
+    Assert-Match (Read-PartText $file 'xl/drawings/drawing1.xml') '<a:p><a:r><a:t>受注</a:t></a:r><a:br ?/><a:r><a:t>管理システム</a:t></a:r></a:p><a:p><a:r><a:t>販売管理</a:t></a:r></a:p>'
+}
+
+Test-Case 'Replace-Excel: -BackupDir の中のファイルは置換しないが、名前の先頭が -BackupDir と同じだけのフォルダ（旧版_設計書資料 など）のファイルは置換する' {
+    $root = New-TestDir
+    foreach ($sub in @('設計書', '旧版_設計書資料', '旧版')) {
+        New-Item -ItemType Directory -Path (Join-Path $root $sub) | Out-Null
+        New-SheetsBook (Join-Path $root "$sub/仕様書.xlsx") ([ordered]@{ 'S' = @(@('項目'), @('受注管理システム')) })
+    }
+    $r = Invoke-Replace @{ Pattern = '受注'; Replacement = '販売'; Path = $root; Force = $true; BackupDir = (Join-Path $root '旧版') }
+    $replaced = @($r | Where-Object Result -eq '置換' | ForEach-Object { ConvertTo-Slash $_.File })
+    Assert-Equal 2 $replaced.Count ($replaced -join ', ')
+    Assert-True ($replaced -contains '旧版_設計書資料/仕様書.xlsx') ($replaced -join ', ')
+    Assert-True ($replaced -contains '設計書/仕様書.xlsx') ($replaced -join ', ')
+    Assert-Equal @('S!A2=受注管理システム') @(Get-Texts (Join-Path $root '旧版/仕様書.xlsx') '受注') '-BackupDir の中の（前に残した）ファイルは元のまま'
+}
+
+Test-Case 'Replace-Excel: ヘルプの注意書き（.NOTES）は、既定で置換するヘッダー・フッターを「置換しません」に挙げず、README と同じく名前の定義を挙げる' {
+    $notes = (Get-Help $ReplaceExcel -Full).alertSet.alert.Text -join "`n"
+    Assert-Match $notes 'シート名、グラフの文字、名前の定義は置換しません'
+    Assert-NotMatch $notes 'ヘッダー[^。]*置換しません'
+}
+
 Test-Case 'Replace-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $ReplaceExcel
     Assert-Match $h.Synopsis '置換'
