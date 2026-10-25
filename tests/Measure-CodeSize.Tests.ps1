@@ -67,6 +67,35 @@ Test-Case 'Measure-CodeSize: -Baseline の前の版と比べて、新規・修�
     Assert-Match $text '前の版との差: 新規 6・修正 1・削除 1 ステップ'
 }
 
+Test-Case 'Measure-CodeSize: 大文字・小文字だけを変えた行も修正に数える' {
+    $dir = New-TestDir
+    $new = Join-Path $dir 'v2'; $old = Join-Path $dir 'v1'
+    Write-Source $old 'app/A.java' @('class A {', '    int userId = getUserId();', '}')
+    Write-Source $new 'app/A.java' @('class A {', '    int userID = getUserID();', '}')
+    $r = @(& $CodeSizeTool $new -Baseline $old 6>$null)
+    Assert-Equal '0|1|0' ('{0}|{1}|{2}' -f $r[0].Added, $r[0].Changed, $r[0].Deleted)
+}
+
+Test-Case 'Measure-CodeSize: 空のファイル（Python の __init__.py など）は 0 行に数える' {
+    $root = Join-Path (New-TestDir) 'src'
+    Write-Source $root 'pkg/main.py' @('print(1)')
+    [System.IO.File]::WriteAllText((Join-Path $root 'pkg/__init__.py'), '')
+    $r = @(& $CodeSizeTool $root 6>$null)
+    Assert-Equal 'pkg|2|1|0|1' ('{0}|{1}|{2}|{3}|{4}' -f $r[0].Group, $r[0].Files, $r[0].Lines, $r[0].Blank, $r[0].Steps)
+}
+
+Test-Case 'Measure-CodeSize: 固定形式の COBOL の一連番号（1〜6 桁目）と識別領域（73 桁目から）は、空行の判定と前の版との比較に使わない' {
+    $dir = New-TestDir
+    $new = Join-Path $dir 'v2'; $old = Join-Path $dir 'v1'
+    Write-Source $old 'batch/PGM01.cbl' @('000100 IDENTIFICATION DIVISION.', '000200 PROGRAM-ID. PGM01.', '000300', '000400*COMMENT', '000500 PROCEDURE DIVISION.', '000600     DISPLAY "A".', ('000700     STOP RUN.'.PadRight(72) + 'PGM01V10'))
+    # 1 行足して、一連番号を振り直し、識別領域を書き換えた版
+    Write-Source $new 'batch/PGM01.cbl' @('000100 IDENTIFICATION DIVISION.', '000200 PROGRAM-ID. PGM01.', '000300', '000400*COMMENT', '000500 PROCEDURE DIVISION.', '000600     DISPLAY "NEW".', '000700     DISPLAY "A".', ('000800     STOP RUN.'.PadRight(72) + 'PGM01V11'))
+    $r = @(& $CodeSizeTool $old 6>$null)
+    Assert-Equal '7|1|1|5' ('{0}|{1}|{2}|{3}' -f $r[0].Lines, $r[0].Blank, $r[0].Comment, $r[0].Steps) '一連番号だけの行は空行'
+    $r = @(& $CodeSizeTool $new -Baseline $old 6>$null)
+    Assert-Equal '1|0|0' ('{0}|{1}|{2}' -f $r[0].Added, $r[0].Changed, $r[0].Deleted) '一連番号の振り直しと識別領域は修正にしない'
+}
+
 Test-Case 'Measure-CodeSize: Get-Help でヘルプが表示される' {
     $h = Get-Help $CodeSizeTool
     Assert-Match $h.Synopsis 'ステップ数'

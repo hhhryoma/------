@@ -1495,12 +1495,17 @@ function Measure-SourceLines {
     #     1 ファイルの行を、空行・コメント・ステップ（コメント以外の行）に分ける。
     #     文字列（言語の Quote で囲んだもの）と行コメントの中の /* などはブロックコメントの始まりにせず、1 行の中のブロックコメントはすべて見る（閉じなければ次の行もコメント）
     #     CodeText なら、すべての行を左から見て、行の後ろのコメントと行の中のブロックコメントを除いた文字も作る（遅くなるので、要るときだけ）
+    #     固定形式の COBOL は、1〜6 桁目（一連番号）と 73 桁目から（識別領域）を見ない（7 桁目が標識、8〜72 桁目がステップの文字）
     #     戻り値: @{ Lines; Blank; Comment; Steps; Code = ステップの行（前後の空白を除いた文字）の一覧;
     #               CodeLines = ステップの行の @{ No（行番号）; Text; CodeText（CodeText のときだけ） } の一覧 }
     param([string] $FilePath, $Language, [switch] $CodeText)
     $text = Read-TextFile $FilePath
-    $lines = $text -split "\r\n|\n|\r"
-    if ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines = $lines[0..($lines.Count - 2)] }
+    # 最後の改行の後ろは行にしない。空のファイルは 0 行
+    $lines = @()
+    if ($text) {
+        $lines = $text -split "\r\n|\n|\r"
+        if ($lines[$lines.Count - 1] -eq '') { $lines = $lines[0..($lines.Count - 2)] }
+    }
     $blank = 0; $comment = 0
     $code = New-Object System.Collections.Generic.List[string]
     $codeLines = New-Object System.Collections.Generic.List[object]
@@ -1524,12 +1529,14 @@ function Measure-SourceLines {
     foreach ($raw in $lines) {
         $no++
         if ($Language.Cobol) {
-            # 固定形式の COBOL: 7 桁目が * か / ならコメント
-            if (-not $raw.Trim()) { $blank++ }
-            elseif ($raw.Length -ge 7 -and ($raw[6] -eq '*' -or $raw[6] -eq '/')) { $comment++ }
+            # 固定形式の COBOL: 7 桁目が * か / ならコメント。空行の判定と比べる文字は 8〜72 桁目だけ（一連番号だけの行は空行。番号を振り直しても変えた行にしない）
+            $area = ''
+            if ($raw.Length -gt 7) { $area = $raw.Substring(7, [math]::Min(65, $raw.Length - 7)).Trim() }
+            if ($raw.Length -ge 7 -and ($raw[6] -eq '*' -or $raw[6] -eq '/')) { $comment++ }
+            elseif (-not $area) { $blank++ }
             else {
-                $code.Add($raw.Trim())
-                if ($keep) { $codeLines.Add([pscustomobject]@{ No = $no; Text = $raw.Trim(); CodeText = $raw.Trim() }) } else { $codeLines.Add([pscustomobject]@{ No = $no; Text = $raw.Trim() }) }
+                $code.Add($area)
+                if ($keep) { $codeLines.Add([pscustomobject]@{ No = $no; Text = $area; CodeText = $area }) } else { $codeLines.Add([pscustomobject]@{ No = $no; Text = $area }) }
             }
             continue
         }

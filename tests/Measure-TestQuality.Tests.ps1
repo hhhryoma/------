@@ -208,6 +208,70 @@ Test-Case 'Measure-TestQuality: Redmine の CSV（見出しの「#」・題名�
     Assert-Match $text 'バグ 2 件（未完了 1 件。取下げなどで数えなかったもの 1 件）'
 }
 
+Test-Case 'Measure-TestQuality: 保留のケースの実施日や、未完了のバグの完了日（予定）だけの日も、推移に件数の増えない日として出す' {
+    $dir = New-TestDir
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'SCR201'; Header = @('項番', 'テスト項目', '実施日', '判定'); Rows = @(
+                @('1', '確認 1', '2026/11/02', 'OK'),
+                @('2', '確認 2', '2026/11/03', '保留')) })
+    @('No,件名,起票日,完了日,状態', '1,障害 1,2026/11/01,2026/11/04,確認待ち', '2,障害 2,2026/11/02,2026/11/05,完了') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $out = Join-Path $dir 'test-quality.xlsx'
+    $null = & $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'bugs.csv') -AsOf '2026-11-06' -OutXlsx $out 6>$null 3>$null
+    # 日付・実施（累計）・バグの発見・バグの完了・未完了のバグ
+    $trend = Read-XlsxSheet -Path $out -Index 4
+    Assert-Equal @('2026/11/01|0|1|0|1', '2026/11/02|1|1|0|2', '2026/11/03|1|0|0|2', '2026/11/04|1|0|0|2', '2026/11/05|1|0|1|1') @(2..6 | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $trend.Rows[$_]['A'], $trend.Rows[$_]['C'], $trend.Rows[$_]['E'], $trend.Rows[$_]['F'], $trend.Rows[$_]['I'] })
+}
+
+Test-Case 'Measure-TestQuality: 最初の時点からバグの累計が増えていなければ収束とし、起票日の無いバグは収束率に入れずに知らせる' {
+    $dir = New-TestDir
+    $rows = @(1..100 | ForEach-Object { , @([string]$_, "確認 $_", (Get-Date '2026-11-01').AddDays([math]::Floor(($_ - 1) / 10)).ToString('yyyy/MM/dd'), 'OK') })
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'SCR201'; Header = @('項番', 'テスト項目', '実施日', '判定'); Rows = $rows })
+    # 20 件のバグがテストの初日にすべて見つかり、そのあと 9 日間は新しいバグが無い
+    $lines = @('No,件名,起票日,状態')
+    for ($i = 1; $i -le 20; $i++) { $lines += ('{0},障害 {0},2026/11/01,完了' -f $i) }
+    $lines | Set-Content -LiteralPath (Join-Path $dir 'flat.csv') -Encoding UTF8
+    $text = Get-HostText { & $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'flat.csv') -AsOf '2026-11-10' 3>$null | Out-Null }
+    Assert-Match $text '信頼度成長曲線: 収束している（バグの累計が最初の時点から増えていません）'
+
+    # S 字に収束する起票日のあるバグ 30 件と、起票日の無いバグ 10 件
+    $daily = @(2, 5, 8, 7, 4, 2, 1, 1, 0, 0)
+    $lines = @('No,件名,起票日,状態'); $n = 0
+    for ($d = 0; $d -lt $daily.Count; $d++) { for ($j = 0; $j -lt $daily[$d]; $j++) { $n++; $lines += ('{0},障害 {0},{1},完了' -f $n, (Get-Date '2026-11-01').AddDays($d).ToString('yyyy/MM/dd')) } }
+    for ($j = 0; $j -lt 10; $j++) { $n++; $lines += ('{0},障害 {0},,完了' -f $n) }
+    $lines | Set-Content -LiteralPath (Join-Path $dir 'undated.csv') -Encoding UTF8
+    $out = Join-Path $dir 'test-quality.xlsx'
+    $text = Get-HostText { & $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'undated.csv') -AsOf '2026-11-10' -OutXlsx $out 3>$null | Out-Null }
+    Assert-Match $text 'バグ 40 件'
+    Assert-Match $text '潜在バグ数 30(\.\d)? 件（推定）・収束率 9\d\.\d% → 収束している（基準 90%）。起票日の無いバグ 10 件は曲線に入れていません' '収束率は、起票日のあるバグ 30 件 ÷ 潜在バグ数'
+    $summary = @{}
+    foreach ($row in (Read-XlsxSheet -Path $out -Index 1).Rows.Values) { $summary[$row['A']] = $row['B'] }
+    Assert-True ([double]$summary['収束率（バグ ÷ 潜在バグ数）'] -le 1) $summary['収束率（バグ ÷ 潜在バグ数）']
+    Assert-Match $summary['収束の判定'] '^収束している（基準: 収束率 0\.9）。起票日の無いバグ 10 件は曲線に入れていません$'
+}
+
+Test-Case 'Measure-TestQuality: 取下げ・仕様どおりのバグの番号は、テスト仕様書から参照していても「障害管理表に無いバグ番号」にしない' {
+    $dir = New-TestDir
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'SCR201'; Header = @('項番', 'テスト項目', '実施日', '判定', '障害番号'); Rows = @(
+                @('1', '確認 1', '2026/11/02', 'OK', 'B001'),
+                @('2', '確認 2', '2026/11/02', 'OK', 'B002'),
+                @('3', '確認 3', '2026/11/02', 'OK', 'B999')) })
+    @('障害番号,件名,起票日,状態', 'B001,障害 1,2026/11/02,完了', 'B002,仕様の誤解,2026/11/02,仕様どおり') | Set-Content -LiteralPath (Join-Path $dir 'bugs.csv') -Encoding UTF8
+    $out = Join-Path $dir 'test-quality.xlsx'
+    $text = Get-HostText { & $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'bugs.csv') -AsOf '2026-11-06' -OutXlsx $out 3>$null | Out-Null }
+    Assert-Match $text '食い違い: 1 件（障害管理表に無いバグ番号 1）'
+    Assert-Equal 'バグ番号 B999 が障害管理表にありません' (Read-XlsxSheet -Path $out -Index 6).Rows[2]['D']
+}
+
+Test-Case 'Measure-TestQuality: 基準値の CSV のテスト密度・バグ密度でない行（指摘密度など）は、分母が同じでも使わない' {
+    $dir = New-TestDir
+    New-SheetBook (Join-Path $dir 'SCR001.xlsx') @(@{ Name = 'ケース'; Header = @('No', '確認内容', '実施日', '結果'); Rows = @(1..10 | ForEach-Object { , @([string]$_, "確認 $_", '2026/11/02', 'OK') }) })
+    @('機能,規模', 'SCR001,1') | Set-Content -LiteralPath (Join-Path $dir 'size.csv') -Encoding UTF8
+    # New-QualityLimits.ps1 の CSV には、レビューの指標の行も入る
+    $limits = Join-Path $dir 'limits.csv'
+    @('指標,分母,工程,下限,上限', '指摘密度,規模,,0.4,0.6', 'レビュー工数密度,規模,,0.02,0.1', 'テスト密度,規模,,8,12') | Set-Content -LiteralPath $limits -Encoding UTF8
+    $r = @(& $TestQualityTool -Path (Join-Path $dir 'SCR001.xlsx') -SizeCsv (Join-Path $dir 'size.csv') -Limits $limits -AsOf '2026-11-06' 6>$null 3>$null)
+    Assert-Equal 'SCR001|10|基準内' ('{0}|{1}|{2}' -f $r[0].Function, $r[0].TestDensity, $r[0].TestJudgement) 'テスト密度の基準値（8〜12）と比べる'
+}
+
 Test-Case 'Measure-TestQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestQualityTool
     Assert-Match $h.Synopsis 'テスト'

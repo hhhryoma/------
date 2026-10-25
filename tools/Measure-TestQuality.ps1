@@ -75,14 +75,16 @@ $bugFields = @('機能', '障害ID', '障害内容', '起票日', '完了日', '
 $candidates = Read-HeaderCandidates $Headers ($caseFields + $bugFields)
 foreach ($f in @('結果', '障害内容')) { if ($candidates[$f].Count -eq 0) { throw "見出しの候補に「$f」の行がありません: $Headers" } }
 
-# 基準値。指標は「テスト密度」「バグ密度」
+# 基準値。指標は「テスト密度」「バグ密度」。New-QualityLimits.ps1 の CSV にある指摘密度・レビュー工数密度など、ほかの指標の行は読まない
+# （分母が同じ名前（規模など）でも、ほかの指標の基準値で判定しないように）
 $limitRows = New-Object System.Collections.Generic.List[object]
 foreach ($r in (Read-CsvFile $Limits @('指標', '分母', '下限', '上限') '基準値')) {
     $unit = ([string]$r.'分母').Trim()
     $metricText = ([string]$r.'指標').Trim()
     if (-not $unit -or -not $metricText) { continue }
-    $metric = 'Test'
     if ($metricText -match 'バグ|障害|不具合') { $metric = 'Bug' }
+    elseif ($metricText -match 'テスト|ケース') { $metric = 'Test' }
+    else { continue }
     $process = ''
     if ($r.PSObject.Properties['工程']) { $process = ([string]$r.'工程').Trim() }
     $low = $null; $high = $null
@@ -190,13 +192,20 @@ if ($cases.Count -eq 0) { Write-Warning 'テストケースが見つかりませ
 
 $bugs = New-Object System.Collections.Generic.List[object]
 $excludedBugs = 0
+# 取下げなどで数えないバグの番号（テスト仕様書が参照していても、障害管理表に無い番号にはしない）
+$excludedIds = New-Object 'System.Collections.Generic.HashSet[string]'
 $bugListHasFunction = $false
 if ($BugList) {
     $bugRecords = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $BugList '障害管理表' -NoRecurse:$NoRecurse) -Fields $bugFields -Need @('障害内容', @('起票日', '状態', '重要度', '障害ID')) -Key @('障害内容') -What '障害管理表'
     foreach ($rec in $bugRecords) {
         $v = $rec.Values
         $status = ([string]$v['状態']).Trim()
-        if ($status -match $excludedPattern) { $excludedBugs++; continue }
+        if ($status -match $excludedPattern) {
+            $excludedBugs++
+            $excludedId = @(ConvertTo-BugIds $v['障害ID'])[0]
+            if ($excludedId) { [void]$excludedIds.Add($excludedId) }
+            continue
+        }
         if ($rec.Labels['機能']) { $bugListHasFunction = $true }
         $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
         $functionName = Resolve-FunctionName $functionNames $v['機能']
@@ -358,7 +367,9 @@ foreach ($b in $bugs) {
 $trend = New-Object System.Collections.Generic.List[object]
 $sum = @{ Planned = 0; Executed = 0; Passed = 0; Found = 0; Closed = 0 }
 foreach ($day in $dates) {
+    # 保留・未実施のケースの実施日や、未完了のバグの完了日（予定）だけの日は、数える件数が無い
     $count = $perDay[$day]
+    if (-not $count) { $count = @{ Planned = 0; Executed = 0; Passed = 0; Found = 0; Closed = 0 } }
     foreach ($k in @($sum.Keys)) { $sum[$k] += $count[$k] }
     $trend.Add([pscustomobject]@{
         Date = $day; Planned = $sum.Planned; Executed = $sum.Executed; Passed = $sum.Passed
@@ -379,20 +390,25 @@ if ($trend.Count -gt 0) {
         if ($x -gt 0 -and $t.TotalFound -gt 0) { $points[[string]$x] = @([double]$x, [double]$t.TotalFound) }
     }
 }
+# バグの累計が最初の時点から変わらない（4 時点以上あっても曲線にならない）ときは、当てはめずに収束とみなす
+$flat = $points.Count -ge 4 -and @($points.Values | ForEach-Object { $_[1] } | Sort-Object -Unique).Count -eq 1
 $fit = $null
-if ($points.Count -ge 4) { $fit = Get-GompertzFit @($points.Values | ForEach-Object { $_[0] }) @($points.Values | ForEach-Object { $_[1] }) }
+if ($points.Count -ge 4 -and -not $flat) { $fit = Get-GompertzFit @($points.Values | ForEach-Object { $_[0] }) @($points.Values | ForEach-Object { $_[1] }) }
 $totalFound = $bugs.Count
-$growth = [pscustomobject]@{ Axis = $axisName; Points = $points.Count; Potential = $null; Rate = $null; Remaining = $null; RSquared = $null; Judgement = ''; Recent = $null; Before = $null }
+# 曲線に入るのは起票日のあるバグだけなので、潜在バグ数とは起票日のあるバグの数で比べる（起票日の無いバグは、判定に添えて知らせる）
+$datedFound = @($bugs | Where-Object { $_.Found }).Count
+$growth = [pscustomobject]@{ Axis = $axisName; Points = $points.Count; Potential = $null; Rate = $null; Remaining = $null; RSquared = $null; Judgement = ''; Note = ''; Recent = $null; Before = $null }
 if (-not $BugList) { $growth.Judgement = '' }
+elseif ($flat) { $growth.Judgement = '収束している（バグの累計が最初の時点から増えていません）' }
 elseif (-not $fit) { $growth.Judgement = '判定できません（起票日のあるバグが少ないため、曲線を当てはめられません）' }
-elseif ($fit.AtLowerBound -or $fit.K -gt $totalFound * 10) {
+elseif ($fit.AtLowerBound -or $fit.K -gt $datedFound * 10) {
     $growth.Judgement = '収束していない（バグがまだ増え続けており、上限を推定できません）'
     $growth.RSquared = [math]::Round($fit.RSquared, 3)
 }
 else {
     $growth.Potential = [math]::Round($fit.K, 1)
-    $growth.Rate = [math]::Round($totalFound / $fit.K, 3)
-    $growth.Remaining = [math]::Round([math]::Max(0.0, $fit.K - $totalFound), 1)
+    $growth.Rate = [math]::Round($datedFound / $fit.K, 3)
+    $growth.Remaining = [math]::Round([math]::Max(0.0, $fit.K - $datedFound), 1)
     $growth.RSquared = [math]::Round($fit.RSquared, 3)
     if ($growth.Rate -ge $ConvergenceRate) { $growth.Judgement = '収束している' }
     else { $growth.Judgement = '収束していない' }
@@ -409,6 +425,7 @@ if ($countedCases.Count -gt 0) { $progressAll = @($countedCases | Where-Object {
 if ($BugList -and ($totalFound -lt $MinBugs -or $progressAll -lt $MinProgress)) {
     $growth.Judgement = 'まだ判定できない（バグ {0} 件・消化率 {1:0}%。バグ {2} 件以上・消化率 {3:0}% 以上で判定します）' -f $totalFound, ($progressAll * 100), $MinBugs, ($MinProgress * 100)
 }
+if ($BugList -and $datedFound -lt $totalFound) { $growth.Note = '。起票日の無いバグ {0} 件は曲線に入れていません' -f ($totalFound - $datedFound) }
 # 直近の新規バグ（曲線とは別に、増え方が落ち着いてきたかを見る）
 if ($BugList) {
     $recentFrom = $AsOf.AddDays(-$RecentDays)
@@ -430,7 +447,7 @@ $bugListHasId = $bugById.Count -gt 0
 foreach ($c in $countedCases) {
     if ($c.Kind -eq 'NG' -and $c.HasBugColumn -and $c.BugIds.Count -eq 0) { Add-Issue 'NG なのにバグ番号が無い' $c '結果が NG のケースに、バグ（障害）の番号を書いてください' }
     foreach ($id in $c.BugIds) {
-        if ($bugListHasId -and -not $bugById.ContainsKey($id)) { Add-Issue '障害管理表に無いバグ番号' $c ("バグ番号 {0} が障害管理表にありません" -f $id) }
+        if ($bugListHasId -and -not $bugById.ContainsKey($id) -and -not $excludedIds.Contains($id)) { Add-Issue '障害管理表に無いバグ番号' $c ("バグ番号 {0} が障害管理表にありません" -f $id) }
         elseif ($c.Kind -eq 'NG' -and $bugById.ContainsKey($id) -and $bugById[$id].Closed) { Add-Issue '再テストの結果が無い' $c ("バグ {0} は完了していますが、ケースの結果が NG のままです（再テストの結果を書いてください）" -f $id) }
     }
     if (($c.Kind -eq 'OK' -or $c.Kind -eq 'NG') -and $c.HasDoneColumn -and -not $c.Done) { Add-Issue '実施日が無い' $c '結果がありますが、実施日がありません' }
@@ -464,7 +481,7 @@ if ($OutXlsx) {
             & $add '残りのバグ（推定）' ([double]$growth.Remaining)
         }
         if ($null -ne $growth.RSquared) { & $add '当てはまり（決定係数）' ([double]$growth.RSquared) }
-        & $add '収束の判定' ('{0}（基準: 収束率 {1}）' -f $growth.Judgement, $ConvergenceRate)
+        & $add '収束の判定' ('{0}（基準: 収束率 {1}）{2}' -f $growth.Judgement, $ConvergenceRate, $growth.Note)
         & $add ('直近 {0} 日の新規バグ' -f $RecentDays) ([double]$growth.Recent)
         & $add ('その前の {0} 日の新規バグ' -f $RecentDays) ([double]$growth.Before)
     }
@@ -539,9 +556,9 @@ Write-Host ('テストケース {0} 件（実施 {1}・OK {2}・NG {3}・保留 
 if ($BugList) {
     Write-Host ('バグ {0} 件（未完了 {1} 件。取下げなどで数えなかったもの {2} 件）' -f $bugs.Count, @($bugs | Where-Object { -not $_.Closed }).Count, $excludedBugs)
     if ($null -ne $growth.Potential) {
-        Write-Host ('信頼度成長曲線（横軸: {0}）: 潜在バグ数 {1} 件（推定）・収束率 {2:0.0}% → {3}（基準 {4:0}%）' -f $growth.Axis, $growth.Potential, ($growth.Rate * 100), $growth.Judgement, ($ConvergenceRate * 100))
+        Write-Host ('信頼度成長曲線（横軸: {0}）: 潜在バグ数 {1} 件（推定）・収束率 {2:0.0}% → {3}（基準 {4:0}%）{5}' -f $growth.Axis, $growth.Potential, ($growth.Rate * 100), $growth.Judgement, ($ConvergenceRate * 100), $growth.Note)
     }
-    else { Write-Host ('信頼度成長曲線: {0}' -f $growth.Judgement) }
+    else { Write-Host ('信頼度成長曲線: {0}{1}' -f $growth.Judgement, $growth.Note) }
     Write-Host ('直近 {0} 日の新規バグ: {1} 件（その前の {0} 日: {2} 件）' -f $RecentDays, $growth.Recent, $growth.Before)
 }
 $zoned = @($results | Where-Object { $_.Zone })
@@ -588,7 +605,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     機能の対応表の CSV（機能・別名・設計書。| で区切って複数書ける）。テスト仕様書・障害管理表・規模・設計書で機能の書き方が違うときにそろえる。
 #
 # .PARAMETER Limits
-#     基準値の CSV（指標・分母・工程・下限・上限）。指標は「テスト密度」か「バグ密度」。既定は tools\test-quality\基準値_サンプル.csv（数値は例です）。
+#     基準値の CSV（指標・分母・工程・下限・上限）。指標は「テスト密度」か「バグ密度」（ほかの指標の行は読みません）。既定は tools\test-quality\基準値_サンプル.csv（数値は例です）。
 #
 # .PARAMETER Headers
 #     テスト仕様書・障害管理表の見出しの候補の CSV（項目と、見出しの候補）。既定は tools\test-quality\見出し.csv。
@@ -628,3 +645,4 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに ExcelTools.psm1・Search-Excel.ps1（-DesignPath では Measure-DesignSize.ps1 も）が必要です。
 #     基準値のサンプルの数値は例です。社内の実績・標準値に合わせて直してください。
 #     信頼度成長曲線は推定です。バグの起票日が少ない時期や、テストの途中で大きく増え続けている時期は、判定できないことがあります。
+#     起票日の無いバグは曲線に入れず、収束率・残りのバグも起票日のあるバグの数で出します。

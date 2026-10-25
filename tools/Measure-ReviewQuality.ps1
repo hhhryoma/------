@@ -68,13 +68,17 @@ $logFields = @('設計書', '工数', '時間', '人数', '参加者')
 foreach ($f in ($fields + $logFields)) { if (-not $candidates.ContainsKey($f)) { $candidates[$f] = @() } }
 if ($candidates['指摘内容'].Count -eq 0) { throw "指摘管理表の見出しに「指摘内容」の行がありません: $Headers" }
 
-# 基準値。「指標」の列が無い CSV（以前の形）は、すべて指摘密度の基準値とみなす
+# 基準値。指標は「指摘密度」「レビュー工数密度」。指標が空の行と、「指標」の列が無い CSV（以前の形）は、指摘密度の基準値とみなす。
+# New-QualityLimits.ps1 の CSV にあるテスト密度・バグ密度など、ほかの指標の行は読まない（分母が同じ名前でも、ほかの指標の基準値で判定しないように）
 $limitRows = New-Object System.Collections.Generic.List[object]
 foreach ($r in (Read-CsvFile $Limits @('分母', '下限', '上限') '基準値')) {
     $unit = ([string]$r.'分母').Trim()
     if (-not $unit) { continue }
-    $metric = 'Findings'
-    if ($r.PSObject.Properties['指標'] -and ([string]$r.'指標') -match '工数') { $metric = 'Effort' }
+    $metricText = ''
+    if ($r.PSObject.Properties['指標']) { $metricText = ([string]$r.'指標').Trim() }
+    if ($metricText -match '工数') { $metric = 'Effort' }
+    elseif (-not $metricText -or $metricText -match '指摘') { $metric = 'Findings' }
+    else { continue }
     $process = ''
     if ($r.PSObject.Properties['工程']) { $process = ([string]$r.'工程').Trim() }
     $low = $null; $high = $null
@@ -91,43 +95,32 @@ function ConvertTo-DocKey {
     return (ConvertTo-Label $n).ToUpperInvariant()
 }
 
-function ConvertTo-Date {
-    #     日付の文字（2026/10/1・2026-10-01・2026年10月1日・10/1）を日付にする（無ければ $null）
-    param([string] $Text)
-    $t = ([string]$Text).Normalize($nfkc).Trim()
-    if (-not $t) { return $null }
-    $m = [regex]::Match($t, '(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})')
-    try {
-        if ($m.Success) { return New-Object DateTime ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value), ([int]$m.Groups[3].Value) }
-        $m = [regex]::Match($t, '^(\d{1,2})\s*[/月]\s*(\d{1,2})日?$')
-        if ($m.Success) { return New-Object DateTime $AsOf.Year, ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value) }
-    }
-    catch { }
-    return $null
-}
-
 # ---------------------------------------------------------------- 指摘管理表を読む
 
 
 $findings = New-Object System.Collections.Generic.List[object]
 $excluded = 0
+$lastDoc = @{}   # 表ごとの上の行の設計書
 
 function Add-Finding {
-    param([hashtable] $Values, $Place)
+    #     指摘を 1 件足す。Table: 表（ファイル・シート・見出しの行）。日付は、年の無い日付・和暦・曜日つきも読む（ConvertTo-DateValue）
+    param([hashtable] $Values, $Place, [string] $Table)
     if (-not ([string]$Values['指摘内容']).Trim()) { return }
+    # 設計書はグループの最初の行だけに書くことがある（縦に結合したセルも左上だけに値がある）ので、空なら同じ表の上の行の設計書
+    $doc = ([string]$Values['設計書']).Trim()
+    if ($doc) { $lastDoc[$Table] = $doc } elseif ($lastDoc.ContainsKey($Table)) { $doc = $lastDoc[$Table] }
     $status = ([string]$Values['状態']).Trim()
     $required = ([string]$Values['対応要否']).Trim()
     if ($status -match $excludedPattern) { $script:excluded++; return }
-    $closedOn = ConvertTo-Date $Values['完了日']
+    $closedOn = ConvertTo-DateValue $Values['完了日'] $AsOf
     $closed = (Test-ClosedStatus $status $closedPattern) -or ($required -match '^(不要|否|×|-)$') -or ((-not $status) -and $closedOn)
-    $due = ConvertTo-Date $Values['期限']
-    $doc = ([string]$Values['設計書']).Trim()
+    $due = ConvertTo-DateValue $Values['期限'] $AsOf
     if (-not $doc) { $doc = '（設計書なし）' }
     $findings.Add([pscustomobject]@{
         Document = $doc; Key = (ConvertTo-DocKey $doc); Content = ([string]$Values['指摘内容']).Trim()
         Category = ([string]$Values['分類']).Trim(); Severity = ([string]$Values['重要度']).Trim(); Status = $status
         Owner = ([string]$Values['対応者']).Trim(); Process = ([string]$Values['工程']).Trim()
-        Opened = (ConvertTo-Date $Values['起票日']); Due = $due; ClosedOn = $closedOn; Closed = [bool]$closed
+        Opened = (ConvertTo-DateValue $Values['起票日'] $AsOf); Due = $due; ClosedOn = $closedOn; Closed = [bool]$closed
         Overdue = ((-not $closed) -and $due -and $due -lt $AsOf); Place = $Place
     })
 }
@@ -161,7 +154,10 @@ if ($excelFiles.Count -gt 0) {
     if ($NoExcel) { $searchArgs['NoExcel'] = $true }
     $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
     $books = ConvertTo-DesignBooks $hits
+    $ownResults = New-Object System.Collections.Generic.List[string]
     foreach ($book in $books.Values) {
+        # 前に -OutXlsx で保存したこのツールの結果（設計書別・未完了・読み取り結果のシートがあるブック）は読まない（設計書別・未完了のシートを指摘に数えてしまう）
+        if ($book.Sheets.Contains('設計書別') -and $book.Sheets.Contains('未完了') -and $book.Sheets.Contains('読み取り結果')) { $ownResults.Add($book.File); continue }
         $tableFound = $false
         foreach ($sheetName in $book.Sheets.Keys) {
             $grid = $book.Sheets[$sheetName]
@@ -181,12 +177,13 @@ if ($excelFiles.Count -gt 0) {
                     $v = @{}
                     foreach ($f in $map.Keys) { $v[$f] = [string]$dr.Cells[$t.ColumnOf[$map[$f]]] }
                     $col = $t.ColumnOf[$map['指摘内容']]
-                    Add-Finding $v ([pscustomobject]@{ File = $book.File; Path = $book.Path; Sheet = $sheetName; Cell = ('{0}{1}' -f (ConvertTo-ColumnName $col), $dr.Row) })
+                    Add-Finding $v ([pscustomobject]@{ File = $book.File; Path = $book.Path; Sheet = $sheetName; Cell = ('{0}{1}' -f (ConvertTo-ColumnName $col), $dr.Row) }) ('{0}|{1}|{2}' -f $book.Path, $sheetName, $t.HeaderRow)
                 }
             }
         }
         if (-not $tableFound) { Add-ReadLog $readLog '指摘管理表' $book.File '' $null 0 $null $fields '表が見つかりません（必要な見出しの行がありません）' }
     }
+    if ($ownResults.Count -gt 0) { Write-Warning ('このツールの結果のブック（設計書別・未完了・読み取り結果のシートがあるもの）は、指摘管理表として読みません: {0}' -f ($ownResults -join '・')) }
 }
 foreach ($c in $csvFiles) {
     $rows = Read-InputCsv $c.FullName '指摘管理表' $readLog $fields
@@ -207,7 +204,7 @@ foreach ($c in $csvFiles) {
         $line++
         $v = @{}
         foreach ($f in $map.Keys) { $v[$f] = [string]$r.($map[$f]) }
-        Add-Finding $v ([pscustomobject]@{ File = $c.Name; Path = $c.FullName; Sheet = ''; Cell = ('{0} 行目' -f $line) })
+        Add-Finding $v ([pscustomobject]@{ File = $c.Name; Path = $c.FullName; Sheet = ''; Cell = ('{0} 行目' -f $line) }) $c.FullName
     }
 }
 
@@ -217,7 +214,7 @@ foreach ($c in $csvFiles) {
 $efforts = New-Object System.Collections.Generic.List[object]
 
 function ConvertTo-Hours {
-    #     時間の文字（1.5・1.5h・2時間・90分・1時間30分・3人時・1:30・10:00～11:30）を時間の数にする。読めなければ $null。
+    #     時間の文字（1.5・1.5h・2時間・90分・1時間30分・1時間半・3人時・1:30・10:00～11:30）を時間の数にする。読めなければ $null。
     #     時刻の書式のセルは Search-Excel が「01:30:00」の形で返すので、秒も読む
     #     Minutes: 数字だけのときに分とみなす（見出しが「レビュー時間(分)」など）
     param([string] $Text, [bool] $Minutes)
@@ -235,11 +232,12 @@ function ConvertTo-Hours {
         if ($m.Groups[3].Success) { $hours += [int]$m.Groups[3].Value / 3600.0 }
         return $hours
     }
-    $m = [regex]::Match($t, '^(?:(\d+(?:\.\d+)?)\s*(?:人時|時間|hrs|hr|h))?\s*(?:(\d+(?:\.\d+)?)\s*分)?$', 'IgnoreCase')
-    if ($m.Success -and ($m.Groups[1].Success -or $m.Groups[2].Success)) {
+    $m = [regex]::Match($t, '^(?:(\d+(?:\.\d+)?)\s*(?:人時|時間|hrs|hr|h)(半)?)?\s*(?:(\d+(?:\.\d+)?)\s*分)?$', 'IgnoreCase')
+    if ($m.Success -and ($m.Groups[1].Success -or $m.Groups[3].Success)) {
         $hours = 0.0
         if ($m.Groups[1].Success) { $hours += [double]::Parse($m.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture) }
-        if ($m.Groups[2].Success) { $hours += [double]::Parse($m.Groups[2].Value, [System.Globalization.CultureInfo]::InvariantCulture) / 60 }
+        if ($m.Groups[2].Success) { $hours += 0.5 }
+        if ($m.Groups[3].Success) { $hours += [double]::Parse($m.Groups[3].Value, [System.Globalization.CultureInfo]::InvariantCulture) / 60 }
         return $hours
     }
     $n = 0.0
@@ -260,25 +258,38 @@ function Get-PersonCount {
     return @($t -split '[、,/・;\r\n↵]+' | Where-Object { $_.Trim() }).Count
 }
 
+$lastLogDoc = @{}   # 表ごとの上の行の設計書
+$skippedLogs = New-Object System.Collections.Generic.List[string]   # 数えなかった行（場所と値）
+
 function Add-Effort {
-    #     レビュー 1 回分の工数（人時）を足す。工数が無ければ、時間 × 人数（参加者の数）
-    param([hashtable] $Values, [hashtable] $Labels, $Place)
+    #     レビュー 1 回分の工数（人時）を足す。工数が無ければ、時間 × 人数（参加者の数）。設計書が空なら、同じ表（Table）の上の行の設計書。
+    #     工数・時間が書いてあるのに読めない行と、設計書の無い行は、数えずに skippedLogs に足す（工数・時間が空の行は、レビューの記録ではないので足さない）
+    param([hashtable] $Values, [hashtable] $Labels, $Place, [string] $Table)
     $doc = ([string]$Values['設計書']).Trim()
-    if (-not $doc) { return }
+    if ($doc) { $lastLogDoc[$Table] = $doc } elseif ($lastLogDoc.ContainsKey($Table)) { $doc = $lastLogDoc[$Table] }
+    $where = ('{0} {1}' -f $Place.File, $Place.Sheet).Trim()
+    if ($Place.Row) { $where += (' {0} 行目' -f $Place.Row) }
     $hours = ConvertTo-Hours $Values['工数'] ($Labels['工数'] -match '分')
     if ($null -eq $hours) {
         $time = ConvertTo-Hours $Values['時間'] ($Labels['時間'] -match '分')
-        if ($null -eq $time) { return }
+        if ($null -eq $time) {
+            $text = @(@($Values['工数'], $Values['時間']) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+            if ($text.Count -gt 0) { $skippedLogs.Add(('{0}「{1}」' -f $where, ($text -join '・'))) }
+            return
+        }
         $persons = 0
         if (([string]$Values['人数']).Trim()) { $persons = Get-PersonCount $Values['人数'] }
         if ($persons -eq 0) { $persons = Get-PersonCount $Values['参加者'] }
         if ($persons -eq 0) { $persons = 1 }
         $hours = $time * $persons
     }
+    if (-not $doc) { $skippedLogs.Add(('{0}（設計書が無い）' -f $where)); return }
     $efforts.Add([pscustomobject]@{ Document = $doc; Key = (ConvertTo-DocKey $doc); Hours = [double]$hours; Place = $Place })
 }
 
 if ($ReviewLog) {
+    # 記録票の見出し（参加者の右に並べた名前は、次の見出しの前まで）
+    $logHeadings = @($logFields | ForEach-Object { $candidates[$_] })
     $logExcel = New-Object System.Collections.Generic.List[string]
     $logCsv = New-Object System.Collections.Generic.List[object]
     foreach ($p in $ReviewLog) {
@@ -312,12 +323,21 @@ if ($ReviewLog) {
                 }
                 if ($map) {
                     $logFound = $true
-                    foreach ($t in (Find-DesignTables $grid @($map.Values) $map['設計書'])) {
-                        Add-ReadLog $readLog 'レビュー記録' $book.File $sheetName $t.HeaderRow $t.Rows.Count $map $logFields ''
-                        foreach ($dr in $t.Rows) {
+                    # 設計書はグループの最初の行だけに書くことがあるので、設計書か工数・時間のどれかに値のある行を読む。
+                    # 表の見つけ方は同じなので、どの列で読んだ表も同じ順に並ぶ
+                    $keyTables = @(@('設計書', '工数', '時間') | Where-Object { $map[$_] } | ForEach-Object { , (Find-DesignTables $grid @($map.Values) $map[$_]) })
+                    for ($ti = 0; $ti -lt $keyTables[0].Count; $ti++) {
+                        $t = $keyTables[0][$ti]
+                        $rowOf = @{}
+                        foreach ($keyed in $keyTables) { foreach ($dr in $keyed[$ti].Rows) { $rowOf[$dr.Row] = $dr } }
+                        $rowNumbers = [int[]]@($rowOf.Keys)
+                        [Array]::Sort($rowNumbers)
+                        Add-ReadLog $readLog 'レビュー記録' $book.File $sheetName $t.HeaderRow $rowNumbers.Count $map $logFields ''
+                        foreach ($rn in $rowNumbers) {
+                            $dr = $rowOf[$rn]
                             $v = @{}
                             foreach ($f in $map.Keys) { $v[$f] = [string]$dr.Cells[$t.ColumnOf[$map[$f]]] }
-                            Add-Effort $v $map ([pscustomobject]@{ File = $book.File; Sheet = $sheetName; Row = $dr.Row })
+                            Add-Effort $v $map ([pscustomobject]@{ File = $book.File; Sheet = $sheetName; Row = $dr.Row }) ('{0}|{1}|{2}' -f $book.Path, $sheetName, $t.HeaderRow)
                         }
                     }
                     continue
@@ -329,8 +349,16 @@ if ($ReviewLog) {
                         $cell = Find-LabelCell $grid $cand
                         if (-not ($cell -and $cell.Value)) { continue }
                         $v[$f] = $cell.Value
-                        # 参加者は、右に 1 人ずつ並べて書くことがある
-                        if ($f -eq '参加者') { $v[$f] = (@($grid.Cols[$cell.Row] | Where-Object { $_ -ge $cell.Col } | ForEach-Object { $grid.Cells[$cell.Row][$_] }) -join '、') }
+                        # 参加者は、右に 1 人ずつ並べて書くことがある。同じ行の右にある見出し（欠席者・場所・レビュー時間など）の前までを読む
+                        if ($f -eq '参加者') {
+                            $names = New-Object System.Collections.Generic.List[string]
+                            foreach ($col in @($grid.Cols[$cell.Row] | Where-Object { $_ -ge $cell.Col })) {
+                                $label = $grid.Labels[$cell.Row][$col]
+                                if ($logHeadings -contains $label -or $label -match '欠席|場所') { break }
+                                $names.Add($grid.Cells[$cell.Row][$col])
+                            }
+                            $v[$f] = $names -join '、'
+                        }
                         $found[$f] = $cand
                         break
                     }
@@ -338,7 +366,7 @@ if ($ReviewLog) {
                 if ($v['設計書'] -and ($v['工数'] -or $v['時間'])) {
                     $logFound = $true
                     Add-ReadLog $readLog 'レビュー記録' $book.File $sheetName $null 1 $found $logFields '記録票の形（見出しの右の値）'
-                    Add-Effort $v $found ([pscustomobject]@{ File = $book.File; Sheet = $sheetName; Row = 0 })
+                    Add-Effort $v $found ([pscustomobject]@{ File = $book.File; Sheet = $sheetName; Row = 0 }) ('{0}|{1}' -f $book.Path, $sheetName)
                 }
             }
             if (-not $logFound) { Add-ReadLog $readLog 'レビュー記録' $book.File '' $null 0 $null $logFields '表・記録票が見つかりません（設計書と、工数か時間の見出しがありません）' }
@@ -363,8 +391,13 @@ if ($ReviewLog) {
             $line++
             $v = @{}
             foreach ($f in $map.Keys) { $v[$f] = [string]$r.($map[$f]) }
-            Add-Effort $v $labels ([pscustomobject]@{ File = $c.Name; Sheet = ''; Row = $line })
+            Add-Effort $v $labels ([pscustomobject]@{ File = $c.Name; Sheet = ''; Row = $line }) $c.FullName
         }
+    }
+    if ($skippedLogs.Count -gt 0) {
+        $examples = @($skippedLogs | Select-Object -First 3) -join '、'
+        if ($skippedLogs.Count -gt 3) { $examples += ' など' }
+        Write-Warning ('レビュー記録の {0} 行は、工数・時間か設計書を読めないため数えていません: {1}' -f $skippedLogs.Count, $examples)
     }
     if ($efforts.Count -eq 0) { Write-Warning 'レビュー記録から工数を読めませんでした（設計書と、工数か時間の見出しを確かめてください）' }
 }
@@ -381,7 +414,8 @@ if ($SizeCsv) {
         $sizeCol = @($names | Where-Object { (ConvertTo-Label $_) -match '^(ページ数|規模|サイズ|件数|ページ)$' })[0]
         if (-not $nameCol -or -not $sizeCol) { throw "規模の CSV には、ファイル（設計書）の列と、ページ数（規模）の列が必要です: $SizeCsv" }
         foreach ($r in $rows) {
-            if ($r.PSObject.Properties['結果'] -and ([string]$r.'結果').Trim() -and ([string]$r.'結果').Trim() -ne '成功') { continue }
+            # Export-ExcelToPdf.ps1 -LogPath の CSV は、失敗した行を使わない（-SkipExisting で「スキップ」した行にも、既存の PDF のページ数がある）
+            if ($r.PSObject.Properties['結果'] -and ([string]$r.'結果').Trim() -eq '失敗') { continue }
             $n = 0.0
             if (-not [double]::TryParse(([string]$r.$sizeCol).Trim(), [ref]$n)) { continue }
             $k = ConvertTo-DocKey $r.$nameCol
@@ -507,13 +541,15 @@ $results = @($results | Sort-Object @{ e = { $_.Findings }; Descending = $true }
 if ($ReviewLog) { Update-TypeData -TypeName 'ReviewQuality.Document' -DefaultDisplayPropertySet Document, Findings, Open, Density, Effort, EffortDensity, Zone -Force -WhatIf:$false }
 $results
 
-# 日ごとの起票・完了（収束の確認）
+# 日ごとの起票・完了（収束の確認）。未完了の残りが合うよう、起票日のある指摘だけを数え、完了は完了した指摘の完了日だけ数える
+# （差し戻しなどで未完了に戻った指摘に残っている完了日は数えない）
 $trend = New-Object System.Collections.Generic.List[object]
-$dates = @($findings | ForEach-Object { $_.Opened; $_.ClosedOn } | Where-Object { $_ } | Sort-Object -Unique)
+$dated = @($findings | Where-Object { $_.Opened })
+$dates = @($dated | ForEach-Object { $_.Opened; if ($_.Closed) { $_.ClosedOn } } | Where-Object { $_ } | Sort-Object -Unique)
 $cumOpen = 0; $cumClosed = 0
 foreach ($day in $dates) {
-    $o = @($findings | Where-Object { $_.Opened -eq $day }).Count
-    $c = @($findings | Where-Object { $_.ClosedOn -eq $day }).Count
+    $o = @($dated | Where-Object { $_.Opened -eq $day }).Count
+    $c = @($dated | Where-Object { $_.Closed -and $_.ClosedOn -eq $day }).Count
     $cumOpen += $o; $cumClosed += $c
     $trend.Add([pscustomobject]@{ Date = $day; Opened = $o; Closed = $c; TotalOpened = $cumOpen; TotalClosed = $cumClosed; Remaining = $cumOpen - $cumClosed })
 }
@@ -653,6 +689,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER Path
 #     指摘管理表のファイルまたはフォルダ（Excel・CSV。複数可・ワイルドカード可）。既定はカレントフォルダ。
+#     前に -OutXlsx で保存したこのツールの結果のブック（設計書別・未完了・読み取り結果のシートがあるもの）は読みません。
 #
 # .PARAMETER DesignPath
 #     設計書のフォルダ・ファイル。Measure-DesignSize.ps1 で数えた規模（項目数・カラム数など）を指摘密度の分母にします。
@@ -663,10 +700,11 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .PARAMETER ReviewLog
 #     レビュー記録のファイルまたはフォルダ（Excel・CSV。複数可）。1 行 1 回のレビューの表（対象成果物・レビュー時間・参加者など）か、
 #     1 シート 1 回の記録票（「対象成果物」「レビュー時間」などの見出しの右に値）を読みます。工数の列があれば工数を、
-#     無ければ時間 × 人数（参加者の数）をレビュー工数（人時）にします。時間は 1.5・1.5h・90分・1時間30分・10:00～11:30 などを読めます。
+#     無ければ時間 × 人数（参加者の数）をレビュー工数（人時）にします。時間は 1.5・1.5h・90分・1時間30分・1時間半・10:00～11:30 などを読めます。
+#     設計書が空の行は、同じ表の上の行の設計書とみなします。読めない工数・時間の行は数えずに知らせます。
 #
 # .PARAMETER Limits
-#     基準値の CSV（指標・分母・工程・下限・上限）。指標は「指摘密度」か「レビュー工数密度」（指標の列が無ければすべて指摘密度）。
+#     基準値の CSV（指標・分母・工程・下限・上限）。指標は「指摘密度」か「レビュー工数密度」（指標の列が無いか空なら指摘密度。ほかの指標の行は読みません）。
 #     既定は tools\review-quality\基準値_サンプル.csv（数値は例です）。
 #
 # .PARAMETER Headers
