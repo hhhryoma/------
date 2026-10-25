@@ -305,6 +305,26 @@ Test-Case 'Search-Excel: -IncludeWord で Word の段落・表の行・テキス
     Assert-True (@($links | Where-Object { $_.Location -or $_.Target -notlike '*基本設計書.docx' }).Count -eq 0) ($links | Out-String)
 }
 
+Test-Case 'Search-Excel: 経過時間の表示形式（[h]:mm・[h]:mm:ss など）のセルは、Excel の表示と同じ 7:30・31:15 の形で検索される（時刻の書式は 07:30:00 のまま）' {
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $path = Join-Path (New-TestDir) '工数.xlsx'
+    $rows = @(@('[h]:mm', 0.3125), @('[h]:mm', (31.25 / 24)), @('[h]:mm:ss（組み込み）', (31.25 / 24)), @('[mm]:ss', 0.3125), @('[h]"時間"mm"分"', 0.3125), @('h:mm（時刻）', 0.3125), @('数値', 0.3125))
+    Export-Workbook -FilePath $path -Sheets @(@{ Name = '工数'; Columns = @(@{ Header = '書式'; Width = 16 }, @{ Header = '値'; Width = 8 }); Rows = @($rows | ForEach-Object { @{ Values = $_ } }) })
+    # B2・B3 は [h]:mm、B4 は組み込みの [h]:mm:ss（46）、B5 は [mm]:ss、B6 は [h]"時間"mm"分"、B7 は時刻の h:mm（組み込みの 20）にする
+    Edit-ZipText $path 'xl/styles.xml' {
+        param($x)
+        $x = $x.Replace('</numFmts>', '<numFmt numFmtId="177" formatCode="[h]:mm"/><numFmt numFmtId="178" formatCode="[mm]:ss"/><numFmt numFmtId="179" formatCode="[h]&quot;時間&quot;mm&quot;分&quot;"/></numFmts>')
+        $x.Replace('<cellXfs count="5">', '<cellXfs count="10">').Replace('</cellXfs>', ((@(177, 46, 178, 179, 20) | ForEach-Object { '<xf numFmtId="{0}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' -f $_ }) -join '') + '</cellXfs>')
+    }
+    Edit-ZipText $path 'xl/worksheets/sheet1.xml' {
+        param($x)
+        foreach ($p in @(@('B2', 5), @('B3', 5), @('B4', 6), @('B5', 7), @('B6', 8), @('B7', 9))) { $x = $x.Replace(('<c r="{0}" s="2">' -f $p[0]), ('<c r="{0}" s="{1}">' -f $p[0], $p[1])) }
+        $x
+    }
+    $hits = Invoke-Search -Pattern '\S' -Path $path -Target Value
+    Assert-Equal @('7:30', '31:15', '31:15:00', '450:00', '7時間30分', '07:30:00', '0.3125') @(2..8 | ForEach-Object { $c = 'B' + $_; @($hits | Where-Object { $_.Cell -eq $c })[0].Text }) '経過時間は 24 時間を超えても時間で数える。時刻・数値の書式はこれまでどおり'
+}
+
 Test-Case 'Search-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $SearchExcel
     Assert-Match $h.Synopsis 'grep'

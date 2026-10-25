@@ -47,8 +47,8 @@ $msoAutomationSecurityForceDisable = 3
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
 $nfkc      = [System.Text.NormalizationForm]::FormKC
 
-# 組み込みの表示形式のうち日付・時刻のもの（27〜36, 50〜58 は日本語ロケールの和暦・年月日）
-$builtinDateFormatIds = @(14..22) + @(27..36) + @(45..47) + @(50..58)
+# 組み込みの表示形式のうち日付・時刻のもの（27〜36, 50〜58 は日本語ロケールの和暦・年月日）。46 は経過時間の [h]:mm:ss
+$builtinDateFormatIds = @(14..22) + @(27..36) + @(45, 47) + @(50..58)
 
 $wantValue     = $Target -contains 'Value'
 $wantFormula   = $Target -contains 'Formula'
@@ -191,6 +191,35 @@ function Format-ExcelDate {
     }
 }
 
+function Format-ExcelElapsed {
+    #     シリアル値を、経過時間の表示形式（[h]:mm・[h]:mm:ss・[mm]:ss など）で Excel が表示する形にする（7:30・31:15。秒に丸める）。
+    #     [h]・[m]・[s] は 24 時間・60 分を超えても数え、括弧の無い h・m・s は 1 日・1 時間・1 分の中の時・分・秒。
+    #     "..." と \x の文字はそのまま書き、ほかの [...]（色など）と _x・*x は書かない
+    param([double] $Serial, [string] $Code)
+
+    $seconds = [long][math]::Round([math]::Abs($Serial) * 86400)
+    $sb = New-Object System.Text.StringBuilder
+    if ($Serial -lt 0 -and $seconds -gt 0) { [void]$sb.Append('-') }
+    foreach ($m in [regex]::Matches($Code.Split(';')[0], '"[^"]*"|\\.|[_*].|\[[^\]]*\]|h+|m+|s+|.', 'IgnoreCase')) {
+        $t = $m.Value
+        $unit = [regex]::Match($t, '^(\[)?(h+|m+|s+)\]?$', 'IgnoreCase')
+        if ($unit.Success) {
+            $letters = $unit.Groups[2].Value
+            switch ($letters.Substring(0, 1).ToLowerInvariant()) {
+                'h' { $n = [math]::Floor($seconds / 3600); $within = 24 }
+                'm' { $n = [math]::Floor($seconds / 60); $within = 60 }
+                default { $n = $seconds; $within = 60 }
+            }
+            if (-not $unit.Groups[1].Success) { $n = $n % $within }
+            [void]$sb.Append(([long]$n).ToString('D' + $letters.Length, $invariant))
+        }
+        elseif ($t.StartsWith('"')) { [void]$sb.Append($t.Substring(1, $t.Length - 2)) }
+        elseif ($t.StartsWith('\')) { [void]$sb.Append($t.Substring(1)) }
+        elseif (-not ($t.StartsWith('[') -or $t.StartsWith('_') -or $t.StartsWith('*'))) { [void]$sb.Append($t) }
+    }
+    return $sb.ToString()
+}
+
 function Test-DateFormatCode {
     #     ユーザー定義の表示形式が日付・時刻か判定する。
     #     文字列リテラル（"..."）・エスケープ（\x）・[色] や [$-411] などの [...] を除いてから
@@ -311,10 +340,11 @@ function Read-SharedStrings {
 }
 
 function Read-DateStyles {
-    #     styles.xml の cellXfs を読み、スタイル番号ごとに日付書式かどうかを返す
+    #     styles.xml の cellXfs を読み、スタイル番号ごとに、日付・時刻の書式なら $true、経過時間の書式（[h]:mm など）なら書式の文字、
+    #     ほかは $false を返す
     param($Package, [string] $PartName)
 
-    $result = New-Object System.Collections.Generic.List[bool]
+    $result = New-Object System.Collections.Generic.List[object]
     if (-not $PartName) { return ,$result }
 
     $doc = Read-PartXml -Package $Package -PartName $PartName
@@ -322,13 +352,16 @@ function Read-DateStyles {
 
     $customDate = @{}
     foreach ($nf in $doc.SelectNodes("//*[local-name()='numFmts']/*[local-name()='numFmt']")) {
-        $customDate[[int]$nf.GetAttribute('numFmtId')] = Test-DateFormatCode $nf.GetAttribute('formatCode')
+        $code = $nf.GetAttribute('formatCode')
+        if ($code -match '\[(h+|m+|s+)\]') { $customDate[[int]$nf.GetAttribute('numFmtId')] = $code }
+        else { $customDate[[int]$nf.GetAttribute('numFmtId')] = Test-DateFormatCode $code }
     }
 
     foreach ($xf in $doc.SelectNodes("//*[local-name()='cellXfs']/*[local-name()='xf']")) {
         $id = 0
         [void][int]::TryParse($xf.GetAttribute('numFmtId'), [ref]$id)
         if ($customDate.ContainsKey($id)) { $result.Add($customDate[$id]) }
+        elseif ($id -eq 46) { $result.Add('[h]:mm:ss') }
         else { $result.Add($builtinDateFormatIds -contains $id) }
     }
     return ,$result
@@ -482,7 +515,11 @@ function Search-WorksheetCells {
                     elseif ($type -eq 'str' -or $type -eq 'e' -or $type -eq 'd') { $text = ConvertFrom-OoxmlEscape $value }
                     elseif ($value) {
                         if ([double]::TryParse($value, $numStyle, $invariant, [ref]$num)) {
-                            if ($style -lt $dateCount -and $DateStyles[$style]) { $text = Format-ExcelDate -Serial $num -Date1904 $Date1904 }
+                            if ($style -lt $dateCount -and $DateStyles[$style]) {
+                                # 経過時間の書式（[h]:mm など）は、書式の文字が入っている
+                                if ($DateStyles[$style] -is [string]) { $text = Format-ExcelElapsed -Serial $num -Code $DateStyles[$style] }
+                                else { $text = Format-ExcelDate -Serial $num -Date1904 $Date1904 }
+                            }
                             else { $text = $num.ToString('G15', $invariant) }
                         }
                         else { $text = $value }

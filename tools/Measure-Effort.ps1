@@ -110,7 +110,7 @@ foreach ($g in @($entries | Where-Object { $_.Task -lt 0 } | Group-Object { ('{0
     $sum = ($g.Group | Measure-Object Hours -Sum).Sum
     $others.Add([pscustomobject]@{
             Name = $g.Name; Actual = [math]::Round($sum / $perUnit, 2, $away); Rows = $g.Count
-            Owners = (@($g.Group | ForEach-Object { $_.Owner } | Where-Object { $_ } | Select-Object -Unique) -join '、'); Place = $g.Group[0].Place
+            Owners = (@($g.Group | Where-Object { $_.Owner } | Group-InOrder { Get-OwnerKey $_.Owner } | ForEach-Object { $_.Group[0].Owner }) -join '、'); Place = $g.Group[0].Place
         })
 }
 $others = @($others | Sort-Object @{ e = { $_.Actual }; Descending = $true }, Name)
@@ -134,8 +134,10 @@ if ($dated.Count -gt 0) {
     $lastWeek = & $monday $AsOf
     while ($w -le $lastWeek) { $weekStarts += $w; $w = $w.AddDays(7) }
 }
+# 担当者は、全角・半角、英字の大文字・小文字と空白の違いをそろえてまとめる（表示は最初に出てきた書き方。名前の順）
+$ownerGroups = @($entries | Group-InOrder { Get-OwnerKey $_.Owner } | Sort-Object @{ e = { $_.Group[0].Owner } }, Index)
 $ownerRows = New-Object System.Collections.Generic.List[object]
-foreach ($g in @($entries | Group-Object Owner | Sort-Object Name)) {
+foreach ($g in $ownerGroups) {
     $byWeek = @{}
     foreach ($e in $g.Group) {
         if (-not $e.Date) { continue }
@@ -143,7 +145,7 @@ foreach ($g in @($entries | Group-Object Owner | Sort-Object Name)) {
         if (-not $byWeek.ContainsKey($k)) { $byWeek[$k] = 0.0 }
         $byWeek[$k] += $e.Hours
     }
-    $values = @($g.Name)
+    $values = @($g.Group[0].Owner)
     foreach ($w in $weekStarts) {
         $h = $byWeek[$w.ToString('yyyy/MM/dd', $invariant)]
         $values += $(if ($h) { [double][math]::Round($h / $perUnit, 2, $away) } else { [double]0 })
@@ -196,7 +198,7 @@ Write-Host ''
 Write-ReadLogSummary $readLog
 $range = ''
 if ($dated.Count -gt 0) { $range = '{0}～{1}・' -f (@($dated | Sort-Object Date)[0].Date.ToString('yyyy/MM/dd', $invariant)), (@($dated | Sort-Object Date)[-1].Date.ToString('yyyy/MM/dd', $invariant)) }
-Write-Host ('工数の実績: {0} 時間（{1} 人日。{2}{3} 人・{4} 行）' -f (Format-Number $totalHours), (Format-Number ($totalHours / $HoursPerDay)), $range, @($entries | ForEach-Object { $_.Owner } | Select-Object -Unique).Count, $entries.Count)
+Write-Host ('工数の実績: {0} 時間（{1} 人日。{2}{3} 人・{4} 行）' -f (Format-Number $totalHours), (Format-Number ($totalHours / $HoursPerDay)), $range, $ownerGroups.Count, $entries.Count)
 if ($future -gt 0) { Write-Host ('基準日（{0}）より後の日付の行 {1} 件は数えていません' -f $AsOf.ToString('yyyy/MM/dd', $invariant), $future) }
 if ($Wbs) {
     $line = 'WBS のタスクに対応した工数: {0} 時間（{1}%）' -f (Format-Number $matchedTotal), (Format-Number ($(if ($totalHours -gt 0) { $matchedTotal / $totalHours * 100 } else { 0 })) 0)
