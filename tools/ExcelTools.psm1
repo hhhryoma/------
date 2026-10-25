@@ -986,8 +986,9 @@ function Export-Workbook {
                     continue
                 }
                 $linkCount++
-                # Excel が他ブックへのリンクを保存するときと同じ file:/// 形式にする
-                $target = $row.Link.Path
+                # Excel が他ブックへのリンクを保存するときと同じ file:/// 形式にする。URI で意味を持つ文字（% # ? 空白など）は %xx にする
+                # （そのままでは「#」から後ろをブックの中の場所と、「%41」を「A」と読まれ、別のファイルを開くため）。日本語などはそのまま
+                $target = [regex]::Replace($row.Link.Path, '[\x00-\x20"#%<>?\[\]^`{|}\x7F]', { param($m) '%{0:X2}' -f [int][char]$m.Value })
                 if ($target.StartsWith('/')) { $target = 'file://' + $target } else { $target = 'file:///' + $target }
                 $tip = ''
                 if ($row.Link.Tooltip) { $tip = ' tooltip="{0}"' -f (ConvertTo-XmlText $row.Link.Tooltip) }

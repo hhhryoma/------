@@ -2242,7 +2242,7 @@ $script:MarkKinds = [ordered]@{
     Moved   = @{ Color = 'FFDDEBF7'; Title = '移動' }
 }
 # ワークシートの子要素のうち、dataValidations より後ろに置くもの（スキーマで順序が決まっている）
-$script:AfterDataValidations = 'hyperlinks|printOptions|pageMargins|pageSetup|headerFooter|rowBreaks|colBreaks|customProperties|cellWatches|ignoredErrors|smartTags|drawing|legacyDrawing|legacyDrawingHF|picture|oleObjects|controls|webPublishItems|tableParts|extLst'
+$script:AfterDataValidations = 'hyperlinks|printOptions|pageMargins|pageSetup|headerFooter|rowBreaks|colBreaks|customProperties|cellWatches|ignoredErrors|smartTags|drawing|legacyDrawing|legacyDrawingHF|drawingHF|picture|oleObjects|controls|webPublishItems|tableParts|extLst'
 
 function Get-DiffMarks {
     #     差分から、新のブックのシートごとに印を付けるセル・行・列と、セルを選んだときに出すメッセージを決める。
@@ -2375,6 +2375,28 @@ function Get-MarkStyle {
         $State.Next++
     }
     return $State.Map[$key]
+}
+
+function Get-WorksheetInsertIndex {
+    #     sheetData より後ろの、ワークシート直下の要素のうち、名前が Before（正規表現）に一致する最初の要素の位置を返す（無ければ </worksheet> の位置）。
+    #     要素の中にある同じ名前の要素（データバーの cfRule の中の extLst、ユーザー設定のビューの中の pageMargins など）は見ない
+    param([string] $Xml, [string] $Prefix, [string] $Before)
+    $close = '</{0}sheetData>' -f $Prefix
+    $start = $Xml.IndexOf($close, [System.StringComparison]::Ordinal) + $close.Length
+    $tagRx = New-Object System.Text.RegularExpressions.Regex('<(/?)(?:[\w.-]+:)?([\w.-]+)(?:"[^"]*"|''[^'']*''|[^''">])*?(/?)>|<!--.*?-->|<\?.*?\?>', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    $nameRx = New-Object System.Text.RegularExpressions.Regex(('^(?:{0})$' -f $Before))
+    $depth = 0
+    foreach ($m in $tagRx.Matches($Xml, $start)) {
+        if (-not $m.Groups[2].Success) { continue }   # コメントなど
+        if ($m.Groups[1].Value) {
+            $depth--
+            if ($depth -lt 0) { return $m.Index }     # </worksheet>
+            continue
+        }
+        if ($depth -eq 0 -and $nameRx.IsMatch($m.Groups[2].Value)) { return $m.Index }
+        if (-not $m.Groups[3].Value) { $depth++ }
+    }
+    return $Xml.LastIndexOf(('</{0}worksheet>' -f $Prefix), [System.StringComparison]::Ordinal)
 }
 
 function Add-SheetMarks {
@@ -2517,10 +2539,7 @@ function Add-SheetMarks {
         return $xmlOut.Substring(0, $dv.Index) + $element + $xmlOut.Substring($dv.Index + $dv.Length)
     }
     $element = '<{0}dataValidations count="{1}">{2}</{0}dataValidations>' -f $px, $items.Count, ($items -join '')
-    $sdEnd = $xmlOut.IndexOf(('</{0}sheetData>' -f $px)) + ('</{0}sheetData>' -f $px).Length
-    $after = [regex]::Match($xmlOut.Substring($sdEnd), ('<{0}(?:{1})\b' -f $px, $script:AfterDataValidations))
-    if ($after.Success) { $at = $sdEnd + $after.Index }
-    else { $at = $xmlOut.LastIndexOf(('</{0}worksheet>' -f $px)) }
+    $at = Get-WorksheetInsertIndex $xmlOut $px $script:AfterDataValidations
     return $xmlOut.Substring(0, $at) + $element + $xmlOut.Substring($at)
 }
 
@@ -2727,7 +2746,7 @@ function Get-ExcelFiles {
 $pairs = New-Object System.Collections.Generic.List[object]
 function Add-ComparePairs {
     #     比べる組（旧・新のファイル）を $pairs に足す。フォルダどうしなら、同じ相対パスと、版数だけが違う名前のファイルを組にする。
-    #     Label を指定すると、ファイル名の後ろに「（v1.0 → v1.1）」のように付ける（-Versions）
+    #     Label を指定すると、ファイル名の後ろに「（v1.0 → v1.1）」のように付ける（-Versions）。Name は付ける前の名前（印を付けた写しの名前に使う）
     param([string] $OldPath, [string] $NewPath, [string] $Label)
     if (-not (Test-Path -LiteralPath $OldPath)) { throw "見つかりません: $OldPath" }
     if (-not (Test-Path -LiteralPath $NewPath)) { throw "見つかりません: $NewPath" }
@@ -2760,14 +2779,14 @@ function Add-ComparePairs {
             $o = $null
             if ($oldFiles.Contains($k)) { $o = $oldFiles[$k].Path }
             elseif ($renamedNew.ContainsKey($k)) { $o = $oldFiles[$renamedNew[$k]].Path }
-            $pairs.Add([pscustomobject]@{ Relative = $newFiles[$k].Relative + $suffix; Old = $o; New = $newFiles[$k].Path })
+            $pairs.Add([pscustomobject]@{ Relative = $newFiles[$k].Relative + $suffix; Name = $newFiles[$k].Relative; Label = $Label; Old = $o; New = $newFiles[$k].Path })
         }
         foreach ($k in $oldFiles.Keys) {
-            if (-not $newFiles.Contains($k) -and -not $renamedOld.ContainsKey($k)) { $pairs.Add([pscustomobject]@{ Relative = $oldFiles[$k].Relative + $suffix; Old = $oldFiles[$k].Path; New = $null }) }
+            if (-not $newFiles.Contains($k) -and -not $renamedOld.ContainsKey($k)) { $pairs.Add([pscustomobject]@{ Relative = $oldFiles[$k].Relative + $suffix; Name = $oldFiles[$k].Relative; Label = $Label; Old = $oldFiles[$k].Path; New = $null }) }
         }
     }
     else {
-        $pairs.Add([pscustomobject]@{ Relative = $newItem.Name + $suffix; Old = $oldItem.FullName; New = $newItem.FullName })
+        $pairs.Add([pscustomobject]@{ Relative = $newItem.Name + $suffix; Name = $newItem.Name; Label = $Label; Old = $oldItem.FullName; New = $newItem.FullName })
     }
     return [pscustomobject]@{ Old = $oldItem; New = $newItem }
 }
@@ -2839,7 +2858,10 @@ foreach ($p in $pairs) {
         Write-Warning ("{0}: 比較できませんでした: {1}" -f $p.Relative, $_.Exception.Message)
     }
     if ($OutMarkedDir -and $state -eq '差分あり') {
-        $markedPath = [System.IO.Path]::GetFullPath((Join-Path $OutMarkedDir $p.Relative))
+        # 写しは比べたファイルと同じ名前にする。版を続けて比べたとき（-Versions）は、拡張子の前に版の組を付ける（画面設計書_v1.1（v1.0 → v1.1）.xlsx）
+        $markedName = $p.Name
+        if ($p.Label) { $markedName = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($p.Name), ('{0}（{1}）{2}' -f [System.IO.Path]::GetFileNameWithoutExtension($p.Name), $p.Label, [System.IO.Path]::GetExtension($p.Name))) }
+        $markedPath = [System.IO.Path]::GetFullPath((Join-Path $OutMarkedDir $markedName))
         if (@('.xlsx', '.xlsm') -notcontains [System.IO.Path]::GetExtension($p.New).ToLowerInvariant()) {
             Write-Warning ("{0}: 印を付けた写しは .xlsx / .xlsm だけ作れます" -f $p.Relative)
         }
@@ -2869,6 +2891,8 @@ if ($OutXlsx) {
             $oldValue = @{ Runs = @($d.Segments | Where-Object { $_.Op -ne '+' } | ForEach-Object { @{ Text = $_.Text; Style = $(if ($_.Op -eq '-') { 'Deleted' } else { '' }) } }) }
             $newValue = @{ Runs = @($d.Segments | Where-Object { $_.Op -ne '-' } | ForEach-Object { @{ Text = $_.Text; Style = $(if ($_.Op -eq '+') { 'Inserted' } else { '' }) } }) }
         }
+        # 変更前・変更後の無い差分（改訂履歴のシートが無い・改訂履歴に追記が無い）は、変更後の欄に内容を書く
+        elseif (-not $oldValue -and -not $newValue) { $newValue = $d.Detail }
         $row = @{ Values = @($d.File, $d.Sheet, $d.Location, $d.OldLocation, $d.Kind, $d.Change, $oldValue, $newValue, $d.Tag) }
         # 削除は旧のファイル、それ以外は新のファイルの該当セルを開く
         $target = $d.Path; $cell = $d.Cell
@@ -3046,7 +3070,8 @@ if ($OutHistory) {
 #
 # .PARAMETER OutMarkedDir
 #     差分のあった新のブック（.xlsx / .xlsm）の写しを、このフォルダーに同じ名前（フォルダーどうしなら同じ相対パス）で保存し、
-#     差分の印を付けます。変更したセルは黄、追加したセル・行・列は緑、値を消したセルは赤、移動した行は青で塗り、
+#     差分の印を付けます（-Versions では、名前の拡張子の前に「（v1.0 → v1.1）」のように版の組を付けます）。
+#     変更したセルは黄、追加したセル・行・列は緑、値を消したセルは赤、移動した行は青で塗り、
 #     セルを選ぶと変更前の値などが出るようにします（データの入力規則の入力時メッセージ。既に入力規則のあるセルには付けません）。
 #     末尾に、各セルへのリンク付きの「差分一覧」シートを足します。元のブックは変更しません。
 #

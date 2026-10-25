@@ -225,10 +225,11 @@ var DATA = /*DIFF_DATA*/null;
   };
 
   var chip = function (d) { return cls(d, d.ch === '削除' ? 'old' : 'new'); };
-  var short = function (t) { t = String(t); return t.length > 20 ? t.substring(0, 20) + '…' : (t || '（空）'); };
+  // 文字数は、絵文字などのサロゲートペアを分けないようにコードポイント（Array.from）で数える
+  var short = function (t) { t = String(t); var c = Array.from(t); return c.length > 20 ? c.slice(0, 20).join('') + '…' : (t || '（空）'); };
 
   // レビューの記録（差分ごとの 確認: ok / issue と、指摘のメモ）。このブラウザーに残し、開き直しても消えない
-  // 記録のキーは差分の中身（ファイル・シート・種類・場所）で決めるので、比べ直した HTML でも同じ差分には同じ記録が付く
+  // 記録のキーは差分の中身（ファイル・シート・種類・場所。図形・画像は図形の名前も）で決めるので、比べ直した HTML でも同じ差分には同じ記録が付く
   var notes = {}, storeKey = DATA ? 'compare-excel-review|' + DATA.old + '|' + DATA['new'] : '';
   try { notes = JSON.parse(localStorage.getItem(storeKey) || '{}') || {}; } catch (e) { notes = {}; }
   var saveNotes = function () { try { localStorage.setItem(storeKey, JSON.stringify(notes)); } catch (e) { } };
@@ -250,21 +251,27 @@ var DATA = /*DIFF_DATA*/null;
     var seen = {};
     f.diffs.forEach(function (d) {
       var k = [f.name, d.s, d.os, d.k, d.ch, d.nc, d.oc].join('\u0001');
+      // グループの中の図形・画像はどれもグループの左上のセルになるので、図形の名前でも分ける（名前の無い差分のキーは変えない）
+      if (isLayout(d) && (d.so || d.sn)) k += '\u0001' + [d.so, d.sn].join('\u0001');
       seen[k] = (seen[k] || 0) + 1;
       d.key = seen[k] > 1 ? k + '#' + seen[k] : k;
       d.file = f.name;
     });
   });
+  // シートの一覧に出る差分。出ない差分（ファイルの追加・削除と、改訂履歴のシートが見つからないこと）は、左の一覧のファイルの下に書く
+  DATA.files.forEach(function (f) {
+    f.sheets.forEach(function (s) { sheetDiffs(f, s).forEach(function (d) { d.onSheet = true; }); });
+  });
 
-  // 同じ変更: 前後の同じ文字を除いた「変わった部分」が同じ変更（「受注」→「注文」の置き換えなど）を、ファイルをまたいでまとめる
+  // 同じ変更: 前後の同じ文字（コードポイントで比べる）を除いた「変わった部分」が同じ変更（「受注」→「注文」の置き換えなど）を、ファイルをまたいでまとめる
   var sameSig = function (d) {
     if (d.ch !== '変更' || !/^(値|数式|コメント|図形)$/.test(d.k) || d.a == null || d.b == null) return null;
-    var a = String(d.a), b = String(d.b), p = 0, q = 0;
-    while (p < a.length && p < b.length && a.charAt(p) === b.charAt(p)) p++;
-    while (q < a.length - p && q < b.length - p && a.charAt(a.length - 1 - q) === b.charAt(b.length - 1 - q)) q++;
-    var x = a.substring(p, a.length - q), y = b.substring(p, b.length - q);
+    var a = Array.from(String(d.a)), b = Array.from(String(d.b)), p = 0, q = 0;
+    while (p < a.length && p < b.length && a[p] === b[p]) p++;
+    while (q < a.length - p && q < b.length - p && a[a.length - 1 - q] === b[b.length - 1 - q]) q++;
+    var x = a.slice(p, a.length - q), y = b.slice(p, b.length - q);
     if (x.length > 40 || y.length > 40) return null;
-    return [x, y];
+    return [x.join(''), y.join('')];
   };
   var sameGroups = {};
   DATA.files.forEach(function (f) {
@@ -311,11 +318,12 @@ var DATA = /*DIFF_DATA*/null;
     // 差分のあるファイルが多いときは畳んでおく（選んだファイルは開く）
     html += '<div class="fgroup' + (many && changedFiles > 3 ? ' closed' : '') + '" data-f="' + fi + '" data-name="' + esc(names) + '">' +
       '<div class="file" title="クリックで畳む・開く">' + (many ? '<span class="tw"></span>' : '') + '<span class="fname">' + esc(f.name) + '</span><small>' + esc(f.state) + (f.count ? '・' + f.count + ' 件' : '') + '</small></div><div class="fbody">';
+    var notes = f.diffs.filter(function (d) { return !d.onSheet; }).map(function (d) { return esc(d.d); });
     if (f.sheets.length === 0) {
-      var notes = f.diffs.map(function (d) { return esc(d.d); });
       html += '<div class="note">' + (notes.length ? notes.join('<br>') : '差分なし') + '</div></div></div>';
       return;
     }
+    if (notes.length) html += '<div class="note">' + notes.join('<br>') + '</div>';
     f.sheets.forEach(function (s, si) {
       var n = sheetDiffs(f, s).length;
       var badge = !s.oldName ? 'add' : !s.name ? 'del' : n ? '' : 'zero';
@@ -563,17 +571,18 @@ var DATA = /*DIFF_DATA*/null;
     var maxRows = Math.max(200, Math.floor(MAX_CELLS / Math.max(1, cols.length) / paneCount));
     if (rows.length > maxRows) { rows = rows.slice(0, maxRows); notes.push(maxRows + ' 行'); }
 
-    // 列幅（左右に並べるときは広いほう）。非表示の列でも、差分があれば細く見せる
+    // 列幅（左右に並べるときは広いほう）。非表示の列は幅 0 にし、差分があればシートの既定の幅で見せる
     var widths = cols.map(function (e) {
-      var w = 0, marked = false;
+      var w = 0, def = 0, marked = false;
       all.forEach(function (x) {
         var c = e[x.side];
         if (c == null) return;
         var v = x.sheet.w[c];
         w = Math.max(w, v == null ? x.sheet.def : v);
+        def = Math.max(def, x.sheet.def || 64);
         if (x.markCols[c] || x.colMarks[c]) marked = true;
       });
-      return { w: w || (marked ? 24 : 0), hid: !w && marked };
+      return { w: w || (marked ? def : 0), hid: !w && marked };
     });
     var rowAt = {}, colAt = {};
     rows.forEach(function (e, i) { if (e[side] != null) rowAt[e[side]] = i; });
@@ -674,7 +683,7 @@ var DATA = /*DIFF_DATA*/null;
   function renderList() {
     var rows = state.items.map(function (d, i) {
       var where = d.nc ? (d.s + '!' + d.nc) : d.oc ? ((d.os || d.s) + '!' + d.oc + '（旧）') : d.s;
-      if (d.ho == null) { d.ho = diffHtml(d.a, d.b, 'old'); d.hn = diffHtml(d.a, d.b, 'new'); }
+      valueHtml(d);
       var n = noteOf(d);
       var tag = d.t ? '<span class="tag">' + esc(tagLabel[d.t] || d.t) + '</span>' : '';
       var same = d.same ? '<button class="same" data-i="' + i + '" title="「' + esc(short(d.same.from)) + '」→「' + esc(short(d.same.to)) + '」と同じ変更が、ほかのシート・ファイルも含めて ' + d.same.list.length +
@@ -739,10 +748,10 @@ var DATA = /*DIFF_DATA*/null;
     updateProgress();
   }
 
-  // 確認の進み具合（レビューできる差分 = シートを表示できるファイルの、ファイル以外の差分）
+  // 確認の進み具合（レビューできる差分 = シートの一覧に出る差分。ファイルの下に書いた差分は数えない）
   function reviewable() {
     var out = [];
-    DATA.files.forEach(function (f) { if (f.sheets.length) f.diffs.forEach(function (d) { if (d.k !== 'ファイル') out.push(d); }); });
+    DATA.files.forEach(function (f) { f.diffs.forEach(function (d) { if (d.onSheet) out.push(d); }); });
     return out;
   }
   function updateProgress() {
@@ -811,7 +820,8 @@ var DATA = /*DIFF_DATA*/null;
   $('saveCsv').addEventListener('click', function () {
     var pad = function (x) { return (x < 10 ? '0' : '') + x; }, now = new Date();
     var today = now.getFullYear() + '/' + pad(now.getMonth() + 1) + '/' + pad(now.getDate());
-    var q = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+    // Excel で開いたときに数式として計算されないよう、= + - @ やタブ・改行で始まる値（数式の差分の「=SUM(…)」など）は先頭に ' を付ける
+    var q = function (v) { v = String(v == null ? '' : v); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return '"' + v.replace(/"/g, '""') + '"'; };
     var lines = [['No', '設計書', 'シート', '場所', '種類', '変更', '変更前', '変更後', '指摘内容', '分類', '重要度', '状態', '起票日', '期限', '完了日', '対応者'].map(q).join(',')];
     var no = 0;
     reviewable().forEach(function (d) {
@@ -884,7 +894,7 @@ var DATA = /*DIFF_DATA*/null;
   });
   $('find').addEventListener('input', function () { if (!$('find').value.trim()) { find.q = ''; find.hits = []; $('findPos').textContent = ''; each(document.querySelectorAll('td.found'), function (x) { x.classList.remove('found'); }); } });
 
-  // まだ確認していない次の差分へ（今のシートの続き → 次のシート・ファイル → 先頭から今の差分の前まで）。絞り込みで隠した差分は飛ばす
+  // まだ確認していない次の差分へ（今のシートの続き → 次のシート・ファイル → 先頭から今の差分まで）。絞り込みで隠した差分は飛ばす
   function goOpen() {
     var order = [];
     DATA.files.forEach(function (f, fi) { f.sheets.forEach(function (s, si) { order.push([fi, si]); }); });
@@ -895,7 +905,7 @@ var DATA = /*DIFF_DATA*/null;
       var at = order[(start + step) % order.length], f = DATA.files[at[0]];
       var list = sheetDiffs(f, f.sheets[at[1]]).filter(visible);
       var here = at[0] === state.file && at[1] === state.sheet;
-      var from = here && step === 0 ? state.index + 1 : 0, to = here && step === order.length ? state.index : list.length;
+      var from = here && step === 0 ? state.index + 1 : 0, to = here && step === order.length ? state.index + 1 : list.length;
       for (var i = from; i < to; i++) {
         if (noteOf(list[i]).st) continue;
         if (!here) select(at[0], at[1]);
@@ -904,7 +914,9 @@ var DATA = /*DIFF_DATA*/null;
         return;
       }
     }
-    $('pos').textContent = 'すべての差分を確認しました';
+    // 見つからなくても、種類・分類の絞り込みで隠した差分に未確認のものがあれば、そう知らせる
+    var rest = reviewable().filter(function (d) { return !noteOf(d).st; }).length;
+    $('pos').textContent = rest ? '未確認の差分 ' + rest + ' 件は、種類・分類の絞り込みで隠しています' : 'すべての差分を確認しました';
   }
 
   // 図形・画像・グラフを、左上・右下のセル（またはピクセルの大きさ）の位置に重ねる。図形・画像の差分は図形に色を付ける。
@@ -1032,7 +1044,7 @@ var DATA = /*DIFF_DATA*/null;
     var seen = {};
     tip.innerHTML = td.getAttribute('data-tip').split(' ').filter(function (i) { if (seen[i]) return false; seen[i] = true; return state.items[+i]; }).map(function (i) {
       var d = state.items[+i];
-      if (d.ho == null) { d.ho = diffHtml(d.a, d.b, 'old'); d.hn = diffHtml(d.a, d.b, 'new'); }
+      valueHtml(d);
       return '<div><span class="chip ' + chip(d) + '">' + esc(d.k + ' ' + d.ch) + '</span></div>' +
         '<div class="row"><b>旧</b><span class="v">' + d.ho + '</span></div><div class="row"><b>新</b><span class="v">' + d.hn + '</span></div>';
     }).join('<hr>');
@@ -1046,10 +1058,18 @@ var DATA = /*DIFF_DATA*/null;
     tip.style.left = Math.max(4, x) + 'px'; tip.style.top = Math.max(4, y) + 'px';
   });
 
-  // 文字単位の差分（短い文字は LCS。長すぎる文字はそのまま）
+  // 差分の変更前・変更後の表示（d.ho・d.hn）。どちらも無い差分（改訂履歴に追記が無いなど）は、変更後の欄に差分の内容を出す
+  function valueHtml(d) {
+    if (d.ho != null) return;
+    d.ho = diffHtml(d.a, d.b, 'old'); d.hn = diffHtml(d.a, d.b, 'new');
+    if (!d.a && !d.b && d.d) d.hn = esc(d.d);
+  }
+
+  // 文字単位の差分（短い文字は LCS。長すぎる文字はそのまま）。絵文字などのサロゲートペアを分けないよう、コードポイントで比べる
   function diffHtml(a, b, side) {
     a = a == null ? '' : String(a); b = b == null ? '' : String(b);
     if (!a || !b || a.length * b.length > 250000) return esc(side === 'old' ? a : b) || '<span class="muted">（なし）</span>';
+    a = Array.from(a); b = Array.from(b);
     var n = a.length, m = b.length, dp = [];
     for (var i = 0; i <= n; i++) { dp.push(new Uint16Array(m + 1)); }
     for (i = n - 1; i >= 0; i--) for (var j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
