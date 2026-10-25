@@ -180,6 +180,45 @@ Test-Case 'Test-DesignConsistency: -OutXlsx で指摘一覧（該当セルへの
     Assert-Equal '16|1' ('{0}|{1}' -f $row['B'], $row['E']) 'メッセージの定義 16・参照先なし 1'
 }
 
+Test-Case 'Test-DesignConsistency: 画面遷移の遷移元が空の行（縦に結合したセル）は上の行の値を使い、1 つのセルに書いた複数の遷移元は ID ごとに比べる' {
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    # SCR001 の 2 行目の遷移元を空にする（縦に結合したセルは、左上のセルにだけ値がある）。SCR002 から SCR001 への行の遷移元に SCR003 も書く
+    Set-CellValues (Join-Path $dir 'DD01_画面一覧.xlsx') '画面遷移' @{ C7 = $null; I7 = $null; C9 = 'SCR002、SCR003'; I9 = '受注登録・受注詳細' }
+    $issues = Invoke-Consistency @{ Path = $dir }
+    Assert-Equal 0 $issues.Count ((Get-ConsistencyKeys $issues) -join ', ')
+
+    # CRUD 図も同じ（元の列が空の行は上の行の値、複数の ID は ID ごとの行）
+    $dir = New-TestDir
+    $book = Join-Path $dir 'CRUD表.xlsx'
+    New-SheetsBook $book ([ordered]@{ 'CRUD' = @(@('画面ID', '使用テーブル'), @('S01、S02', 'T_A'), @('', 'T_B')) })
+    $rules = Join-Path $dir 'rules.csv'
+    @('区分,種類,ファイル名,シート名,見出し,列,名前,親,元,書き方,重複,属性,未使用,CRUD', '参照,テーブル,CRUD表,,画面ID/使用テーブル,使用テーブル,,,画面ID,(?<id>T_\w+),,,,R') | Set-Content -LiteralPath $rules -Encoding UTF8
+    $out = Join-Path $dir 'check.xlsx'
+    $null = Invoke-Consistency @{ Path = $book; Rules = $rules; OutXlsx = $out }
+    $crud = Read-XlsxSheet -Path $out -Index 3
+    Assert-Equal @('S01||R|R', 'S02||R|R') @(2, 3 | ForEach-Object { $r = $_; (@('A', 'B', 'C', 'D' | ForEach-Object { $crud.Rows[$r][$_] }) -join '|') })
+}
+
+Test-Case 'Test-DesignConsistency: 「コード定義 C001、C002」の 2 つ目からのコードも読み、コード区分 ID を桁数で切らない（C0001・C0010）' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir 'コード定義書.xlsx') ([ordered]@{ 'コード一覧' = @(@('コード区分ID', 'コード区分名', 'コード値', '表示名'), @('C001', '受注ステータス', '10', '受付'), @('C002', '支払方法', '1', '銀行振込'), @('C0001', '配送区分', '1', '通常')) })
+    New-SheetsBook (Join-Path $dir '画面設計書_SCR001.xlsx') ([ordered]@{ '画面項目定義' = @(@('項目名', '備考'), @('状態・支払', 'コード定義 C001、C002'), @('配送', 'コード定義 C0001'), @('区分', 'コード定義 C0010')) })
+    $issues = Invoke-Consistency @{ Path = $dir }
+    Assert-Equal 'エラー|参照先なし|画面設計書_SCR001.xlsx|画面項目定義!B4' ((Get-ConsistencyKeys $issues) -join ', ') 'C002・C0001 は未使用ではなく、C0010 は C001 ではない'
+    Assert-Equal 'コード「C0010」が定義されていません' $issues[0].Detail
+    $usages = Invoke-Consistency @{ Path = $dir; Where = 'C002' }
+    Assert-Equal @('定義|コード一覧!A3', '参照|画面項目定義!B2') @($usages | ForEach-Object { '{0}|{1}' -f $_.Usage, $_.Location })
+}
+
+Test-Case 'Test-DesignConsistency: ファイル名に同じ長さの ID が 2 つあれば、左に書かれたほうとヘッダの ID を比べる' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir '画面設計書_SCR001_SCR002.xlsx') ([ordered]@{ '画面概要' = @(@('項目', '値'), @('画面ID', 'SCR002')) })
+    New-SheetsBook (Join-Path $dir '画面設計書_SCR002_SCR001.xlsx') ([ordered]@{ '画面概要' = @(@('項目', '値'), @('画面ID', 'SCR001')) })
+    # ハッシュテーブルの順（PowerShell 7 では実行ごとに変わる）で決めると、どちらか一方しか知らせない
+    $issues = Invoke-Consistency @{ Path = $dir }
+    Assert-Equal @('画面設計書_SCR001_SCR002.xlsx|ファイル名は「SCR001」ですが、画面IDは「SCR002」です', '画面設計書_SCR002_SCR001.xlsx|ファイル名は「SCR002」ですが、画面IDは「SCR001」です') @($issues | ForEach-Object { '{0}|{1}' -f $_.File, $_.Detail })
+}
+
 Test-Case 'Test-DesignConsistency: Get-Help でヘルプが表示される' {
     $h = Get-Help $ConsistencyTool
     Assert-Match $h.Synopsis '参照'

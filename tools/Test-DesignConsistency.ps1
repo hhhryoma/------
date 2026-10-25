@@ -262,11 +262,11 @@ function Add-Crud {
 }
 
 function Add-Reference {
-    param($Rule, [string] $Text, [string] $From, $Book, [string] $Sheet, [int] $Row, [int] $Col, $Attrs)
+    #     From: 参照元（ルールの「元」）の ID の一覧。1 つのセルに複数の ID が書かれていれば、ID ごとに組み合わせ・CRUD 図に入れる
+    param($Rule, [string] $Text, [string[]] $From, $Book, [string] $Sheet, [int] $Row, [int] $Col, $Attrs)
     if (-not $Text) { return }
     $matches2 = $Rule.Pattern.Matches($Text.Normalize($nfkc))
     if ($matches2.Count -eq 0) { return }
-    $fromKey = ConvertTo-Key $From
     $Place = New-Place $Book $Sheet $Row $Col
     foreach ($m in $matches2) {
         $id = $m.Groups['id'].Value
@@ -277,15 +277,16 @@ function Add-Reference {
         $key = ConvertTo-Key $id
         if ($parent) { $shown = '{0}.{1}' -f $parent, $id; $key = '{0}.{1}' -f (ConvertTo-Key $parent), $key }
         if ($excludeRx -and $excludeRx.IsMatch($shown)) { continue }
-        if ($Rule.From -and $fromKey) {
-            $pairKey = '{0}>{1}' -f $fromKey, $key
-            if (-not $Rule.Pairs.ContainsKey($pairKey)) { $Rule.Pairs[$pairKey] = [pscustomobject]@{ FromKey = $fromKey; From = $From.Trim(); To = $shown; Place = $Place } }
-        }
         # CRUD 図: 「書き方」の (?<crud>...) か、ルールの「CRUD」。カラムの参照（T_ORDER.ORDER_NO）はテーブルへの操作として数える
         $letters = $Rule.Crud
         if ($m.Groups['crud'].Success) { $letters = $m.Groups['crud'].Value }
-        if ($letters -and $From) {
-            if ($parent) { Add-Crud $From $Rule.Kind $parent (ConvertTo-Key $parent) $letters } else { Add-Crud $From $Rule.Kind $id (ConvertTo-Key $id) $letters }
+        foreach ($f in $From) {
+            $fromKey = ConvertTo-Key $f
+            if (-not $fromKey) { continue }
+            $pairKey = '{0}>{1}' -f $fromKey, $key
+            if (-not $Rule.Pairs.ContainsKey($pairKey)) { $Rule.Pairs[$pairKey] = [pscustomobject]@{ FromKey = $fromKey; From = $f.Trim(); To = $shown; Place = $Place } }
+            if (-not $letters) { continue }
+            if ($parent) { Add-Crud $f $Rule.Kind $parent (ConvertTo-Key $parent) $letters } else { Add-Crud $f $Rule.Kind $id (ConvertTo-Key $id) $letters }
         }
         if (-not $refSeen.Add(('{0}|{1}|{2}|{3}|{4}' -f $Rule.Kind, $key, $Place.Path, $Place.Sheet, $Place.Cell))) { continue }
         $refs.Add([pscustomobject]@{ Rule = $Rule; Kind = $Rule.Kind; Shown = $shown; Key = $key; Parent = $parent; ParentKey = (ConvertTo-Key $parent); Raw = $Text; Place = $Place; Attrs = $Attrs })
@@ -297,6 +298,12 @@ function Add-Coverage {
     param($Rule, [string] $From, $Book, [string] $Sheet)
     $k = ConvertTo-Key $From
     if ($k -and -not $Rule.Coverage.ContainsKey($k)) { $Rule.Coverage[$k] = '{0}（{1}）' -f $Book.File, $Sheet }
+}
+
+function Split-Ids {
+    #     1 つのセルに書かれた複数の ID（「SCR002、SCR003」）を分ける（「、」「,」「・」「/」とセル内の改行（Search-Excel の ↵）で区切る）
+    param([string] $Text)
+    return @($Text.Normalize($nfkc) -split '[、,・/↵]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
 
 function Read-References {
@@ -333,9 +340,15 @@ function Read-References {
                     if ($t.ColumnOf.ContainsKey($Rule.From.Label)) { $fromCol = $t.ColumnOf[$Rule.From.Label] }
                 }
             }
+            $lastFrom = ''
             foreach ($dr in $t.Rows) {
                 $from = $fromLabel
-                if ($fromCol) { $from = [string]$dr.Cells[$fromCol] }
+                if ($fromCol) {
+                    # 元の ID を最初の行にだけ書く表（縦に結合したセルなど。2 行目以降が空）は、上の行の値を使う
+                    $fromText = [string]$dr.Cells[$fromCol]
+                    if ($fromText.Trim()) { $lastFrom = $fromText } else { $fromText = $lastFrom }
+                    $from = Split-Ids $fromText
+                }
                 if ($Rule.Column) { $cols = @($t.ColumnOf[$Rule.Column.Label]) } else { $cols = @($dr.Cells.Keys | Sort-Object) }
                 $attrs = $null
                 if ($Rule.Attributes.Count -gt 0) { $attrs = Get-RowAttributes $Rule $t $dr }
@@ -514,13 +527,16 @@ foreach ($d in $defs) {
         }
     }
     if (@('ファイル', 'シート') -notcontains $d.Unit -or $d.Rule.Parent) { continue }
-    # ファイル名・シート名に書かれた同じ種類の ID のうち、いちばん長いもの（T_ORDER_DETAIL と T_ORDER なら T_ORDER_DETAIL）
+    # ファイル名・シート名に書かれた同じ種類の ID のうち、いちばん長いもの（T_ORDER_DETAIL と T_ORDER なら T_ORDER_DETAIL）。
+    # 同じ長さなら左に書かれたもの（ハッシュテーブルの順は PowerShell 7 では実行ごとに変わるので、順によらず決める）
     if ($d.Unit -eq 'ファイル') { $target = [System.IO.Path]::GetFileNameWithoutExtension($d.Place.Path) } else { $target = $d.Place.Sheet }
     $target = ConvertTo-Key $target
-    $best = $null
+    $best = $null; $bestAt = 0
     foreach ($k in $index[$d.Kind].ById.Keys) {
-        if ($best -and $k.Length -le $best.Length) { continue }
-        if ([regex]::IsMatch($target, '(?<![A-Z0-9])' + [regex]::Escape($k) + '(?![A-Z0-9])')) { $best = $k }
+        if ($best -and $k.Length -lt $best.Length) { continue }
+        $hit = [regex]::Match($target, '(?<![A-Z0-9])' + [regex]::Escape($k) + '(?![A-Z0-9])')
+        if (-not $hit.Success -or ($best -and $k.Length -eq $best.Length -and $hit.Index -gt $bestAt)) { continue }
+        $best = $k; $bestAt = $hit.Index
     }
     if ($best -and $best -ne $d.Key) {
         $whereName = 'ファイル名'
