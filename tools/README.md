@@ -2566,7 +2566,7 @@ git config diff.excel.textconv "powershell -NoProfile -ExecutionPolicy Bypass -F
 | パラメーター | 説明 |
 | --- | --- |
 | `-Path` | Excel のフォルダ・ファイル（複数可） |
-| `-OutDir` | .md を保存するフォルダ。元のフォルダ構成のまま保存し、Excel より新しい .md があるファイルは変換しない |
+| `-OutDir` | .md を保存するフォルダ。元のフォルダ構成のまま保存し、Excel より新しい .md があるファイルは変換しない。同じフォルダの、拡張子だけが違う同じ名前の Excel（`設計書.xlsx` と `設計書.xlsm` など）を一緒に変換するときは、名前に拡張子も含める（`設計書.xlsx.md`・`設計書.xlsm.md`） |
 | `-Force` | `-OutDir` の .md が新しくても変換し直す |
 | `-CellAddress` | 行番号・セル番地を付ける |
 | `-TextConv` | git の textconv 用（1 ファイルの Markdown を UTF-8 で標準出力へ。見出しにファイル名を入れない） |
@@ -3462,12 +3462,12 @@ AI の下書きです。会議の前に、事実と合っているかを確か�
 
 ## Export-ExcelToPdf.ps1
 
-フォルダ配下の Excel ファイル（.xls / .xlsx / .xlsm / .xlsb）を PDF に一括出力します。
+フォルダ配下の Excel ファイル（.xls / .xlsx / .xlsm / .xlsb）を PDF に一括出力します（ファイルを 1 つだけ指定することもできます）。
 処理後に、ファイルごとの出力先PDFと**ページ数**の一覧を表示します。
 
 ### 要件
 
-- Windows + **デスクトップ版 Excel**（COM 自動化を使用。Microsoft 365 のクラウド版のみでは動作しません）
+- Windows + **デスクトップ版 Excel**（COM 自動化を使用。Microsoft 365 のクラウド版のみでは動作しません）。`-CountOnly` と `-WhatIf` は Excel を起動しません
 - PowerShell 5.1 以降（PowerShell 7 でも動作）
 - **対話的なデスクトップセッション**での実行
 
@@ -3477,15 +3477,24 @@ AI の下書きです。会議の前に、事実と合っているかを確か�
 # 元ファイルと同じ場所に PDF を出力
 .\Export-ExcelToPdf.ps1 -Path D:\Docs
 
+# 1 つのファイルだけを PDF にする（同じフォルダに 基本設計書.pdf を保存）
+.\Export-ExcelToPdf.ps1 -Path D:\Docs\基本設計書.xlsx
+
 # 出力先を分け、フォルダ構成を再現し、結果をCSVログに残す
 .\Export-ExcelToPdf.ps1 -Path D:\Docs -OutputRoot D:\Pdf -LogPath D:\Pdf\result.csv
 
 # シート単位で出力し、横1ページに収める
 .\Export-ExcelToPdf.ps1 -Path D:\Docs -PerSheet -FitToWidth
 
-# 実行せずに対象だけ確認
+# 実行せずに、対象と出力する PDF の名前だけ確認（Excel を起動しない）
 .\Export-ExcelToPdf.ps1 -Path D:\Docs -WhatIf
 ```
+
+出力する PDF の名前:
+
+- 元のファイル名の拡張子を `.pdf` にした名前です（`-PerSheet` は `ファイル名_シート名.pdf`）。前に出力した PDF は上書きします
+- 同じフォルダに、拡張子だけが違う同じ名前のブック（`設計書.xls` と `設計書.xlsx` など）を一緒に出力するときは、PDF が重ならないよう名前に拡張子も含めます（`設計書.xls.pdf`・`設計書.xlsx.pdf`、`-PerSheet` では `設計書.xls_シート名.pdf`）。`-SkipExisting` もこの名前の PDF で判定します
+- `-PerSheet` で、ファイル名に使えない記号を `_` にすると同じ名前になるシート（`A/B` と `A_B` など）は、2 つめから `(2)` などを付けます
 
 実行ポリシーで止まる場合:
 
@@ -3497,7 +3506,7 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 
 | パラメーター | 説明 |
 | --- | --- |
-| `-Path` | 走査するフォルダ（必須） |
+| `-Path` | 走査するフォルダ、または Excel ファイル（必須）。ファイルのときはそのファイルだけを出力する（`-CountOnly` では PDF ファイル） |
 | `-OutputRoot` | 出力先ルート。省略時は元ファイルと同じ場所 |
 | `-NoRecurse` | サブフォルダを走査しない |
 | `-PerSheet` | シート単位で出力（`ファイル名_シート名.pdf`） |
@@ -3511,7 +3520,7 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 | `-SmallPageRatio` | 小ページ判定のしきい値。最大ページ面積に対する比率（既定 0.2） |
 | `-OpenMode` | `Workbooks.Open` の呼び出し形式（`Auto` / `Full` / `Simple`）。既定は自動判定 |
 | `-LogPath` | 結果（ページ数を含む）を CSV（UTF-8 BOM 付き）で保存 |
-| `-WhatIf` | 実行せず対象を表示 |
+| `-WhatIf` | 実行せず、対象と出力する PDF の名前を表示（Excel を起動しない） |
 | `-Extensions` | 対象にする拡張子（既定は .xls・.xlsx・.xlsm・.xlsb） |
 
 ### シート名で対象を絞る
@@ -3542,6 +3551,7 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 - **シート単位出力（`-PerSheet`）** … 一致しないシートを単純にスキップします
 - **ブック単位出力（既定）** … 一致しないシートを**一時的に非表示**にしてから出力します。非表示シートは `ExportAsFixedFormat` の対象外になるため、これだけで出力範囲を限定できます。読み取り専用で開いており保存しないので、**元の Excel ファイルは変更されません**
 - 1 枚も一致しないブックは、そのファイルごとスキップして「条件に一致する印刷対象シートなし」と記録します（Excel は全シートを非表示にできないため、非表示化は行いません）
+- **ブックの保護**（シート構成の保護）があると、Excel はシートを非表示にできません。そのまま出力すると対象外のシートまで PDF とページ数に入るため、そのブックは出力せず「失敗」として記録します（`-PerSheet` なら、一致するシートだけをシートごとに出力できます）
 - 正規表現は**実行前に検証**します。不正なパターンは処理を始める前にエラーで止まります
 - **`-CountOnly` では使えません**（PDF にシート名の情報が残らないため）。指定すると警告が出て無視されます
 
@@ -3554,7 +3564,7 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 .\Export-ExcelToPdf.ps1 -Path D:\Pdf -CountOnly -IgnoreSmallPages -LogPath D:\count.csv
 ```
 
-- 対象は Excel ファイルではなく **`*.pdf`** です（サブフォルダも走査、`-NoRecurse` で抑止）
+- 対象は Excel ファイルではなく **`*.pdf`** です（サブフォルダも走査、`-NoRecurse` で抑止）。`-Path` に PDF ファイルを 1 つ指定することもできます
 - **Excel を一切起動しません。** Excel が入っていない端末でも動作し、大量のファイルでも高速です
 - `-IgnoreSmallPages` / `-SmallPageRatio` / `-LogPath` / `-NoRecurse` はそのまま使えます
 - `-OutputRoot` `-PerSheet` `-FitToWidth` `-SkipExisting` `-IncludeHiddenSheets` は無視され、指定すると警告が出ます
@@ -3625,7 +3635,7 @@ powershell -ExecutionPolicy Bypass -File .\Export-ExcelToPdf.ps1 -Path D:\Docs
 
 #### ページ数の取得方法
 
-1. 生成された PDF のバイト列から `/Type /Page` の出現数を数えます（外部ツール不要）
+1. 生成された PDF のバイト列から、ページのオブジェクト（`/Type /Page`）を数えます（外部ツール不要）。承認印・注釈・電子署名などを追記保存した PDF では、書き換えたページが同じオブジェクト番号でファイルの末尾に足されるため、同じ番号のものは 1 ページ（最後に保存したもの）として数えます
 2. 取れない場合のみ、Excel の `PageSetup.Pages.Count` にページ割りを計算させます（低速なためフォールバック扱い）
 3. どちらでも取得できなければ `-` と表示します
 

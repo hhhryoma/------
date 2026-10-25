@@ -57,14 +57,25 @@ foreach ($p in $Path) {
 }
 if ($TextConv -and $files.Count -ne 1) { throw '-TextConv には Excel ファイルを 1 つ指定してください' }
 
-# -OutDir: 元のフォルダ構成のまま .md を作る。Excel より新しい .md があるファイルは変換しない（-Force で変換する）
+# -OutDir: 元のフォルダ構成のまま .md を作る。Excel より新しい .md があるファイルは変換しない（-Force で変換する）。
+# 同じ .md になる Excel（同じフォルダの 設計書.xlsx と 設計書.xlsm など）は、重ならないよう名前に拡張子も含める（設計書.xlsx.md）
 $todo = New-Object System.Collections.Generic.List[object]
 $skipped = 0
-foreach ($f in $files) {
-    if ($OutDir) {
+$sameName = @{}
+if ($OutDir) {
+    foreach ($f in $files) {
         $relDir = [System.IO.Path]::GetDirectoryName($f.Relative)
         $name = [System.IO.Path]::GetFileNameWithoutExtension($f.Info.Name) + '.md'
         if ($relDir) { $f.Target = Join-Path (Join-Path $OutDir $relDir) $name } else { $f.Target = Join-Path $OutDir $name }
+        $key = $f.Target.ToUpperInvariant()
+        $sameName[$key] = 1 + [int]$sameName[$key]
+    }
+}
+foreach ($f in $files) {
+    if ($OutDir) {
+        if ($sameName[$f.Target.ToUpperInvariant()] -gt 1) {
+            $f.Target = Join-Path ([System.IO.Path]::GetDirectoryName($f.Target)) ($f.Info.Name + '.md')
+        }
         if (-not $Force -and (Test-Path -LiteralPath $f.Target) -and (Get-Item -LiteralPath $f.Target).LastWriteTimeUtc -ge $f.Info.LastWriteTimeUtc) { $skipped++; continue }
     }
     $todo.Add($f)
@@ -135,6 +146,8 @@ if ($OutDir) {
 #
 # .PARAMETER OutDir
 #     Markdown（.md）を保存するフォルダ。元のフォルダ構成のまま保存し、Excel より新しい .md があるファイルは変換しません。
+#     同じフォルダの、拡張子だけが違う同じ名前の Excel（設計書.xlsx と 設計書.xlsm など）を一緒に変換するときは、
+#     名前に拡張子も含めます（設計書.xlsx.md・設計書.xlsm.md）。
 #     指定しないときは Markdown の文字列を出力します。
 #
 # .PARAMETER Force
