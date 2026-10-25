@@ -89,7 +89,8 @@ foreach ($r in (Read-CsvFile $Criteria @('指標', '向き', '○', '△') '判�
         if ($t.EndsWith('%')) { $percent = $true }
         $v = 0.0
         if (-not [double]::TryParse($t.TrimEnd('%').Trim(), [System.Globalization.NumberStyles]::Float, $invariant, [ref]$v)) { throw ("判定基準の CSV の {0} が数値ではありません（{1}: {2}）: {3}" -f $k, $pattern, $t, $Criteria) }
-        if ($t.EndsWith('%')) { $v = $v / 100.0 }
+        # 99.9% を 0.9990000000000001 にしない（ちょうど 999 / 1000 件の割合を、基準に届かないと判定しないため）
+        if ($t.EndsWith('%')) { $v = [math]::Round($v / 100.0, 10) }
         $limits[$k] = $v
     }
     if ($null -eq $limits['○']) { throw ("判定基準の CSV の ○ が空です（{0}）: {1}" -f $pattern, $Criteria) }
@@ -125,7 +126,8 @@ function Get-MetricJudgement {
 function Add-Metric {
     #     品質評価の 1 行（区分・指標・実績・判定・判定の考え方・詳細のファイル）。判定は判定基準の CSV で決める
     #       Key・Unit: 実績の CSV（-HistoryCsv）に書く指標の名前と分母（密度は New-QualityLimits.ps1 で基準値にできる名前にする）
-    param([string] $Area, [string] $Name, $Value, [string] $Note, [string] $Detail, [string] $Key, [string] $Unit)
+    #       Rate: 件数から求めた割合。丸める前の値で判定し、実績には小数 3 桁に切り捨てた値を書く（2999 / 3000 件を 1 と書かない）
+    param([string] $Area, [string] $Name, $Value, [string] $Note, [string] $Detail, [string] $Key, [string] $Unit, [switch] $Rate)
     $judgement = ''
     $basis = $Note
     $c = Get-Criterion $Name
@@ -133,6 +135,8 @@ function Add-Metric {
         $judgement = Get-MetricJudgement $c $Value
         $basis = (@($Note, $c.Text) | Where-Object { $_ }) -join '。'
     }
+    # 浮動小数の誤差（0.29 × 1000 = 289.99…）で 1 つ下に切り捨てないよう、わずかに足してから切り捨てる
+    if ($Rate) { $Value = [math]::Floor($Value * 1000 + 1e-9) / 1000 }
     if (-not $Key) { $Key = $Name }
     $rows.Add([pscustomobject]@{ Area = $Area; Name = $Name; Value = $Value; Judgement = $judgement; Basis = $basis; Detail = $Detail; Key = $Key; Unit = $Unit })
 }
@@ -181,18 +185,36 @@ function Read-SheetTable {
     return , $list
 }
 
+function Add-Failure {
+    #     ツールを失敗したツールにする（実行したツールからは除く）。呼び出し元は、そのツールの指標を出さない
+    param([string] $Name, [string] $Reason)
+    Write-Warning ("{0} が失敗しました: {1}" -f $Name, $Reason)
+    [void]$ran.Remove($Name)
+    $failed.Add(('{0}（{1}）' -f $Name, $Reason))
+}
+
 function Invoke-Tool {
-    #     ツールを実行し、パイプラインの結果を返す（ツールの表示は出さない）。失敗したら $null を返し、ほかのツールは続ける
+    #     ツールを実行し、パイプラインの結果を返す（ツールの表示は出さない）。失敗したら $null を返し、ほかのツールは続ける。
+    #     資料のパスが見つからない（書き間違いなど）ときは実行せず、詳細（-OutXlsx）を保存できなかった（前回の詳細を Excel で
+    #     開いているなど）ときも失敗にする（読めなかった資料を 0 件として ○ にしない・前回の詳細を今回の結果として読まないため）
     param([string] $Name, [hashtable] $Arguments)
     Write-Host ("  {0} を実行しています…" -f $Name)
     try {
+        $missing = @(foreach ($k in @($Arguments.Keys | Sort-Object)) {
+                if ($k -ne 'OutXlsx') { @($Arguments[$k]) | Where-Object { $_ -is [string] -and $_ -and @(Get-PathItem $_).Count -eq 0 } }
+            })
+        if ($missing.Count -gt 0) { throw ('見つかりません: {0}' -f ($missing -join '、')) }
+        # 詳細の更新日時が変わらなければ、保存できなかった（実行の開始の時刻とは比べない。共有フォルダの時計がずれていても見分けられる）
+        $detail = $Arguments['OutXlsx']
+        $before = $null
+        if (Test-Path -LiteralPath $detail) { $before = (Get-Item -LiteralPath $detail).LastWriteTimeUtc }
         $out = @(& (Join-Path $PSScriptRoot "$Name.ps1") @Arguments 6>$null)
+        if (-not (Test-Path -LiteralPath $detail) -or (Get-Item -LiteralPath $detail).LastWriteTimeUtc -eq $before) { throw ('詳細を保存できませんでした。Excel で開いていれば閉じて、実行し直してください: {0}' -f $detail) }
         $ran.Add($Name)
         return , $out
     }
     catch {
-        Write-Warning ("{0} が失敗しました: {1}" -f $Name, $_.Exception.Message)
-        $failed.Add(('{0}（{1}）' -f $Name, $_.Exception.Message))
+        Add-Failure $Name $_.Exception.Message
         return $null
     }
 }
@@ -216,6 +238,15 @@ try {
         if ($ReviewLog) { $args1['ReviewLog'] = $ReviewLog }
         if ($ReviewLimits) { $args1['Limits'] = $ReviewLimits }
         $docs = Invoke-Tool 'Measure-ReviewQuality' $args1
+    }
+    # 指摘管理表の表を 1 つも読めなかった（見出しが読めないなど）ときは、未完了・期限切れを 0 件として ○ にせず、失敗にする
+    # （表を読んで指摘が 0 件のときは、0 件として判定する。読んだ表は詳細の読み取り結果のシートに見出しの行がある）
+    if ($null -ne $docs -and -not ($docs | Measure-Object -Property Findings -Sum).Sum) {
+        $reviewTables = Read-SheetTable $file '読み取り結果'
+        if (@($reviewTables | Where-Object { $_['種類'] -eq '指摘管理表' -and $_['見出しの行'] }).Count -eq 0) {
+            Add-Failure 'Measure-ReviewQuality' '指摘を読めませんでした。指摘管理表の見出しを確かめてください'
+            $docs = $null
+        }
     }
     if ($null -ne $docs) {
         $total = ($docs | Measure-Object -Property Findings -Sum).Sum
@@ -251,8 +282,8 @@ try {
         # レビュー実施率は、レビュー記録と設計書の一覧（規模）があるときだけ（未レビューを決められるのはこのときだけ）
         if ($ReviewLog -and ($PageCsv -or $DesignPath) -and @($docs).Count -gt 0) {
             $unreviewed = @($docs | Where-Object { $_.Reviewed -eq $false })
-            $rate = [math]::Round((@($docs).Count - $unreviewed.Count) / @($docs).Count, 3)
-            Add-Metric 'レビュー' 'レビュー実施率' ([double]$rate) ('設計書 {0} 件のうち {1} 件' -f @($docs).Count, (@($docs).Count - $unreviewed.Count)) $file
+            $rate = (@($docs).Count - $unreviewed.Count) / @($docs).Count
+            Add-Metric 'レビュー' 'レビュー実施率' ([double]$rate) ('設計書 {0} 件のうち {1} 件' -f @($docs).Count, (@($docs).Count - $unreviewed.Count)) $file -Rate
             foreach ($d in $unreviewed) { Add-Action 'レビュー' $d.Document '未レビュー（レビュー記録も指摘も無い）' 'レビューを実施する' }
         }
         if ($ReviewLog) {
@@ -276,10 +307,13 @@ try {
     }
     if ($null -ne $functions) {
         $summary = Read-SheetPairs $file 'サマリー'
-        if ($summary.ContainsKey('消化率')) {
-            $rate = [double]::Parse($summary['消化率'], [System.Globalization.CultureInfo]::InvariantCulture)
-            Add-Metric 'テスト' '消化率' $rate '' $file
-        }
+        $caseCount = [double]$summary['テストケース（対象外を除く）']
+        # テストケースを 1 件も読めなかった（見出しが読めないなど）ときは、食い違いなどを 0 件として ○ にせず、失敗にする
+        if ($caseCount -eq 0) { Add-Failure 'Measure-TestQuality' 'テストケースを読めませんでした。テスト仕様書の見出しを確かめてください'; $functions = $null }
+    }
+    if ($null -ne $functions) {
+        # 消化率は、サマリーの丸めた値（1999 / 2000 件で 1）ではなく、件数から求めて判定する
+        Add-Metric 'テスト' '消化率' ([double]$summary['実施（OK・NG）'] / $caseCount) '' $file -Rate
         if ($BugList) {
             Add-Metric 'テスト' 'バグ' ([double]$summary['バグ']) '' $file
             $openBugs = [int]$summary['未完了のバグ']
@@ -323,6 +357,8 @@ try {
         if ($DesignPath) { $specArgs['DesignPath'] = $DesignPath }
         $specIssues = Invoke-Tool 'Test-TestSpec' $specArgs
     }
+    # テストケースを 1 件も読めなかった（機能別のシートが空）ときは、エラー・警告を 0 件として ○ にせず、失敗にする
+    if ($null -ne $specIssues -and (Read-SheetTable $file '機能別').Count -eq 0) { Add-Failure 'Test-TestSpec' 'テストケースを読めませんでした。テスト仕様書の見出しを確かめてください'; $specIssues = $null }
     if ($null -ne $specIssues) {
         $specErrors = @($specIssues | Where-Object Level -eq 'エラー').Count
         $specWarnings = @($specIssues | Where-Object Level -eq '警告').Count
@@ -344,7 +380,7 @@ try {
         $inTime = ($phases | Measure-Object -Property FoundInTime -Sum).Sum
         $leaked = ($phases | Measure-Object -Property Leaked -Sum).Sum
         if (($inTime + $leaked) -gt 0) {
-            Add-Metric '工程' '摘出すべき工程までに見つかった割合' ([double][math]::Round($inTime / ($inTime + $leaked), 3)) ('{0} / {1} 件' -f $inTime, ($inTime + $leaked)) $file
+            Add-Metric '工程' '摘出すべき工程までに見つかった割合' ([double]($inTime / ($inTime + $leaked))) ('{0} / {1} 件' -f $inTime, ($inTime + $leaked)) $file -Rate
             Add-Metric '工程' '後の工程への流出' ([double]$leaked) '' $file
             foreach ($p in @($phases | Where-Object { $_.Leaked -gt 0 })) { Add-Action '工程' $p.Phase ('{0} で入った欠陥のうち {1} 件が後の工程で見つかった（摘出率 {2}）' -f $p.Phase, $p.Leaked, $p.RemovalRate) ('{0}のレビューの観点を見直す' -f $p.Phase) }
         }
@@ -368,7 +404,7 @@ try {
         # 未レビューの設計書は、指摘もバグも入れない（Measure-ReviewEffectiveness.ps1 の全体の摘出率と同じ）
         $bugSum = ($reviewedDocs | Measure-Object -Property DesignBugs -Sum).Sum
         if ($findingSum + $bugSum -gt 0) {
-            Add-Metric 'レビュー' '設計工程の摘出率' ([double][math]::Round($findingSum / ($findingSum + $bugSum), 3)) ('レビューの指摘 {0} 件 ÷ (指摘 + 設計で入ったバグ {1} 件)' -f $findingSum, $bugSum) $file
+            Add-Metric 'レビュー' '設計工程の摘出率' ([double]($findingSum / ($findingSum + $bugSum))) ('レビューの指摘 {0} 件 ÷ (指摘 + 設計で入ったバグ {1} 件)' -f $findingSum, $bugSum) $file -Rate
         }
         $missed = @($effect | Where-Object NeedsAction)
         Add-Metric 'レビュー' 'レビューで見逃した設計書' ([double]$missed.Count) '設計で入ったバグがテストで見つかった設計書（指摘密度が少ない・基準内）など' $file
@@ -387,8 +423,8 @@ try {
         $matched = @($pairs | Where-Object Status -eq '一致').Count
         $humanCount = $matched + @($pairs | Where-Object Status -eq '人だけ').Count
         $aiCount = $matched + @($pairs | Where-Object Status -eq 'AI だけ').Count
-        if ($humanCount -gt 0) { Add-Metric 'AI レビュー' '人の指摘のうち AI も見つけた割合' ([double][math]::Round($matched / $humanCount, 3)) ('{0} / {1} 件' -f $matched, $humanCount) $file }
-        if ($aiCount -gt 0) { Add-Metric 'AI レビュー' 'AI の指摘のうち人と一致した割合' ([double][math]::Round($matched / $aiCount, 3)) ('{0} / {1} 件。AI だけの指摘には、人が見落とした正しい指摘も入る' -f $matched, $aiCount) $file }
+        if ($humanCount -gt 0) { Add-Metric 'AI レビュー' '人の指摘のうち AI も見つけた割合' ([double]($matched / $humanCount)) ('{0} / {1} 件' -f $matched, $humanCount) $file -Rate }
+        if ($aiCount -gt 0) { Add-Metric 'AI レビュー' 'AI の指摘のうち人と一致した割合' ([double]($matched / $aiCount)) ('{0} / {1} 件。AI だけの指摘には、人が見落とした正しい指摘も入る' -f $matched, $aiCount) $file -Rate }
         # 観点ごとの、AI の指摘のうち人と一致した割合（実績の CSV に残し、「観点別の一致率」のシートで推移を見る）
         $pointRates = @($pairs | Where-Object { $_.PointId -and $_.Status -ne '人だけ' } | Group-Object PointId | Sort-Object Name | ForEach-Object {
                 $hit = @($_.Group | Where-Object Status -eq '一致').Count
@@ -419,8 +455,7 @@ try {
             $reqs = Read-SheetTable $file '要件'
             if ($reqs.Count -gt 0) {
                 $covered = @($reqs | Where-Object { $_['判定'] -eq '○' }).Count
-                $rate = [math]::Round($covered / $reqs.Count, 3)
-                Add-Metric '網羅' '設計とテストのある要件の割合' ([double]$rate) ('{0} / {1} 件' -f $covered, $reqs.Count) $file
+                Add-Metric '網羅' '設計とテストのある要件の割合' ([double]($covered / $reqs.Count)) ('{0} / {1} 件' -f $covered, $reqs.Count) $file -Rate
             }
         }
         # 種類（画面・イベント・メッセージ・IF）ごとに、網羅のシートに出てきた順に並べる
@@ -428,8 +463,7 @@ try {
         foreach ($kind in @($coverage | ForEach-Object { $_['種類'] } | Select-Object -Unique)) {
             $group = @($coverage | Where-Object { $_['種類'] -eq $kind })
             $covered = @($group | Where-Object { $_['判定'] -eq '○' }).Count
-            $rate = [math]::Round($covered / $group.Count, 3)
-            Add-Metric '網羅' ('テストのある{0}の割合' -f $kind) ([double]$rate) ('{0} / {1} 件' -f $covered, $group.Count) $file
+            Add-Metric '網羅' ('テストのある{0}の割合' -f $kind) ([double]($covered / $group.Count)) ('{0} / {1} 件' -f $covered, $group.Count) $file -Rate
         }
         if ($gaps.Count -gt 0) { Add-Action '網羅' ('テストの無い要素 {0} 件' -f $gaps.Count) ((@($gaps | Group-InOrder Kind | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count })) -join '・') 'テストケースを追加する（詳細\網羅.xlsx の抜けのシート）' }
     }
@@ -441,6 +475,8 @@ try {
         $file = Join-Path $detailDir '設計書の整合性.xlsx'
         $issues = Invoke-Tool 'Test-DesignConsistency' (@{ Path = $DesignPath; OutXlsx = $file } + $common)
     }
+    # 設計書から定義も参照も読めなかった（定義と参照のシートが空）ときは、食い違いを 0 件として ○ にせず、失敗にする
+    if ($null -ne $issues -and (Read-SheetTable $file '定義と参照').Count -eq 0) { Add-Failure 'Test-DesignConsistency' '設計書から定義も参照も読めませんでした。参照のルールのファイル名・見出しを確かめてください'; $issues = $null }
     if ($null -ne $issues) {
         $errors = @($issues | Where-Object Level -eq 'エラー').Count
         $warnings = @($issues | Where-Object Level -eq '警告').Count
@@ -464,7 +500,12 @@ $history = New-Object System.Collections.Generic.List[object]
 $previous = @{}; $previousDate = $null
 $historyDates = @()
 if ($HistoryCsv -and (Test-Path -LiteralPath $HistoryCsv)) {
-    foreach ($h in (Read-CsvFile $HistoryCsv @('プロジェクト', '時点', '区分', '指標', '分母', '値') '実績の CSV')) { $history.Add($h) }
+    foreach ($h in (Read-CsvFile $HistoryCsv @('プロジェクト', '時点', '区分', '指標', '分母', '値') '実績の CSV')) {
+        # Excel で開いて保存すると、時点が 2026/10/6 の形になる。日付として読み、yyyy/MM/dd の形にそろえる（そのまま書き戻す）
+        $day = ConvertTo-DateValue ([string]$h.'時点')
+        if ($day) { $h.'時点' = $day.ToString('yyyy/MM/dd', $invariant) }
+        $history.Add($h)
+    }
     $mine = @($history | Where-Object { ([string]$_.'プロジェクト') -eq $Project -and ([string]$_.'時点') -ne $dateText })
     # 時点は yyyy/MM/dd なので、文字の順で日付の順になる
     $historyDates = @($mine | ForEach-Object { [string]$_.'時点' } | Where-Object { $_ -lt $dateText } | Sort-Object -Unique)

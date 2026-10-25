@@ -98,10 +98,10 @@ Test-Case 'New-QualityReport: 失敗したツールがあっても、ほかの�
 
 Test-Case 'New-QualityReport: ツールの結果をまとめる途中でエラーになっても、読み取り結果の使い回しを残さない' {
     $dir = New-TestDir
-    # tools を写し、指摘件数が数でない結果を返す Measure-ReviewQuality.ps1 に置き換える（集計の Measure-Object で止まる）
+    # tools を写し、詳細は保存するが、指摘件数が数でない結果を返す Measure-ReviewQuality.ps1 に置き換える（集計の Measure-Object で止まる）
     $tools = Join-Path $dir 'tools'
     Copy-Item -LiteralPath $script:ToolsDir -Destination $tools -Recurse
-    Set-Content -LiteralPath (Join-Path $tools 'Measure-ReviewQuality.ps1') -Value "[pscustomobject]@{ Document = 'x'; Findings = 'abc'; Open = 0; Overdue = 0 }" -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $tools 'Measure-ReviewQuality.ps1') -Value "param(`$Path, `$AsOf, `$OutXlsx) Set-Content -LiteralPath `$OutXlsx -Value 'x'; [pscustomobject]@{ Document = 'x'; Findings = 'abc'; Open = 0; Overdue = 0 }" -Encoding UTF8
     New-Item -ItemType Directory -Path (Join-Path $dir 'レビュー') | Out-Null
     Assert-Throws { & (Join-Path $tools 'New-QualityReport.ps1') -OutDir (Join-Path $dir '報告') -Findings (Join-Path $dir 'レビュー') 3>$null 6>$null } 'abc'
     Assert-True ($null -eq (Get-Variable -Name ExcelToolsSearchCache -Scope Global -ErrorAction SilentlyContinue)) '読み取り結果を残している'
@@ -234,4 +234,93 @@ Test-Case 'New-QualityReport: -Config の設定ファイル（相対パス・| �
     @('項目,値', '知らない項目,x') | Set-Content -LiteralPath (Join-Path $dir '品質評価の設定.csv') -Encoding UTF8
     Assert-Throws { & $ReportTool -Config $dir 6>$null } '知らない項目'
     Assert-Throws { & $ReportTool -Config (Join-Path $dir '無い') 6>$null } '設定ファイルが見つかりません'
+}
+
+Test-Case 'New-QualityReport: 前回の詳細を Excel で開いていて保存できなかったツールは失敗にし、前回の詳細の値を今回の結果にしない' {
+    $dir = New-TestDir
+    New-Item -ItemType Directory -Path (Join-Path $dir 'テスト') | Out-Null
+    # 10 ケースのうち、前から $done 件を実施した（OK）テスト仕様書
+    $writeCases = { param([int] $done) @(@('No,機能,確認内容,結果') + @(1..10 | ForEach-Object { '{0},SCR001,確認{0},{1}' -f $_, $(if ($_ -le $done) { 'OK' } else { '' }) })) | Set-Content -LiteralPath (Join-Path $dir 'テスト/cases.csv') -Encoding UTF8 }
+    $out = Join-Path $dir '報告'
+    & $writeCases 5
+    $r = @(& $ReportTool -OutDir $out -TestPath (Join-Path $dir 'テスト') -AsOf '2026-10-13' 3>$null 6>$null)
+    Assert-Equal 0.5 @($r | Where-Object Name -eq '消化率')[0].Value
+    & $writeCases 10
+    # Excel で前回の詳細を開いたときと同じく、書き込みは拒み、読み取りは許す
+    $lock = [System.IO.File]::Open((Join-Path $out '詳細/テスト.xlsx'), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    try { $text = Get-HostText { $script:staleResult = @(& $ReportTool -OutDir $out -TestPath (Join-Path $dir 'テスト') -AsOf '2026-10-20' 3>$null) } }
+    finally { $lock.Dispose() }
+    Assert-Equal 0 @($script:staleResult | Where-Object Name -eq '消化率').Count '前回の詳細の消化率（0.5）を今回の値にしている'
+    Assert-Match $text '失敗したツール: Measure-TestQuality（詳細を保存できませんでした'
+    Assert-True (@($script:staleResult | Where-Object Area -eq 'テスト仕様書').Count -gt 0) '保存できたツールの結果はまとめる'
+}
+
+Test-Case 'New-QualityReport: 資料のパスが見つからない・資料から何も読めなかったツールは失敗にし、0 件として ○ にしない' {
+    $dir = New-TestDir
+    # 設定ファイルの書き間違いなどで、資料のフォルダが無い
+    $text = Get-HostText { $script:unreadResult = @(& $ReportTool -OutDir (Join-Path $dir '報告1') -Findings (Join-Path $dir '無いレビュー') -TestPath (Join-Path $dir '無いテスト') -AsOf '2026-10-20' 3>$null) }
+    Assert-Equal '' ((@($script:unreadResult | ForEach-Object { $_.Name })) -join '・') '読まなかった資料の指標'
+    foreach ($tool in @('Measure-ReviewQuality', 'Measure-TestQuality', 'Test-TestSpec')) { Assert-Match $text ('{0}（見つかりません: [^）]*無い' -f $tool) }
+
+    # 見出しが読めない指摘管理表・テスト仕様書、定義も参照も無い設計書のフォルダ
+    New-Item -ItemType Directory -Path (Join-Path $dir 'テスト'), (Join-Path $dir '設計書') | Out-Null
+    @('項目番号,確認すること,OK/NG', '1,一覧が表示される,NG', '2,検索できる,') | Set-Content -LiteralPath (Join-Path $dir 'テスト/cases.csv') -Encoding UTF8
+    @('番号,コメント,担当', '1,桁数が違う,山田') | Set-Content -LiteralPath (Join-Path $dir 'findings.csv') -Encoding UTF8
+    New-ReportBook (Join-Path $dir '設計書/メモ.xlsx') 'メモ' @('項目', '内容') @(, @('打合せ', '来週に決める'))
+    $r = @(& $ReportTool -OutDir (Join-Path $dir '報告2') -Findings (Join-Path $dir 'findings.csv') -TestPath (Join-Path $dir 'テスト') -DesignPath (Join-Path $dir '設計書') -AsOf '2026-10-20' 3>$null 6>$null)
+    Assert-Equal '' ((@($r | ForEach-Object { '{0} {1}' -f $_.Name, $_.Judgement })) -join '・') '読めなかった資料の指標'
+    $scope = Read-XlsxSheet -Path (Join-Path $dir '報告2/品質評価_20261020.xlsx') -Index 3
+    $failedTools = [string]@($scope.Rows.Values | Where-Object { $_['A'] -eq '失敗したツール' })[0]['B']
+    $ranTools = [string]@($scope.Rows.Values | Where-Object { $_['A'] -eq '実行したツール' })[0]['B']
+    foreach ($tool in @('Measure-ReviewQuality（指摘を読めませんでした', 'Measure-TestQuality（テストケースを読めませんでした', 'Test-TestSpec（テストケースを読めませんでした', 'Test-DesignConsistency（設計書から定義も参照も読めませんでした')) {
+        Assert-True ($failedTools.Contains($tool)) $failedTools
+        Assert-True (-not $ranTools.Contains($tool.Split('（')[0])) $ranTools
+    }
+
+    # 見出しを読めた指摘管理表に指摘が 0 件なら、失敗にせず 0 件として判定する
+    New-ReportBook (Join-Path $dir '指摘0件.xlsx') '指摘' @('No', '設計書', '指摘内容', '状態') @()
+    $r = @(& $ReportTool -OutDir (Join-Path $dir '報告3') -Findings (Join-Path $dir '指摘0件.xlsx') -AsOf '2026-10-20' 3>$null 6>$null)
+    Assert-Equal '0|○' ((@($r | Where-Object Name -eq '未完了の指摘' | ForEach-Object { '{0}|{1}' -f $_.Value, $_.Judgement })) -join ',') '指摘が 0 件の指摘管理表'
+    $scope = Read-XlsxSheet -Path (Join-Path $dir '報告3/品質評価_20261020.xlsx') -Index 3
+    Assert-Equal 0 @($scope.Rows.Values | Where-Object { $_['A'] -eq '失敗したツール' -and $_['B'] }).Count '失敗したツール'
+}
+
+Test-Case 'New-QualityReport: 割合は丸める前の値で判定し、実績に 100% 未満を 1 と書かない（判定基準ちょうどの 99.9% は ○）' {
+    $dir = New-TestDir
+    New-Item -ItemType Directory -Path (Join-Path $dir 'テスト') | Out-Null
+    # 2000 ケースのうち、前から $done 件を実施した（OK）テスト仕様書
+    $writeCases = {
+        param([int] $done)
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add('No,機能,確認内容,結果')
+        for ($i = 1; $i -le 2000; $i++) { $lines.Add(('{0},SCR001,確認{0},{1}' -f $i, $(if ($i -le $done) { 'OK' } else { '' }))) }
+        [System.IO.File]::WriteAllLines((Join-Path $dir 'テスト/cases.csv'), $lines, (New-Object System.Text.UTF8Encoding($true)))
+    }
+    & $writeCases 1999
+    $r = @(& $ReportTool -OutDir (Join-Path $dir '報告') -TestPath (Join-Path $dir 'テスト') -AsOf '2026-10-20' 3>$null 6>$null)
+    $m = @($r | Where-Object Name -eq '消化率')[0]
+    Assert-Equal '0.999|△' ('{0}|{1}' -f $m.Value, $m.Judgement) '1999 / 2000 件（99.95%）を 1（100%）に丸めて ○ にしている'
+    & $writeCases 1998
+    $criteria = Join-Path $dir '判定基準.csv'
+    @('指標,向き,○,△', '消化率,以上,99.9%,90%') | Set-Content -LiteralPath $criteria -Encoding UTF8
+    $r = @(& $ReportTool -OutDir (Join-Path $dir '報告') -TestPath (Join-Path $dir 'テスト') -Criteria $criteria -AsOf '2026-10-20' 3>$null 6>$null)
+    $m = @($r | Where-Object Name -eq '消化率')[0]
+    Assert-Equal '0.999|○' ('{0}|{1}' -f $m.Value, $m.Judgement) '1998 / 2000 件は 99.9% ちょうど'
+}
+
+Test-Case 'New-QualityReport: 実績の CSV の時点を日付として読み、Excel で保存した 2026/10/6 の形でも前回と比べ、同じ時点の行を置き換える' {
+    $dir = New-TestDir
+    @('設計書,指摘内容,分類,状態', 'SCR001_受注一覧,桁数が違う,誤り,完了', 'SCR001_受注一覧,型が違う,誤り,対応中') | Set-Content -LiteralPath (Join-Path $dir 'findings.csv') -Encoding UTF8
+    $history = Join-Path $dir '実績.csv'
+    $base = @{ Findings = (Join-Path $dir 'findings.csv'); HistoryCsv = $history; Project = 'A'; OutDir = (Join-Path $dir '報告') }
+    & $ReportTool @base -AsOf '2026-10-06' 3>$null 6>$null | Out-Null
+    # Excel で開いて保存すると、時点が 0 埋めの無い形になる
+    [System.IO.File]::WriteAllText($history, ([System.IO.File]::ReadAllText($history) -replace '"2026/10/06"', '"2026/10/6"'), (New-Object System.Text.UTF8Encoding($true)))
+    $text = Get-HostText { & $ReportTool @base -AsOf '2026-10-20' 3>$null | Out-Null }
+    Assert-Match $text '前回 2026/10/06 と比べました'
+    $count = @(Import-Csv -LiteralPath $history).Count
+    & $ReportTool @base -AsOf '2026-10-06' 3>$null 6>$null | Out-Null
+    $rows = @(Import-Csv -LiteralPath $history)
+    Assert-Equal $count $rows.Count '同じ時点の行を置き換えずに足している'
+    Assert-Equal @('2026/10/06', '2026/10/20') @($rows | ForEach-Object { $_.'時点' } | Sort-Object -Unique)
 }
