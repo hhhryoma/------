@@ -242,6 +242,18 @@ Test-Case 'Measure-ReviewQuality: 状態の「取消」「取り消し」「取�
     Assert-Match $text '取下げなどで数えなかったもの 3 件'
 }
 
+Test-Case 'Measure-ReviewQuality: 状態の「キャンセル」「Cancelled」の指摘は数えず、「終了」は完了にする（「未終了」は未完了）' {
+    $dir = New-TestDir
+    New-FindingBook (Join-Path $dir '指摘管理表.xlsx') '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '対応状況') @(
+        @('1', '2026/10/01', 'DD03_テーブル定義書', '型が違う', '終了'),
+        @('2', '2026/10/01', 'DD03_テーブル定義書', '桁数が違う', 'キャンセル'),
+        @('3', '2026/10/02', 'DD03_テーブル定義書', '誤記', 'Cancelled'),
+        @('4', '2026/10/02', 'DD03_テーブル定義書', '名前の揺れ', '未終了'))
+    $text = Get-HostText { $script:r = @(& $QualityTool -Path (Join-Path $dir '指摘管理表.xlsx') -AsOf '2026-10-20' 3>$null) }
+    Assert-Equal 'DD03_テーブル定義書|2|1' ('{0}|{1}|{2}' -f $script:r[0].Document, $script:r[0].Findings, $script:r[0].Open)
+    Assert-Match $text '取下げなどで数えなかったもの 2 件'
+}
+
 Test-Case 'Measure-ReviewQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityTool
     Assert-Match $h.Synopsis '指摘'

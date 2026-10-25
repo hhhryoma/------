@@ -1146,7 +1146,10 @@ function Read-CsvFile {
     #     設定の CSV を読み、必要な列がそろっているかを確かめる
     param([string] $FilePath, [string[]] $Required, [string] $What)
     if (-not (Test-Path -LiteralPath $FilePath)) { throw "$What が見つかりません: $FilePath" }
-    $rows = @(Read-TextFile $FilePath | ConvertFrom-Csv)
+    # 見出しが「#」で始まる CSV（Redmine の書き出しのチケット番号の列）は、ConvertFrom-Csv が見出しを注釈として読み飛ばすので、全角の「＃」にして読む。
+    # Windows PowerShell の Export-Csv が 1 行目に書く「#TYPE …」は、そのまま読み飛ばさせる
+    $text = [regex]::Replace((Read-TextFile $FilePath), '^(\s*"?)#(?!(?i:type)\s)', '$1＃')
+    $rows = @($text | ConvertFrom-Csv)
     if ($rows.Count -gt 0) {
         $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
         foreach ($r in $Required) { if ($names -notcontains $r) { throw "$What に「$r」の列がありません: $FilePath" } }
@@ -1988,9 +1991,9 @@ function ConvertTo-DateValue {
     return $null
 }
 
-# 状態の文字のうち、終わっていないことを表すもの（「未完了」「未済」「未解決」「完了待ち」「完了予定」「not done」「reopen」「差し戻し」など）。
+# 状態の文字のうち、終わっていないことを表すもの（「未完了」「未済」「未解決」「未終了」「完了待ち」「完了予定」「not done」「reopen」「差し戻し」など）。
 # 「完了」「済」などを含んでいても、終わったものにしない
-$script:OpenStatusPattern = '未(完了|済|クローズ|解決|対応)|(完了|クローズ|解決)(待ち|予定)|(?i:not\s*(done|closed?)|un(done|closed)|re-?open)|再オープン|差し?戻'
+$script:OpenStatusPattern = '未(完了|済|クローズ|解決|対応|終了)|(完了|クローズ|解決|終了)(待ち|予定)|(?i:not\s*(done|closed?)|un(done|closed)|re-?open)|再オープン|差し?戻'
 
 function Test-ClosedStatus {
     #     状態の文字（対応状況など）が、終わったもの（ClosedPattern に合い、「未完了」「完了待ち」などの打ち消しでない）か

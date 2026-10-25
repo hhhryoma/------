@@ -64,8 +64,8 @@ Update-TypeData -TypeName 'TestQuality.Function' -DefaultDisplayPropertySet Func
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
 # 障害の状態: 対応が終わった・障害として数えない
-$closedPattern = '完了|済|クローズ|close|done|解決|対応不要'
-$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない'
+$closedPattern = '完了|済|クローズ|close|done|解決|対応不要|終了'
+$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない|キャンセル|cancel'
 
 # ---------------------------------------------------------------- 設定
 
