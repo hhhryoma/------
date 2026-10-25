@@ -264,6 +264,8 @@ foreach ($entry in $files) {
                     if ($backupPath -ne $dest) { $renamed.Add($backupPath.Substring($BackupDir.Length).TrimStart('\', '/')) }
                     New-Item -ItemType Directory -Force -Path (Split-Path $backupPath -Parent) | Out-Null
                     Copy-Item -LiteralPath $file.FullName -Destination $backupPath -Force
+                    # 設計書を読むツールが、残したファイルを設計書として読まないように、印のファイルを置く
+                    Add-BackupMarker $BackupDir 'Reset-ExcelView.ps1'
                 }
                 $null = Repair-Workbook -FilePath $file.FullName
                 if ($KeepTimestamp) { [System.IO.File]::SetLastWriteTimeUtc($file.FullName, $lastWrite) }
@@ -324,6 +326,7 @@ if ($renamed.Count -gt 0) { Write-Host ('  前に残したファイルと名前�
 #     書き換える前のファイルを、このフォルダにフォルダ構成ごとコピーしておきます。
 #     -Path に別々のフォルダ（ファイルならそのフォルダ）を指定したときは、そのフォルダの名前のフォルダ（同じ名前があれば「第1回 (2)」）に分けます。
 #     前に残したファイルと名前が同じときは上書きせず、「見積書 (2).xlsx」のように番号を付けて残します。
+#     このフォルダには印のファイル「書き換える前のファイル.txt」を置きます（設計書を読むツールは、印のあるフォルダを読みません）。
 #
 # .PARAMETER Force
 #     直す必要がないと判定したファイルも書き換えます。

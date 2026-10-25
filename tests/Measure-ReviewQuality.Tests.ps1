@@ -431,7 +431,8 @@ Test-Case 'Measure-ReviewQuality: 設計書の名前の版数を除いて規模�
         'DD01_画面一覧_v1.0.xlsx|1|||規模を数えない',
         'DD05_メッセージ一覧_v1.0.xlsx|1|16|0.062|基準内',
         'DD09_帳票設計書_v1.0.xlsx|1|||規模なし') @($script:r | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Document, $_.Findings, $_.Size, $_.Density, $_.Judgement }) '古い版の規模を足さない（19 × 2 にしない）'
-    Assert-Match $text '古い版 1 件は数えていません: DD02_画面設計書_SCR002_受注登録_v1\.0\.xlsx'
+    # 古い版は Measure-DesignSize.ps1 が読まない（その警告を出す）
+    Assert-Match $text '古い版 1 件は読みませんでした（DD02_画面設計書_SCR002_受注登録_v1\.0\.xlsx → DD02_画面設計書_SCR002_受注登録_v1\.1\.xlsx'
     Assert-Match $text '規模を数えない設計書: 1 件（.*）: DD01_画面一覧_v1\.0\.xlsx'
     Assert-Match $text '設計書 4 件'
 

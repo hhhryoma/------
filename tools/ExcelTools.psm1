@@ -1076,12 +1076,20 @@ function Export-Workbook {
         if ($name -match '^xl/charts/.+\.xml$') { [void]$ct.Append(('<Override PartName="/{0}" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>' -f $name)) }
         elseif ($name -match '^xl/drawings/[^/]+\.xml$') { [void]$ct.Append(('<Override PartName="/{0}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>' -f $name)) }
     }
+    # ツールが書き出したブックには、印（ユーザー設定のプロパティ）を付ける。設計書を読むツールは、設計書のフォルダに置いた出力を読まない（Select-DesignFiles）。
+    # Excel で保存し直しても残る。ツールから呼ばれていなければ（テストの入力のブックなど）付けない
+    $tool = Get-OutputToolName
+    $rootRels = '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+    if ($tool) {
+        [void]$ct.Append('<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/>')
+        $rootRels += '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties" Target="docProps/custom.xml"/>'
+    }
     [void]$ct.Append('</Types>')
     [void]$wbRels.Append(('<Relationship Id="rId{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>' -f ($sheetEntries.Count + 1)))
 
     $parts = [ordered]@{
         '[Content_Types].xml' = $ct.ToString()
-        '_rels/.rels' = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'
+        '_rels/.rels' = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + $rootRels + '</Relationships>'
         'xl/workbook.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets>{0}</sheets>{1}</workbook>' -f $wbSheets.ToString(), $(if ($definedNames.Length -gt 0) { '<definedNames>' + $definedNames.ToString() + '</definedNames>' } else { '' }))
         'xl/_rels/workbook.xml.rels' = $wbRels.ToString()
         # スタイル 0:標準 1:見出し 2:折り返し・上詰め 3:リンク
@@ -1092,6 +1100,9 @@ function Export-Workbook {
         if ($sheetEntries[$i - 1].HasLinks) { $parts["xl/worksheets/_rels/sheet$i.xml.rels"] = $sheetEntries[$i - 1].Rels }
     }
     foreach ($name in $chartParts.Keys) { $parts[$name] = $chartParts[$name] }
+    if ($tool) {
+        $parts['docProps/custom.xml'] = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><property fmtid="{{D5CDD505-2E9C-101B-9397-08002B2CF9AE}}" pid="2" name="{0}"><vt:lpwstr>{1}</vt:lpwstr></property></Properties>' -f $script:OutputMarkerName, (ConvertTo-XmlText $tool))
+    }
 
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     $stream = New-Object System.IO.FileStream($FilePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -1114,7 +1125,8 @@ $script:Nfkc = [System.Text.NormalizationForm]::FormKC
 
 function Read-ScreenDesign {
     #     画面設計書の画面項目定義・イベント定義と、コード定義書・メッセージ一覧を読む（Books は ConvertTo-DesignBooks の結果）。
-    #     画面項目定義・イベント定義は、「画面ID」の欄のあるシートだけを読む（AnySheet を付けると、欄の無いシートも読み、Screen は空）
+    #     画面項目定義・イベント定義は、「画面ID」の欄のあるシートだけを読む（AnySheet を付けると、欄の無いシートも読み、Screen は空）。
+    #     画面ID が差し込み欄（{{画面ID}}）のままのシート（New-DesignDocument.ps1 の雛形）は読まない
     #     戻り値: @{ Items（画面項目。No は No の列の値、Input は入力のある項目、Digits は桁数（読めなければ $null）、DigitsText は桁数の欄の文字）; Events（イベント）;
     #             Codes（コード区分名 → 表示名の一覧）; Messages（メッセージID（大文字）→ @{ Text（一覧の文言のまま）; File; Sheet; Row }）;
     #             MessageIdPattern（メッセージID の形の正規表現。^ と $ は付けない） }
@@ -1131,6 +1143,9 @@ function Read-ScreenDesign {
     foreach ($book in $Books.Values) {
         foreach ($sheetName in $book.Sheets.Keys) {
             $grid = $book.Sheets[$sheetName]
+            $screen = Find-LabelValue $grid '画面ID'
+            # 画面ID が差し込み欄（{{画面ID}}）のままのシートは雛形なので読まない
+            if ($screen -and (Test-PlaceholderId $screen)) { continue }
             # コード定義書: コード区分名ごとの表示名
             foreach ($t in (Find-DesignTables $grid @('コード区分名', '表示名') 'コード区分名')) {
                 foreach ($dr in $t.Rows) {
@@ -1152,7 +1167,6 @@ function Read-ScreenDesign {
                     $messages[$id] = [pscustomobject]@{ Text = $text; File = $book.File; Sheet = $sheetName; Row = $dr.Row }
                 }
             }
-            $screen = Find-LabelValue $grid '画面ID'
             if (-not $screen -and -not $AnySheet) { continue }
             $screen = ([string]$screen).Trim()
             $screenName = Find-LabelValue $grid '画面名'
@@ -1356,6 +1370,297 @@ function Find-DesignTables {
     return , $tables
 }
 
+# ---------------------------------------------------------------- 設計書を読むツールが読むファイル・シート
+
+
+# ツールが書き出したブックの印（docProps/custom.xml のユーザー設定のプロパティの名前。値は書き出したツールのファイル名）
+$script:OutputMarkerName = 'ExcelTools'
+# 書き換える前のファイルを残したフォルダ（-BackupDir）に置く印のファイル
+$script:BackupMarkerName = '書き換える前のファイル.txt'
+# 差し込み欄（{{テーブルID}} など。New-DesignDocument.ps1 の雛形）
+$script:PlaceholderPattern = '\{\{[^{}]*\}\}'
+
+function Get-OutputToolName {
+    #     Export-Workbook を呼んだツール（このモジュールと同じフォルダの .ps1）のファイル名。ツールから呼ばれていなければ $null
+    #     （テストの入力のブックなど、ツールの出力でないブックには印を付けないため）
+    foreach ($frame in @(Get-PSCallStack)) {
+        $s = [string]$frame.ScriptName
+        if (-not $s -or [System.IO.Path]::GetExtension($s) -ne '.ps1') { continue }
+        if ([string]::Equals([System.IO.Path]::GetDirectoryName($s), $PSScriptRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return [System.IO.Path]::GetFileName($s) }
+    }
+    return $null
+}
+
+function Get-ToolOutputKind {
+    #     ブック（xlsx / xlsm）が、ツールの書き出したものかを見分ける。ツールの出力なら、何の出力かの説明（違えば・読めなければ $null）:
+    #       - Export-Workbook が印（docProps/custom.xml の ExcelTools）を付けたブック（整合性チェックなどの -OutXlsx）
+    #       - Invoke-DesignReview.ps1 のレビュー結果（指摘一覧と観点消化状況のシート。印を付ける前に作ったもの）
+    #       - Compare-Excel.ps1 -OutMarkedDir の写し（最後のシートが「差分一覧」で、1 行目が 場所・種類・変更・内容）
+    param([string] $FilePath)
+    if (@('.xlsx', '.xlsm', '.xltx', '.xltm') -notcontains [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()) { return $null }
+    try { $pkg = Open-ZipPackage $FilePath } catch { return $null }
+    try {
+        $custom = Read-PartXml -Package $pkg -PartName 'docProps/custom.xml'
+        if ($custom) {
+            foreach ($p in $custom.SelectNodes("//*[local-name()='property']")) {
+                if ($p.GetAttribute('name') -eq $script:OutputMarkerName) { return ('{0} の出力' -f $p.InnerText.Trim()) }
+            }
+        }
+        $sheets = (Get-WorkbookSheetParts $pkg).Sheets
+        $names = @($sheets.Keys)
+        if ($names -contains '指摘一覧' -and $names -contains '観点消化状況') { return 'Invoke-DesignReview.ps1 のレビュー結果' }
+        if ($names.Count -gt 1 -and $names[-1] -match '^差分一覧( \(\d+\))?$') {
+            $doc = Read-PartXml -Package $pkg -PartName $sheets[$names[-1]]
+            $shared = $null
+            $first = @{}
+            foreach ($c in @($doc.SelectNodes("//*[local-name()='row'][@r='1']/*[local-name()='c']"))) {
+                $text = ''
+                $t = $c.GetAttribute('t')
+                if ($t -eq 's') {
+                    if ($null -eq $shared) {
+                        $sst = Read-PartXml -Package $pkg -PartName 'xl/sharedStrings.xml'
+                        $shared = @()
+                        if ($sst) { $shared = @($sst.SelectNodes("//*[local-name()='si']") | ForEach-Object { $_.InnerText }) }
+                    }
+                    $i = 0
+                    if ([int]::TryParse($c.InnerText, [ref]$i) -and $i -lt $shared.Count) { $text = $shared[$i] }
+                }
+                else { $text = $c.InnerText }
+                $first[($c.GetAttribute('r') -replace '\d', '')] = $text.Trim()
+            }
+            if ($first['A'] -eq '場所' -and $first['B'] -eq '種類' -and $first['C'] -eq '変更' -and $first['D'] -eq '内容') { return 'Compare-Excel.ps1 の差分の印を付けた写し' }
+        }
+    }
+    catch { }
+    finally { $pkg.Zip.Dispose() }
+    return $null
+}
+
+function Add-BackupMarker {
+    #     書き換える前のファイルを残したフォルダ（-BackupDir）に印のファイルを置く（無ければ）。設計書を読むツールは、印のあるフォルダを読まない
+    param([string] $BackupDir, [string] $Tool)
+    $marker = Join-Path $BackupDir $script:BackupMarkerName
+    if (Test-Path -LiteralPath $marker) { return }
+    $text = "このフォルダには、{0} が書き換える前のファイルを残しています。`r`n設計書を読むツール（Test-DesignConsistency.ps1・Measure-DesignSize.ps1 など）は、このファイルのあるフォルダを読みません。`r`n" -f $Tool
+    try {
+        if (-not (Test-Path -LiteralPath $BackupDir)) { New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null }
+        [System.IO.File]::WriteAllText($marker, $text, (New-Object System.Text.UTF8Encoding($true)))
+    }
+    catch { Write-Verbose ("印のファイルを置けませんでした: {0}" -f $_.Exception.Message) }
+}
+
+function Get-PathNameVersion {
+    #     ファイルの版数（Get-NameVersion）。ファイル名に無ければ、近いフォルダの名前の版数（v1.0\設計書.xlsx）。無ければ $null
+    param([string] $FilePath)
+    $v = Get-NameVersion ([System.IO.Path]::GetFileName($FilePath))
+    $dir = [System.IO.Path]::GetDirectoryName($FilePath)
+    while ($null -eq $v -and $dir) {
+        $name = [System.IO.Path]::GetFileName($dir)
+        if (-not $name) { break }
+        $v = Get-NameVersion $name
+        $dir = [System.IO.Path]::GetDirectoryName($dir)
+    }
+    return $v
+}
+
+function Select-DesignFiles {
+    #     設計書を読むツール（Test-DesignConsistency・Measure-DesignSize・Export-DesignDiagram・Export-TableDdl・New-TestData・
+    #     New-TestSpecDraft・New-GlossaryDraft・Invoke-DesignReview）が読むファイルを集める（Path のファイルと、フォルダの中のファイル）。
+    #     次のファイルは読まない（Skipped に入れ、Write-DesignSkipWarning で種類ごとに知らせる）:
+    #       - 古い版: 版数（_v1.0・Ver1.0・第1.0版。ファイル名に無ければフォルダ名）だけが違う同じ文書のうち、版数の小さいもの
+    #         （同じなら更新日時の古いもの）。New-DocumentRegister.ps1 と同じく、版数を除いたパスが同じものを同じ文書とみなす
+    #       - ツールの出力: ツールが書き出したブック（Get-ToolOutputKind）
+    #       - 書き換える前のファイル: 指定したフォルダの下の、印のファイル（Add-BackupMarker）のあるフォルダの中（指定したフォルダ自体は読む）
+    #     Exclude: 読まないファイル・フォルダ（そのツールの -OutXlsx など。知らせない）。Extensions: 読む拡張子（Search-Excel.ps1 と同じ）
+    #     戻り値: @{ Paths = Search-Excel の -Path に渡すパス; Files = @(@{ Path; Name; Relative }); RelativeOf = パス → 指定したフォルダからの相対パス;
+    #               Skipped = @(@{ Kind; Note }); Reported = 知らせたもの（種類|Note） }（ファイルは見つけた順）
+    param([string[]] $Path, [switch] $NoRecurse, [string[]] $Exclude, [switch] $IncludeWord,
+        [string[]] $Extensions = @('.xlsx', '.xlsm', '.xltx', '.xltm', '.xls', '.xlsb'))
+    $exts = @($Extensions | ForEach-Object { $_.ToLowerInvariant() })
+    if ($IncludeWord) { $exts += @('.docx', '.docm') }
+    $excluded = @($Exclude | Where-Object { $_ } | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\', '/') })
+    $skipped = New-Object System.Collections.Generic.List[object]
+    $entries = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $markerOf = @{}
+    foreach ($p in $Path) {
+        $items = @(Get-PathItem $p)
+        if ($items.Count -eq 0) { Write-Warning "見つかりません: $p"; continue }
+        foreach ($item in $items) {
+            if ($item.PSIsContainer) {
+                $root = $item.FullName.TrimEnd('\', '/')
+                $found = @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue)
+            }
+            else {
+                $root = [System.IO.Path]::GetDirectoryName($item.FullName)
+                $found = @($item)
+            }
+            foreach ($f in $found) {
+                if ($exts -notcontains $f.Extension.ToLowerInvariant() -or $f.Name.StartsWith('~$')) { continue }
+                if (@($excluded | Where-Object { [string]::Equals($f.FullName, $_, [System.StringComparison]::OrdinalIgnoreCase) -or $f.FullName.StartsWith($_ + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { continue }
+                if (-not $seen.Add($f.FullName)) { continue }
+                $rel = $f.FullName
+                if ($rel.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { $rel = $rel.Substring($root.Length).TrimStart('\', '/') }
+                # 書き換える前のファイルを残したフォルダ（指定したフォルダより下で、印のファイルのあるフォルダ）
+                $backup = $null
+                if ($item.PSIsContainer) {
+                    $dir = $f.DirectoryName
+                    while ($dir -and $dir.TrimEnd('\', '/').Length -gt $root.Length -and $dir.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        if (-not $markerOf.ContainsKey($dir)) { $markerOf[$dir] = Test-Path -LiteralPath (Join-Path $dir $script:BackupMarkerName) }
+                        if ($markerOf[$dir]) { $backup = $dir.Substring($root.Length).Trim('\', '/') }
+                        $dir = [System.IO.Path]::GetDirectoryName($dir)
+                    }
+                }
+                if ($backup) { $skipped.Add([pscustomobject]@{ Kind = '書き換える前のファイル'; Note = $backup }); continue }
+                $output = Get-ToolOutputKind $f.FullName
+                if ($output) { $skipped.Add([pscustomobject]@{ Kind = 'ツールの出力'; Note = ('{0}（{1}）' -f $rel, $output) }); continue }
+                $entries.Add([pscustomobject]@{ Path = $f.FullName; Name = $f.Name; Relative = $rel; Modified = $f.LastWriteTimeUtc; Key = (Get-VersionlessName $f.FullName); Version = (Get-PathNameVersion $f.FullName) })
+            }
+        }
+    }
+    # 同じ文書の古い版は読まない（版数の大きいもの、同じなら更新日時の新しいものを読む）
+    $latestOf = @{}
+    foreach ($g in @($entries | Group-InOrder Key)) {
+        if ($g.Count -lt 2) { continue }
+        $zero = New-Object System.Version(0, 0, 0, 0)
+        $sorted = @($g.Group | Sort-Object @{ e = { if ($_.Version) { $_.Version } else { $zero } } }, Modified, Path)
+        $latest = $sorted[$sorted.Count - 1]
+        foreach ($e in $sorted) { if ($e -ne $latest) { $latestOf[$e.Path] = $latest } }
+    }
+    $files = New-Object System.Collections.Generic.List[object]
+    $relativeOf = @{}
+    foreach ($e in $entries) {
+        if ($latestOf.ContainsKey($e.Path)) { $skipped.Add([pscustomobject]@{ Kind = '古い版'; Note = ('{0} → {1}' -f $e.Relative, $latestOf[$e.Path].Relative) }); continue }
+        $files.Add([pscustomobject]@{ Path = $e.Path; Name = $e.Name; Relative = $e.Relative })
+        $relativeOf[$e.Path] = $e.Relative
+    }
+    $reported = New-Object 'System.Collections.Generic.HashSet[string]'
+    return [pscustomobject]@{ Paths = [string[]]@($files | ForEach-Object { $_.Path }); Files = $files; RelativeOf = $relativeOf; Skipped = $skipped; Reported = $reported }
+}
+
+function Test-PlaceholderId {
+    #     ID の欄の値が、差し込み欄（{{テーブルID}} など）のままか（New-DesignDocument.ps1 の雛形のシート）
+    param([string] $Text)
+    return [regex]::IsMatch([string]$Text, $script:PlaceholderPattern)
+}
+
+function Select-DesignHits {
+    #     Search-Excel.ps1 の結果（Hits）を、設計書として読むものだけにする。
+    #       - Files（Select-DesignFiles の結果）があれば、ファイルの名前（File）を指定したフォルダからの相対パスにする（Search-Excel にはファイルを 1 つずつ渡すため）
+    #       - 雛形のシートを除く。名前が ID で終わる見出し（画面ID・テーブルID など）の右の値が、差し込み欄（{{テーブルID}} など）のままのシート
+    #         （New-DesignDocument.ps1 -TemplateSheet の雛形）。ほかのシートにも英数字の ID が無いブック（-Template の雛形のブック）は、ブックごと除く
+    #     除いたものは Files.Skipped に足す。NoWarning を付けなければ、最後に Write-DesignSkipWarning で知らせる
+    param($Hits, $Files, [switch] $NoWarning)
+    $list = @($Hits)
+    if ($Files) {
+        foreach ($h in $list) { if ($Files.RelativeOf.ContainsKey($h.Path)) { $h.File = $Files.RelativeOf[$h.Path] } }
+    }
+    $cellRx = [regex]'^([A-Z]+)(\d+)$'
+    # 見出しの右の値: 行の列の順で、見出しの次のセル
+    $nextTo = { param([hashtable] $Cells, [int[]] $Cols, [int] $Index) (ConvertTo-Label $Cells[$Cols[$Index]]).ToUpperInvariant().EndsWith('ID') }
+    # 差し込み欄のあるセルと、その行（ブック|シート|行 → 列 → 文字）。行のほかのセル（左の見出し）を集めて、見出しが ID で終わるかを見る
+    $rows = @{}
+    $found = New-Object System.Collections.Generic.List[object]
+    foreach ($h in $list) {
+        if ($h.Kind -ne '値' -or ([string]$h.Text).IndexOf('{{') -lt 0 -or -not (Test-PlaceholderId $h.Text)) { continue }
+        $m = $cellRx.Match([string]$h.Cell)
+        if (-not $m.Success) { continue }
+        $key = '{0}|{1}|{2}' -f $h.Path, $h.Sheet, $m.Groups[2].Value
+        $rows[$key] = @{}
+        $found.Add([pscustomobject]@{ Key = $key; Col = (Get-ColumnIndex $m.Groups[1].Value); Hit = $h })
+    }
+    if ($found.Count -eq 0) {
+        if (-not $NoWarning) { Write-DesignSkipWarning $Files }
+        return , $list
+    }
+    foreach ($h in $list) {
+        if ($h.Kind -ne '値') { continue }
+        $m = $cellRx.Match([string]$h.Cell)
+        if (-not $m.Success) { continue }
+        $key = '{0}|{1}|{2}' -f $h.Path, $h.Sheet, $m.Groups[2].Value
+        if ($rows.ContainsKey($key)) { $rows[$key][(Get-ColumnIndex $m.Groups[1].Value)] = [string]$h.Text }
+    }
+    # 雛形のシート（ブック|シート → 知らせる文）と、雛形のシートのあるブック（見つけた順）
+    $templates = [ordered]@{}
+    $books = [ordered]@{}
+    foreach ($v in $found) {
+        $sheetKey = '{0}|{1}' -f $v.Hit.Path, $v.Hit.Sheet
+        if ($templates.Contains($sheetKey)) { continue }
+        $cells = $rows[$v.Key]
+        $cols = [int[]]@($cells.Keys)
+        [Array]::Sort($cols)
+        $i = [Array]::IndexOf($cols, $v.Col)
+        if ($i -lt 1 -or -not (& $nextTo $cells $cols ($i - 1))) { continue }
+        $what = '{0} が {1}' -f $cells[$cols[$i - 1]].Trim(), $v.Hit.Text.Trim()
+        $templates[$sheetKey] = '{0} {1}（{2}）' -f $v.Hit.File, $v.Hit.Sheet, $what
+        if (-not $books.Contains($v.Hit.Path)) { $books[$v.Hit.Path] = '{0}（ブックのすべてのシート。{1}）' -f $v.Hit.File, $what }
+    }
+    # 雛形のブック: 雛形のシートのほかに、ID で終わる見出しの右に英数字の ID（SCR001・T_ORDER など）を書いたシートの無いブック
+    $wholeBooks = @{}
+    if ($books.Count -gt 0) {
+        $other = @{}
+        foreach ($h in $list) {
+            if ($h.Kind -ne '値' -or -not $books.Contains($h.Path) -or $templates.Contains(('{0}|{1}' -f $h.Path, $h.Sheet))) { continue }
+            $m = $cellRx.Match([string]$h.Cell)
+            if (-not $m.Success) { continue }
+            if (-not $other.ContainsKey($h.Path)) { $other[$h.Path] = @{} }
+            $key = '{0}|{1}' -f $h.Sheet, $m.Groups[2].Value
+            if (-not $other[$h.Path].ContainsKey($key)) { $other[$h.Path][$key] = @{} }
+            $other[$h.Path][$key][(Get-ColumnIndex $m.Groups[1].Value)] = [string]$h.Text
+        }
+        foreach ($p in @($books.Keys)) {
+            $real = $false
+            if ($other.ContainsKey($p)) {
+                foreach ($cells in $other[$p].Values) {
+                    $cols = [int[]]@($cells.Keys)
+                    [Array]::Sort($cols)
+                    for ($i = 0; $i -lt $cols.Count - 1 -and -not $real; $i++) {
+                        if ((& $nextTo $cells $cols $i) -and $cells[$cols[$i + 1]].Normalize($script:Nfkc).Trim() -match '^[A-Za-z0-9][A-Za-z0-9_.\-]*$') { $real = $true }
+                    }
+                    if ($real) { break }
+                }
+            }
+            if (-not $real) { $wholeBooks[$p] = $true }
+        }
+    }
+    # 知らせる（同じものは 1 回だけ。Invoke-DesignReview.ps1 は同じ設計書を何度か読む）
+    if ($Files) {
+        $notes = New-Object System.Collections.Generic.List[string]
+        foreach ($p in $books.Keys) {
+            if ($wholeBooks.ContainsKey($p)) { $notes.Add($books[$p]); continue }
+            foreach ($k in $templates.Keys) { if ($k.StartsWith($p + '|')) { $notes.Add($templates[$k]) } }
+        }
+        foreach ($note in $notes) {
+            if (-not $Files.Reported.Contains('雛形|' + $note) -and @($Files.Skipped | Where-Object { $_.Note -eq $note }).Count -eq 0) {
+                $Files.Skipped.Add([pscustomobject]@{ Kind = '雛形'; Note = $note })
+            }
+        }
+    }
+    if ($templates.Count -gt 0) { $list = @($list | Where-Object { -not $wholeBooks.ContainsKey($_.Path) -and -not $templates.Contains(('{0}|{1}' -f $_.Path, $_.Sheet)) }) }
+    if (-not $NoWarning) { Write-DesignSkipWarning $Files }
+    return , $list
+}
+
+function Write-DesignSkipWarning {
+    #     Select-DesignFiles・Select-DesignHits で読まなかったファイル・シートを、種類ごとに 1 回ずつ知らせる（知らせたものは Skipped から除く）
+    param($Files)
+    if (-not $Files -or $Files.Skipped.Count -eq 0) { return }
+    foreach ($g in @($Files.Skipped | Group-InOrder Kind)) {
+        $notes = New-Object System.Collections.Generic.List[string]
+        foreach ($s in $g.Group) { if (-not $notes.Contains($s.Note)) { $notes.Add($s.Note) } }
+        $shown = @($notes | Select-Object -First 3) -join '・'
+        if ($notes.Count -gt 3) { $shown += ' ほか {0} 件' -f ($notes.Count - 3) }
+        switch ($g.Name) {
+            '古い版' { Write-Warning ('古い版 {0} 件は読みませんでした（{1}。版数の大きいファイルだけを読みます）' -f $g.Count, $shown) }
+            'ツールの出力' { Write-Warning ('ツールが書き出したファイル {0} 件は、設計書ではないので読みませんでした（{1}。下書きを直して設計書にしたものなど、読ませるときは、Excel の［ファイル］→［情報］→［プロパティ］→［詳細プロパティ］の［ユーザー設定］で「{2}」を削除してください）' -f $g.Count, $shown, $script:OutputMarkerName) }
+            '書き換える前のファイル' { Write-Warning ('書き換える前のファイルを残したフォルダの {0} 件は読みませんでした（{1}。印のファイル「{2}」のあるフォルダ）' -f $g.Count, $shown, $script:BackupMarkerName) }
+            '雛形' { Write-Warning ('雛形（差し込み欄のまま）のシート・ブック {0} 件は読みませんでした（{1}）' -f $g.Count, $shown) }
+        }
+    }
+    foreach ($s in $Files.Skipped) { [void]$Files.Reported.Add($s.Kind + '|' + $s.Note) }
+    $Files.Skipped.Clear()
+}
+
 # ---------------------------------------------------------------- テーブル定義書を読む（Export-TableDdl・New-TestData）
 
 
@@ -1396,7 +1701,7 @@ function Test-BlankValue {
 function Read-TableDesign {
     #     テーブル定義書のカラム定義（物理名とデータ型の見出しがそろった表）とインデックス定義を、シートごとに読む（Books は ConvertTo-DesignBooks の結果。パスの順に読む）。
     #       Candidates: 見出しの候補（Read-TableHeaderCandidates）
-    #       OnFinding: 使わなかった表・カラム（テーブル ID が無い・ほかのシートと同じテーブル・同じシートの 2 つ目からの表・同じカラム）を知らせるスクリプトブロック（引数: 文、場所）
+    #       OnFinding: 使わなかった表・カラム（テーブル ID が無い・差し込み欄（{{テーブルID}}）のまま・ほかのシートと同じテーブル・同じシートの 2 つ目からの表・同じカラム）を知らせるスクリプトブロック（引数: 文、場所）
     #     戻り値: @{ Id; Name; File; Sheet; Place; Columns; Indexes } の一覧。場所（Place）は @{ File; Path; Sheet; Cell }
     #       Columns: @{ Name; Logical; BaseType; Length; Scale; PkOrder（主キーの順。主キーでなければ $null）; NotNull; Default; FkTable; FkColumn; Note（備考）; Place; SqlType（空） }
     #       Indexes: @{ Name; Columns; Unique; Place }（インデックス名が空の行は、上の行のインデックスのカラムの続き）
@@ -1441,6 +1746,8 @@ function Read-TableDesign {
             elseif ($sheetName -match '^[A-Za-z][A-Za-z0-9_$#]*$') { $tableId = $sheetName; $place = $headerPlace }
             else { & $finding ('テーブル ID（{0}）が見つからないため、このシートの表は使いません' -f ($Candidates['テーブルID'] -join '・')) $headerPlace; continue }
             $tableId = $tableId.Normalize($nfkc).Trim()
+            # テーブル ID が差し込み欄（{{テーブルID}}）のままのシートは、New-DesignDocument.ps1 -TemplateSheet の雛形なので使わない
+            if (Test-PlaceholderId $tableId) { & $finding ('テーブル ID が差し込み欄（{0}）のままなので、雛形のシートとみなして使いません' -f $tableId) $place; continue }
             $key = $tableId.ToUpperInvariant()
             if ($tableById.ContainsKey($key)) {
                 $firstPlace = $tableById[$key].Place

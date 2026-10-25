@@ -556,6 +556,8 @@ if ($CompareWith) {
     elseif ($files.Count -gt 1) { throw '-CompareWith にファイルを指定できるのは、版を上げるファイルが 1 つのときだけです（複数のときは前の版のフォルダを指定してください）。' }
 }
 
+# 新しい版数の名前で別に保存したとき、残した版を上げる前のファイル
+$kept = New-Object System.Collections.Generic.List[string]
 foreach ($f in $files) {
     $oldPath = $null
     if ($CompareWith) {
@@ -745,9 +747,15 @@ foreach ($f in $files) {
         if ($WhatIfPreference) { New-Result $shown '版上げ予定' $detail $f.FullName }
         continue
     }
-    if ($outPath) { Save-ZipPackage -FilePath $f.FullName -Changes $changes -OutPath $outPath; $resultPath = $outPath }
+    if ($outPath) { Save-ZipPackage -FilePath $f.FullName -Changes $changes -OutPath $outPath; $resultPath = $outPath; $kept.Add($f.Name) }
     else { Save-ZipPackage -FilePath $f.FullName -Changes $changes; $resultPath = $f.FullName }
     New-Result ([System.IO.Path]::GetFileName($resultPath)) '版上げ' $detail $resultPath
+}
+# 版を上げる前のファイルは同じフォルダに残る。版を上げる前に直したときは、中身は新しい版とほぼ同じ（前に提出した版ではない）ので知らせる
+if ($kept.Count -gt 0) {
+    $names = @($kept | Select-Object -First 3) -join '・'
+    if ($kept.Count -gt 3) { $names += ' ほか {0} 件' -f ($kept.Count - 3) }
+    Write-Warning ('版を上げる前のファイル {0} 件を、同じフォルダに残しています（{1}）。版を上げる前に直したときは、中身は新しい版とほぼ同じで、前に提出した版ではありません。要らなければ消してください。設計書を読むツール（Test-DesignConsistency.ps1 など）は、版数の大きいファイルだけを読みます' -f $kept.Count, $names)
 }
 
 # .SYNOPSIS

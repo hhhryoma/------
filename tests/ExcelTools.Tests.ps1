@@ -267,3 +267,58 @@ Test-Case 'ExcelTools: 障害として数えない状態（取下げ・誤指摘
     Assert-Match (Get-HostText { & (& $tool 'Measure-ReviewEffectiveness') -Findings $findings -BugList $bugs 3>$null | Out-Null }) '設計で入ったバグ 2 件'
     Assert-Match (Get-HostText { & (& $tool 'New-WeeklyReport') -BugList $bugs -AsOf '2026-10-23' 3>$null | Out-Null }) '・今週: 起票 2 件'
 }
+
+Test-Case 'ExcelTools: Select-DesignFiles は、同じ文書の古い版・ツールの出力・書き換える前のファイルのフォルダを読まず、種類ごとに 1 回知らせる' {
+    $dir = New-TestDir
+    $sheet = [ordered]@{ 'S' = @(, @('画面ID', 'SCR001')) }
+    foreach ($f in @('A_v1.0.xlsx', 'A_v1.2.xlsx', 'A_v1.10.xlsx', 'B.xlsx', 'v1.0/C.xlsx', 'v1.1/C.xlsx', 'sub/D_v1.0.xlsx', '置換前/A_v1.10.xlsx', '置換前/深い/B.xlsx')) {
+        $p = Join-Path $dir $f
+        New-Item -ItemType Directory -Force -Path (Split-Path $p -Parent) | Out-Null
+        New-SheetsBook $p $sheet
+    }
+    Add-BackupMarker (Join-Path $dir '置換前') 'Replace-Excel.ps1'
+    # ツールが書き出したブックには印がある（テストで作ったブックには無い）
+    $null = & (Join-Path $script:ToolsDir 'Search-Excel.ps1') 'SCR001' (Join-Path $dir 'B.xlsx') -OutXlsx (Join-Path $dir '検索結果.xlsx') 6>$null
+    Assert-Equal 'Search-Excel.ps1 の出力' (Get-ToolOutputKind (Join-Path $dir '検索結果.xlsx'))
+    Assert-Equal $null (Get-ToolOutputKind (Join-Path $dir 'B.xlsx'))
+
+    $sel = Select-DesignFiles -Path $dir -Exclude (Join-Path $dir 'sub')
+    Assert-Equal @('A_v1.10.xlsx', 'B.xlsx', 'v1.1/C.xlsx') @($sel.Files | ForEach-Object { ConvertTo-Slash $_.Relative } | Sort-Object) '版数は数として比べる（1.10 は 1.2 より新しい）。フォルダ名の版数も見る'
+    Assert-Equal @($sel.Files | ForEach-Object { $_.Path }) $sel.Paths
+    $text = Get-HostText { Write-DesignSkipWarning $sel }
+    Assert-Match $text '古い版 3 件は読みませんでした（'
+    Assert-Match $text 'A_v1\.0\.xlsx → A_v1\.10\.xlsx'
+    Assert-Match $text 'A_v1\.2\.xlsx → A_v1\.10\.xlsx'
+    Assert-Match $text 'v1\.0[\\/]C\.xlsx → v1\.1[\\/]C\.xlsx'
+    Assert-Match $text 'ツールが書き出したファイル 1 件は、設計書ではないので読みませんでした（検索結果\.xlsx（Search-Excel\.ps1 の出力）。.*［ユーザー設定］で「ExcelTools」を削除してください）'
+    Assert-Match $text '書き換える前のファイルを残したフォルダの 2 件は読みませんでした（置換前。'
+    Assert-NotMatch $text 'D_v1\.0' '-Exclude のフォルダは知らせない'
+    Assert-Equal '' (Get-HostText { Write-DesignSkipWarning $sel }) '知らせるのは 1 回だけ'
+
+    # 書き換える前のファイルのフォルダも、そのフォルダを指定すれば読む
+    $sel = Select-DesignFiles -Path (Join-Path $dir '置換前')
+    Assert-Equal @('A_v1.10.xlsx', '深い/B.xlsx') @($sel.Files | ForEach-Object { ConvertTo-Slash $_.Relative } | Sort-Object)
+}
+
+Test-Case 'ExcelTools: Select-DesignHits は、ID の欄が差し込み欄のままのシート（雛形）を除き、ほかのシートに ID の無いブックはブックごと除く' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir 'テーブル定義書.xlsx') ([ordered]@{
+            'T_ORDER' = @(@('テーブルID', 'T_ORDER'), @('物理名', 'データ型'), @('ORDER_NO', 'CHAR'))
+            '雛形'    = @(@('テーブルID', '{{テーブルID}}'), @('物理名', 'データ型'), @('{{主キー}}', 'CHAR'))
+            # ID の欄でない差し込み欄（メールの文面など）のシートは除かない
+            'メール'  = @(@('件名', '{{顧客名}} 様'), @('本文', 'ご注文ありがとうございます'))
+        })
+    New-Item -ItemType Directory -Path (Join-Path $dir 'sub') | Out-Null
+    New-SheetsBook (Join-Path $dir 'sub/画面設計書_雛形.xlsx') ([ordered]@{
+            '表紙'         = @(, @('画面設計書（{{画面ID}}）'))
+            '画面項目定義' = @(@('画面ID', '{{画面ID}}', '画面名', '{{画面名}}'), @('項目名', '項目ID'))
+            'イベント定義' = @(, @('イベントID', 'イベント名'))
+        })
+    $sel = Select-DesignFiles -Path $dir
+    $hits = Select-DesignHits @(& (Join-Path $script:ToolsDir 'Search-Excel.ps1') -Pattern '\S' -Path $sel.Paths -Target Value 6>$null) $sel -NoWarning
+    Assert-Equal @('テーブル定義書.xlsx|T_ORDER', 'テーブル定義書.xlsx|メール') @($hits | ForEach-Object { '{0}|{1}' -f $_.File, $_.Sheet } | Select-Object -Unique)
+    $text = Get-HostText { Write-DesignSkipWarning $sel }
+    Assert-Match $text '雛形（差し込み欄のまま）のシート・ブック 2 件は読みませんでした（'
+    Assert-Match $text 'テーブル定義書\.xlsx 雛形（テーブルID が \{\{テーブルID\}\}）'
+    Assert-Match $text 'sub[\\/]画面設計書_雛形\.xlsx（ブックのすべてのシート。画面ID が \{\{画面ID\}\}）' 'ファイルの名前は指定したフォルダからの相対パス'
+}

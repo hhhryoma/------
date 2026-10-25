@@ -382,6 +382,8 @@ Test-Case 'Test-ExcelDeliverable: -BackupDir の中のファイルはチェッ�
     $issues = Invoke-Check @{ Path = $dir; Fix = $true; BackupDir = $backup }
     Assert-Equal @('bad.xlsx') @($issues | ForEach-Object { $_.File } | Sort-Object -Unique) '-BackupDir の中のファイル'
     Assert-Equal $hash (Get-FileHash -LiteralPath (Join-Path $backup 'bad.xlsx')).Hash '前に残した直す前のファイル'
+    # 設計書を読むツールが、このフォルダを読まないための印のファイル
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $backup '書き換える前のファイル.txt'))) 'Test-ExcelDeliverable\.ps1 が書き換える前のファイル'
 }
 
 function New-ViewBook {

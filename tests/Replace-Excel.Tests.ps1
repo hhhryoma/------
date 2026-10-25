@@ -182,7 +182,9 @@ Test-Case 'Replace-Excel: 図形・隠しシート・セル番地を省略した
     Assert-Equal 0 @(Get-Texts (Join-Path $dir 'sample.xlsx') 'TODO').Count 'sample.xlsx に TODO が残っています'
     Assert-Equal 'インライン↵DONE' (@($r | Where-Object Location -eq 'inline!A1')[0].After) '改行（_x000D_）は表示では ↵'
     Assert-WellFormed (Join-Path $dir 'sample.xlsx')
-    Assert-Equal @('sample.xlsx', 'sub/inline.xlsx', 'sub/quote.xlsx') @(Get-ChildItem -LiteralPath $backup -Recurse -File | ForEach-Object { ConvertTo-Slash $_.FullName.Substring($backup.Length + 1) } | Sort-Object)
+    # 印のファイル（設計書を読むツールが、このフォルダを読まないように）も置く
+    Assert-Equal @('sample.xlsx', 'sub/inline.xlsx', 'sub/quote.xlsx', '書き換える前のファイル.txt') @(Get-ChildItem -LiteralPath $backup -Recurse -File | ForEach-Object { ConvertTo-Slash $_.FullName.Substring($backup.Length + 1) } | Sort-Object)
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $backup '書き換える前のファイル.txt'))) 'Replace-Excel\.ps1 が書き換える前のファイル'
     Assert-Equal (Get-FileHash -LiteralPath (Join-Path $script:Fixtures 'grep/sample.xlsx')).Hash (Get-FileHash -LiteralPath (Join-Path $backup 'sample.xlsx')).Hash 'バックアップは元のまま'
 }
 

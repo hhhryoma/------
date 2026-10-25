@@ -38,10 +38,11 @@ $nfkc = [System.Text.NormalizationForm]::FormKC
 # ---------------------------------------------------------------- 設計書を読む
 
 
-$searchArgs = @{ Pattern = '\S'; Path = $Path; Target = 'Value' }
-if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
+# 同じ文書の古い版・ツールの出力・書き換える前のファイルと、非表示のシート・雛形のシート（差し込み欄のまま）は読まない（知らせる）
+$designFiles = Select-DesignFiles -Path $Path -NoRecurse:$NoRecurse -Exclude @($OutXlsx)
+$searchArgs = @{ Pattern = '\S'; Path = $designFiles.Paths; Target = 'Value'; SkipHiddenSheets = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-$hits = @(& (Join-Path $PSScriptRoot 'Search-Excel.ps1') @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
+$hits = Select-DesignHits @(& (Join-Path $PSScriptRoot 'Search-Excel.ps1') @searchArgs 6>$null) $designFiles
 $books = ConvertTo-DesignBooks $hits
 
 $edges = New-Object System.Collections.Generic.List[object]
@@ -541,6 +542,7 @@ if ($OutXlsx) { Write-Host "Excel の図を保存しました: $OutXlsx" }
 #
 # .PARAMETER Path
 #     設計書のフォルダまたはファイル（画面一覧・画面設計書・テーブル定義書。複数可）。
+#     同じ文書の古い版・ツールが書き出したファイル・書き換える前のファイル（-BackupDir）と、非表示のシート・雛形のシート（ID が {{テーブルID}} などのまま）は読みません（読まなかったものは警告で知らせます）。
 #
 # .PARAMETER Kind
 #     作る図（ScreenFlow: 画面遷移図 / ER: ER 図）。既定は両方。

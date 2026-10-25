@@ -92,3 +92,18 @@ Test-Case 'New-GlossaryDraft: Get-Help でヘルプが表示される' {
     Assert-Match $h.Synopsis '用語集'
     Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
+
+Test-Case 'New-GlossaryDraft: 同じ文書の古い版と、設計書のフォルダに置いたツールの出力（前の下書きなど）の言葉は数えない' {
+    $dir = New-TestDir
+    New-TermBook $dir
+    $expected = @(& $GlossaryTool $dir 6>$null 3>$null | ForEach-Object { '{0}|{1}|{2}' -f $_.Term, $_.Kind, $_.Count })
+    Move-Item -LiteralPath (Join-Path $dir '基本設計書.xlsx') -Destination (Join-Path $dir '基本設計書_v1.0.xlsx')
+    Copy-Item -LiteralPath (Join-Path $dir '基本設計書_v1.0.xlsx') -Destination (Join-Path $dir '基本設計書_v1.1.xlsx')
+    $null = & $GlossaryTool $dir -OutXlsx (Join-Path $dir '用語集の下書き.xlsx') 6>$null 3>$null
+    $w = $null
+    $terms = @(& $GlossaryTool $dir -WarningVariable w -WarningAction SilentlyContinue 6>$null | ForEach-Object { '{0}|{1}|{2}' -f $_.Term, $_.Kind, $_.Count })
+    Assert-Equal $expected $terms
+    $warnings = ($w | ForEach-Object { $_.Message }) -join "`n"
+    Assert-Match $warnings '古い版 1 件は読みませんでした'
+    Assert-Match $warnings '用語集の下書き\.xlsx（New-GlossaryDraft\.ps1 の出力）'
+}

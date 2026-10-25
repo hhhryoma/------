@@ -45,10 +45,11 @@ $sqlIgnore = @('DUAL', 'SELECT', 'SET', 'VALUES', 'WHERE', 'LATERAL', 'UNNEST', 
 # ---------------------------------------------------------------- 設計書の ID を読む
 
 
-$searchArgs = @{ Pattern = '\S'; Path = $DesignPath; Target = 'Value' }
-if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
+# 同じ文書の古い版・ツールの出力・書き換える前のファイルと、非表示のシート・雛形のシート（差し込み欄のまま）は読まない（知らせる）
+$designFiles = Select-DesignFiles -Path $DesignPath -NoRecurse:$NoRecurse -Exclude @($OutXlsx)
+$searchArgs = @{ Pattern = '\S'; Path = $designFiles.Paths; Target = 'Value'; SkipHiddenSheets = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-$hits = @(& (Join-Path $PSScriptRoot 'Search-Excel.ps1') @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
+$hits = Select-DesignHits @(& (Join-Path $PSScriptRoot 'Search-Excel.ps1') @searchArgs 6>$null) $designFiles
 $books = ConvertTo-DesignBooks $hits
 
 # 設計書の ID: 種類 → ID（大文字）→ @{ Kind; Id; Name; File; Path; Sheet; Row; Hits（ソースの場所の一覧）}
@@ -349,6 +350,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER DesignPath
 #     設計書のフォルダまたはファイル（メッセージ一覧・画面一覧・画面設計書・テーブル定義書。複数可）。
+#     同じ文書の古い版・ツールが書き出したファイル・書き換える前のファイル（-BackupDir）と、非表示のシート・雛形のシート（ID が {{テーブルID}} などのまま）は読みません（読まなかったものは警告で知らせます）。
 #
 # .PARAMETER SourcePath
 #     ソースのフォルダまたはファイル（複数可）。Measure-CodeSize.ps1 と同じ拡張子のソースと、.properties・.yml・.json などの設定ファイルを読みます。

@@ -456,7 +456,11 @@ elseif ($DesignPath) {
     $sizeArgs = @{ Path = $DesignPath }
     if ($NoRecurse) { $sizeArgs['NoRecurse'] = $true }
     if ($NoExcel) { $sizeArgs['NoExcel'] = $true }
-    foreach ($item in @(& $sizeScript @sizeArgs 6>$null 3>$null)) { Add-Size $item.File ([double]$item.Size) '規模' }
+    # Measure-DesignSize.ps1 の警告のうち、読まなかった設計書（同じ文書の古い版・ツールの出力など）は規模に関わるので出す（ほかの警告は出さない）
+    foreach ($item in @(& $sizeScript @sizeArgs 6>$null 3>&1)) {
+        if ($item -is [System.Management.Automation.WarningRecord]) { if ($item.Message -match '読みませんでした') { Write-Warning $item.Message }; continue }
+        Add-Size $item.File ([double]$item.Size) '規模'
+    }
 }
 if ($staleSizes.Count -gt 0) {
     Write-Warning ('同じ設計書の版が複数あるため、いちばん新しい版の規模を使います。古い版 {0} 件は数えていません: {1}' -f $staleSizes.Count, ($staleSizes -join '・'))

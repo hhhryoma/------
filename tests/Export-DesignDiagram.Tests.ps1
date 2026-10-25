@@ -192,3 +192,13 @@ Test-Case 'Export-DesignDiagram: Get-Help でヘルプが表示される' {
     Assert-Match $h.Synopsis '画面遷移図'
     Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
+
+Test-Case 'Export-DesignDiagram: 版を上げたあとの古い版の画面設計書は読まない（遷移を二重にしない）' {
+    $dir = Copy-Fixture (Join-Path $designDir '.')
+    $scr = Join-Path $dir 'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx'
+    Move-Item -LiteralPath (Join-Path $dir 'DD02_画面設計書_SCR001_受注一覧.xlsx') -Destination $scr
+    Copy-Item -LiteralPath $scr -Destination (Join-Path $dir 'DD02_画面設計書_SCR001_受注一覧_v1.1.xlsx')
+    $text = Get-HostText { & $DiagramTool $dir | Out-Null }
+    Assert-Match $text '画面遷移図: 画面 3・遷移 6、ER 図: テーブル 4・外部キー 3'
+    Assert-Match $text '古い版 1 件は読みませんでした（DD02_画面設計書_SCR001_受注一覧_v1\.0\.xlsx → DD02_画面設計書_SCR001_受注一覧_v1\.1\.xlsx。'
+}

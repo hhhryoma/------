@@ -769,3 +769,24 @@ Test-Case 'Invoke-DesignReview: Get-Help でヘルプが表示される' {
     Assert-Match $h.Synopsis 'AI'
     Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
+
+Test-Case 'Invoke-DesignReview: 保存先の既定は、設計書のフォルダと同じ場所の design-review（今いるフォルダによらない）。同じ文書の古い版は依頼しない' {
+    $dir = New-TestDir
+    $design = Join-Path $dir '設計書'
+    New-Item -ItemType Directory -Path $design | Out-Null
+    Copy-Item -Path (Join-Path $designDir '*.xlsx') -Destination $design
+    $scr = Join-Path $design 'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx'
+    Move-Item -LiteralPath (Join-Path $design 'DD02_画面設計書_SCR001_受注一覧.xlsx') -Destination $scr
+    Copy-Item -LiteralPath $scr -Destination (Join-Path $design 'DD02_画面設計書_SCR001_受注一覧_v1.1.xlsx')
+    # 設計書のフォルダの中で実行しても、レビュー結果を設計書のフォルダに置かない
+    Push-Location -LiteralPath $design
+    try { $text = Get-HostText { & $Review -Path . -PromptOnly } }
+    finally { Pop-Location }
+    $out = Join-Path $dir 'design-review'
+    Assert-True (Test-Path -LiteralPath (Join-Path $out 'requests.json')) '設計書のフォルダと同じ場所の design-review'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $design 'design-review'))) '設計書のフォルダの中には作らない'
+    $files = @((Get-Manifest $out).Files | ForEach-Object { $_.Relative })
+    Assert-True ($files -contains 'DD02_画面設計書_SCR001_受注一覧_v1.1.xlsx') ($files -join ', ')
+    Assert-True ($files -notcontains 'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx') '古い版は依頼しない'
+    Assert-Match $text '古い版 1 件は読みませんでした（DD02_画面設計書_SCR001_受注一覧_v1\.0\.xlsx → DD02_画面設計書_SCR001_受注一覧_v1\.1\.xlsx。'
+}
