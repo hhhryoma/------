@@ -156,6 +156,27 @@ Test-Case 'Start-ExcelTools: 結果の既定の保存先（名前_日時。同�
     Assert-Equal 0 @($errors).Count 'PowerShell のスクリプトとして読める'
 }
 
+Test-Case 'Start-ExcelTools: 品質評価・週次報告を設定ファイルだけで作ったときは、設定ファイルの出力先にできたブックを開く（「送る」と同じ）' {
+    $dir = Join-Path (New-TestDir) '受注システム'
+    New-Item -ItemType Directory -Path (Join-Path $dir '品質報告'), (Join-Path $dir '報告') | Out-Null
+    @('項目,値', '指摘管理表,レビュー') | Set-Content -LiteralPath (Join-Path $dir '品質評価の設定.csv') -Encoding UTF8
+    @('項目,値', '出力先,報告') | Set-Content -LiteralPath (Join-Path $dir '週次報告の設定.csv') -Encoding UTF8
+    $since = (Get-Date).AddSeconds(-2)
+    foreach ($f in @('品質報告/品質評価_20261020.xlsx', '報告/週次報告_20261020.txt', '報告/週次報告_20261020.xlsx')) { [System.IO.File]::WriteAllText((Join-Path $dir $f), 'x') }
+    $quality = Get-GuiResultTarget (Get-TestEntry 'Quality') @{ Config = $dir } $since
+    Assert-Equal ('{0}|{1}' -f (Join-Path $dir '品質報告/品質評価_20261020.xlsx'), (Join-Path $dir '品質報告')) ('{0}|{1}' -f $quality.Path, $quality.Dir) '設定ファイルの既定の出力先（品質報告）'
+    $weekly = Get-GuiResultTarget (Get-TestEntry 'Weekly') @{ Config = (Join-Path $dir '週次報告の設定.csv') } $since
+    Assert-Equal (Join-Path $dir '報告/週次報告_20261020.xlsx') $weekly.Path '設定ファイルの出力先'
+    # 出力先の欄があれば、その出力先
+    $other = Join-Path $dir '別'
+    New-Item -ItemType Directory -Path $other | Out-Null
+    $t = Get-GuiResultTarget (Get-TestEntry 'Quality') @{ Config = $dir; OutDir = $other } $since
+    Assert-Equal "|$other" ('{0}|{1}' -f $t.Path, $t.Dir)
+    # 設定ファイルを読めなければ、開くものは無い
+    $t = Get-GuiResultTarget (Get-TestEntry 'Quality') @{ Config = (Join-Path $dir '無い') } $since
+    Assert-Equal '|' ('{0}|{1}' -f $t.Path, $t.Dir)
+}
+
 Test-Case 'Start-ExcelTools: ツールを別の実行空間で動かし、Write-Host・警告・出力の件数と表を受け取り、中止・エラーも知らせる' {
     $dir = New-TestDir
     $search = Get-TestEntry 'Search'

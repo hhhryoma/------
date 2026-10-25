@@ -155,6 +155,9 @@ Test-Case 'Invoke-SendTo: 品質評価は、案件のフォルダの品質評価
     $analysisDir = Join-Path $dir '定性分析'
     New-Item -ItemType Directory -Path $analysisDir | Out-Null
     Export-Workbook -FilePath (Join-Path $analysisDir '品質評価_20261020.xlsx') -Sheets @(@{ Name = '品質評価'; Columns = @(@('区分', '指標', '実績', '判定', '判定の考え方', '定性分析（原因）', '対策') | ForEach-Object { @{ Header = $_; Width = 12 } }); Rows = @(@{ Values = @('テスト', '未完了のバグ', [double]5, '×', '0 件が ○', '割り当ての遅れ', '日次で確認する') }) })
+    # 前の週のブックをあとで直して保存しても（更新日時は新しい）、名前の日付が一番新しいブックを結果にする
+    Copy-Item -LiteralPath (Join-Path $analysisDir '品質評価_20261020.xlsx') -Destination (Join-Path $analysisDir '品質評価_20261013.xlsx')
+    (Get-Item -LiteralPath (Join-Path $analysisDir '品質評価_20261013.xlsx')).LastWriteTime = (Get-Date).AddMinutes(5)
     $text = Get-HostText { & $SendTo -Action Analysis -NoOpen -NoPause $analysisDir | Out-Null }
     Assert-Match $text '品質評価の定性分析（1 件）'
     Assert-Match $text '定性分析・対策が記入済みです'

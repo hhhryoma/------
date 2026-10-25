@@ -97,11 +97,20 @@ $zones = Read-ZoneTable $zoneCsv 'テスト密度' 'バグ密度'
 # ---------------------------------------------------------------- ヘルパー
 
 
+# -DesignPath の FP（4 × EI + 5 × EO + 4 × EQ）の分母の名前。Measure-DesignSize.ps1 の NESMA の FP（データファンクションも入れる）と
+# 実績の CSV・基準値で混ざらないよう「FP（トランザクション）」と書く。以前の名前「FP」の基準値の行も、この分母の行が無ければ使う
+$transactionFpUnit = 'FP（トランザクション）'
+$oldUnitNames = @{ $transactionFpUnit = 'FP' }
+
 function Get-Judgement {
     #     基準値（指標・分母・工程）と比べて「少ない」「基準内」「多い」。基準値が無ければ ''
     param([string] $Metric, [string] $Unit, [string] $Process, [double] $Value)
-    $limit = @($limitRows | Where-Object { $_.Metric -eq $Metric -and $_.Unit -eq $Unit -and $Process -and $_.Process -eq $Process })[0]
-    if (-not $limit) { $limit = @($limitRows | Where-Object { $_.Metric -eq $Metric -and $_.Unit -eq $Unit -and -not $_.Process })[0] }
+    $limit = $null
+    foreach ($u in @($Unit, $oldUnitNames[$Unit])) {
+        if (-not $u -or $limit) { continue }
+        $limit = @($limitRows | Where-Object { $_.Metric -eq $Metric -and $_.Unit -eq $u -and $Process -and $_.Process -eq $Process })[0]
+        if (-not $limit) { $limit = @($limitRows | Where-Object { $_.Metric -eq $Metric -and $_.Unit -eq $u -and -not $_.Process })[0] }
+    }
     if (-not $limit) { return '' }
     if ($null -ne $limit.Low -and $Value -lt $limit.Low) { return '少ない' }
     if ($null -ne $limit.High -and $Value -gt $limit.High) { return '多い' }
@@ -194,11 +203,22 @@ $bugs = New-Object System.Collections.Generic.List[object]
 $excludedBugs = 0
 # 取下げなどで数えないバグの番号（テスト仕様書が参照していても、障害管理表に無い番号にはしない）
 $excludedIds = New-Object 'System.Collections.Generic.HashSet[string]'
+# 時点（-AsOf）より後に起票したバグの番号（数えないが、テスト仕様書が参照していても障害管理表に無い番号にはしない）
+$laterIds = New-Object 'System.Collections.Generic.HashSet[string]'
+$laterBugs = 0
 $bugListHasFunction = $false
 if ($BugList) {
     $bugRecords = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $BugList '障害管理表' -NoRecurse:$NoRecurse) -Fields $bugFields -Need @('障害内容', @('起票日', '状態', '重要度', '障害ID')) -Key @('障害内容') -What '障害管理表'
     foreach ($rec in $bugRecords) {
         $v = $rec.Values
+        # 時点より後に起票したバグは数えない（前の時点の評価を後から作るとき。New-WeeklyReport.ps1・Measure-ReviewQuality.ps1 と同じ）
+        $found = ConvertTo-DateValue $v['起票日'] $AsOf
+        if ($found -and $found -gt $AsOf) {
+            $laterBugs++
+            $laterId = @(ConvertTo-BugIds $v['障害ID'])[0]
+            if ($laterId) { [void]$laterIds.Add($laterId) }
+            continue
+        }
         $status = ([string]$v['状態']).Trim()
         if ($status -match $excludedPattern) {
             $excludedBugs++
@@ -208,11 +228,14 @@ if ($BugList) {
         }
         if ($rec.Labels['機能']) { $bugListHasFunction = $true }
         $closedOn = ConvertTo-DateValue $v['完了日'] $AsOf
+        $closed = [bool]((Test-ClosedStatus $status $closedPattern) -or ((-not $status) -and $closedOn))
+        # 時点より後に完了したバグは、時点では未完了
+        if ($closed -and $closedOn -and $closedOn -gt $AsOf) { $closed = $false; $closedOn = $null }
         $functionName = Resolve-FunctionName $functionNames $v['機能']
         if (-not $functionName) { $functionName = ([string]$v['機能']).Trim() }
         $bugs.Add([pscustomobject]@{
             Id = @(ConvertTo-BugIds $v['障害ID'])[0]; Function = $functionName; Content = ([string]$v['障害内容']).Trim()
-            Found = (ConvertTo-DateValue $v['起票日'] $AsOf); ClosedOn = $closedOn; Closed = [bool]((Test-ClosedStatus $status $closedPattern) -or ((-not $status) -and $closedOn))
+            Found = $found; ClosedOn = $closedOn; Closed = $closed
             Status = $status; Severity = ([string]$v['重要度']).Trim(); Cause = ([string]$v['原因']).Trim()
             Injected = ([string]$v['混入工程']).Trim(); Detected = ([string]$v['摘出工程']).Trim(); Place = $rec
         })
@@ -259,7 +282,7 @@ elseif ($DesignPath) {
         if (-not $canonical) { $canonical = Resolve-FunctionName $functionNames $item.File }
         if ($canonical) { $name = $canonical }
         $k = ConvertTo-NameKey $name
-        if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = $name; Size = 0.0; Unit = $DesignUnit } }
+        if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = $name; Size = 0.0; Unit = $(if ($DesignUnit -eq 'FP') { $transactionFpUnit } else { $DesignUnit }) } }
         $sizes[$k].Size += $size
     }
 }
@@ -318,6 +341,8 @@ foreach ($k in $functions.Keys) {
     if ($null -ne $size -and $size -gt 0) {
         $testDensity = [math]::Round($counted.Count / $size, 3)
         $testJudgement = Get-Judgement 'Test' $unit $process $testDensity
+        # 規模があるのにテストケースが 1 件も無い機能は、基準値（下限が空・0 のときも）によらずテスト密度が少ない
+        if ($counted.Count -eq 0) { $testJudgement = '少ない' }
         if ($bugListHasFunction) {
             $bugDensity = [math]::Round($fn.Bugs.Count / $size, 3)
             $bugJudgement = Get-Judgement 'Bug' $unit $process $bugDensity
@@ -447,7 +472,7 @@ $bugListHasId = $bugById.Count -gt 0
 foreach ($c in $countedCases) {
     if ($c.Kind -eq 'NG' -and $c.HasBugColumn -and $c.BugIds.Count -eq 0) { Add-Issue 'NG なのにバグ番号が無い' $c '結果が NG のケースに、バグ（障害）の番号を書いてください' }
     foreach ($id in $c.BugIds) {
-        if ($bugListHasId -and -not $bugById.ContainsKey($id) -and -not $excludedIds.Contains($id)) { Add-Issue '障害管理表に無いバグ番号' $c ("バグ番号 {0} が障害管理表にありません" -f $id) }
+        if ($bugListHasId -and -not $bugById.ContainsKey($id) -and -not $excludedIds.Contains($id) -and -not $laterIds.Contains($id)) { Add-Issue '障害管理表に無いバグ番号' $c ("バグ番号 {0} が障害管理表にありません" -f $id) }
         elseif ($c.Kind -eq 'NG' -and $bugById.ContainsKey($id) -and $bugById[$id].Closed) { Add-Issue '再テストの結果が無い' $c ("バグ {0} は完了していますが、ケースの結果が NG のままです（再テストの結果を書いてください）" -f $id) }
     }
     if (($c.Kind -eq 'OK' -or $c.Kind -eq 'NG') -and $c.HasDoneColumn -and -not $c.Done) { Add-Issue '実施日が無い' $c '結果がありますが、実施日がありません' }
@@ -555,6 +580,7 @@ if ($countedCases.Count -gt 0) { $rateText = '消化率 {0:0.0}%' -f ($executedA
 Write-Host ('テストケース {0} 件（実施 {1}・OK {2}・NG {3}・保留 {4}・未実施 {5}。対象外 {6}）{7}（{8} 時点）' -f $countedCases.Count, $executedAll, @($countedCases | Where-Object Kind -eq 'OK').Count, @($countedCases | Where-Object Kind -eq 'NG').Count, @($countedCases | Where-Object Kind -eq '保留').Count, @($countedCases | Where-Object Kind -eq '未実施').Count, @($cases | Where-Object Kind -eq '対象外').Count, $rateText, $AsOf.ToString('yyyy/MM/dd', $invariant))
 if ($BugList) {
     Write-Host ('バグ {0} 件（未完了 {1} 件。取下げなどで数えなかったもの {2} 件）' -f $bugs.Count, @($bugs | Where-Object { -not $_.Closed }).Count, $excludedBugs)
+    if ($laterBugs -gt 0) { Write-Host ('時点（{0}）より後に起票したバグ {1} 件は数えていません（時点より後に完了したバグは未完了として数えます）' -f $AsOf.ToString('yyyy/MM/dd', $invariant), $laterBugs) }
     if ($null -ne $growth.Potential) {
         Write-Host ('信頼度成長曲線（横軸: {0}）: 潜在バグ数 {1} 件（推定）・収束率 {2:0.0}% → {3}（基準 {4:0}%）{5}' -f $growth.Axis, $growth.Potential, ($growth.Rate * 100), $growth.Judgement, ($ConvergenceRate * 100), $growth.Note)
     }
@@ -582,6 +608,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 #     テストケースの機能は、機能の列（空なら上の行の値）、無ければシート名（表のあるシートが複数のブック）かファイル名です。
 #     テスト密度・バグ密度の分母は、-SizeCsv（KLOC・ステップ数・FP など）か、-DesignPath（Measure-DesignSize.ps1 の規模）で渡します。
+#     規模があるのにテストケースが 1 件も無い機能は、基準値によらずテスト密度を「少ない」と判定します。
 #
 # .PARAMETER Path
 #     テスト仕様書のファイルまたはフォルダ（Excel・CSV。複数可・ワイルドカード可）。既定はカレントフォルダ。
@@ -597,6 +624,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER DesignUnit
 #     -DesignPath のときの分母。FP（既定。NESMA 試算法のトランザクションファンクション 4 × EI + 5 × EO + 4 × EQ）か、規模（Measure-DesignSize.ps1 の規模）。
+#     FP の分母の名前は「FP（トランザクション）」です（Measure-DesignSize.ps1 の FP はデータファンクションも入れるので、別の名前にする）。
+#     基準値の CSV に「FP（トランザクション）」の行が無ければ、以前の名前の「FP」の行を使います。
 #
 # .PARAMETER FunctionKinds
 #     -DesignPath のとき、機能とみなす設計書の種類（既定は 画面・IF・帳票・バッチ。テーブル定義書・メッセージ一覧などは機能にしない）。
@@ -623,7 +652,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     直近の新規バグを数える日数（既定 7）。直近とその前の同じ日数の新規バグを並べて出します。
 #
 # .PARAMETER AsOf
-#     集計の時点（予定日を過ぎても未実施の判定などに使う）。既定は今日。
+#     集計の時点（予定日を過ぎても未実施の判定などに使う）。時点より後に起票したバグは数えず、時点より後に完了したバグは
+#     未完了として数えます（前の時点の評価を後から作るとき）。既定は今日。
 #
 # .PARAMETER NoRecurse
 #     フォルダを指定したとき、サブフォルダを見ません。

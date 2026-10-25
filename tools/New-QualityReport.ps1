@@ -62,7 +62,9 @@ $reportPath = Join-Path $OutDir ('{0}_{1}.xlsx' -f $Title, $AsOf.ToString('yyyyM
 if (-not $Criteria) { $Criteria = Join-Path $PSScriptRoot 'quality-report/判定基準.csv' }
 $Criteria = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Criteria)
 if ($HistoryCsv) { $HistoryCsv = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($HistoryCsv) }
-if (-not $Project) { $Project = Split-Path -Path $OutDir -Leaf }
+# プロジェクトの既定は出力先のフォルダの名前。「品質報告」など出力先によく付ける名前なら、その上のフォルダ（案件のフォルダ）の名前
+# （-Config のときの既定（設定ファイルのフォルダの名前）とそろえ、別の案件を同じプロジェクトにしない）
+if (-not $Project) { $Project = Get-ProjectName $OutDir }
 
 # ---------------------------------------------------------------- ヘルパー
 
@@ -334,16 +336,35 @@ try {
             Add-Metric 'テスト' 'テスト密度・バグ密度が基準外の機能' ([double]$outsideFunctions.Count) ('基準値と比べた機能 {0} 件のうち' -f $judged.Count) $file
         }
         foreach ($f in @($functions | Where-Object NeedsAction)) { Add-Action 'テスト' $f.Function ('ゾーン: {0}（{1}）' -f $f.Zone, $f.ZoneView) $f.ZoneAction }
-        # 全体のテスト密度・バグ密度（規模のある機能の合計）
+        # 全体のテスト密度・バグ密度（規模のある機能の合計）。規模の無い機能のケース・バグは入れられないので、
+        # 除いた件数を判定の考え方に書き、その機能を要対応に並べる（黙って除くと、密度が実際より小さく見える）
         $sizedFunctions = @($functions | Where-Object { $null -ne $_.Size -and $_.Size -gt 0 })
         if ($sizedFunctions.Count -gt 0) {
             $unit = $sizedFunctions[0].Unit
             $sizeSum = ($sizedFunctions | Measure-Object -Property Size -Sum).Sum
             $caseSum = ($sizedFunctions | Measure-Object -Property Cases -Sum).Sum
-            Add-Metric 'テスト' 'テスト密度（全体）' ([double][math]::Round($caseSum / $sizeSum, 3)) ('ケース {0} 件 ÷ {1} {2}' -f $caseSum, [math]::Round($sizeSum, 2), $unit) $file 'テスト密度' $unit
-            if ($BugList) {
-                $bugSum = ($sizedFunctions | Measure-Object -Property Bugs -Sum).Sum
-                Add-Metric 'テスト' 'バグ密度（全体）' ([double][math]::Round($bugSum / $sizeSum, 3)) ('バグ {0} 件 ÷ {1} {2}' -f $bugSum, [math]::Round($sizeSum, 2), $unit) $file 'バグ密度' $unit
+            # 障害管理表に機能の列が無いと、機能ごとのバグ（バグ密度）が無い。バグがあるのに全体のバグ密度を 0 とは書かない
+            $bugByFunction = $BugList -and (@($sizedFunctions | Where-Object { $null -ne $_.BugDensity }).Count -gt 0 -or [double]$summary['バグ'] -eq 0)
+            if ($BugList -and -not $bugByFunction) { Add-Action 'テスト' '障害管理表' '機能の列が無いため、バグ密度を出せない' '障害管理表に機能の列を足す' }
+            $bugSum = 0
+            if ($bugByFunction) { $bugSum = ($sizedFunctions | Measure-Object -Property Bugs -Sum).Sum }
+            $leftCases = [int]($caseCount - $caseSum)
+            $leftBugs = 0
+            if ($bugByFunction) { $leftBugs = [int]([double]$summary['バグ'] - $bugSum) }
+            $caseNote = 'ケース {0} 件 ÷ {1} {2}' -f $caseSum, [math]::Round($sizeSum, 2), $unit
+            if ($leftCases -gt 0) { $caseNote += '。規模の無い機能のケース {0} 件は除く' -f $leftCases }
+            Add-Metric 'テスト' 'テスト密度（全体）' ([double][math]::Round($caseSum / $sizeSum, 3)) $caseNote $file 'テスト密度' $unit
+            if ($bugByFunction) {
+                $bugNote = 'バグ {0} 件 ÷ {1} {2}' -f $bugSum, [math]::Round($sizeSum, 2), $unit
+                if ($leftBugs -gt 0) { $bugNote += '。規模の無い機能のバグ {0} 件は除く' -f $leftBugs }
+                Add-Metric 'テスト' 'バグ密度（全体）' ([double][math]::Round($bugSum / $sizeSum, 3)) $bugNote $file 'バグ密度' $unit
+            }
+            foreach ($f in @($functions | Where-Object { -not ($null -ne $_.Size -and $_.Size -gt 0) -and ($_.Cases -gt 0 -or ($bugByFunction -and $_.Bugs -gt 0)) })) {
+                $counts = 'ケース {0} 件' -f $f.Cases
+                if ($bugByFunction) { $counts += '・バグ {0} 件' -f $f.Bugs }
+                $todo = '規模の CSV に足すか、機能の対応表で規模のある機能に対応付ける'
+                if ($f.Function -eq '（機能なし）') { $todo = '障害管理表の機能の列を書く' }
+                Add-Action 'テスト' $f.Function ('規模が無いため、全体のテスト密度・バグ密度に入れていない（{0}）' -f $counts) $todo
             }
         }
         if ($summary.ContainsKey('食い違い')) {
@@ -507,6 +528,11 @@ if ($HistoryCsv -and (Test-Path -LiteralPath $HistoryCsv)) {
         $history.Add($h)
     }
     $mine = @($history | Where-Object { ([string]$_.'プロジェクト') -eq $Project -and ([string]$_.'時点') -ne $dateText })
+    # 実績の CSV に別の 1 つのプロジェクトの行だけがあるときは、プロジェクトの名前が変わった（以前の既定の「品質報告」など）かもしれないので知らせる
+    $otherProjects = @($history | ForEach-Object { ([string]$_.'プロジェクト').Trim() } | Where-Object { $_ -and $_ -ne $Project } | Sort-Object -Unique)
+    if ($otherProjects.Count -eq 1 -and @($history | Where-Object { ([string]$_.'プロジェクト') -eq $Project }).Count -eq 0) {
+        Write-Warning ("実績の CSV には、プロジェクト「{0}」の行だけがあり、今回のプロジェクト「{1}」の行がありません。同じプロジェクトなら、CSV のプロジェクトの列を「{1}」に直すか、-Project（設定ファイルの「プロジェクト」）に「{0}」を指定してください: {2}" -f $otherProjects[0], $Project, $HistoryCsv)
+    }
     # 時点は yyyy/MM/dd なので、文字の順で日付の順になる
     $historyDates = @($mine | ForEach-Object { [string]$_.'時点' } | Where-Object { $_ -lt $dateText } | Sort-Object -Unique)
     if ($historyDates.Count -gt 0) {
@@ -515,6 +541,42 @@ if ($HistoryCsv -and (Test-Path -LiteralPath $HistoryCsv)) {
     }
 }
 $invariantNumber = { param($t) $v = 0.0; if ([double]::TryParse([string]$t, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$v)) { $v } else { $null } }
+# 分母の以前の名前。Measure-TestQuality.ps1 の設計書の FP（4 × EI + 5 × EO + 4 × EQ）は、以前は「FP」と書いた（Measure-DesignSize.ps1 の
+# NESMA の FP と見分けるため「FP（トランザクション）」にした）。以前の実績の行も、前回・推移に使う
+$oldUnitNames = @{ 'FP（トランザクション）' = 'FP' }
+function Get-HistoryValue {
+    #     実績の値（Map: キー → 値。キーは Prefix|分母）。今の分母の名前の行が無ければ、以前の分母の名前の行
+    param([hashtable] $Map, [string] $Prefix, [string] $Unit)
+    $k = '{0}|{1}' -f $Prefix, $Unit
+    if ($Map.ContainsKey($k)) { return $Map[$k] }
+    if ($Unit -and $oldUnitNames.ContainsKey($Unit)) {
+        $k = '{0}|{1}' -f $Prefix, $oldUnitNames[$Unit]
+        if ($Map.ContainsKey($k)) { return $Map[$k] }
+    }
+    return $null
+}
+
+# 同じ時点の品質評価のブックを作り直すとき（資料を直して同じ日にもう一度作るなど）は、前のブックに記入した
+# 定性分析（原因）・対策（区分と指標で当てる）と、要対応の担当・期限（区分・対象・内容で当て、内容の数値が変わった行は
+# 区分と対象が前と今回でそれぞれ 1 つだけのときに当てる）を引き継ぐ。引き継げなかった記入があれば、前のブックを残す
+$oneLine = { param($t) ([string]$t -replace '\r\n|\n|\r', '↵').Trim() }
+$restoreText = { param($t) ([string]$t).Replace('↵', "`n").Trim() }
+$oldNotes = [ordered]@{}
+$oldOwners = New-Object System.Collections.Generic.List[object]
+if (Test-Path -LiteralPath $reportPath) {
+    foreach ($r in (Read-SheetTable $reportPath '品質評価')) {
+        $cause = & $restoreText $r['定性分析（原因）']; $measure = & $restoreText $r['対策']
+        if ($cause -or $measure) { $oldNotes[('{0}|{1}' -f (& $oneLine $r['区分']), (& $oneLine $r['指標']))] = [pscustomobject]@{ Name = (& $oneLine $r['指標']); Cause = $cause; Measure = $measure; Used = $false } }
+    }
+    foreach ($r in (Read-SheetTable $reportPath '要対応')) {
+        $owner = & $restoreText $r['担当']; $due = & $restoreText $r['期限']
+        if (-not ($owner -or $due)) { continue }
+        # 期限の日付のセル（Search-Excel は yyyy/MM/dd で読む）は、日付のセルとして書き戻す
+        $dueDay = [datetime]::MinValue
+        if ([datetime]::TryParseExact($due, 'yyyy/MM/dd', $invariant, [System.Globalization.DateTimeStyles]::None, [ref]$dueDay)) { $due = $dueDay }
+        $oldOwners.Add([pscustomobject]@{ Area = (& $oneLine $r['区分']); Target = (& $oneLine $r['対象']); Content = (& $oneLine $r['内容']); Owner = $owner; Due = $due; Used = $false })
+    }
+}
 
 $metricRows = New-Object System.Collections.Generic.List[object]
 foreach ($r in $rows) {
@@ -522,14 +584,17 @@ foreach ($r in $rows) {
     $detailColumn = 7
     if ($HistoryCsv) {
         $before = $null
-        $k = '{0}|{1}|{2}' -f $r.Area, $r.Key, $r.Unit
-        if ($previous.ContainsKey($k)) { $before = & $invariantNumber $previous[$k] }
+        $v = Get-HistoryValue $previous ('{0}|{1}' -f $r.Area, $r.Key) $r.Unit
+        if ($null -ne $v) { $before = & $invariantNumber $v }
         $change = ''
         if ($null -ne $before -and $r.Value -is [double]) { $change = [double][math]::Round($r.Value - $before, 3) }
         $values += @($(if ($null -ne $before) { [double]$before } else { '' }), $change)
         $detailColumn = 9
     }
-    $values += @($r.Judgement, $r.Basis, '', '', [System.IO.Path]::GetFileName($r.Detail))
+    $cause = ''; $measure = ''
+    $note = $oldNotes[('{0}|{1}' -f (& $oneLine $r.Area), (& $oneLine $r.Name))]
+    if ($note -and -not $note.Used) { $cause = $note.Cause; $measure = $note.Measure; $note.Used = $true }
+    $values += @($r.Judgement, $r.Basis, $cause, $measure, [System.IO.Path]::GetFileName($r.Detail))
     $row = @{ Values = $values }
     if ($r.Detail) { $row.Link = @{ Column = $detailColumn; Path = $r.Detail; Location = '' } }
     $metricRows.Add($row)
@@ -537,8 +602,30 @@ foreach ($r in $rows) {
 $metricColumns = @(@{ Header = '区分'; Width = 12 }, @{ Header = '指標'; Width = 36 }, @{ Header = '実績'; Width = 14 })
 if ($HistoryCsv) { $metricColumns += @(@{ Header = $(if ($previousDate) { '前回（' + $previousDate + '）' } else { '前回' }); Width = 14 }, @{ Header = '増減'; Width = 9 }) }
 $metricColumns += @(@{ Header = '判定'; Width = 6 }, @{ Header = '判定の考え方'; Width = 40 }, @{ Header = '定性分析（原因）'; Width = 40 }, @{ Header = '対策'; Width = 40 }, @{ Header = '詳細'; Width = 24 })
+# 要対応の担当・期限: 区分・対象・内容が同じ行に当て、残りは区分・対象が前と今回でそれぞれ 1 つだけの行に当てる
+$owners = @{}
+foreach ($pass in 1, 2) {
+    for ($i = 0; $i -lt $actions.Count; $i++) {
+        if ($owners.ContainsKey($i)) { continue }
+        $a = $actions[$i]
+        $area = & $oneLine $a.Area; $target = & $oneLine $a.Target; $content = & $oneLine $a.Content
+        $hit = @($oldOwners | Where-Object { -not $_.Used -and $_.Area -eq $area -and $_.Target -eq $target -and ($pass -eq 2 -or $_.Content -eq $content) })
+        if ($pass -eq 2) {
+            $same = @(for ($j = 0; $j -lt $actions.Count; $j++) { if (-not $owners.ContainsKey($j) -and (& $oneLine $actions[$j].Area) -eq $area -and (& $oneLine $actions[$j].Target) -eq $target) { $j } })
+            if ($hit.Count -ne 1 -or $same.Count -ne 1) { continue }
+        }
+        if ($hit.Count -eq 0) { continue }
+        $hit[0].Used = $true
+        $owners[$i] = $hit[0]
+    }
+}
 $actionRows = New-Object System.Collections.Generic.List[object]
-foreach ($a in $actions) { $actionRows.Add(@{ Values = @($a.Area, $a.Target, $a.Content, $a.Action, '', '') }) }
+for ($i = 0; $i -lt $actions.Count; $i++) {
+    $a = $actions[$i]
+    $owner = ''; $due = ''
+    if ($owners.ContainsKey($i)) { $owner = $owners[$i].Owner; $due = $owners[$i].Due }
+    $actionRows.Add(@{ Values = @($a.Area, $a.Target, $a.Content, $a.Action, $owner, $due) })
+}
 $scope = New-Object System.Collections.Generic.List[object]
 foreach ($pair in @(@('時点', $AsOf.ToString('yyyy/MM/dd', $invariant)), @('設計書', ($DesignPath -join '、')), @('レビューの指摘管理表', ($Findings -join '、')), @('レビュー記録', ($ReviewLog -join '、')), @('テスト仕様書', ($TestPath -join '、')), @('障害管理表', ($BugList -join '、')), @('要件一覧', ($Requirement -join '、')), @('実行したツール', ($ran -join '、')), @('失敗したツール', ($failed -join '、')))) {
     if ($pair[1]) { $scope.Add(@{ Values = $pair }) }
@@ -559,7 +646,7 @@ if ($HistoryCsv) {
         $values = @($r.Area, $r.Name)
         foreach ($d in $dates) {
             if ($d -eq $dateText) { $values += $r.Value; continue }
-            $v = $byDate[('{0}|{1}|{2}|{3}' -f $d, $r.Area, $r.Key, $r.Unit)]
+            $v = Get-HistoryValue $byDate ('{0}|{1}|{2}' -f $d, $r.Area, $r.Key) $r.Unit
             $n = & $invariantNumber $v
             $values += $(if ($null -ne $n) { [double]$n } else { '' })
         }
@@ -583,6 +670,16 @@ if ($pointRates.Count -gt 0) {
         $pointRows.Add(@{ Values = $values })
     }
     $reportSheets += @{ Name = '観点別の一致率'; Columns = @(@(@{ Header = '観点ID'; Width = 10 }, @{ Header = 'AI の指摘'; Width = 9 }, @{ Header = '人と一致'; Width = 9 }) + @($pointDates | ForEach-Object { @{ Header = $_; Width = 11 } })); Rows = $pointRows }
+}
+# 引き継げなかった記入（今回の品質評価に無い指標・要対応の行）があれば、上書きする前のブックを残す
+$carriedNotes = @($oldNotes.Values | Where-Object Used)
+$carriedOwners = @($oldOwners | Where-Object Used)
+$lostNotes = @($oldNotes.Values | Where-Object { -not $_.Used })
+$lostOwners = @($oldOwners | Where-Object { -not $_.Used })
+$keptBook = $null
+if ($lostNotes.Count + $lostOwners.Count -gt 0) {
+    $keptBook = Get-BackupPath (Join-Path $OutDir ('{0}_{1}_前の版.xlsx' -f $Title, $AsOf.ToString('yyyyMMdd', $invariant)))
+    Copy-Item -LiteralPath $reportPath -Destination $keptBook
 }
 Export-Workbook -FilePath $reportPath -Sheets $reportSheets
 
@@ -608,6 +705,15 @@ if ($HistoryCsv) {
     if ($previousDate) { $prevText = '前回 ' + $previousDate + ' と比べました' }
     Write-Host ('実績の CSV に {0} 件を足しました（プロジェクト「{1}」・{2}。{3}）: {4}' -f $numeric.Count, $Project, $dateText, $prevText, $HistoryCsv)
 }
+if ($carriedNotes.Count + $carriedOwners.Count -gt 0) {
+    $carriedText = '同じ時点の前の品質評価から、定性分析（原因）・対策 {0} 件' -f $carriedNotes.Count
+    if ($carriedNotes.Count -gt 0) { $carriedText += '（{0}）' -f (@($carriedNotes | ForEach-Object { $_.Name }) -join '・') }
+    Write-Host ('{0}と、要対応の担当・期限 {1} 件を引き継ぎました' -f $carriedText, $carriedOwners.Count)
+}
+if ($keptBook) {
+    $lostText = @($lostNotes | ForEach-Object { '定性分析・対策（{0}）' -f $_.Name }) + @($lostOwners | ForEach-Object { '要対応の担当・期限（{0} {1}）' -f $_.Target, $_.Content })
+    Write-Warning ('今回の品質評価に無い指標・要対応の行に記入したものは、引き継げませんでした: {0}。前のブックを残しました: {1}' -f ($lostText -join '・'), $keptBook)
+}
 Write-Host "品質評価を保存しました: $reportPath"
 Write-Host "各ツールの詳細: $detailDir"
 if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 0) { Write-Host ('定性分析（原因）・対策の下書き: .\Invoke-QualityAnalysis.ps1 "{0}"' -f $reportPath) }
@@ -618,6 +724,8 @@ if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 
 # .DESCRIPTION
 #     渡した資料に応じて次のツールを実行し、指標ごとの実績・判定（○△×）・判定の考え方を 1 枚にまとめます。
 #     定性分析（原因）・対策の列は空欄です。会議の前に記入してください（Invoke-QualityAnalysis.ps1 で AI に下書きを書かせられます）。
+#     同じ時点のブックを作り直すときは、前のブックに記入した定性分析（原因）・対策と、要対応の担当・期限を引き継ぎます
+#     （今回の品質評価に無い指標・要対応の行に記入したものがあれば、前のブックを「<ブック名>_前の版.xlsx」として残します）。
 #     各ツールの結果は「詳細」フォルダに保存し、リンクから開けます。
 #
 #       -Findings        Measure-ReviewQuality.ps1（指摘件数・未完了・期限切れ・指摘密度。-ReviewLog でゾーン分析）
@@ -628,7 +736,8 @@ if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 
 #       -DesignPath と -TestPath  Test-Traceability.ps1（テストのある画面・イベント・メッセージ・IF の割合。-Requirement で要件も）
 #       -DesignPath      Test-DesignConsistency.ps1（設計書どうしの参照の食い違い）
 #
-#     「要対応」のシートには、基準から外れた設計書・機能、要対応のゾーン、流出のあった工程、テストの抜けを書きます（担当・期限は空欄）。
+#     「要対応」のシートには、基準から外れた設計書・機能、要対応のゾーン、流出のあった工程、テストの抜け、
+#     規模が無いため全体のテスト密度・バグ密度に入れていない機能を書きます（担当・期限は空欄）。
 #
 # .PARAMETER Config
 #     品質評価の設定ファイル（CSV。項目・値）か、それを置いたフォルダ（「品質評価の設定.csv」を読む）。
@@ -683,7 +792,8 @@ if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 
 #     （密度は「指摘密度」「テスト密度」などの名前と分母で書く）。
 #
 # .PARAMETER Project
-#     実績の CSV に書くプロジェクトの名前。既定は -OutDir のフォルダの名前。
+#     実績の CSV に書くプロジェクトの名前。既定は -OutDir のフォルダの名前（「品質報告」など出力先によく付ける名前なら、
+#     その上のフォルダ（案件のフォルダ）の名前。-Config のときは設定ファイルのフォルダの名前）。
 #
 # .PARAMETER Title
 #     品質評価のブックの名前（既定は「品質評価」）。

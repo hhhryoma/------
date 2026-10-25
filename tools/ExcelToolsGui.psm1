@@ -1579,21 +1579,44 @@ function Update-GuiRun {
     }
 }
 
-function Set-GuiResult {
-    #     結果のファイル・フォルダ（ツールの一覧の Open の順に、あるもの）を「結果を開く」「保存先のフォルダを開く」にする。
-    #     フォルダなら、Since（実行を始めた時刻）よりあとにそのフォルダに書いた結果のファイルを開けるようにする
+# 設定ファイル（Config）で出力先を決めるツールと、その設定を読む関数（ExcelTools.psm1）。出力先の欄が空なら、設定ファイルの出力先を開く
+$script:ConfigOutDirReaders = @{ 'New-QualityReport.ps1' = 'Read-QualityReportConfig'; 'New-WeeklyReport.ps1' = 'Read-WeeklyReportConfig' }
+
+function Get-GuiResultTarget {
+    #     開く結果のファイル・フォルダ。ツールの一覧の Open の順に、引数にあって、あるもの。フォルダなら、Since（実行を始めた時刻）より
+    #     あとにそのフォルダに書いた結果のファイル。Open の引数が無く、設定ファイル（Config）だけで実行したとき（品質評価・週次報告）は、
+    #     設定ファイルの出力先（「送る」と同じ）。戻り値: @{ Path（ファイル。無ければ $null）; Dir（フォルダ。無ければ $null） }
     param($Entry, $Arguments, $Since)
-    $s = $script:Gui
+    $paths = New-Object System.Collections.Generic.List[string]
     foreach ($name in $Entry.Open) {
-        if (-not $Arguments.Contains($name)) { continue }
-        $p = [System.Management.Automation.WildcardPattern]::Unescape([string](@($Arguments[$name])[0]))
-        if (Test-Path -LiteralPath $p -PathType Leaf) { $s.ResultPath = $p; $s.ResultDir = Split-Path -Parent $p; break }
+        if ($Arguments.Contains($name)) { $paths.Add([System.Management.Automation.WildcardPattern]::Unescape([string](@($Arguments[$name])[0]))) }
+    }
+    $reader = $script:ConfigOutDirReaders[[string]$Entry.Tool]
+    if ($reader -and $Arguments.Contains('Config') -and -not @($Entry.Open | Where-Object { $Arguments.Contains($_) }).Count) {
+        try {
+            Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -DisableNameChecking
+            $settings = & $reader ([string](@($Arguments['Config'])[0]))
+            if ($settings.OutDir) { $paths.Add([string]$settings.OutDir) }
+        }
+        catch { }
+    }
+    foreach ($p in $paths) {
+        if (Test-Path -LiteralPath $p -PathType Leaf) { return [pscustomobject]@{ Path = $p; Dir = (Split-Path -Parent $p) } }
         if (Test-Path -LiteralPath $p -PathType Container) {
-            $s.ResultDir = $p
-            if ($Since) { $s.ResultPath = Find-GuiNewResult $p $Since }
-            break
+            $file = $null
+            if ($Since) { $file = Find-GuiNewResult $p $Since }
+            return [pscustomobject]@{ Path = $file; Dir = $p }
         }
     }
+    return [pscustomobject]@{ Path = $null; Dir = $null }
+}
+
+function Set-GuiResult {
+    #     結果のファイル・フォルダ（Get-GuiResultTarget）を「結果を開く」「保存先のフォルダを開く」にする
+    param($Entry, $Arguments, $Since)
+    $s = $script:Gui
+    $target = Get-GuiResultTarget $Entry $Arguments $Since
+    if ($target.Dir) { $s.ResultPath = $target.Path; $s.ResultDir = $target.Dir }
     $s.OpenButton.Enabled = [bool]$s.ResultPath
     $s.FolderButton.Enabled = [bool]$s.ResultDir
     if ($s.ResultPath) { $s.ResultLabel.Text = $s.ResultPath } elseif ($s.ResultDir) { $s.ResultLabel.Text = $s.ResultDir }

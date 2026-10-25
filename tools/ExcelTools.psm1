@@ -2530,6 +2530,48 @@ function Read-WeeklyReportConfig {
     return $settings
 }
 
+# 出力先のフォルダによく付ける名前（プロジェクトの名前にはしない）
+$script:OutputFolderNames = @('品質報告', '品質評価', '報告', '出力', '結果', 'out', 'output', 'report', 'reports')
+
+function Test-OutputFolderName {
+    #     名前が、出力先のフォルダによく付ける名前（品質報告・出力 など）か
+    param([string] $Name)
+    $n = (ConvertTo-Label $Name).ToLowerInvariant()
+    if (-not $n) { return $false }
+    return @($script:OutputFolderNames | Where-Object { (ConvertTo-Label $_).ToLowerInvariant() -eq $n }).Count -gt 0
+}
+
+function Get-ProjectName {
+    #     出力先のフォルダから、実績の CSV に書くプロジェクトの名前を決める。フォルダの名前。
+    #     「品質報告」など出力先によく付ける名前なら、その上のフォルダ（案件のフォルダ）の名前にする
+    #     （品質評価の設定ファイルの既定の出力先「<案件>\品質報告」と同じく、案件のフォルダの名前をプロジェクトにする）
+    param([string] $Dir)
+    $leaf = Split-Path -Path $Dir -Leaf
+    if (Test-OutputFolderName $leaf) {
+        $parent = Split-Path -Path $Dir -Parent
+        if ($parent) {
+            $up = Split-Path -Path $parent -Leaf
+            if ($up -and $up -notmatch '[\\/:]') { return $up }
+        }
+    }
+    return $leaf
+}
+
+function Find-QualityBook {
+    #     フォルダの中の品質評価のブック（「品質評価」のシートがある xlsx）のうち、名前の日付（<タイトル>_yyyyMMdd）が一番新しいもの。
+    #     日付が同じか、名前に日付が無いときは、更新日時の新しいもの（前の週のブックをあとで直して保存しても、今週のブックを選ぶ）。無ければ $null
+    param([string] $Dir)
+    $dateOf = { $m = [regex]::Match($_.BaseName, '_(\d{8})$'); if ($m.Success) { $m.Groups[1].Value } else { '' } }
+    $files = @(Get-ChildItem -LiteralPath $Dir -Filter '*.xlsx' -File | Where-Object { $_.Name -notlike '~$*' } |
+            Sort-Object @{ e = $dateOf; Descending = $true }, @{ e = 'LastWriteTime'; Descending = $true }, Name)
+    foreach ($f in $files) {
+        $pkg = Open-ZipPackage $f.FullName
+        try { $hasSheet = (Get-WorkbookSheetParts $pkg).Sheets.Contains('品質評価') } finally { $pkg.Zip.Dispose() }
+        if ($hasSheet) { return $f.FullName }
+    }
+    return $null
+}
+
 function Read-FunctionMap {
     #     機能の対応表の CSV（機能・別名・設計書。別名と設計書は | で区切って複数書ける）を、名前（ConvertTo-NameKey）→ 機能の名前 にする
     #     テスト仕様書・障害管理表・規模・設計書で機能の書き方が違うとき（SCR001 / 受注一覧 / DD02_画面設計書_SCR001_受注一覧 など）にそろえる

@@ -387,6 +387,28 @@ Test-Case 'Measure-ReviewQuality: 読み取りの要約で、記録票の形で�
     Assert-Equal '1|2.5|0.4' ('{0}|{1}|{2}' -f $script:sizeResult[0].Findings, $script:sizeResult[0].Size, $script:sizeResult[0].Density)
 }
 
+Test-Case 'Measure-ReviewQuality: 時点より後に起票した指摘は数えず、後に完了した指摘は未完了に数える（同じ指摘管理表・同じ基準日の週次報告と同じ数）' {
+    $dir = New-TestDir
+    # 10/23 時点の指摘管理表を、基準日 10/16 で集計する（10/16 の時点では 3 件が未完了・うち 1 件が期限切れ）
+    $book = Join-Path $dir '指摘管理表.xlsx'
+    New-FindingBook $book '指摘' @('No', '指摘日', '対象成果物', '指摘内容', '重要度', '対応期限', '対応状況', '完了日') @(
+        @('1', '2026/10/05', 'DD02_画面設計書_SCR001_受注一覧', '桁数が違う', '高', '2026/10/09', '完了', '2026/10/08'),
+        @('2', '2026/10/06', 'DD02_画面設計書_SCR001_受注一覧', 'イベントが足りない', '中', '2026/10/14', '完了', '2026/10/20'),
+        @('3', '2026/10/07', 'DD03_テーブル定義書', '型が違う', '低', '2026/10/23', '完了', '2026/10/21'),
+        @('4', '2026/10/14', 'DD03_テーブル定義書', '索引が無い', '中', '2026/10/30', '対応中', ''),
+        @('5', '2026/10/19', 'DD03_テーブル定義書', '誤記', '低', '2026/10/30', '対応中', ''))
+    $out = Join-Path $dir 'quality.xlsx'
+    $text = Get-HostText { $script:asOfDocs = @(& $QualityTool -Path $book -AsOf '2026-10-16' -OutXlsx $out 3>$null) }
+    Assert-Match $text '指摘 4 件（未完了 3 件・うち期限切れ 1 件。取下げなどで数えなかったもの 0 件）'
+    Assert-Match $text '時点より後に起票した指摘 1 件は数えていません'
+    $trend = Read-XlsxSheet -Path $out -Index 4
+    Assert-Equal @('2026/10/05|1|0|1', '2026/10/06|1|0|2', '2026/10/07|1|0|3', '2026/10/08|0|1|2', '2026/10/14|1|0|3') @(2..$trend.Rows.Count | ForEach-Object { '{0}|{1}|{2}|{3}' -f $trend.Rows[$_]['A'], $trend.Rows[$_]['B'], $trend.Rows[$_]['C'], $trend.Rows[$_]['F'] }) '時点より後の起票・完了は推移に入れない'
+
+    # 同じ指摘管理表・同じ基準日の週次報告と同じ数
+    $weekly = Get-HostText { & (Join-Path $script:ToolsDir 'New-WeeklyReport.ps1') -Findings $book -AsOf '2026-10-16' -OutDir (Join-Path $dir '週次報告') 3>$null | Out-Null }
+    Assert-Match $weekly '・未完了: 3 件・うち期限切れ 1 件'
+}
+
 Test-Case 'Measure-ReviewQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $QualityTool
     Assert-Match $h.Synopsis '指摘'
