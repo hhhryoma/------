@@ -549,7 +549,7 @@ function Read-BookFormat {
         $result = @{}
         foreach ($sheet in $wbDoc.SelectNodes("//*[local-name()='sheets']/*[local-name()='sheet']")) {
             $rel = $relById[(Get-RelationshipIdAttribute $sheet)]
-            if ($null -eq $rel -or ($rel.Kind -ne 'worksheet' -and $rel.Kind -ne 'macrosheet')) { continue }
+            if ($null -eq $rel -or ($rel.Kind -ne 'worksheet' -and $rel.Kind -notmatch 'macrosheet')) { continue }
             $result[$sheet.GetAttribute('name')] = Read-SheetFormats -Package $pkg -PartName $rel.Target -Styles $styles -SharedRuns $sharedRuns
         }
         return $result

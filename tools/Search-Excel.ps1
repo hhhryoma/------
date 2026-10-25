@@ -758,8 +758,8 @@ function Search-OpenXmlWorkbook {
 
             $rel = $relById[(Get-RelationshipIdAttribute $sheet)]
             if ($null -eq $rel) { continue }
-            # グラフシートなどセルを持たないシートは中身を見ない
-            if ($rel.Kind -ne 'worksheet' -and $rel.Kind -ne 'macrosheet') { continue }
+            # グラフシートなどセルを持たないシートは中身を見ない（マクロシートのリレーションの種類は xlMacrosheet・xlIntlMacrosheet）
+            if ($rel.Kind -ne 'worksheet' -and $rel.Kind -notmatch 'macrosheet') { continue }
 
             if ($wantValue -or $wantFormula -or $wantHeaderFooter -or $wantValidation) {
                 Search-WorksheetCells -Package $pkg -PartName $rel.Target -SheetName $sheetName `

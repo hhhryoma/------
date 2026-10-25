@@ -419,11 +419,7 @@ function Test-PictureInPrintArea {
         if ($b.X -lt $p1[0] -and $b.X + $b.W -gt $p0[0] -and $b.Y -lt $p1[1] -and $b.Y + $b.H -gt $p0[1]) { $overlap = $true }
     }
     # 列全体・行全体の印刷範囲は、Excel と同じ A:H・1:40 の形で示す
-    $range = @($Sheet.PrintAreas | ForEach-Object {
-            if ($_.R0 -eq 1 -and $_.R1 -ge 1048576) { '{0}:{1}' -f (ConvertTo-ColumnName $_.C0), (ConvertTo-ColumnName $_.C1) }
-            elseif ($_.C0 -eq 1 -and $_.C1 -ge 16384) { '{0}:{1}' -f $_.R0, $_.R1 }
-            else { '{0}{1}:{2}{3}' -f (ConvertTo-ColumnName $_.C0), $_.R0, (ConvertTo-ColumnName $_.C1), $_.R1 }
-        }) -join '、'
+    $range = @($Sheet.PrintAreas | ForEach-Object { ConvertTo-PrintAreaText $_ }) -join '、'
     if ($overlap) { $detail = '{0}の一部が、印刷範囲（{1}）からはみ出しています。はみ出した部分は印刷されません' -f $Label, $range }
     else { $detail = '{0}が印刷範囲（{1}）の外にあり、印刷されません' -f $Label, $range }
     Add-Issue '警告' '画像' '印刷範囲の外' $detail -Sheet $Sheet.Name -Cell $Picture.Cell

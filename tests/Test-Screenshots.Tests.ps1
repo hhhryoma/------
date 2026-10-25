@@ -115,6 +115,16 @@ Test-Case 'Test-Screenshots: 位置で置いた（absoluteAnchor）スクリー�
     Assert-Equal 'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx 受注一覧!B3' $results[0].Location
 }
 
+Test-Case 'Test-Screenshots: -OutXlsx の元のシートの一覧では、列全体・行全体の印刷範囲を Excel と同じ A:F・1:20 の形で示す' {
+    $set = New-ScreenshotSet (New-TestDir)
+    # 受注一覧は A〜F 列の全体、受注登録は 1〜20 行目の全体を印刷範囲にする
+    Edit-ZipText $set.Book 'xl/workbook.xml' { param($t) $t.Replace('''受注一覧''!$A$1:$F$20', '''受注一覧''!$A:$F').Replace('''受注登録''!$A$1:$F$20', '''受注登録''!$1:$20') }
+    $out = Join-Path $set.Wire '状態.xlsx'
+    $null = Invoke-Screenshots @{ Path = $set.Design; Wireframe = $set.Wire; OutXlsx = $out }
+    $sheets = Read-XlsxSheet $out 2
+    Assert-Equal @('受注一覧|A:F', '受注登録|1:20') @(3..4 | ForEach-Object { '{0}|{1}' -f $sheets.Rows[$_]['B'], $sheets.Rows[$_]['C'] })
+}
+
 Test-Case 'Test-Screenshots: -Screen は -Record と一緒に使う。Get-Help でヘルプが表示される' {
     Assert-Throws { & $ScreenshotsTool -Path '.' -Wireframe '.' -Screen '受注登録' } '-Record と一緒に'
     $h = Get-Help $ScreenshotsTool

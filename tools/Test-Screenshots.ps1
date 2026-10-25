@@ -208,7 +208,7 @@ function Read-Wireframes {
                     if (-not $area) { $area = New-Object System.Collections.Generic.List[object] }
                     $sheets.Add([pscustomobject]@{
                             File = [System.IO.Path]::GetFileName($file); Path = $file; Sheet = $name; Key = (ConvertTo-ScreenKey $name); Cut = ($name.Length -ge 31)
-                            HasArea = ($area.Count -gt 0); Area = (@($area | ForEach-Object { '{0}{1}:{2}{3}' -f (ConvertTo-ColumnName $_.C0), $_.R0, (ConvertTo-ColumnName $_.C1), $_.R1 }) -join ',')
+                            HasArea = ($area.Count -gt 0); Area = (@($area | ForEach-Object { ConvertTo-PrintAreaText $_ }) -join ',')
                             Look = (Get-WireframeKey $pkg $part $area $styles $strings $mdw $images); Used = $false
                         })
                 }

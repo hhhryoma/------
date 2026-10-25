@@ -298,7 +298,8 @@ function Add-DrawingItem {
     if ($nv) { $name = $nv.GetAttribute('name'); $hidden = @('1', 'true') -contains $nv.GetAttribute('hidden') }
     $text = ''
     if ($Node.LocalName -eq 'sp') {
-        $text = (@($Node.SelectNodes("*[local-name()='txBody']/*[local-name()='p']") | ForEach-Object { -join @($_.SelectNodes(".//*[local-name()='t']") | ForEach-Object { $_.InnerText }) }) -join "`n").TrimEnd("`n")
+        # 段落と、段落の中の改行（<a:br>。Shift+Enter の改行）を改行にしてつなぐ（Search-Excel と同じ）
+        $text = (@($Node.SelectNodes("*[local-name()='txBody']/*[local-name()='p']") | ForEach-Object { -join @($_.SelectNodes(".//*[local-name()='t' or local-name()='br']") | ForEach-Object { if ($_.LocalName -eq 'br') { "`n" } else { $_.InnerText } }) }) -join "`n").TrimEnd("`n")
     }
     $path = $name
     if ($ParentPath) { $path = $ParentPath + '/' + $name }
@@ -457,6 +458,14 @@ function Get-PrintAreas {
         $areas.Add([pscustomobject]@{ R0 = $r0; R1 = $r1; C0 = $c0; C1 = $c1 })
     }
     return , $areas
+}
+
+function ConvertTo-PrintAreaText {
+    #     印刷範囲（Get-PrintAreas の 1 つ）を Excel と同じ形の文字にする。列全体は A:H、行全体は 1:40、それ以外は A1:H40
+    param($Area)
+    if ($Area.R0 -eq 1 -and $Area.R1 -ge 1048576) { return '{0}:{1}' -f (ConvertTo-ColumnName $Area.C0), (ConvertTo-ColumnName $Area.C1) }
+    if ($Area.C0 -eq 1 -and $Area.C1 -ge 16384) { return '{0}:{1}' -f $Area.R0, $Area.R1 }
+    return '{0}{1}:{2}{3}' -f (ConvertTo-ColumnName $Area.C0), $Area.R0, (ConvertTo-ColumnName $Area.C1), $Area.R1
 }
 
 function Get-MaxDigitWidth {

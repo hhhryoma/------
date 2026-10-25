@@ -394,6 +394,28 @@ Test-Case 'Search-Excel: 日付のセル（t="d"。値は 2026-10-01T09:30:00 �
     Assert-Equal @('2026/10/01', '09:00:00') @(2..3 | ForEach-Object { $c = 'B' + $_; @($hits | Where-Object { $_.Cell -eq $c })[0].Text }) '1904 年からの日付のブック'
 }
 
+Test-Case 'Search-Excel: マクロシート（Excel 4.0 マクロ。リレーションの種類は xlMacrosheet・xlIntlMacrosheet）のセルも検索される' {
+    $path = Join-Path (New-TestDir) '集計.xlsm'
+    New-SheetsBook $path ([ordered]@{ '一覧' = @(@('項目'), @('TODO 一覧')); 'マクロ1' = @(@('項目'), @('TODO 集計')); 'マクロ2' = @(@('項目'), @('TODO 転記')) })
+    # 2 つ目をマクロシート、3 つ目を国際マクロシートにする（リレーションの種類・パーツの種類・XML の先頭の要素）
+    $kinds = @(@(2, 'xlMacrosheet', 'macrosheet'), @(3, 'xlIntlMacrosheet', 'intlmacrosheet'))
+    Edit-ZipText $path 'xl/_rels/workbook.xml.rels' {
+        param($t)
+        foreach ($k in $kinds) { $t = $t.Replace(('http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{0}.xml"' -f $k[0]), ('http://schemas.microsoft.com/office/2006/relationships/{0}" Target="worksheets/sheet{1}.xml"' -f $k[1], $k[0])) }
+        $t
+    }
+    Edit-ZipText $path '[Content_Types].xml' {
+        param($t)
+        foreach ($k in $kinds) { $t = $t.Replace(('/xl/worksheets/sheet{0}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"' -f $k[0]), ('/xl/worksheets/sheet{0}.xml" ContentType="application/vnd.ms-excel.{1}+xml"' -f $k[0], $k[2])) }
+        $t
+    }
+    foreach ($k in $kinds) {
+        Edit-ZipText $path ('xl/worksheets/sheet{0}.xml' -f $k[0]) { param($t) $t.Replace('<worksheet xmlns=', '<xm:macrosheet xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main" xmlns=').Replace('</worksheet>', '</xm:macrosheet>') }
+    }
+    $hits = Invoke-Search -Pattern 'TODO' -Path $path -Target Value
+    Assert-Equal @('一覧!A2', 'マクロ1!A2', 'マクロ2!A2') @($hits | ForEach-Object { $_.Location })
+}
+
 Test-Case 'Search-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $SearchExcel
     Assert-Match $h.Synopsis 'grep'
