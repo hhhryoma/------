@@ -29,10 +29,11 @@ Update-TypeData -TypeName 'TestSpecDraft.Case' -DefaultDisplayPropertySet Id, Vi
 # ---------------------------------------------------------------- 設計書を読む
 
 
-$searchArgs = @{ Pattern = '\S'; Path = $DesignPath; Target = 'Value' }
-if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
+# 同じ文書の古い版・ツールの出力・書き換える前のファイルと、非表示のシート・雛形のシート（差し込み欄のまま）は読まない（知らせる）
+$designFiles = Select-DesignFiles -Path $DesignPath -NoRecurse:$NoRecurse -Exclude @($OutXlsx)
+$searchArgs = @{ Pattern = '\S'; Path = $designFiles.Paths; Target = 'Value'; SkipHiddenSheets = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-$books = ConvertTo-DesignBooks @(& $searchScript @searchArgs 6>$null)
+$books = ConvertTo-DesignBooks (Select-DesignHits @(& $searchScript @searchArgs 6>$null) $designFiles)
 $design = Read-ScreenDesign $books
 $screens = @($design.Items | ForEach-Object { $_.Screen }) + @($design.Events | ForEach-Object { $_.Screen }) | Select-Object -Unique
 if (@($screens).Count -eq 0) { throw '画面設計書（画面ID と、項目名・桁数の画面項目定義、またはイベント定義）が見つかりません' }
@@ -316,6 +317,7 @@ Write-Host '下書きです。「（処理概要から書き足す）」の条�
 #
 # .PARAMETER DesignPath
 #     画面設計書と、コード定義書・メッセージ一覧のファイルかフォルダ（いっしょに渡すと、コード値とメッセージの文言を使います）。
+#     同じ文書の古い版・ツールが書き出したファイル・書き換える前のファイル（-BackupDir）と、非表示のシート・雛形のシート（ID が {{テーブルID}} などのまま）は読みません（読まなかったものは警告で知らせます）。
 #
 # .PARAMETER OutXlsx
 #     書き出すテスト仕様書の下書き（.xlsx）。同じ名前のファイルがあるときは -Force を付けたときだけ上書きします。

@@ -5,7 +5,7 @@ param(
 
     [string] $Checklist,
 
-    [string] $OutDir = '.\design-review',
+    [string] $OutDir,
 
     [ValidateRange(2000, 200000)]
     [int] $MaxChars = 8000,
@@ -50,6 +50,20 @@ if (-not $Path -and -not $ImportOnly -and -not $CheckOnly) {
     throw 'レビューする設計書のフォルダまたはファイルを指定してください（例: .\Invoke-DesignReview.ps1 D:\Design\詳細設計）。'
 }
 
+# 保存先の既定は、1 つ目の設計書のフォルダと同じ場所の design-review（D:\設計書 なら D:\design-review）。
+# 今いるフォルダによらない（設計書のフォルダの中で実行しても、レビュー結果を設計書のフォルダに置かない）。設計書を指定しないときは今いるフォルダ
+if (-not $OutDir) {
+    $OutDir = '.\design-review'
+    $first = $null
+    foreach ($p in @($Path)) { if (-not $first) { $first = @(Get-PathItem $p)[0] } }
+    if ($first) {
+        $folder = $first.FullName
+        if (-not $first.PSIsContainer) { $folder = $first.DirectoryName }
+        $dirInfo = New-Object System.IO.DirectoryInfo($folder)
+        if ($dirInfo.Parent) { $dirInfo = $dirInfo.Parent }
+        $OutDir = Join-Path $dirInfo.FullName 'design-review'
+    }
+}
 $OutDir    = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
 $Checklist = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Checklist)
 if ($Glossary) {
@@ -91,8 +105,9 @@ function Test-WordPath {
 
 function Get-ExcelCells {
     #     Search-Excel.ps1 で全セル（値・コメント・図形・シート名）を読み出す。
-    #     ブックの並び順（シート順、行優先）のまま返る。Word の文書は、段落・表の行・テキストボックス・コメント（シートの列は本文・脚注などの部分）
-    param([string] $FilePath)
+    #     ブックの並び順（シート順、行優先）のまま返る。Word の文書は、段落・表の行・テキストボックス・コメント（シートの列は本文・脚注などの部分）。
+    #     設計書の非表示のシートと雛形のシート（ID の欄が差し込み欄のまま。New-DesignDocument.ps1 -TemplateSheet の雛形）は読まない（AllSheets なら読む）
+    param([string] $FilePath, [switch] $AllSheets)
 
     $warnings = $null
     $searchArgs = @{
@@ -101,11 +116,14 @@ function Get-ExcelCells {
         Target  = @('Value', 'Comment', 'Shape', 'SheetName')
         IncludeWord = $true
     }
+    if (-not $AllSheets) { $searchArgs['SkipHiddenSheets'] = $true }
     if ($SheetNameExclude) { $searchArgs['SheetNameExclude'] = $SheetNameExclude }
 
     $hits = @(& $searchScript @searchArgs -WarningVariable warnings -WarningAction SilentlyContinue 6>$null)
     if ($warnings) { foreach ($w in $warnings) { Write-Warning $w.Message } }
-    return $hits
+    if ($AllSheets) { return $hits }
+    # 雛形のシートは、依頼を作り終えてから知らせる
+    return (Select-DesignHits $hits $script:designSelection -NoWarning)
 }
 
 function ConvertTo-DesignText {
@@ -447,7 +465,7 @@ function Read-Checklist {
         }
     }
     else {
-        $cells = Get-ExcelCells -FilePath $FilePath | Where-Object { $_.Kind -eq '値' }
+        $cells = Get-ExcelCells -FilePath $FilePath -AllSheets | Where-Object { $_.Kind -eq '値' }
         $firstSheet = ($cells | Select-Object -First 1).Sheet
         $grid = [ordered]@{}
         foreach ($c in ($cells | Where-Object { $_.Sheet -eq $firstSheet })) {
@@ -663,33 +681,12 @@ function Show-ChecklistIssues {
 }
 
 function Get-DesignFiles {
-    #     レビュー対象の設計書を列挙する（出力フォルダと観点表は除く）
+    #     レビュー対象の設計書を列挙する（出力フォルダと観点表は除く）。同じ文書の古い版・ツールの出力（前のレビュー結果など）・
+    #     書き換える前のファイルを残したフォルダの中は読まない（Select-DesignFiles。読まなかったものは知らせる）
+    $script:designSelection = Select-DesignFiles -Path $Path -NoRecurse:$NoRecurse -Exclude @($OutDir, $Checklist) -Extensions @('.xlsx', '.xlsm', '.xls') -IncludeWord
+    Write-DesignSkipWarning $script:designSelection
     $files = New-Object System.Collections.Generic.List[object]
-    $seen = @{}
-    foreach ($p in $Path) {
-        $items = @(Get-PathItem $p)
-        if ($items.Count -eq 0) { Write-Warning "見つかりません: $p" }
-        foreach ($item in $items) {
-            if ($item.PSIsContainer) {
-                $root  = $item.FullName.TrimEnd('\', '/')
-                $found = Get-ChildItem -LiteralPath $item.FullName -File -Recurse:(-not $NoRecurse) -ErrorAction SilentlyContinue
-            }
-            else {
-                $root  = [System.IO.Path]::GetDirectoryName($item.FullName)
-                $found = @($item)
-            }
-            foreach ($f in $found) {
-                if (@('.xlsx', '.xlsm', '.xls', '.docx', '.docm') -notcontains $f.Extension.ToLowerInvariant()) { continue }
-                if ($f.Name.StartsWith('~$')) { continue }
-                if ($f.FullName.StartsWith($OutDir, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-                if ([string]::Equals($f.FullName, $Checklist, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-                if ($seen.ContainsKey($f.FullName)) { continue }
-                $seen[$f.FullName] = $true
-                $rel = $f.FullName.Substring($root.Length).TrimStart('\', '/')
-                $files.Add([pscustomobject]@{ Path = $f.FullName; Name = $f.Name; Relative = $rel })
-            }
-        }
-    }
+    foreach ($f in $script:designSelection.Files) { $files.Add([pscustomobject]@{ Path = $f.Path; Name = $f.Name; Relative = $f.Relative }) }
     return ,$files
 }
 
@@ -1006,7 +1003,7 @@ function Invoke-ToolChecks {
                 }
             }
             else {
-                if ($null -eq $books) { $books = ConvertTo-DesignBooks @(& $searchScript -Pattern '\S' -Path $paths -Target Value 6>$null 3>$null) }
+                if ($null -eq $books) { $books = ConvertTo-DesignBooks (Select-DesignHits @(& $searchScript -Pattern '\S' -Path $paths -Target Value -SkipHiddenSheets 6>$null 3>$null) $script:designSelection -NoWarning) }
                 if ($src -eq '画面') { Add-ScreenRuleFindings $books $names $add }
                 else { Add-TableRuleFindings $books $names $add }
             }
@@ -1016,6 +1013,7 @@ function Invoke-ToolChecks {
             foreach ($n in $names) { $result.Failed[$n] = $true }
         }
     }
+    Write-DesignSkipWarning $script:designSelection
     return $result
 }
 
@@ -1784,6 +1782,7 @@ function New-ReviewRequests {
 
 $checklistData = Read-Checklist -FilePath $Checklist
 $designFiles = $null
+$script:designSelection = $null
 if ($Path) {
     $designFiles = Get-DesignFiles
     if ($designFiles.Count -eq 0 -and -not $CheckOnly) { throw '設計書（.xlsx / .xlsm / .xls / .docx / .docm）が見つかりません。' }
@@ -1870,6 +1869,8 @@ else {
         $requests = (New-RecheckRequests -Findings $recheckFindings -Files $designFiles).ToArray()
     }
     else { $requests = (New-ReviewRequests -Points $points -Files $designFiles).ToArray() }
+    # 読まなかった雛形のシートを知らせる
+    Write-DesignSkipWarning $script:designSelection
 
     # 前回の依頼と内容が変わったものは、古い回答を使わない
     $oldHash = @{}
@@ -2484,6 +2485,7 @@ Write-Host "レビュー結果: $reportPath"
 #
 # .PARAMETER Path
 #     レビューする設計書のフォルダまたはファイル（複数指定可）。Excel（.xlsx / .xlsm / .xls）と Word（.docx / .docm）の設計書を読みます。
+#     同じ文書の古い版・ツールが書き出したファイル・書き換える前のファイル（-BackupDir）と、非表示のシート・雛形のシート（ID が {{テーブルID}} などのまま）は読みません（読まなかったものは警告で知らせます）。
 #
 # .PARAMETER Checklist
 #     観点表（xlsx または UTF-8 の csv）。省略時は review-checklists\詳細設計レビュー観点.xlsx。
@@ -2491,7 +2493,8 @@ Write-Host "レビュー結果: $reportPath"
 #     確かめ方（AI・ツール・両方）が空欄なら、ツールの確認があれば両方、無ければ AI です。
 #
 # .PARAMETER OutDir
-#     プロンプト・回答・レビュー結果の保存先。省略時は .\design-review
+#     プロンプト・回答・レビュー結果の保存先。省略時は、1 つ目の設計書のフォルダと同じ場所の design-review
+#     （D:\設計書 なら D:\design-review。今いるフォルダによらない）。設計書を指定しないとき（-ImportOnly だけなど）は .\design-review
 #
 # .PARAMETER MaxChars
 #     1 回のプロンプトの最大文字数。Copilot の入力上限に合わせてください（既定 8000）。

@@ -80,11 +80,11 @@ foreach ($c in (Read-CsvFile $Coefficients @('種類', '難易度', '基準', '�
 
 function Read-DesignBooks {
     param([string[]] $Paths)
-    # 非表示のシート（New-DesignDocument.ps1 -TemplateSheet の雛形のシートなど）は読まない
-    $searchArgs = @{ Pattern = '\S'; Path = $Paths; Target = 'Value'; SkipHiddenSheets = $true }
-    if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
+    # 同じ文書の古い版・ツールの出力・書き換える前のファイルと、非表示のシート・雛形のシート（New-DesignDocument.ps1 -TemplateSheet の雛形など）は読まない
+    $designFiles = Select-DesignFiles -Path $Paths -NoRecurse:$NoRecurse -Exclude @($OutXlsx)
+    $searchArgs = @{ Pattern = '\S'; Path = $designFiles.Paths; Target = 'Value'; SkipHiddenSheets = $true }
     if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-    $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
+    $hits = Select-DesignHits @(& $searchScript @searchArgs 6>$null) $designFiles
     return ConvertTo-DesignBooks $hits
 }
 
@@ -510,6 +510,7 @@ if ($OutXlsx) {
 #
 # .PARAMETER Path
 #     設計書のフォルダまたはファイル（複数可・ワイルドカード可）。既定はカレントフォルダ。
+#     同じ文書の古い版・ツールが書き出したファイル・書き換える前のファイル（-BackupDir）と、非表示のシート・雛形のシート（ID が {{テーブルID}} などのまま）は読みません（読まなかったものは警告で知らせます）。
 #
 # .PARAMETER Rules
 #     規模の数え方の CSV（種類・ファイル名・シート名・単位・見出し・数える列・数えるもの・名前・ID・CRUD列）。

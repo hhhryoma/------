@@ -59,11 +59,12 @@ $wordRx = New-Object System.Text.RegularExpressions.Regex('[一-龠々〆ヵヶ]
 # ---------------------------------------------------------------- 設計書を読む
 
 
-$searchArgs = @{ Pattern = '\S'; Path = $Path; Target = 'Value' }
-if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
+# 同じ文書の古い版・ツールの出力・書き換える前のファイルと、非表示のシート・雛形のシート（差し込み欄のまま）は読まない（知らせる）
+$designFiles = Select-DesignFiles -Path $Path -NoRecurse:$NoRecurse -Exclude @($OutXlsx) -IncludeWord:$IncludeWord
+$searchArgs = @{ Pattern = '\S'; Path = $designFiles.Paths; Target = 'Value'; SkipHiddenSheets = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
 if ($IncludeWord) { $searchArgs['IncludeWord'] = $true }
-$hits = @(& (Join-Path $PSScriptRoot 'Search-Excel.ps1') @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
+$hits = Select-DesignHits @(& (Join-Path $PSScriptRoot 'Search-Excel.ps1') @searchArgs 6>$null) $designFiles
 
 # 表記（そのままの文字）→ @{ Kind; Key（表記ゆれをまとめる形）; Text; Count; Files; First（最初に出てきたセル）; FirstSeq }
 $terms = [ordered]@{}
@@ -250,6 +251,7 @@ if ($OutCsv) { Write-Host "表記ゆれの用語集（Test-ExcelTerms.ps1 の -G
 #
 # .PARAMETER Path
 #     設計書のフォルダまたはファイル（複数可）。
+#     同じ文書の古い版・ツールが書き出したファイル・書き換える前のファイル（-BackupDir）と、非表示のシート・雛形のシート（ID が {{テーブルID}} などのまま）は読みません（読まなかったものは警告で知らせます）。
 #
 # .PARAMETER Kind
 #     集める言葉の種類（Katakana: カタカナ語 / Abbreviation: 略語 / Word: 用語）。既定はすべて。

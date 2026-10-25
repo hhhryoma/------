@@ -160,7 +160,9 @@ Test-Case 'Measure-DesignSize: 表がどれも見出しだけ（行が無い）�
     Assert-Equal @('画面|S20 出荷|項目数 1・イベント数 0', 'テーブル|T_ORDER 受注|カラム数 1') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Kind, $_.Name, $_.Measures }) '行のある表が 1 つでもあれば数える'
     $text = ($w | ForEach-Object { $_.Message }) -join "`n"
     Assert-Match $text 'DD03_テーブル定義書\.xlsx: テーブル「T_SHIP 出荷」のカラム数が 0 件です.*数えません'
-    Assert-Match $text '画面設計書_雛形\.xlsx: 画面「\{\{画面ID\}\} \{\{画面名\}\}」の項目数・イベント数が 0 件です.*数えません'
+    # 画面ID が差し込み欄のままの雛形のブックは、読まずに知らせる
+    Assert-Match $text '雛形（差し込み欄のまま）のシート・ブック 1 件は読みませんでした（画面設計書_雛形\.xlsx（ブックのすべてのシート。画面ID が \{\{画面ID\}\}））'
+    Assert-NotMatch $text '画面設計書_雛形\.xlsx: '
     $s = @(& $MeasureSize -Path $dir -Summary 6>$null 3>$null)[0]
     Assert-Equal '1|35|7' ('{0}|{1}|{2}' -f $s.ILF, $s.FpIndicative, $s.FpEstimated) 'T_SHIP は ILF にしない'
     Assert-Equal 3.5 $s.TotalDays '画面 S20（簡易）3 + T_ORDER 0.5'
@@ -185,4 +187,20 @@ Test-Case 'Measure-DesignSize: Get-Help でヘルプが表示される' {
     $h = Get-Help $MeasureSize
     Assert-Match $h.Synopsis '規模'
     Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
+}
+
+Test-Case 'Measure-DesignSize: 版を上げたあとの古い版と、設計書のフォルダに置いたツールの出力（-OutXlsx）は数えない' {
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    $old = Join-Path $dir 'DD03_テーブル定義書_v1.0.xlsx'
+    Move-Item -LiteralPath (Join-Path $dir 'DD03_テーブル定義書.xlsx') -Destination $old
+    Copy-Item -LiteralPath $old -Destination (Join-Path $dir 'DD03_テーブル定義書_v1.1.xlsx')
+    Move-Item -LiteralPath (Join-Path $dir 'DD02_画面設計書_SCR001_受注一覧.xlsx') -Destination (Join-Path $dir 'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx')
+    Copy-Item -LiteralPath (Join-Path $dir 'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx') -Destination (Join-Path $dir 'DD02_画面設計書_SCR001_受注一覧_v1.1.xlsx')
+    $null = & $MeasureSize -Path $dir -OutXlsx (Join-Path $dir '規模.xlsx') 6>$null 3>$null
+    $expected = @(& $MeasureSize -Path $sampleDir -Summary 6>$null 3>$null)[0]
+    $s = @(& $MeasureSize -Path $dir -Summary 6>$null 3>$null)[0]
+    Assert-Equal ('{0}|{1}|{2}' -f $expected.ILF, $expected.FpIndicative, $expected.TotalDays) ('{0}|{1}|{2}' -f $s.ILF, $s.FpIndicative, $s.TotalDays) '版を上げる前と同じ規模'
+    $r = Invoke-Measure @{ Path = $dir }
+    Assert-Equal 1 @($r | Where-Object Name -eq 'SCR001 受注一覧').Count
+    Assert-Equal 4 @($r | Where-Object Kind -eq 'テーブル').Count
 }

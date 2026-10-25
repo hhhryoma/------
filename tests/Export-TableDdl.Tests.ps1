@@ -299,3 +299,25 @@ Test-Case 'Export-TableDdl: Get-Help でヘルプが表示される' {
     Assert-Match $h.Synopsis 'DDL'
     Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
+
+Test-Case 'Export-TableDdl: 同じテーブル定義書の古い版と、雛形のシート（テーブル ID が差し込み欄のまま）・非表示のシートからは DDL を作らない' {
+    $dir = New-TestDir
+    # 1 行目（表の見出しの行）の数だけ列を書くので、1 行目も 5 列にする
+    $columns = @('論理名', '物理名', 'データ型', '桁数', 'PK')
+    foreach ($v in @(@('v1.0', '500'), @('v1.1', '1000'))) {
+        $book = Join-Path $dir ('テーブル定義書_{0}.xlsx' -f $v[0])
+        New-SheetsBook $book ([ordered]@{
+                'T_ORDER' = @(@('テーブルID', 'T_ORDER', 'テーブル名', '受注', ''), $columns, @('受注番号', 'ORDER_NO', 'CHAR', '12', '1'), @('備考', 'REMARKS', 'VARCHAR', $v[1], ''))
+                'T_OLD'   = @(@('テーブルID', 'T_OLD', 'テーブル名', '使わなくなったテーブル', ''), $columns, @('番号', 'NO', 'CHAR', '1', '1'))
+                '雛形'    = @(@('テーブルID', '{{テーブルID}}', 'テーブル名', '{{テーブル名}}', ''), $columns, @('（主キー）', '{{主キー}}', 'CHAR', '10', '1'))
+            })
+        Edit-ZipText $book 'xl/workbook.xml' { param($t) $t -replace '(<sheet name="T_OLD")', '$1 state="hidden"' }
+    }
+    $r = Invoke-Ddl @{ Path = $dir }
+    Assert-Equal @('T_ORDER') @([regex]::Matches($r.Text, '(?m)^CREATE TABLE (\S+)') | ForEach-Object { $_.Groups[1].Value })
+    Assert-Match $r.Text '(?m)^    REMARKS\s+VARCHAR2\(1000 CHAR\),?$' '新しい版（v1.1）の桁数'
+    Assert-Match $r.Text '元のファイル: テーブル定義書_v1\.1\.xlsx'
+    Assert-Equal 2 $r.Warnings.Count ($r.Warnings -join ' / ')
+    Assert-Match $r.Warnings[0] '^古い版 1 件は読みませんでした（テーブル定義書_v1\.0\.xlsx → テーブル定義書_v1\.1\.xlsx。'
+    Assert-Match $r.Warnings[1] '^雛形（差し込み欄のまま）のシート・ブック 1 件は読みませんでした（テーブル定義書_v1\.1\.xlsx 雛形（テーブルID が \{\{テーブルID\}\}））'
+}

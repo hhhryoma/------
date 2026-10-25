@@ -56,10 +56,11 @@ $candidates = Read-TableHeaderCandidates $Headers
 # ---------------------------------------------------------------- テーブル定義書・コード定義書を読む
 
 
-$searchArgs = @{ Pattern = '\S'; Path = $Path; Target = 'Value' }
-if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
+# 同じ文書の古い版・ツールの出力・書き換える前のファイルと、非表示のシート・雛形のシート（差し込み欄のまま）は読まない（知らせる）
+$designFiles = Select-DesignFiles -Path $Path -NoRecurse:$NoRecurse -Exclude @($OutXlsx)
+$searchArgs = @{ Pattern = '\S'; Path = $designFiles.Paths; Target = 'Value'; SkipHiddenSheets = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-$hits = @(& (Join-Path $PSScriptRoot 'Search-Excel.ps1') @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
+$hits = Select-DesignHits @(& (Join-Path $PSScriptRoot 'Search-Excel.ps1') @searchArgs 6>$null) $designFiles
 $books = ConvertTo-DesignBooks $hits
 $tables = Read-TableDesign -Books $books -Candidates $candidates -OnFinding { param($Message, $Place) Write-Warning ('{0} {1}!{2}: {3}' -f $Place.File, $Place.Sheet, $Place.Cell, $Message) }
 if ($tables.Count -eq 0) { Write-Warning 'テーブル定義（物理名とデータ型の見出しのある表）が見つかりませんでした'; return }
@@ -450,6 +451,7 @@ if ($OutXlsx) { Write-Host "一覧を保存しました: $OutXlsx" }
 #
 # .PARAMETER Path
 #     テーブル定義書（とコード定義書）のファイルまたはフォルダ（複数可・ワイルドカード可）。既定はカレントフォルダ。
+#     同じ文書の古い版・ツールが書き出したファイル・書き換える前のファイル（-BackupDir）と、非表示のシート・雛形のシート（ID が {{テーブルID}} などのまま）は読みません（読まなかったものは警告で知らせます）。
 #
 # .PARAMETER OutDir
 #     テストデータの保存先のフォルダ。テーブルごとの CSV と、INSERT 文（テストデータ.sql）を保存します。

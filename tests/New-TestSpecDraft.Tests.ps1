@@ -171,3 +171,15 @@ Test-Case 'New-TestSpecDraft: Get-Help でヘルプが表示される' {
     Assert-Match $h.Synopsis 'テスト仕様書の下書き'
     Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
+
+Test-Case 'New-TestSpecDraft: 版を上げたあとの古い版の画面設計書は読まない（ケースを二重にしない）' {
+    $dir = Copy-Fixture (Join-Path $designSample '.')
+    $scr = Join-Path $dir 'DD02_画面設計書_SCR003_受注詳細_v1.0.xlsx'
+    Move-Item -LiteralPath (Join-Path $dir 'DD02_画面設計書_SCR003_受注詳細.xlsx') -Destination $scr
+    Copy-Item -LiteralPath $scr -Destination (Join-Path $dir 'DD02_画面設計書_SCR003_受注詳細_v1.1.xlsx')
+    $expected = @(& $TestDraft $designSample -OutXlsx (Join-Path (New-TestDir) 'a.xlsx') 6>$null 3>$null)
+    $w = $null
+    $cases = @(& $TestDraft $dir -OutXlsx (Join-Path (New-TestDir) 'b.xlsx') -WarningVariable w -WarningAction SilentlyContinue 6>$null)
+    Assert-Equal $expected.Count $cases.Count
+    Assert-Match (($w | ForEach-Object { $_.Message }) -join "`n") '古い版 1 件は読みませんでした'
+}

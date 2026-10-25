@@ -126,10 +126,11 @@ if ($ruleList.Count -eq 0) { throw "参照のルールが空です: $Rules" }
 # ---------------------------------------------------------------- 設計書を読む
 
 
-$searchArgs = @{ Pattern = '\S'; Path = $Path; Target = 'Value' }
-if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
+# 同じ文書の古い版・ツールの出力・書き換える前のファイルと、非表示のシート・雛形のシート（差し込み欄のまま）は読まない（知らせる）
+$designFiles = Select-DesignFiles -Path $Path -NoRecurse:$NoRecurse -Exclude @($OutXlsx)
+$searchArgs = @{ Pattern = '\S'; Path = $designFiles.Paths; Target = 'Value'; SkipHiddenSheets = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-$hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
+$hits = Select-DesignHits @(& $searchScript @searchArgs 6>$null) $designFiles
 $books = ConvertTo-DesignBooks $hits
 
 $defs = New-Object System.Collections.Generic.List[object]   # 定義と一覧
@@ -819,6 +820,7 @@ if ($OutXlsx) {
 # .PARAMETER Path
 #     設計書のフォルダまたはファイル（複数可・ワイルドカード可）。既定はカレントフォルダ。
 #     参照先の設計書（テーブル定義書・メッセージ一覧など）も含めて指定してください。
+#     同じ文書の古い版・ツールが書き出したファイル・書き換える前のファイル（-BackupDir）と、非表示のシート・雛形のシート（ID が {{テーブルID}} などのまま）は読みません（読まなかったものは警告で知らせます）。
 #
 # .PARAMETER Rules
 #     参照のルールの CSV（区分・種類・ファイル名・シート名・見出し・列・名前・親・元・書き方・重複・属性・未使用・CRUD。

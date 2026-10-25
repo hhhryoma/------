@@ -399,3 +399,15 @@ Test-Case 'New-DesignDocument: Get-Help でヘルプが表示される' {
     Assert-Match $h.Synopsis '雛形'
     Assert-True (@($h.parameters.parameter | Where-Object { $_.name -notin @('WhatIf', 'Confirm') -and -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
+
+Test-Case 'New-DesignDocument: -Bump で新しい版数の名前で保存したときは、版を上げる前のファイルが残っていることを知らせる（設計書を読むツールは新しい版だけを読む）' {
+    $dir = New-TestDir
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD03_テーブル定義書.xlsx') -Destination (Join-Path $dir 'DD03_テーブル定義書_v1.1.xlsx')
+    $w = $null
+    $null = & $NewDocTool -Bump -Path $dir -Description 'x' -WhatIf -WarningVariable w -WarningAction SilentlyContinue 6>$null
+    Assert-Equal 0 @($w).Count '-WhatIf では知らせない'
+    $null = & $NewDocTool -Bump -Path $dir -Description '受注のインデックスを追加' -WarningVariable w -WarningAction SilentlyContinue 6>$null
+    Assert-Match (($w | ForEach-Object { $_.Message }) -join "`n") '版を上げる前のファイル 1 件を、同じフォルダに残しています（DD03_テーブル定義書_v1\.1\.xlsx）。版を上げる前に直したときは'
+    $tables = @(& (Join-Path $script:ToolsDir 'Measure-DesignSize.ps1') -Path $dir 6>$null 3>$null | Where-Object Kind -eq 'テーブル')
+    Assert-Equal 4 $tables.Count '古い版のテーブルを二重に数えない'
+}

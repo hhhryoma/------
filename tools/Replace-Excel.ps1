@@ -827,6 +827,8 @@ foreach ($p in $plans) {
                 if ($backupPath -ne $dest) { $renamed.Add($backupPath.Substring($BackupDir.Length).TrimStart('\', '/')) }
                 New-Item -ItemType Directory -Force -Path (Split-Path $backupPath -Parent) | Out-Null
                 Copy-Item -LiteralPath $entry.Info.FullName -Destination $backupPath -Force
+                # 設計書を読むツールが、残したファイルを設計書として読まないように、印のファイルを置く
+                Add-BackupMarker $BackupDir 'Replace-Excel.ps1'
                 # 残しているあいだに更新されたときも書き換えない
                 Assert-FileUnchanged $entry.Info.FullName $p.Stamp
             }
@@ -942,6 +944,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     書き換える前のファイルを、このフォルダに同じ相対パスで残します。
 #     -Path に別々のフォルダ（ファイルならそのフォルダ）を指定したときは、そのフォルダの名前のフォルダ（同じ名前があれば「第1回 (2)」）に分けます。
 #     前に残したファイルと名前が同じときは上書きせず、「見積書 (2).xlsx」のように番号を付けて残します。
+#     このフォルダには印のファイル「書き換える前のファイル.txt」を置きます（設計書を読むツールは、印のあるフォルダを読みません）。
 #
 # .PARAMETER Force
 #     確認せずに置換します。

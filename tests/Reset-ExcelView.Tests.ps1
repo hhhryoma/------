@@ -99,7 +99,7 @@ Test-Case 'Reset-ExcelView: -KeepTimestamp で更新日時を保ち、-BackupDir
     Assert-Equal $old (Get-Item -LiteralPath $bad).LastWriteTimeUtc '更新日時'
     Assert-True ((Get-FileHash -LiteralPath $bad).Hash -ne $hash) '中身は直っている'
     Assert-Equal $hash (Get-FileHash -LiteralPath (Join-Path $backup 'bad.xlsx')).Hash 'バックアップは元のまま'
-    Assert-Equal 1 @(Get-ChildItem -LiteralPath $backup -File).Count '直したファイルだけをバックアップ'
+    Assert-Equal @('bad.xlsx', '書き換える前のファイル.txt') @(Get-ChildItem -LiteralPath $backup -File | ForEach-Object { $_.Name } | Sort-Object) '直したファイルだけをバックアップ（と印のファイル）'
 }
 
 Test-Case 'Reset-ExcelView: 見出しを固定したシートはスクロール領域の左上に戻す' {
@@ -183,7 +183,7 @@ Test-Case 'Reset-ExcelView: フォルダを複数指定したときは、-Backup
     # 3 つ目はファイルで指定する（そのフォルダの名前「第1回」は 1 つ目と同じ）
     $r = Invoke-Reset @{ Path = @((Join-Path $dir '提出物/第1回'), (Join-Path $dir '提出物/第2回'), (Join-Path $dir '再提出/第1回/見積書.xlsx')); BackupDir = $backup }
     Assert-Equal @('修正', '修正', '修正') @($r | ForEach-Object { $_.Result })
-    Assert-Equal 3 @(Get-ChildItem -LiteralPath $backup -File -Recurse).Count '直したファイルをすべて残す'
+    Assert-Equal 3 @(Get-ChildItem -LiteralPath $backup -File -Recurse -Filter '*.xlsx').Count '直したファイルをすべて残す'
     Assert-Equal $hashes.ToArray() @(@('第1回', '第2回', '第1回 (2)') | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $backup "$_/見積書.xlsx")).Hash }) '指定したフォルダの名前のフォルダに、元のファイルを残す'
 }
 

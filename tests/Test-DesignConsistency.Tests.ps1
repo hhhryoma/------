@@ -235,3 +235,42 @@ Test-Case 'Test-DesignConsistency: Get-Help でヘルプが表示される' {
     Assert-Match $h.Synopsis '参照'
     Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
+
+Test-Case 'Test-DesignConsistency: 版を上げたあとの古い版、雛形のシート（非表示・差し込み欄のまま）、設計書のフォルダに置いたツールの出力・差分の印の写し・書き換える前のファイルを読まない' {
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    # テーブル定義書の版を上げ（前の版のファイルも残る）、新しい版で備考を 1000 桁にする
+    $old = Join-Path $dir 'DD03_テーブル定義書_v1.0.xlsx'
+    $new = Join-Path $dir 'DD03_テーブル定義書_v1.1.xlsx'
+    Move-Item -LiteralPath (Join-Path $dir 'DD03_テーブル定義書.xlsx') -Destination $old
+    Copy-Item -LiteralPath $old -Destination $new
+    Set-CellValues $new 'T_ORDER' @{ X21 = 1000 }
+    # 非表示のシートのテーブルと、テーブル ID が差し込み欄のままの雛形のシート
+    $extra = Join-Path $dir 'DD03_テーブル定義書_追加.xlsx'
+    $columns = @(@('論理名', '物理名', 'データ型'), @('番号', 'NO', 'CHAR'))
+    New-SheetsBook $extra ([ordered]@{
+            'T_EXTRA' = @(, @('テーブルID', 'T_EXTRA', 'テーブル名', '追加')) + $columns
+            '雛形'    = @(, @('テーブルID', '{{テーブルID}}', 'テーブル名', '{{テーブル名}}')) + $columns
+        })
+    Edit-ZipText $extra 'xl/workbook.xml' { param($t) $t -replace '(<sheet name="T_EXTRA")', '$1 state="hidden"' }
+    # 設計書のフォルダに置いたツールの出力と、差分の印を付けた写し・書き換える前のファイル
+    $null = & $ConsistencyTool -Path $dir -OutXlsx (Join-Path $dir '整合性.xlsx') 6>$null 3>$null
+    $null = & (Join-Path $script:ToolsDir 'Compare-Excel.ps1') $old $new -OutMarkedDir (Join-Path $dir '差分の印') 6>$null 3>$null
+    Assert-True (Test-Path -LiteralPath (Join-Path $dir '差分の印/DD03_テーブル定義書_v1.1.xlsx')) '差分の印を付けた写し'
+    $null = & (Join-Path $script:ToolsDir 'Replace-Excel.ps1') -Pattern '受注管理システム' -Replacement '受注管理システム（改）' -SimpleMatch -Path (Join-Path $dir 'DD05_メッセージ一覧.xlsx') -Force -BackupDir (Join-Path $dir '置換前') 6>$null 3>$null
+    Assert-True (Test-Path -LiteralPath (Join-Path $dir '置換前/DD05_メッセージ一覧.xlsx')) '書き換える前のファイル'
+
+    $all = @(& $ConsistencyTool -Path $dir 6>&1 3>&1)
+    $issues = @($all | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] -and $_ -isnot [System.Management.Automation.WarningRecord] })
+    Assert-Match (($all | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } | ForEach-Object { "$_" }) -join "`n") '8 ファイルを読みました（定義: テーブル 4・'
+    Assert-Equal 0 @($issues | Where-Object Level -eq 'エラー').Count ((@($issues | ForEach-Object { $_.Detail })) -join ' / ')
+    Assert-Equal @('DD02_画面設計書_SCR002_受注登録.xlsx|桁数が 500 ですが、T_ORDER.REMARKS は 1000 です', 'DD02_画面設計書_SCR003_受注詳細.xlsx|桁数が 500 ですが、T_ORDER.REMARKS は 1000 です') `
+        @($issues | Where-Object Item -eq '属性の違い' | ForEach-Object { '{0}|{1}' -f $_.File, $_.Detail } | Sort-Object) '新しい版のテーブル定義書と比べる'
+    Assert-Equal 0 @($issues | Where-Object { $_.Detail -match 'T_EXTRA|\{\{' }).Count '非表示のシート・雛形のシート'
+    $warnings = ($all | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message }) -join "`n"
+    Assert-Match $warnings '古い版 1 件は読みませんでした（DD03_テーブル定義書_v1\.0\.xlsx → DD03_テーブル定義書_v1\.1\.xlsx。'
+    Assert-Match $warnings '雛形（差し込み欄のまま）のシート・ブック 1 件は読みませんでした（DD03_テーブル定義書_追加\.xlsx'
+    Assert-Match $warnings 'ツールが書き出したファイル 2 件は、設計書ではないので読みませんでした（'
+    Assert-Match $warnings '整合性\.xlsx（Test-DesignConsistency\.ps1 の出力）'
+    Assert-Match $warnings '差分の印[\\/]DD03_テーブル定義書_v1\.1\.xlsx（Compare-Excel\.ps1 の差分の印を付けた写し）'
+    Assert-Match $warnings '書き換える前のファイルを残したフォルダの 1 件は読みませんでした（置換前。'
+}

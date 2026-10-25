@@ -81,10 +81,11 @@ foreach ($r in $typeRows) {
 # ---------------------------------------------------------------- テーブル定義書を読む
 
 
-$searchArgs = @{ Pattern = '\S'; Path = $Path; Target = 'Value' }
-if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
+# 同じ文書の古い版・ツールの出力・書き換える前のファイルと、非表示のシート・雛形のシート（差し込み欄のまま）は読まない（知らせる）
+$designFiles = Select-DesignFiles -Path $Path -NoRecurse:$NoRecurse -Exclude @($OutXlsx)
+$searchArgs = @{ Pattern = '\S'; Path = $designFiles.Paths; Target = 'Value'; SkipHiddenSheets = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-$hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) })
+$hits = Select-DesignHits @(& $searchScript @searchArgs 6>$null) $designFiles
 $books = ConvertTo-DesignBooks $hits
 
 $script:Findings = New-Object System.Collections.Generic.List[object]
@@ -530,6 +531,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER Path
 #     テーブル定義書のフォルダまたはファイル（複数可・ワイルドカード可）。既定はカレントフォルダ。
+#     同じ文書の古い版・ツールが書き出したファイル・書き換える前のファイル（-BackupDir）と、非表示のシート・雛形のシート（ID が {{テーブルID}} などのまま）は読みません（読まなかったものは警告で知らせます）。
 #
 # .PARAMETER Database
 #     対象の DB（Oracle / PostgreSQL / SQLServer / MySQL）。既定は Oracle。

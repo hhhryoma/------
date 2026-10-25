@@ -202,3 +202,22 @@ Test-Case 'New-TestData: Get-Help でヘルプが表示される' {
     Assert-Match $h.Synopsis 'テストデータ'
     Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
+
+Test-Case 'New-TestData: 同じテーブル定義書の古い版と、雛形のシート（テーブル ID が差し込み欄のまま）からはデータを作らない' {
+    $dir = New-TestDir
+    $src = Join-Path $dir '設計書'
+    New-Item -ItemType Directory -Path $src | Out-Null
+    foreach ($v in @('v1.0', 'v1.1')) { Copy-Item -LiteralPath (Join-Path $designDir 'DD03_テーブル定義書.xlsx') -Destination (Join-Path $src "DD03_テーブル定義書_$v.xlsx") }
+    New-SheetsBook (Join-Path $src 'DD03_テーブル定義書_追加.xlsx') ([ordered]@{
+            '雛形' = @(@('テーブルID', '{{テーブルID}}', 'テーブル名', '{{テーブル名}}'), @('論理名', '物理名', 'データ型', '桁数', 'PK'), @('（主キー）', '{{主キー}}', 'CHAR', '10', '1'))
+        })
+    $out = Join-Path $dir 'out'
+    $w = $null
+    $r = @(& $DataTool -Path $src -OutDir $out -WarningVariable w -WarningAction SilentlyContinue 6>$null)
+    Assert-Equal 4 $r.Count ((@($r | ForEach-Object { $_.Table })) -join ', ')
+    Assert-Equal 4 @(Get-ChildItem -LiteralPath $out -Filter '*.csv').Count
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $out -Filter '*.csv' | Where-Object { $_.Name.Contains('{{') }).Count 'テーブル ID が差し込み欄のままの CSV'
+    $warnings = ($w | ForEach-Object { $_.Message }) -join "`n"
+    Assert-NotMatch $warnings 'ほかのシートでも定義されている' '古い版のテーブル'
+    Assert-Match $warnings '古い版 1 件は読みませんでした'
+}

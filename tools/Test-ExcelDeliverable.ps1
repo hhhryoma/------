@@ -1154,6 +1154,8 @@ foreach ($entry in $files) {
             if ($backupPath -ne $dest) { $renamed.Add($backupPath.Substring($BackupDir.Length).TrimStart('\', '/')) }
             New-Item -ItemType Directory -Force -Path (Split-Path $backupPath -Parent) | Out-Null
             Copy-Item -LiteralPath $path -Destination $backupPath -Force
+            # 設計書を読むツールが、残したファイルを設計書として読まないように、印のファイルを置く
+            Add-BackupMarker $BackupDir 'Test-ExcelDeliverable.ps1'
         }
         $done = Repair-Deliverable $entry $fixable
         # 直したあとの状態でチェックし直す（出力するのは残っている指摘）
@@ -1320,6 +1322,7 @@ if ($Fix) {
 #     -Fix で書き換える前のファイルを、このフォルダに同じ相対パスで残します（このフォルダの中のファイルはチェックしません）。
 #     -Path に別々のフォルダ（ファイルならそのフォルダ）を指定したときは、そのフォルダの名前のフォルダ（同じ名前があれば「第1回 (2)」）に分けます。
 #     前に残したファイルと名前が同じときは上書きせず、「見積書 (2).xlsx」のように番号を付けて残します。
+#     このフォルダには印のファイル「書き換える前のファイル.txt」を置きます（設計書を読むツールは、印のあるフォルダを読みません）。
 #
 # .PARAMETER OutXlsx
 #     結果を xlsx に保存します（指摘一覧・ファイル別。場所をクリックすると該当セルが開きます）。
