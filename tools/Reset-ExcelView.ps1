@@ -213,6 +213,9 @@ foreach ($p in $Path) {
 }
 if ($files.Count -eq 0) { Write-Warning '対象の Excel ファイル（.xlsx / .xlsm）がありません。'; return }
 
+$backupFolders = Get-BackupFolderNames $files.ToArray()
+$renamed = New-Object System.Collections.Generic.List[string]   # 前に残したファイルと名前が同じため、番号を付けて残したもの
+
 $results = New-Object System.Collections.Generic.List[object]
 $index = 0
 foreach ($entry in $files) {
@@ -246,8 +249,11 @@ foreach ($entry in $files) {
                 $lastWrite = $file.LastWriteTimeUtc
                 if ($BackupDir) {
                     $dest = Join-Path $BackupDir $entry.Relative
-                    New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
-                    Copy-Item -LiteralPath $file.FullName -Destination $dest -Force
+                    if ($backupFolders.Count -gt 0) { $dest = Join-Path (Join-Path $BackupDir $backupFolders[$entry.Root]) $entry.Relative }
+                    $backupPath = Get-BackupPath $dest
+                    if ($backupPath -ne $dest) { $renamed.Add($backupPath.Substring($BackupDir.Length).TrimStart('\', '/')) }
+                    New-Item -ItemType Directory -Force -Path (Split-Path $backupPath -Parent) | Out-Null
+                    Copy-Item -LiteralPath $file.FullName -Destination $backupPath -Force
                 }
                 $null = Repair-Workbook -FilePath $file.FullName
                 if ($KeepTimestamp) { [System.IO.File]::SetLastWriteTimeUtc($file.FullName, $lastWrite) }
@@ -274,6 +280,7 @@ Write-Host ''
 $counts = $results | Group-InOrder Result | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
 Write-Host ("{0} ファイル: {1}" -f $files.Count, ($counts -join ' / '))
 if ($BackupDir -and @($results | Where-Object Result -eq '修正').Count -gt 0) { Write-Host "修正前のファイル: $BackupDir" }
+if ($renamed.Count -gt 0) { Write-Host ('  前に残したファイルと名前が同じため、上書きせずに番号を付けて残したもの: {0}' -f ($renamed -join '、')) }
 
 # .SYNOPSIS
 #     Excel ファイルを、開いたときに先頭シートの A1 が倍率 100% で表示される状態に直します（Excel 不要）。
@@ -305,6 +312,8 @@ if ($BackupDir -and @($results | Where-Object Result -eq '修正').Count -gt 0) 
 #
 # .PARAMETER BackupDir
 #     書き換える前のファイルを、このフォルダにフォルダ構成ごとコピーしておきます。
+#     -Path に別々のフォルダ（ファイルならそのフォルダ）を指定したときは、そのフォルダの名前のフォルダ（同じ名前があれば「第1回 (2)」）に分けます。
+#     前に残したファイルと名前が同じときは上書きせず、「見積書 (2).xlsx」のように番号を付けて残します。
 #
 # .PARAMETER Force
 #     直す必要がないと判定したファイルも書き換えます。

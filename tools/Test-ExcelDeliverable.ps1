@@ -922,14 +922,17 @@ foreach ($p in $Path) {
         foreach ($f in $found) {
             if (@('.xlsx', '.xlsm', '.xltx', '.xltm', '.xls', '.xlsb', '.docx', '.docm') -notcontains $f.Extension.ToLowerInvariant()) { continue }
             if ($f.Name.StartsWith('~$')) { continue }
+            if ($BackupDir -and $f.FullName.StartsWith($BackupDir, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
             if ($OutXlsx -and [string]::Equals($f.FullName, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
             if ($seen.ContainsKey($f.FullName)) { continue }
             $seen[$f.FullName] = $true
-            $files.Add([pscustomobject]@{ Info = $f; Relative = $f.FullName.Substring($root.Length).TrimStart('\', '/') })
+            $files.Add([pscustomobject]@{ Info = $f; Root = $root; Relative = $f.FullName.Substring($root.Length).TrimStart('\', '/') })
         }
     }
 }
 if ($files.Count -eq 0) { Write-Warning 'チェックする Excel・Word ファイルがありません。'; return }
+$backupFolders = Get-BackupFolderNames $files.ToArray()
+$renamed = New-Object System.Collections.Generic.List[string]   # 前に残したファイルと名前が同じため、番号を付けて残したもの
 
 function Invoke-FileChecks {
     #     1 ファイルをチェックし、指摘を $script:Issues に足す
@@ -1084,8 +1087,11 @@ foreach ($entry in $files) {
         if (Test-FileLocked $path) { throw 'ファイルを開いているため書き換えられません（Excel で閉じてから実行してください）' }
         if ($BackupDir) {
             $dest = Join-Path $BackupDir $entry.Relative
-            New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
-            Copy-Item -LiteralPath $path -Destination $dest -Force
+            if ($backupFolders.Count -gt 0) { $dest = Join-Path (Join-Path $BackupDir $backupFolders[$entry.Root]) $entry.Relative }
+            $backupPath = Get-BackupPath $dest
+            if ($backupPath -ne $dest) { $renamed.Add($backupPath.Substring($BackupDir.Length).TrimStart('\', '/')) }
+            New-Item -ItemType Directory -Force -Path (Split-Path $backupPath -Parent) | Out-Null
+            Copy-Item -LiteralPath $path -Destination $backupPath -Force
         }
         $done = Repair-Deliverable $entry $fixable
         # 直したあとの状態でチェックし直す（出力するのは残っている指摘）
@@ -1169,6 +1175,7 @@ if ($Fix) {
     if ($fixed.Count -gt 0) {
         Write-Host ('{0} ファイルを直しました（上の件数は直したあとに残っている指摘です）' -f $fixed.Count)
         if ($BackupDir) { Write-Host "直す前のファイル: $BackupDir" }
+        if ($renamed.Count -gt 0) { Write-Host ('  前に残したファイルと名前が同じため、上書きせずに番号を付けて残したもの: {0}' -f ($renamed -join '、')) }
     }
 }
 
@@ -1246,7 +1253,9 @@ if ($Fix) {
 #     読み取り専用のファイルは書き換えません。-WhatIf で直すファイルと項目を確かめられます。
 #
 # .PARAMETER BackupDir
-#     -Fix で書き換える前のファイルを、このフォルダに同じ相対パスで残します。
+#     -Fix で書き換える前のファイルを、このフォルダに同じ相対パスで残します（このフォルダの中のファイルはチェックしません）。
+#     -Path に別々のフォルダ（ファイルならそのフォルダ）を指定したときは、そのフォルダの名前のフォルダ（同じ名前があれば「第1回 (2)」）に分けます。
+#     前に残したファイルと名前が同じときは上書きせず、「見積書 (2).xlsx」のように番号を付けて残します。
 #
 # .PARAMETER OutXlsx
 #     結果を xlsx に保存します（指摘一覧・ファイル別。場所をクリックすると該当セルが開きます）。

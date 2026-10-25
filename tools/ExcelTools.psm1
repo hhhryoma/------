@@ -635,6 +635,38 @@ function Save-ZipPackage {
     Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
 }
 
+function Get-BackupFolderNames {
+    #     -BackupDir（書き換える前のファイルを残すフォルダ）の中で、対象のフォルダ（ファイルを指定したときはそのフォルダ）ごとに
+    #     分けるフォルダの名前（対象のフォルダ → 名前）。Entries は対象のファイルの一覧（Root に対象のフォルダ）。
+    #     対象のフォルダが 1 つなら分けない（空）。複数あれば、同じ相対パスのファイルが重ならないように、そのフォルダの名前のフォルダに分ける
+    #     （名前が同じフォルダは「第1回 (2)」）
+    param([object[]] $Entries)
+    $names = @{}
+    foreach ($e in $Entries) {
+        if ($names.ContainsKey($e.Root)) { continue }
+        $name = [System.IO.Path]::GetFileName($e.Root)
+        if (-not $name) { $name = $e.Root -replace '[\\/:]', '' }   # ドライブ（D:）
+        $sub = $name
+        $n = 1
+        while (@($names.Values) -contains $sub) { $n++; $sub = '{0} ({1})' -f $name, $n }
+        $names[$e.Root] = $sub
+    }
+    if ($names.Count -le 1) { return @{} }
+    return $names
+}
+
+function Get-BackupPath {
+    #     書き換える前のファイルを残すパス。同じ名前のファイルが既にあれば（前に残したものなど）、上書きせずに「見積書 (2).xlsx」のように番号を付ける
+    param([string] $Dest)
+    $dir = [System.IO.Path]::GetDirectoryName($Dest)
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($Dest)
+    $ext = [System.IO.Path]::GetExtension($Dest)
+    $candidate = $Dest
+    $n = 1
+    while (Test-Path -LiteralPath $candidate) { $n++; $candidate = Join-Path $dir ('{0} ({1}){2}' -f $base, $n, $ext) }
+    return $candidate
+}
+
 # ---------------------------------------------------------------- 書き出し（xlsx）
 
 

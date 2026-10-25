@@ -168,6 +168,39 @@ Test-Case 'Reset-ExcelView: インターネットから取得したファイル�
     Assert-Match ($zone -join "`n") 'ZoneId=3' 'Zone.Identifier が残っていない'
 }
 
+Test-Case 'Reset-ExcelView: フォルダを複数指定したときは、-BackupDir に指定したフォルダごとに分けて残す' {
+    $dir = New-TestDir
+    $places = @('提出物/第1回', '提出物/第2回', '再提出/第1回')
+    $hashes = New-Object System.Collections.Generic.List[string]
+    foreach ($p in $places) {
+        $file = Join-Path $dir "$p/見積書.xlsx"
+        New-Item -ItemType Directory -Force -Path (Split-Path $file -Parent) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:Fixtures 'deliverable/bad.xlsx') -Destination $file
+        Set-CellValues $file '詳細' @{ A1 = $p }
+        $hashes.Add((Get-FileHash -LiteralPath $file).Hash)
+    }
+    $backup = Join-Path $dir 'bk'
+    # 3 つ目はファイルで指定する（そのフォルダの名前「第1回」は 1 つ目と同じ）
+    $r = Invoke-Reset @{ Path = @((Join-Path $dir '提出物/第1回'), (Join-Path $dir '提出物/第2回'), (Join-Path $dir '再提出/第1回/見積書.xlsx')); BackupDir = $backup }
+    Assert-Equal @('修正', '修正', '修正') @($r | ForEach-Object { $_.Result })
+    Assert-Equal 3 @(Get-ChildItem -LiteralPath $backup -File -Recurse).Count '直したファイルをすべて残す'
+    Assert-Equal $hashes.ToArray() @(@('第1回', '第2回', '第1回 (2)') | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $backup "$_/見積書.xlsx")).Hash }) '指定したフォルダの名前のフォルダに、元のファイルを残す'
+}
+
+Test-Case 'Reset-ExcelView: -BackupDir に前に残したファイルは上書きせず、番号を付けて残す' {
+    $dir = Copy-Fixture 'deliverable'
+    $bad = Join-Path $dir 'bad.xlsx'
+    $original = (Get-FileHash -LiteralPath $bad).Hash
+    $backup = Join-Path (New-TestDir) 'backup'
+    $null = Invoke-Reset @{ Path = $bad; BackupDir = $backup }
+    $fixed = (Get-FileHash -LiteralPath $bad).Hash
+    # 2 回目（-NormalView で表示モードも直す）
+    $text = Get-HostText { $null = & $ResetView -Path $bad -BackupDir $backup -NormalView }
+    Assert-Equal $original (Get-FileHash -LiteralPath (Join-Path $backup 'bad.xlsx')).Hash '1 回目に残した元のファイル'
+    Assert-Equal $fixed (Get-FileHash -LiteralPath (Join-Path $backup 'bad (2).xlsx')).Hash '2 回目に書き換える前のファイル'
+    Assert-Match $text '番号を付けて残し.*bad \(2\)\.xlsx'
+}
+
 Test-Case 'Reset-ExcelView: Get-Help でヘルプが表示される' {
     $h = Get-Help $ResetView
     Assert-Match $h.Synopsis 'A1'

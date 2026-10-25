@@ -670,11 +670,13 @@ foreach ($p in $Path) {
             if ($OutXlsx -and [string]::Equals($f.FullName, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
             if ($seen.ContainsKey($f.FullName)) { continue }
             $seen[$f.FullName] = $true
-            $files.Add([pscustomobject]@{ Info = $f; Relative = $f.FullName.Substring($root.Length).TrimStart('\', '/') })
+            $files.Add([pscustomobject]@{ Info = $f; Root = $root; Relative = $f.FullName.Substring($root.Length).TrimStart('\', '/') })
         }
     }
 }
 if ($files.Count -eq 0) { Write-Warning '対象の Excel ファイル（.xlsx / .xlsm）がありません。'; return }
+$backupFolders = Get-BackupFolderNames $files.ToArray()
+$renamed = New-Object System.Collections.Generic.List[string]   # 前に残したファイルと名前が同じため、番号を付けて残したもの
 
 # ---- まず全ファイルを読んで、置換する箇所を求める（ファイルはまだ変えない）
 $results = New-Object System.Collections.Generic.List[object]
@@ -756,8 +758,11 @@ foreach ($p in $plans) {
             if (Test-FileLocked $entry.Info.FullName) { throw 'ファイルを開いているため書き換えられません（Excel で閉じてから実行してください）' }
             if ($BackupDir) {
                 $dest = Join-Path $BackupDir $entry.Relative
-                New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
-                Copy-Item -LiteralPath $entry.Info.FullName -Destination $dest -Force
+                if ($backupFolders.Count -gt 0) { $dest = Join-Path (Join-Path $BackupDir $backupFolders[$entry.Root]) $entry.Relative }
+                $backupPath = Get-BackupPath $dest
+                if ($backupPath -ne $dest) { $renamed.Add($backupPath.Substring($BackupDir.Length).TrimStart('\', '/')) }
+                New-Item -ItemType Directory -Force -Path (Split-Path $backupPath -Parent) | Out-Null
+                Copy-Item -LiteralPath $entry.Info.FullName -Destination $backupPath -Force
             }
             Save-ZipPackage -FilePath $entry.Info.FullName -Changes $p.Plan.Changes
             $result = '置換'
@@ -807,6 +812,7 @@ Write-Host ''
 $counts = $results | Group-InOrder Result | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }
 Write-Host ("{0} ファイルを調べました: {1}" -f $files.Count, ($counts -join ' / '))
 if ($BackupDir -and @($results | Where-Object Result -eq '置換').Count -gt 0) { Write-Host "置換前のファイル: $BackupDir" }
+if ($renamed.Count -gt 0) { Write-Host ('  前に残したファイルと名前が同じため、上書きせずに番号を付けて残したもの: {0}' -f ($renamed -join '、')) }
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
 # .SYNOPSIS
@@ -867,6 +873,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER BackupDir
 #     書き換える前のファイルを、このフォルダに同じ相対パスで残します。
+#     -Path に別々のフォルダ（ファイルならそのフォルダ）を指定したときは、そのフォルダの名前のフォルダ（同じ名前があれば「第1回 (2)」）に分けます。
+#     前に残したファイルと名前が同じときは上書きせず、「見積書 (2).xlsx」のように番号を付けて残します。
 #
 # .PARAMETER Force
 #     確認せずに置換します。
