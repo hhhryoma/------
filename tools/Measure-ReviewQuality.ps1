@@ -419,7 +419,7 @@ if ($SizeCsv) {
             # Export-ExcelToPdf.ps1 -LogPath の CSV は、失敗した行を使わない（-SkipExisting で「スキップ」した行にも、既存の PDF のページ数がある）
             if ($r.PSObject.Properties['結果'] -and ([string]$r.'結果').Trim() -eq '失敗') { continue }
             $n = 0.0
-            if (-not [double]::TryParse(([string]$r.$sizeCol).Trim(), [ref]$n)) { continue }
+            if (-not [double]::TryParse(([string]$r.$sizeCol).Trim(), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { continue }
             $k = ConvertTo-DocKey $r.$nameCol
             if (-not $sizes.Contains($k)) { $sizes[$k] = [pscustomobject]@{ Name = @(([string]$r.$nameCol).Trim() -split '[\\/]')[-1]; Size = 0.0; Unit = $sizeCol } }
             $sizes[$k].Size += $n

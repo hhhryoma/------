@@ -336,6 +336,20 @@ Test-Case 'New-DesignDocument: -Bump で表紙の版数・更新日が数式の�
     Assert-Equal 0 $issues.Count (@($issues | ForEach-Object { $_.Detail }) -join ' / ')
 }
 
+Test-Case 'New-DesignDocument: -FileName に拡張子が無ければ雛形の拡張子を付け、違う拡張子は受け付けない' {
+    $dir = New-TestDir
+    $tpl = Join-Path $dir '画面設計書_雛形.xlsx'
+    New-SheetsBook $tpl ([ordered]@{ '画面概要' = @(@('項目', '値'), @('画面ID', '{{画面ID}}'), @('画面名', '{{画面名}}')) })
+    $list = Join-Path $dir '画面一覧.csv'
+    @('画面ID,画面名', 'SCR001,受注一覧') | Set-Content -LiteralPath $list -Encoding UTF8
+    $out = Join-Path $dir 'out'
+    $r = @(& $NewDocTool -Template $tpl -List $list -FileName '{{画面ID}}_{{画面名}}_v1.0' -OutDir $out 6>$null)
+    Assert-Equal 'SCR001_受注一覧_v1.0.xlsx|作成' ('{0}|{1}' -f $r[0].File, $r[0].Status)
+    $sheet = Read-XlsxSheet -Path (Join-Path $out 'SCR001_受注一覧_v1.0.xlsx') -Index 1
+    Assert-Equal 'SCR001|受注一覧' ('{0}|{1}' -f $sheet.Rows[2]['B'], $sheet.Rows[3]['B']) '差し込み欄を置き換える'
+    Assert-Throws { & $NewDocTool -Template $tpl -List $list -FileName '{{画面ID}}.xlsm' -OutDir $out 6>$null } '拡張子は雛形と同じ'
+}
+
 Test-Case 'New-DesignDocument: Get-Help でヘルプが表示される' {
     $h = Get-Help $NewDocTool
     Assert-Match $h.Synopsis '雛形'
