@@ -237,12 +237,17 @@ catch {
     Write-Host ('エラー: ' + $_.Exception.Message) -ForegroundColor Red
 }
 finally {
-    # Install-ExcelTools.ps1 で入れたツールなら、配布元が更新されていないかを確かめる（12 時間に 1 回まで。次の実行から新しい版になる）
+    # Install-ExcelTools.ps1 で入れたツールなら、配布元が更新されていないかを確かめる（12 時間に 1 回まで。次の実行から新しい版になる）。
+    # 画面（Gui）は、開いた画面が読んでいるファイルを書き換えないよう、画面を閉じたあとに Start-ExcelTools.ps1 が確かめる
     $installDir = Split-Path -Parent $PSScriptRoot
-    if (Test-Path -LiteralPath (Join-Path $installDir 'install.json')) {
+    if ($Action -ne 'Gui' -and (Test-Path -LiteralPath (Join-Path $installDir 'install.json'))) {
         try {
-            $u = & (Join-Path $PSScriptRoot 'Install-ExcelTools.ps1') -InstallDir $installDir -CheckOnly 6>$null
+            $u = & (Join-Path $PSScriptRoot 'Install-ExcelTools.ps1') -InstallDir $installDir -CheckOnly 6>$null 3>$null
             if ($u -and $u.Result -eq '更新') { Write-Host ''; Write-Host ('Excel ツールを新しい版に更新しました（次の実行から使います）: {0} ファイル' -f $u.Copied) }
+            elseif ($u -and $u.Result -eq '一部を更新') {
+                Write-Host ''
+                Write-Host ('Excel ツールを新しい版に更新しましたが、写せなかったファイルがあります（ほかのアプリで開いていれば閉じてください。次の実行のあとに写し直します）: {0}' -f ($u.Failed -join '、')) -ForegroundColor DarkYellow
+            }
         }
         catch { Write-Host ''; Write-Host ('Excel ツールの更新を確かめられませんでした: ' + $_.Exception.Message) }
     }

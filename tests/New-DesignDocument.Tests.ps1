@@ -350,6 +350,50 @@ Test-Case 'New-DesignDocument: -FileName に拡張子が無ければ雛形の拡
     Assert-Throws { & $NewDocTool -Template $tpl -List $list -FileName '{{画面ID}}.xlsm' -OutDir $out 6>$null } '拡張子は雛形と同じ'
 }
 
+Test-Case 'New-DesignDocument: -WhatIf では、作るファイル・足すシート・版数と書き換える場所を「予定」の行で知らせる（画面の「試しに実行」の記録の欄に出る）' {
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $dir = New-TestDir
+    # 雛形から作る
+    $tpl = Join-Path $dir '画面設計書_雛形.xlsx'
+    New-SheetsBook $tpl ([ordered]@{ '画面概要' = @(@('項目', '値'), @('画面ID', '{{画面ID}}'), @('画面名', '{{画面名}}')) })
+    $list = Join-Path $dir '画面一覧.csv'
+    @('画面ID,画面名', 'SCR001,受注一覧', 'SCR002,受注登録') | Set-Content -LiteralPath $list -Encoding UTF8
+    $out = Join-Path $dir 'out'
+    $r = @(& $NewDocTool -Template $tpl -List $list -FileName '{{画面ID}}_{{画面名}}.xlsx' -OutDir $out -WhatIf -InformationVariable info 6>$null)
+    Assert-Equal @('SCR001_受注一覧.xlsx|作成予定', 'SCR002_受注登録.xlsx|作成予定') @($r | ForEach-Object { '{0}|{1}' -f $_.File, $_.Status })
+    Assert-Match (@($info | ForEach-Object { [string]$_.MessageData }) -join ' / ') '2 ファイルを作る予定です（一覧の 2 行'
+    Assert-True (-not (Test-Path -LiteralPath $out)) '作らない'
+
+    # 雛形のシートからシートを足す
+    $book = Join-Path $dir 'book.xlsx'
+    Export-Workbook -FilePath $book -Sheets @(
+        @{ Name = '一覧'; Columns = @(@{ Header = 'ID'; Width = 8 }); Rows = @(@{ Values = @('A01') }, @{ Values = @('A02') }) },
+        @{ Name = '雛形'; Columns = @(@{ Header = '項目'; Width = 8 }, @{ Header = '値'; Width = 10 }); Rows = @(@{ Values = @('ID', '{{ID}}') }) })
+    $hash = (Get-FileHash -LiteralPath $book).Hash
+    $r = @(& $NewDocTool -Book $book -TemplateSheet '雛形' -List $book -ListSheet '^一覧$' -SheetName '{{ID}}' -WhatIf 6>$null)
+    Assert-Equal @('A01|作成予定|雛形のシート「雛形」から作ります', 'A02|作成予定|雛形のシート「雛形」から作ります') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.File, $_.Status, $_.Detail })
+    Assert-Equal $hash (Get-FileHash -LiteralPath $book).Hash '書き換えない'
+
+    # 版を上げる（書き換える場所は、実際に版を上げたときと同じ）
+    $file = Join-Path $dir 'DD03_テーブル定義書_v1.1.xlsx'
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD03_テーブル定義書.xlsx') -Destination $file
+    $hash = (Get-FileHash -LiteralPath $file).Hash
+    $r = @(& $NewDocTool -Bump -Path $file -Description '索引を追加' -WhatIf 6>$null)
+    Assert-Equal 'DD03_テーブル定義書_v1.1.xlsx → DD03_テーブル定義書_v1.2.xlsx|版上げ予定|版数 1.1 → 1.2（表紙の版数・表紙の更新日・改訂履歴の 8 行目）' ('{0}|{1}|{2}' -f $r[0].File, $r[0].Status, $r[0].Detail)
+    Assert-Equal $hash (Get-FileHash -LiteralPath $file).Hash '書き換えない'
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath $dir -Filter 'DD03_*.xlsx').Count '新しい版のファイルも作らない'
+
+    # 前の版と比べるときも、-WhatIf で改訂履歴に足す行を数える（前の版と同じ内容とみなさない）
+    $oldDir = Join-Path $dir '納品'
+    New-Item -ItemType Directory -Path $oldDir | Out-Null
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD03_テーブル定義書.xlsx') -Destination (Join-Path $oldDir 'DD03_テーブル定義書_v1.1.xlsx')
+    $null = & (Join-Path $script:ToolsDir 'Replace-Excel.ps1') '^配送時間帯$' '配送希望時間帯' -Path $file -SheetNamePattern '^T_ORDER$' -Force 6>$null
+    $r = @(& $NewDocTool -Bump -Path $file -CompareWith $oldDir -WhatIf 6>$null)
+    Assert-Equal '版上げ予定' $r[0].Status $r[0].Detail
+    Assert-Match $r[0].Detail '改訂履歴の 8 行目'
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath $dir -Filter 'DD03_*.xlsx').Count '新しい版のファイルを作らない'
+}
+
 Test-Case 'New-DesignDocument: Get-Help でヘルプが表示される' {
     $h = Get-Help $NewDocTool
     Assert-Match $h.Synopsis '雛形'

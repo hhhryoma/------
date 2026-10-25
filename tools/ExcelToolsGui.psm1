@@ -209,10 +209,13 @@ function Test-GuiEmpty {
 }
 
 function ConvertTo-GuiNumber {
+    #     数の文字を数にする（全角も読む。8,000 のような 3 桁ごとのカンマも読む）。読めなければ $null
     param([string] $Text, [type] $Type)
     $styles = [System.Globalization.NumberStyles]::Float
     $n = 0.0
     $t = $Text.Trim().Normalize([System.Text.NormalizationForm]::FormKC)
+    # 3 桁ごとの区切りのカンマだけを除く（7,5 のようなカンマは数として読まない）
+    if ($t -match '^[+-]?[0-9]{1,3}(,[0-9]{3})+(\.[0-9]+)?$') { $t = $t.Replace(',', '') }
     if (-not [double]::TryParse($t, $styles, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { return $null }
     if (@([int], [long]) -contains $Type) { if ($n -ne [math]::Truncate($n)) { return $null }; return [Convert]::ChangeType($n, $Type) }
     return $n
@@ -253,7 +256,9 @@ function ConvertTo-GuiArguments {
             'Number' {
                 $element = $f.Type
                 if ($f.Type.IsArray) { $element = $f.Type.GetElementType() }
-                $texts = @($v | ForEach-Object { [string]$_ -split '[,、\s]+' } | Where-Object { $_ })
+                # 複数の数は、カンマ・読点・空白で区切って入れられる。1 つの数の欄は区切らずに読む（8,000 を 8 にしない）
+                $texts = @($v | ForEach-Object { [string]$_ })
+                if ($f.Multiple) { $texts = @($texts | ForEach-Object { $_ -split '[,、\s]+' } | Where-Object { $_ }) }
                 $numbers = @($texts | ForEach-Object { ConvertTo-GuiNumber $_ $element })
                 if (@($numbers | Where-Object { $null -eq $_ }).Count -gt 0) { $errors.Add(('「{0}」は数で入れてください' -f $f.Label)); continue }
                 if ($f.Multiple) { $arguments[$f.Name] = $numbers } else { $arguments[$f.Name] = $numbers[0] }
@@ -280,12 +285,15 @@ function Get-GuiResultDir {
 }
 
 function Get-GuiDefaultOutputs {
-    #     結果の欄（ツールの一覧の Output）のうち空のものに入れるパス（名前_日時.拡張子。同じ名前があれば連番）。戻り値: 引数の名前 → パス
-    param($Entry, $Fields, [hashtable] $Values, [string] $Dir = (Get-GuiResultDir), [datetime] $Now = (Get-Date))
+    #     結果の欄（ツールの一覧の Output）のうち空のものに入れるパス（名前_日時.拡張子。同じ名前があれば連番）。戻り値: 引数の名前 → パス。
+    #     AutoFilled（引数の名前 → 前にここで入れたパス）のままの欄も空とみなす（入れた名前のままもう一度実行しても、前の結果を上書きしない）
+    param($Entry, $Fields, [hashtable] $Values, [string] $Dir = (Get-GuiResultDir), [datetime] $Now = (Get-Date), [hashtable] $AutoFilled = @{})
     $result = @{}
     $stamp = $Now.ToString('yyyyMMdd_HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
     foreach ($name in $Entry.Output) {
-        if (-not (Test-GuiEmpty $Values[$name])) { continue }
+        $current = $Values[$name]
+        $auto = $AutoFilled -and $AutoFilled.ContainsKey($name) -and -not (Test-GuiEmpty $current) -and ([string]$current).Trim() -eq [string]$AutoFilled[$name]
+        if (-not $auto -and -not (Test-GuiEmpty $current)) { continue }
         $f = @($Fields | Where-Object Name -eq $name)[0]
         if (-not $f) { continue }
         $ext = $f.Extension
@@ -341,14 +349,15 @@ function Get-GuiBrowseStart {
 }
 
 function ConvertTo-GuiLiteral {
-    #     値を PowerShell の式の文字にする（コマンドの表示・PowerShell の画面での実行に使う）
+    #     値を PowerShell の式の文字にする（コマンドの表示・PowerShell の画面での実行に使う）。日付は括弧で囲む（コマンドの引数でも日付になるように）。
+    #     文字の中の引用符は 2 つ重ねる（' のほか、PowerShell が同じ引用符とみなす ‘ ’ ‚ ‛ も。Word などが Customer’s のように書く）
     param($Value)
     if ($null -eq $Value) { return '$null' }
     if ($Value -is [bool]) { if ($Value) { return '$true' } else { return '$false' } }
-    if ($Value -is [datetime]) { return "[datetime]'{0}'" -f $Value.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
+    if ($Value -is [datetime]) { return "([datetime]'{0}')" -f $Value.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
     if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) { return ([string]::Format([System.Globalization.CultureInfo]::InvariantCulture, '{0}', $Value)) }
     if ($Value -is [array]) { return '@(' + ((@($Value | ForEach-Object { ConvertTo-GuiLiteral $_ })) -join ', ') + ')' }
-    return "'" + ([string]$Value).Replace("'", "''") + "'"
+    return "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent([string]$Value) + "'"
 }
 
 function Format-GuiCommandLine {
@@ -618,7 +627,7 @@ function New-GuiWindow {
     $s = @{
         Catalog = (Get-GuiCatalog @catalogArgs); SettingsPath = $SettingsPath; Settings = (Read-GuiSettings $SettingsPath)
         InitialPaths = @($Path | Where-Object { $_ }); Bindings = (New-Object System.Collections.Generic.List[object]); WrapLabels = (New-Object System.Collections.Generic.List[object])
-        Entry = $null; Run = $null; RunArguments = $null; ResultPath = $null; ResultDir = $null; LastState = $null; LastErrors = @(); LastConsoleScript = $null
+        Entry = $null; Run = $null; RunArguments = $null; ResultPath = $null; ResultDir = $null; LastState = $null; LastErrors = @(); LastConsoleScript = $null; AutoOutputs = @{}
         Quiet = [bool]$Quiet; QuietAnswer = $true; CanDrop = ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq [System.Threading.ApartmentState]::STA)
     }
     $script:Gui = $s
@@ -1004,6 +1013,8 @@ function Select-GuiTool {
     $s.WhatIfShown = $entry.WhatIf
     $s.WhatIf.Checked = $true
     if ($entry.Console) { $s.RunButton.Text = 'PowerShell の画面で実行' } else { $s.RunButton.Text = '実行' }
+    # 結果の欄は保存しないので、選び直したら画面が入れた保存先も忘れる
+    $s.AutoOutputs = @{}
     $s.ResultPath = $null
     $s.ResultDir = $null
     $s.OpenButton.Enabled = $false
@@ -1104,6 +1115,8 @@ function New-GuiFieldControl {
             else {
                 $ctl = New-Object System.Windows.Forms.TextBox
                 $ctl.Dock = [System.Windows.Forms.DockStyle]::Fill
+                # エクスプローラーでコピーしたファイル・フォルダも、Ctrl+V で入れられるようにする
+                if ($pathKind) { $ctl.Add_KeyDown({ $box = $this; $e = $_; Invoke-GuiSafe { Invoke-GuiPathKey $box $e } }) }
             }
             $panel = New-Object System.Windows.Forms.TableLayoutPanel
             $panel.Dock = [System.Windows.Forms.DockStyle]::Fill
@@ -1310,6 +1323,15 @@ function Invoke-GuiListKey {
     }
 }
 
+function Invoke-GuiPathKey {
+    #     1 つのパスの欄で Ctrl+V は、エクスプローラーでコピーしたファイル・フォルダを入れる（コピーしたのが文字なら、ふつうに貼り付ける）
+    param($Box, $KeyArgs)
+    if (-not ($KeyArgs.Control -and $KeyArgs.KeyCode -eq [System.Windows.Forms.Keys]::V)) { return }
+    if (-not [System.Windows.Forms.Clipboard]::ContainsFileDropList()) { return }
+    $KeyArgs.SuppressKeyPress = $true
+    Add-GuiPaths @([System.Windows.Forms.Clipboard]::GetFileDropList()) $Box.Tag
+}
+
 function Get-GuiFileFilter {
     param($Field)
     $help = $Field.Help
@@ -1388,13 +1410,13 @@ function Show-GuiMessage {
 }
 
 function Get-GuiRunArguments {
-    #     入力から引数を作る（空の結果の欄には既定の保存先を入れる）。誤りがあれば知らせて $null
+    #     入力から引数を作る（空の結果の欄と、前に画面が入れた保存先のままの欄には、新しい既定の保存先を入れる）。誤りがあれば知らせて $null
     param([switch] $NoDefaults)
     $s = $script:Gui
     $values = Get-GuiValues
     $defaults = @{}
     if (-not $NoDefaults) {
-        $defaults = Get-GuiDefaultOutputs $s.Entry $s.CurrentFields $values
+        $defaults = Get-GuiDefaultOutputs $s.Entry $s.CurrentFields $values -AutoFilled $s.AutoOutputs
         foreach ($k in $defaults.Keys) { $values[$k] = $defaults[$k] }
     }
     $built = ConvertTo-GuiArguments $s.Entry $s.CurrentFields $values
@@ -1413,10 +1435,10 @@ function Get-GuiRunArguments {
         [void](Show-GuiMessage (($built.Errors -join "`n")) -Warning)
         return $null
     }
-    # 空だった結果の欄に、既定の保存先を入れて見せる
+    # 空だった結果の欄に、既定の保存先を入れて見せる（入れたものは覚えておき、そのままもう一度実行したら新しい名前にする）
     foreach ($k in $defaults.Keys) {
         $b = @($s.Bindings | Where-Object { $_.Field.Name -eq $k })[0]
-        if ($b) { Set-GuiControlValue $b $defaults[$k] }
+        if ($b) { Set-GuiControlValue $b $defaults[$k]; $s.AutoOutputs[$k] = $defaults[$k] }
     }
     return $built.Arguments
 }
