@@ -889,8 +889,9 @@ Test-Case 'Compare-Excel: 番号付きの表で行を移動しても、ほかの
     New-TableBook -Path (Join-Path $dir 'old.xlsx') -Header @('No', '項目', '説明') -Rows $old
     New-TableBook -Path (Join-Path $dir 'new.xlsx') -Header @('No', '項目', '説明') -Rows $list
     $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx') }
-    Assert-Equal @('new.xlsx|Data!A3:A8|連番|変更', 'new.xlsx|Data!A3|行|削除', 'new.xlsx|Data!A9|行|追加') @($diffs | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.File, $_.Location, $_.Kind, $_.Change })
-    Assert-Match ($diffs[1].Detail + $diffs[2].Detail) '^行を削除: A:2 \| B:項目2 .*行を追加: A:8 \| B:項目2 '
+    # 項目2 は番号が変わっても「移動」（削除と追加にしない）。番号の変更は、ほかの行と同じく連番の振り直し
+    Assert-Equal @('new.xlsx|Data!A3:A8|連番|変更', 'new.xlsx|Data!A9|行|移動', 'new.xlsx|Data!A9|連番|変更') @($diffs | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.File, $_.Location, $_.Kind, $_.Change })
+    Assert-Equal @('行を移動: A:8 | B:項目2 | C:説明2（旧 A3）', '連番の振り直し: 2 → 8（1 個）') @($diffs[1].Detail, $diffs[2].Detail)
 
     # 番号の無い表で、項目2 を後ろへ移し、項目3 を変更する（項目2 を、すぐ下の変更した項目3 と組にしない）
     $plain = @(1..8 | ForEach-Object { , @("項目$_", "説明$_", '文字') })
@@ -899,6 +900,67 @@ Test-Case 'Compare-Excel: 番号付きの表で行を移動しても、ほかの
     New-TableBook -Path (Join-Path $dir 'new2.xlsx') -Header @('項目', '説明', '型') -Rows $moved
     $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old2.xlsx'); New = (Join-Path $dir 'new2.xlsx') }
     Assert-Equal @('Data!B3|値|変更|Data!B4', 'Data!A6|行|移動|Data!A3') @($diffs | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Location, $_.Kind, $_.Change, $_.OldLocation })
+}
+
+Test-Case 'Compare-Excel: 移動して No を振り直した行は「移動」とし、番号の変更は連番の振り直し、ほかに変えたセルは「変更」として出す' {
+    $dir = New-TestDir
+    # 画面項目定義: 顧客名を先頭へ移し、No を振り直す（new2 は、顧客名の桁数も 10 → 12 に変える）
+    $items = @{
+        '受注番号' = @('orderNo', 'テキスト', '12', '○'); '受注日' = @('orderDate', '日付', '10', '○'); '顧客名' = @('customerName', 'テキスト', '10', '')
+        '金額' = @('amount', '数値', '9', '○'); '備考' = @('remarks', 'テキストエリア', '500', '') }
+    $numbered = {
+        param([string[]] $Order, [hashtable] $Change = @{})
+        $no = 0
+        @(, @('No', '項目名', '項目ID', '型', '桁数', '必須')) + @($Order | ForEach-Object { $no++; $v = $items[$_]; if ($Change.ContainsKey($_)) { $v = $Change[$_] }; , (@("$no", $_) + $v) })
+    }
+    $moved = @('顧客名', '受注番号', '受注日', '金額', '備考')
+    New-SheetsBook (Join-Path $dir 'old.xlsx') ([ordered]@{ '画面項目定義' = (& $numbered @('受注番号', '受注日', '顧客名', '金額', '備考')) })
+    New-SheetsBook (Join-Path $dir 'new.xlsx') ([ordered]@{ '画面項目定義' = (& $numbered $moved) })
+    New-SheetsBook (Join-Path $dir 'new2.xlsx') ([ordered]@{ '画面項目定義' = (& $numbered $moved @{ '顧客名' = @('customerName', 'テキスト', '12', '') }) })
+
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx') }
+    Assert-Equal @(
+        '画面項目定義!A2|画面項目定義!A4|行|移動|行を移動: A:1 | B:顧客名 | C:customerName | D:テキスト | E:10（旧 A4）',
+        '画面項目定義!A2|画面項目定義!A4|連番|変更|連番の振り直し: 3 → 1（1 個）',
+        '画面項目定義!A3:A4|画面項目定義!A2:A3|連番|変更|連番の振り直し: 1～2 → 2～3（2 個）') @($diffs | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Location, $_.OldLocation, $_.Kind, $_.Change, $_.Detail })
+
+    # 桁数も変えた行も、項目名・項目 ID が同じなら「移動」。桁数の変更はセルの変更。新の写しには、移動した行の番号にも連番の印を付ける
+    $outDir = Join-Path $dir 'marked'
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new2.xlsx'); OutMarkedDir = $outDir }
+    Assert-Equal @(
+        '画面項目定義!A2|画面項目定義!A4|行|移動|行を移動: A:1 | B:顧客名 | C:customerName | D:テキスト | E:12（旧 A4）',
+        '画面項目定義!A2|画面項目定義!A4|連番|変更|連番の振り直し: 3 → 1（1 個）',
+        '画面項目定義!E2|画面項目定義!E4|値|変更|値: 10 → 12（旧 E4）',
+        '画面項目定義!A3:A4|画面項目定義!A2:A3|連番|変更|連番の振り直し: 1～2 → 2～3（2 個）') @($diffs | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Location, $_.OldLocation, $_.Kind, $_.Change, $_.Detail })
+    $sheet = Read-ZipEntryText (Join-Path $outDir 'new2.xlsx') 'xl/worksheets/sheet1.xml'
+    Assert-Match $sheet '<dataValidation [^>]*prompt="連番の振り直し: 3 → 1（1 個）" sqref="A2"/>'
+}
+
+Test-Case 'Compare-Excel: 番号だけの行や、項目名の違う別の行は、番号を振り直した表の端から端へ移動したように見えても、削除と追加のまま' {
+    $dir = New-TestDir
+    $numbered = { param($Header, $List) $no = 0; @(, $Header) + @($List | ForEach-Object { $no++; , (@("$no") + $_) }) }
+    $h = @('No', '項目名', '項目ID', '型', '桁数', '必須')
+    $order = @('受注番号', 'orderNo', 'テキスト', '12', '○'); $date = @('受注日', 'orderDate', '日付', '10', '○')
+    $customer = @('顧客名', 'customerName', 'テキスト', '10', ''); $amount = @('金額', 'amount', '数値', '9', '○')
+    # 試験項目: ログインを消し、確認項目のほかは同じ値のログアウトを末尾に足す（期待結果の「成功する」は、旧・新のどちらでも 1 行だけ）
+    $t = @('No', '確認項目', '期待結果', '結果', '確認者')
+    $login = @('ログイン', '成功する', 'OK', '山田'); $search = @('検索', '一覧が出る', 'OK', '山田'); $entry = @('登録', '登録される', 'OK', '佐藤')
+    New-SheetsBook (Join-Path $dir 'old.xlsx') ([ordered]@{
+            # 画面項目定義: 顧客名を消し、型・桁数・必須の同じ担当者を先頭に足す
+            '画面項目定義' = (& $numbered $h @($order, $date, $customer, $amount))
+            # 番号だけの行（ほかは空）を、末尾の近くから先頭へ
+            '番号だけの行' = (& $numbered $h @($order, $date, $customer, @(), $amount))
+            '試験項目'     = (& $numbered $t @($login, $search, $entry)) })
+    New-SheetsBook (Join-Path $dir 'new.xlsx') ([ordered]@{
+            '画面項目定義' = (& $numbered $h @(@('担当者', 'staffName', 'テキスト', '10', ''), $order, $date, $amount))
+            '番号だけの行' = (& $numbered $h @(@(), $order, $date, $customer, $amount))
+            '試験項目'     = (& $numbered $t @($search, $entry, @('ログアウト', '成功する', 'OK', '山田'))) })
+    $diffs = Invoke-Compare @{ Old = (Join-Path $dir 'old.xlsx'); New = (Join-Path $dir 'new.xlsx') }
+    Assert-Equal 0 @($diffs | Where-Object Change -eq '移動').Count ((Get-DiffKeys $diffs) -join ', ')
+    Assert-Equal @(
+        '画面項目定義!A2|行|追加', '画面項目定義!A3:A4|連番|変更', '画面項目定義!A4|行|削除',
+        '番号だけの行!A2|行|追加', '番号だけの行!A3:A5|連番|変更', '番号だけの行!A5|行|削除',
+        '試験項目!A2:A3|連番|変更', '試験項目!A2|行|削除', '試験項目!A4|行|追加') @($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Kind, $_.Change })
 }
 
 Test-Case 'Compare-Excel: 表の中の「更新者」などの行の変更は版情報にしない（-Ignore 版情報 でも外さず、改訂履歴の下書き・記載漏れの対象）' {
