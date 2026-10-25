@@ -285,6 +285,20 @@ Test-Case 'New-QualityReport: 資料のパスが見つからない・資料か�
     Assert-Equal 0 @($scope.Rows.Values | Where-Object { $_['A'] -eq '失敗したツール' -and $_['B'] }).Count '失敗したツール'
 }
 
+Test-Case 'New-QualityReport: テスト仕様書のフォルダに置いた障害管理表は、網羅（Test-Traceability）でもテストとみなさない（Measure-TestQuality と同じ）' {
+    $dir = New-TestDir
+    New-ReportData $dir
+    # 障害管理表をテスト仕様書のフォルダに置く。障害内容に IF001 が出てくる
+    $bugs = Join-Path $dir 'テスト\障害管理表.xlsx'
+    New-ReportBook $bugs '障害' @('障害番号', '障害内容', '起票日', '機能', '混入工程', '摘出工程', '状態') @(
+        , @('B001', '一覧の件数が違う', '2026/10/01', 'SCR001', '製造', '単体テスト', '完了')
+        , @('B002', '出荷指示データ（IF001）の CSV の日付が違う', '2026/10/04', 'IF001', '製造', '単体テスト', '対応中'))
+    $r = @(& $ReportTool -OutDir (Join-Path $dir '報告') -DesignPath $reportDesignDir -TestPath (Join-Path $dir 'テスト') -BugList $bugs -AsOf '2026-10-20' 3>$null 6>$null)
+    $got = @{}
+    foreach ($m in $r) { $got[$m.Name] = '{0}|{1}' -f $m.Value, $m.Judgement }
+    Assert-Equal '0|×' $got['テストのあるIFの割合'] 'テスト仕様書に IF001 のケースは無い'
+}
+
 Test-Case 'New-QualityReport: 割合は丸める前の値で判定し、実績に 100% 未満を 1 と書かない（判定基準ちょうどの 99.9% は ○）' {
     $dir = New-TestDir
     New-Item -ItemType Directory -Path (Join-Path $dir 'テスト') | Out-Null

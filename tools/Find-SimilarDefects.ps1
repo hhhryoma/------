@@ -47,8 +47,8 @@ $nfkc = [System.Text.NormalizationForm]::FormKC
 $utf8Bom = New-Object System.Text.UTF8Encoding($true)
 # 横展開の列がこの値の障害は探さない（横展開が要らないもの・済んだもの）
 $skipPattern = '^(不要|否|なし|無し|無|対象外|-|－|ー|―|×|済|済み|完了|実施済|実施済み|対応済|対応済み)$'
-# 状態がこの値の障害は、障害ではないので探さない（Measure-DefectRemoval.ps1 と同じ）
-$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない|誤指摘|キャンセル|cancel'
+# 状態がこの値の障害は、障害ではないので探さない（取下げ・誤指摘・仕様どおりなど。障害管理表を読むほかのツールと同じ）
+$excludedPattern = Get-ExcludedBugPattern
 # 言葉として比べない、どの設計書にも出てくる言葉
 $stopWords = @('場合', '処理', '表示', '画面', '入力', '出力', '項目', '設定', '選択', '実行', '確認', '内容', '対応', '修正', '発生', '不具合', '障害', '原因', '対策', '結果', '機能', '必要', '可能', '不可', '部分', '全体', '指定', '中断', '遷移', '生成', '考慮', '漏れ', '誤り', '不足', '以上', '以下', '未満', '番号', '一覧', 'データ', 'ボタン', 'メッセージ', 'エラー', 'チェック', 'システム', 'テスト', 'ケース', 'マスタ', 'コード')
 $wordRx = New-Object System.Text.RegularExpressions.Regex('[ァ-ヴー]{2,}|[一-龠々〆ヵヶ]{2,}|[A-Za-z][A-Za-z0-9_]{2,}')
@@ -205,6 +205,8 @@ foreach ($rec in $records) {
 }
 if ($records.Count -eq 0) { Write-Warning '障害管理表が見つかりません（障害番号と、障害内容か原因詳細の見出しがある表を探します）' }
 elseif ($Id -and $bugs.Count -eq 0) { Write-Warning ('障害番号 {0} の障害が見つかりません' -f ($Id -join ', ')) }
+# 同じ障害番号が 2 つのファイルにあれば知らせる（障害管理表のフォルダに、ほかの表を置いていないか）
+Write-DuplicateIdWarning $records '障害ID' '障害管理表'
 
 # ---------------------------------------------------------------- 障害の箇所を探す
 
@@ -503,7 +505,8 @@ if ($OutXlsx) {
     try {
         Export-Workbook -FilePath $OutXlsx -Sheets @(
             @{ Name = '横展開の候補'; Columns = @(@{ Header = 'No'; Width = 5 }, @{ Header = '障害ID'; Width = 10 }, @{ Header = '障害の箇所'; Width = 24 }, @{ Header = '種類'; Width = 8 }, @{ Header = '候補の箇所'; Width = 28 }, @{ Header = '設計の内容'; Width = 60 }, @{ Header = '共通点'; Width = 40 }, @{ Header = '点数'; Width = 6 }, @{ Header = 'AI の判定'; Width = 9 }, @{ Header = 'AI の理由'; Width = 40 }, @{ Header = '確認結果'; Width = 12 }, @{ Header = '設計書'; Width = 40 }); Rows = $candidateRows },
-            @{ Name = '障害'; Columns = @(@{ Header = '障害ID'; Width = 10 }, @{ Header = '機能'; Width = 14 }, @{ Header = '障害内容'; Width = 50 }, @{ Header = '原因'; Width = 40 }, @{ Header = '障害の箇所'; Width = 30 }, @{ Header = '候補'; Width = 6 }, @{ Header = 'メモ'; Width = 50 }); Rows = $bugRows },
+            # 障害のシートの見出しは、障害管理表の見出し（障害内容など）と違う言葉にする（障害管理表と同じフォルダに保存しても、障害管理表として読まないように）
+            @{ Name = '障害'; Columns = @(@{ Header = '障害ID'; Width = 10 }, @{ Header = '機能'; Width = 14 }, @{ Header = '障害の内容'; Width = 50 }, @{ Header = '原因'; Width = 40 }, @{ Header = '障害の箇所'; Width = 30 }, @{ Header = '候補'; Width = 6 }, @{ Header = 'メモ'; Width = 50 }); Rows = $bugRows },
             (New-ReadLogSheet $readLog))
     }
     catch {
@@ -565,7 +568,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     障害ごとの候補の数の上限（点数の高い順。既定は 20）。
 #
 # .PARAMETER OutXlsx
-#     結果を xlsx に保存します（横展開の候補・障害・読み取り結果のシート）。
+#     結果を xlsx に保存します（横展開の候補・障害・読み取り結果のシート）。障害管理表と同じフォルダに保存しても、障害管理表としては読みません。
 #
 # .PARAMETER OutPrompt
 #     候補を Copilot に絞り込ませる依頼のテキストを保存します。

@@ -8,6 +8,8 @@ param(
 
     [string[]] $Requirement,
 
+    [string[]] $BugList,
+
     [string] $Rules,
 
     [switch] $NoRecurse,
@@ -37,6 +39,8 @@ $nfkc = [System.Text.NormalizationForm]::FormKC
 $functionHeaders = @('機能', '機能名', '機能ID', '対象機能', 'テスト対象', '画面', '画面ID', '画面名', '対象画面', '対象画面ID')
 # テスト仕様書の表の見出し。これが 2 つ以上ある最初の行を表の見出しの行とする（表の上の「テスト対象: 受注管理システム」のような行は見出しにしない）
 $testHeaders = @('No', 'No.', '項番', 'テストID', 'テストNo', 'ケースID', 'ケースNo', '確認内容', 'テスト内容', 'テスト項目', 'テストケース', '確認項目', '確認観点', '期待結果', '期待値', '手順', 'テスト手順', '操作')
+# テスト仕様書のテストID の列の見出し（前のものほど優先。エビデンスの置き場所（UT-001\エビデンス.xlsx など）を見分けるのに使う）
+$testIdHeaders = @('テストID', 'テストケースID', 'ケースID', 'テストNo', 'テストケースNo', 'ケースNo', 'テスト番号', 'ケース番号', '項番', 'No', 'No.')
 # テスト仕様書の結果の列の見出し。結果が対象外（削除・欠番など）の行は、テストとみなさない
 $resultHeaders = @('結果', 'テスト結果', '実施結果', '判定', '合否', '確認結果', '試験結果')
 # 要件一覧の見出し（ID は前のものほど詳しい）
@@ -253,16 +257,22 @@ if ($elements.Count -eq 0 -and $requirements.Count -eq 0) { Write-Warning '設�
 # ---------------------------------------------------------------- テスト仕様書を読む
 
 
-# テストのセル: 文字と、属する範囲（ファイル名・シート名・行の機能・行のすべての文字）
-$testBooks = Read-Books $TestPath $requirementFiles
+# テストのセル: 文字と、属する範囲（ファイル名・シート名・行の機能・行のすべての文字）。
+# 要件一覧と障害管理表は、テスト仕様書のフォルダの中にあっても、テストとしては読まない（障害内容に IF ID などがあっても、テストにしない）
+$testSkip = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($set in @($requirementFiles, $(if ($BugList) { Get-FilePaths $BugList }))) { if ($set) { $testSkip.UnionWith([string[]]@($set)) } }
+$testBooks = Read-Books $TestPath $testSkip
 $testCells = New-Object System.Collections.Generic.List[object]
 $functionLabels = @($functionHeaders | ForEach-Object { ConvertTo-Label $_ })
 $tableLabels = @(($testHeaders + $resultHeaders) | ForEach-Object { ConvertTo-Label $_ })
 $resultLabels = @($resultHeaders | ForEach-Object { ConvertTo-Label $_ })
+$testIdLabels = @($testIdHeaders | ForEach-Object { ConvertTo-Label $_ })
+# シートごとの表の見出しの行・機能の列（ID の列があれば ID の列だけ）・結果の列。テストID の列の値は、エビデンスの置き場所を見分けるために集める
+$tableOf = @{}
+$idCases = [System.Collections.Generic.List[object]]::new()
 foreach ($book in $testBooks.Values) {
     foreach ($sheetName in $book.Sheets.Keys) {
         $grid = $book.Sheets[$sheetName]
-        # 表の見出しの行の、機能の列（ID の列があれば ID の列だけ）と結果の列
         $headerRow = 0; $functionCols = @(); $resultCol = $null
         foreach ($row in $grid.Rows) {
             if (@($grid.Labels[$row].Values | Where-Object { $tableLabels -contains $_ }).Count -ge 2) { $headerRow = $row; break }
@@ -273,7 +283,26 @@ foreach ($book in $testBooks.Values) {
             $idCols = @($functionCols | Where-Object { $labelOf[$_] -match 'ID$' })
             if ($idCols.Count -gt 0) { $functionCols = $idCols }
             $resultCol = @($grid.Cols[$headerRow] | Where-Object { $resultLabels -contains $labelOf[$_] })[0]
+            $testIdCol = @(foreach ($l in $testIdLabels) { $grid.Cols[$headerRow] | Where-Object { $labelOf[$_] -eq $l } })[0]
+            if ($testIdCol) {
+                foreach ($row in @($grid.Rows | Where-Object { $_ -gt $headerRow -and $grid.Cells[$_].ContainsKey($testIdCol) })) {
+                    # ConvertTo-TestCases のケースと同じ形（テストID の値とファイル）
+                    $idCases.Add([pscustomobject]@{ Values = @{ 'テストID' = $grid.Cells[$row][$testIdCol] }; Place = [pscustomobject]@{ Path = $book.Path } })
+                }
+            }
         }
+        $tableOf[$book.Path + '|' + $sheetName] = [pscustomobject]@{ HeaderRow = $headerRow; FunctionCols = $functionCols; ResultCol = $resultCol }
+    }
+}
+# エビデンスの置き場所にあるブック（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx・UT-001.xlsx など）は、
+# テストの結果の記録で、テスト仕様書ではない（Test-TestEvidence.ps1 がエビデンスとして読むもの）
+$evidenceBooks = Get-EvidenceFilePaths $idCases ([string[]]@($testBooks.Keys))
+foreach ($book in $testBooks.Values) {
+    if ($evidenceBooks.Contains($book.Path)) { continue }
+    foreach ($sheetName in $book.Sheets.Keys) {
+        $grid = $book.Sheets[$sheetName]
+        $table = $tableOf[$book.Path + '|' + $sheetName]
+        $headerRow = $table.HeaderRow; $functionCols = $table.FunctionCols; $resultCol = $table.ResultCol
         # シートの上の「画面ID: SCR001」のような見出しの右の値は、シートのすべての行の範囲にする
         $sheetScope = (@($functionLabels | ForEach-Object { Find-LabelValue $grid $_ } | Where-Object { $_ }) -join ' ')
         $current = @{}   # 機能の列 → 上の行から引き継ぐ値
@@ -458,6 +487,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 #     「その画面のテスト」は、ファイル名・シート名・行（機能・画面の列。空なら上の行の値）に画面 ID があるテスト仕様書のセルです。
 #     結果が削除・対象外・欠番などの行は、テストとみなしません。
+#     エビデンスの置き場所にあるブック（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）も、テストとみなしません。
 #     -Requirement で要件一覧を渡すと、要件 ID ごとに設計書とテスト仕様書に出てくるかを確かめ、一覧に無い要件 ID も知らせます。
 #
 # .PARAMETER DesignPath
@@ -469,6 +499,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .PARAMETER Requirement
 #     要件一覧のファイル（Excel・CSV。要件ID と要件名の見出しがある表）。Excel の ID が数字だけの表（改訂履歴など）は読みません。
 #     設計書・テスト仕様書のフォルダの中にあっても、そちらとしては読みません。
+#
+# .PARAMETER BugList
+#     障害管理表のファイルまたはフォルダ（複数可）。テスト仕様書のフォルダの中にあっても、テストとしては読みません
+#     （障害内容に書いた IF ID などを、テストがあるとみなさないように）。
 #
 # .PARAMETER Rules
 #     網羅のルールの CSV（種類・ファイル名・シート名・見出し・列・名前・範囲・探し方）。既定は tools\traceability\網羅のルール.csv。

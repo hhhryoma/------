@@ -153,7 +153,8 @@ $readLog = New-Object System.Collections.Generic.List[object]
 $records = Read-HeaderRecords -Inputs (Get-InputFiles $TestPath 'テスト仕様書' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
     -Need @(@('期待結果', 'テスト内容'), @('テストID', '手順', '結果')) -Key @('テストID', '期待結果', 'テスト内容', '手順') -What 'テスト仕様書' `
     -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
-$allCases = ConvertTo-TestCases $records
+# エビデンスの置き場所にあるブック（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）の表は、ケースとして読まない
+$allCases = Remove-EvidenceCases (ConvertTo-TestCases $records) $readLog
 $cases = @($allCases | Where-Object { $_.Kind -ne '対象外' })
 if ($cases.Count -eq 0) { Write-Warning 'テストケースが見つかりません（期待結果か確認内容と、テストID・手順・結果のどれかの見出しがある表を探します）' }
 foreach ($c in $cases) {
@@ -254,6 +255,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     画像（スクリーンショット）・図形・列・コメントの変更も、その画面の変更として扱います。
 #     表紙・改訂履歴のシートと、作成者・更新日・版数・改訂日などの欄の変更（Compare-Excel の版情報）は除きます。
 #     テストが見つからない変更（テストを足すか、影響が無いことを確かめるもの）も知らせます。
+#     エビデンスの置き場所にあるブック（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）の表は、ケースとして読みません。
 #
 # .PARAMETER Old
 #     旧版の設計書のフォルダまたはファイル。

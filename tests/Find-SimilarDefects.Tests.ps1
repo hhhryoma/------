@@ -178,6 +178,30 @@ Test-Case 'Find-SimilarDefects: -OutPrompt で Copilot への依頼を作り、-
     Assert-Equal 'B003|0|障害の箇所（画面の項目・イベント・カラム・メッセージ ID）が、障害内容・原因・対策に見つかりません' ('{0}|{1}|{2}' -f $sheet.Rows[4]['A'], $sheet.Rows[4]['F'], $sheet.Rows[4]['G'])
 }
 
+Test-Case 'Find-SimilarDefects: 障害管理表と同じフォルダに保存した結果は、次に障害管理表として読まない。同じ障害番号が 2 つのファイルにあれば知らせる' {
+    $dir = Join-Path (New-TestDir) '障害管理'
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    New-BugCsv (Join-Path $dir '障害管理表.csv') $bugRows
+    $spec = Join-Path (Split-Path -Parent $dir) 'UT.csv'
+    @('No,機能,確認内容,結果,障害番号', '1,SCR002,受注日にうるう日を入れる,NG,B001') | Set-Content -LiteralPath $spec -Encoding UTF8
+    $quality = Join-Path $script:ToolsDir 'Measure-TestQuality.ps1'
+    $null = & $SimilarTool -BugList $dir -DesignPath $designDir -Id B001 -OutXlsx (Join-Path $dir '横展開_B001.xlsx') 6>$null
+    $text = Get-HostText { & $SimilarTool -BugList $dir -DesignPath $designDir -Id B002 | Out-Null }
+    Assert-Match $text '障害 5 件のうち、横展開を探した障害 1 件'
+    Assert-NotMatch $text '同じ番号'
+    # Measure-TestQuality: 結果の障害のシートの B001（状態なし）で、障害管理表の B001（完了）を隠さない
+    $text = Get-HostText { & $quality -Path $spec -BugList $dir -AsOf '2026-11-06' | Out-Null }
+    Assert-Match $text 'バグ 4 件（未完了 1 件。取下げなどで数えなかったもの 1 件）'
+    Assert-Match $text '食い違い: 1 件（再テストの結果が無い 1）'
+
+    # 前の版の結果（障害のシートの見出しが障害内容）や、写しの障害管理表を置いたときは、同じ番号を知らせる
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    Export-Workbook -FilePath (Join-Path $dir '横展開_古い.xlsx') -Sheets @(@{ Name = '障害'; Columns = @(@('障害ID', '機能', '障害内容', '原因') | ForEach-Object { @{ Header = $_; Width = 12 } }); Rows = @(@{ Values = @('B001', 'SCR002 受注登録', '受注日に 2028/02/29 を入れると E0004 になる', 'うるう年') }) })
+    $text = Get-HostText { & $quality -Path $spec -BugList $dir -AsOf '2026-11-06' | Out-Null }
+    Assert-Match $text '障害管理表の同じ番号が、2 つ以上のファイルにあります: B001（横展開_古い\.xlsx・障害管理表\.csv）'
+    Assert-Match (Get-HostText { & $SimilarTool -BugList $dir -DesignPath $designDir -Id B002 | Out-Null }) '障害管理表の同じ番号が、2 つ以上のファイルにあります: B001'
+}
+
 Test-Case 'Find-SimilarDefects: Get-Help でヘルプが表示される' {
     $h = Get-Help $SimilarTool
     Assert-Match $h.Synopsis '横展開'

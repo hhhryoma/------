@@ -228,3 +228,42 @@ Test-Case 'ExcelTools: Get-WordBlocks は、表の中の内容コントロール
         '<w:tr><w:tc><w:p><w:r><w:t>備考</w:t></w:r></w:p></w:tc>' + $inner + '</w:tr></w:tbl><w:p><w:r><w:t>後</w:t></w:r></w:p><w:tbl>' + (& $row @('次の表')) + '</w:tbl>'
     Assert-Equal @('表 1 の 1 行目|項目 | 桁数', '表 1 の 2 行目|受注番号 | 10', '表 1 の 3 行目|受注日 | 8', '表 1 の 4 行目|備考 | 内側', '段落 1|後', '表 2 の 1 行目|次の表') (ConvertTo-WordBlockTexts $body)
 }
+
+Test-Case 'ExcelTools: Get-EvidenceFilePaths は、フォルダかファイルの名前がほかのファイルのテストID のブックをエビデンスとし、分けたテスト仕様書（数字の名前のフォルダ・受注一覧_2.xlsx）は除かない' {
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) 'テスト仕様書'
+    $path = { param($rel) [System.IO.Path]::Combine($root, $rel) }
+    $case = { param($id, $rel) [pscustomobject]@{ Values = @{ 'テストID' = $id }; Place = [pscustomobject]@{ Path = (& $path $rel); File = [System.IO.Path]::GetFileName($rel) } } }
+    $cases = @(
+        (& $case 'UT-001' 'UT_受注一覧.xlsx'), (& $case 'UT-002' 'UT_受注一覧.xlsx'), (& $case 'UT-003' 'UT_受注一覧.xlsx'),
+        (& $case '1' 'UT-001/エビデンス.xlsx'), (& $case '1' 'UT-002_2.xlsx'), (& $case 'UT-003' 'UT-003.xlsx'), (& $case 'UT-009' 'UT-009.xlsx'),
+        (& $case '1' '1/UT.xlsx'), (& $case '2' '2/UT.xlsx'), (& $case '3' '受注一覧_2.xlsx'))
+    $set = Get-EvidenceFilePaths $cases
+    Assert-Equal @('UT-001/エビデンス.xlsx', 'UT-002_2.xlsx', 'UT-003.xlsx') @(@('UT_受注一覧.xlsx', 'UT-001/エビデンス.xlsx', 'UT-002_2.xlsx', 'UT-003.xlsx', 'UT-009.xlsx', '1/UT.xlsx', '2/UT.xlsx', '受注一覧_2.xlsx') | Where-Object { $set.Contains((& $path $_)) }) '自分のテストID だけの名前のブック（UT-009.xlsx）はテスト仕様書'
+    # 表の無いブックも、置き場所の名前で確かめる（Test-Traceability.ps1 はシートのすべてのセルを読むため）
+    $set = Get-EvidenceFilePaths $cases ([string[]]@((& $path 'UT-002/画面.xlsx'), (& $path 'メモ.xlsx')))
+    Assert-Equal @('UT-002/画面.xlsx') @(@('UT-002/画面.xlsx', 'メモ.xlsx') | Where-Object { $set.Contains((& $path $_)) })
+}
+
+Test-Case 'ExcelTools: 障害として数えない状態（取下げ・誤指摘・仕様どおりなど）は、障害管理表を読むツールで同じにする（1 つの品質評価の中でバグの数が食い違わない）' {
+    $pattern = Get-ExcludedBugPattern
+    Assert-Equal @($true, $true, $true, $true, $true, $true, $true) @(@('取下げ', '誤指摘', '仕様どおり', '仕様通り', '重複', 'キャンセル', 'Cancel') | ForEach-Object { $_ -match $pattern })
+    Assert-Equal @($false, $false, $false) @(@('完了', '対応中', '') | ForEach-Object { $_ -match $pattern })
+    $dir = New-TestDir
+    $bugs = Join-Path $dir 'bugs.csv'
+    @('障害番号,機能,障害内容,起票日,状態,混入工程,摘出工程,横展開',
+        'B001,SCR001,一覧の件数が違う,2026/10/20,完了,詳細設計,単体テスト,要',
+        'B002,SCR002,登録できない,2026/10/20,対応中,詳細設計,単体テスト,要',
+        'B003,SCR002,操作の勘違い,2026/10/20,誤指摘,詳細設計,単体テスト,要',
+        'B004,SCR003,表示の順番,2026/10/21,仕様どおり,詳細設計,単体テスト,要',
+        'B005,SCR003,同じ障害の起票,2026/10/21,取下げ,詳細設計,単体テスト,要') | Set-Content -LiteralPath $bugs -Encoding UTF8
+    $spec = Join-Path $dir 'UT.csv'
+    @('No,機能,確認内容,結果', '1,SCR001,一覧の件数,OK') | Set-Content -LiteralPath $spec -Encoding UTF8
+    $findings = Join-Path $dir 'findings.csv'
+    @('設計書,指摘内容,分類,状態', 'DD02_画面設計書_SCR001_受注一覧,桁数が違う,誤り,完了') | Set-Content -LiteralPath $findings -Encoding UTF8
+    $tool = { param($name) Join-Path $script:ToolsDir "$name.ps1" }
+    Assert-Match (Get-HostText { & (& $tool 'Measure-TestQuality') -Path $spec -BugList $bugs -AsOf '2026-10-23' 3>$null | Out-Null }) 'バグ 2 件（未完了 1 件。取下げなどで数えなかったもの 3 件）'
+    Assert-Match (Get-HostText { & (& $tool 'Measure-DefectRemoval') -BugList $bugs 3>$null | Out-Null }) '欠陥 2 件（バグ 2・レビューの指摘 0。取下げなどで数えなかったもの 3 件）'
+    Assert-Match (Get-HostText { & (& $tool 'Find-SimilarDefects') -BugList $bugs -DesignPath (Join-Path $script:RepoRoot 'docs/design-sample') 3>$null | Out-Null }) '障害 5 件のうち、横展開を探した障害 2 件（横展開が不要・済みのもの、障害ではないもの 3 件を除く）'
+    Assert-Match (Get-HostText { & (& $tool 'Measure-ReviewEffectiveness') -Findings $findings -BugList $bugs 3>$null | Out-Null }) '設計で入ったバグ 2 件'
+    Assert-Match (Get-HostText { & (& $tool 'New-WeeklyReport') -BugList $bugs -AsOf '2026-10-23' 3>$null | Out-Null }) '・今週: 起票 2 件'
+}

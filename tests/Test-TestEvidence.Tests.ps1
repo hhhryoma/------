@@ -277,6 +277,21 @@ Test-Case 'Test-TestEvidence: エビデンスの列のフォルダ付きの名�
     Assert-Equal @() (Get-IssueKeys $issues)
 }
 
+Test-Case 'Test-TestEvidence: -BugList の障害管理表は、テスト仕様書と同じフォルダにあっても、テスト仕様書・エビデンスとして読まない' {
+    $dir = New-TestDir
+    New-SheetsBook (Join-Path $dir 'UT_受注一覧.xlsx') ([ordered]@{ 'テストケース' = @(@('テストID', '確認内容', '結果'), @('UT-001', '一覧が表示される', 'OK')) })
+    New-EvidencePng (Join-Path $dir 'UT-001.png') 'Screen'
+    # 障害管理表の No と確認結果の列は、テストID と結果の見出しの候補でもある
+    $bugs = Join-Path $dir '障害管理表.xlsx'
+    New-SheetsBook $bugs ([ordered]@{ '障害一覧' = @(@('No', '障害番号', '障害内容', '状態', '確認結果'), @('1', 'B001', '一覧の件数が違う', '完了', 'OK'), @('2', 'B002', '登録できない', '対応中', '')) })
+    Assert-Match (Get-HostText { & $EvidenceTool -Path $dir 3>$null | Out-Null }) 'テストケース 3 件' '-BugList が無ければ、障害管理表もテスト仕様書として読む'
+    $issues = @(& $EvidenceTool -Path $dir -BugList $bugs 6>$null)
+    Assert-Equal @() (Get-IssueKeys $issues)
+    $text = Get-HostText { & $EvidenceTool -Path $dir -BugList $bugs | Out-Null }
+    Assert-Match $text 'テストケース 1 件（実施済み 1 件）: エビデンスあり 1 件'
+    Assert-Match $text '読み取り（テスト仕様書）: 1 ファイル・1 行'
+}
+
 Test-Case 'Test-TestEvidence: Get-Help でヘルプが表示される' {
     $h = Get-Help $EvidenceTool
     Assert-Match $h.Synopsis 'エビデンス'

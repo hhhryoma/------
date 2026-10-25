@@ -9,7 +9,7 @@ param(
     [ValidateSet('Message', 'Screen', 'Table', 'Column')]
     [string[]] $Kind = @('Message', 'Screen', 'Table'),
 
-    [string[]] $Exclude = @('.git', '.svn', 'node_modules', 'bin', 'obj', 'target', 'build', 'dist', 'out', 'vendor', '.vs', '.idea'),
+    [string[]] $Exclude,
 
     [string] $Headers,
 
@@ -23,6 +23,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
+# 見ないフォルダの既定は、Measure-CodeSize.ps1 と同じ（同じソースのフォルダから同じファイルを読む）
+if (-not $PSBoundParameters.ContainsKey('Exclude')) { $Exclude = Get-SourceExcludeFolders }
 
 if (-not $Headers) { $Headers = Join-Path $PSScriptRoot 'ddl/テーブル定義書の見出し.csv' }
 foreach ($name in @('Headers', 'OutXlsx')) {
@@ -134,7 +136,7 @@ foreach ($t in $defined['Table'].Values) { $tableKeys[($t.Id -replace '_', '').T
 
 $files = New-Object System.Collections.Generic.List[object]
 $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-$excludeSet = @($Exclude | ForEach-Object { $_.ToLowerInvariant() })
+$skippedFolders = [ordered]@{}   # -Exclude で除いたフォルダ → ソースのファイルの数
 foreach ($p in $SourcePath) {
     $items = @(Get-PathItem $p)
     if ($items.Count -eq 0) { Write-Warning "ソースが見つかりません: $p"; continue }
@@ -148,8 +150,12 @@ foreach ($p in $SourcePath) {
             if (-not $language -and $resourceLanguage.Ext -contains $f.Extension.ToLowerInvariant()) { $language = $resourceLanguage }
             if (-not $language) { continue }
             $rel = $f.FullName.Substring($root.Length).TrimStart('\', '/')
-            $segments = @($rel -split '[\\/]')
-            if ($segments.Count -gt 1 -and @($segments[0..($segments.Count - 2)] | Where-Object { $excludeSet -contains $_.ToLowerInvariant() }).Count -gt 0) { continue }
+            $excluded = Get-ExcludedSourceFolder $rel $Exclude
+            if ($excluded) {
+                if (-not $skippedFolders.Contains($excluded)) { $skippedFolders[$excluded] = 0 }
+                $skippedFolders[$excluded]++
+                continue
+            }
             if ($seen.Add($f.FullName)) { $files.Add([pscustomobject]@{ Info = $f; Relative = $rel; Language = $language }) }
         }
     }
@@ -315,6 +321,7 @@ $parts = @(foreach ($k in @('Message', 'Screen', 'Table', 'Column')) {
         '{0} {1}/{2}' -f $kindNames[$k], $used, $all
     })
 Write-Host ('ソース {0} ファイルで、設計書の ID が見つかったもの: {1}' -f $files.Count, ($parts -join '・'))
+if ($skippedFolders.Count -gt 0) { Write-Host ('見なかったフォルダ（-Exclude）: {0}' -f (Format-ExcludedSourceFolders $skippedFolders)) }
 $notInDesign = @(foreach ($k in @('Message', 'Screen', 'Table')) { if ($undefined[$k].Count -gt 0) { '{0} {1}' -f $kindNames[$k], $undefined[$k].Count } })
 if ($notInDesign.Count -gt 0) { Write-Host ('設計書に無い ID: {0}' -f ($notInDesign -join '・')) }
 Write-Host ('警告 {0} 件 / 情報 {1} 件' -f @($issues | Where-Object Level -eq '警告').Count, @($issues | Where-Object Level -eq '情報').Count)
@@ -350,7 +357,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     突き合わせる ID の種類（Message / Screen / Table / Column）。既定は Message・Screen・Table。
 #
 # .PARAMETER Exclude
-#     見ないフォルダの名前（既定は .git・node_modules・bin・obj・target・build・dist・out・vendor・.vs・.idea）。
+#     見ないフォルダの名前（既定は .git・.svn・node_modules・bin・obj・target・build・dist・out・vendor・.vs・.idea。Measure-CodeSize.ps1 と同じ）。
+#     除いたフォルダは、ソースのファイルの数と一緒に表示します。
 #
 # .PARAMETER Headers
 #     テーブル定義書の見出しの候補の CSV。既定は tools\ddl\テーブル定義書の見出し.csv（Export-TableDdl.ps1 と同じ）。

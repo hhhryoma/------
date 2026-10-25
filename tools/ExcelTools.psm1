@@ -1579,6 +1579,34 @@ function Get-SourceLanguage {
     return $null
 }
 
+# ソースのフォルダのうち、既定で数えない・見ないもの（バージョン管理・ライブラリ・ビルドの出力・IDE の設定）。
+# Measure-CodeSize.ps1 と Test-CodeTrace.ps1 の -Exclude の既定（同じソースのフォルダから同じファイルを読むよう、ここで 1 つに決める）
+$script:SourceExcludeFolders = @('.git', '.svn', 'node_modules', 'bin', 'obj', 'target', 'build', 'dist', 'out', 'vendor', '.vs', '.idea')
+
+function Get-SourceExcludeFolders {
+    #     既定で数えない・見ないソースのフォルダの名前（Measure-CodeSize.ps1・Test-CodeTrace.ps1 の -Exclude の既定）
+    return , ([string[]]$script:SourceExcludeFolders)
+}
+
+function Get-ExcludedSourceFolder {
+    #     ソースの相対パス（scr001/OrderController.java など）のフォルダのうち、Exclude の名前のもの（大文字小文字を区別しない）。
+    #     戻り値: そのフォルダまでの相対パス（vendor・web/node_modules など。いちばん上のもの）。無ければ $null
+    param([string] $Relative, [string[]] $Exclude)
+    $segments = @(([string]$Relative) -split '[\\/]')
+    for ($i = 0; $i -lt $segments.Count - 1; $i++) {
+        if ($Exclude -contains $segments[$i]) { return ($segments[0..$i] -join '/') }
+    }
+    return $null
+}
+
+function Format-ExcludedSourceFolders {
+    #     除いたフォルダ（相対パス → ソースのファイルの数）を「out（1 ファイル）・vendor（2 ファイル）」の形にする（名前の順）
+    param($Folders)
+    $names = [string[]]@($Folders.Keys)
+    [Array]::Sort($names, [StringComparer]::OrdinalIgnoreCase)
+    return (@($names | ForEach-Object { '{0}（{1} ファイル）' -f $_, $Folders[$_] }) -join '・')
+}
+
 function Measure-SourceLines {
     #     1 ファイルの行を、空行・コメント・ステップ（コメント以外の行）に分ける。
     #     文字列（言語の Quote で囲んだもの）と行コメントの中の /* などはブロックコメントの始まりにせず、1 行の中のブロックコメントはすべて見る（閉じなければ次の行もコメント）
@@ -2399,13 +2427,15 @@ function Write-ReadLogSummary {
     foreach ($g in @($ReadLog | Group-InOrder What)) {
         $tables = @($g.Group | Where-Object { -not $_.Note -or $_.Rows -gt 0 })
         $files = @($tables | ForEach-Object { $_.File } | Select-Object -Unique)
-        $notFound = @($g.Group | Where-Object { $_.Note -and $_.Rows -eq 0 } | ForEach-Object { $_.File } | Select-Object -Unique)
+        $notFound = @($g.Group | Where-Object { $_.Note -and $_.Rows -eq 0 -and $_.Note -ne $script:EvidenceReadLogNote } | ForEach-Object { $_.File } | Select-Object -Unique)
+        $evidence = @($g.Group | Where-Object { $_.Note -eq $script:EvidenceReadLogNote } | ForEach-Object { $_.File } | Select-Object -Unique)
         $line = '読み取り（{0}）: {1} ファイル・{2} 行' -f $g.Name, $files.Count, (($tables | Measure-Object -Property Rows -Sum).Sum + 0)
         $missingCounts = [ordered]@{}
         foreach ($t in $tables) { foreach ($m in $t.Missing) { if (-not $missingCounts.Contains($m)) { $missingCounts[$m] = 0 }; $missingCounts[$m]++ } }
         if ($missingCounts.Count -gt 0) { $line += '。見出しが無い項目: ' + ((@($missingCounts.Keys | ForEach-Object { '{0}（{1}/{2} 表）' -f $_, $missingCounts[$_], $tables.Count })) -join '・') }
         Write-Host $line
         if ($notFound.Count -gt 0) { Write-Host ('  表が見つからないファイル: {0}' -f ($notFound -join '・')) }
+        if ($evidence.Count -gt 0) { Write-Host ('  エビデンスのブックとみなしたファイル（フォルダかファイルの名前がテストID）: {0}' -f ($evidence -join '・')) }
     }
 }
 
@@ -2689,6 +2719,36 @@ function Test-ClosedStatus {
     return $s -notmatch $script:OpenStatusPattern
 }
 
+# 障害の状態のうち、障害として数えないもの（取下げ・誤指摘・仕様どおり・重複・キャンセルなど）。
+# 障害管理表を読むツール（Measure-TestQuality・Measure-DefectRemoval・Find-SimilarDefects・Measure-ReviewEffectiveness・New-WeeklyReport）で
+# 同じものを除き、1 つの品質評価の中でバグの数が食い違わないようにする
+$script:ExcludedBugStatusPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない|誤指摘|キャンセル|cancel'
+
+function Get-ExcludedBugPattern {
+    #     障害として数えない状態の正規表現（状態の文字に -match で使う）
+    return $script:ExcludedBugStatusPattern
+}
+
+function Write-DuplicateIdWarning {
+    #     Read-HeaderRecords で読んだ行のうち、Field（障害ID など）の同じ番号が 2 つ以上のファイルにあれば知らせる。
+    #     障害管理表を 2 つ置いた・ツールの結果を同じフォルダに保存したなどで、同じ障害を 2 回読んでいないかを確かめるため
+    param($Records, [string] $Field, [string] $What)
+    $files = @{}   # 番号 → ファイルのパス → ファイル名
+    foreach ($r in $Records) {
+        $id = @(ConvertTo-BugIds $r.Values[$Field])[0]
+        if (-not $id) { continue }
+        if (-not $files.ContainsKey($id)) { $files[$id] = [ordered]@{} }
+        if (-not $files[$id].Contains($r.Path)) { $files[$id][$r.Path] = $r.File }
+    }
+    $ids = [string[]]@($files.Keys | Where-Object { $files[$_].Count -gt 1 })
+    if ($ids.Count -eq 0) { return }
+    [Array]::Sort($ids, [StringComparer]::Ordinal)
+    $shown = @($ids | Select-Object -First 5 | ForEach-Object { '{0}（{1}）' -f $_, (@($files[$_].Values) -join '・') })
+    $more = ''
+    if ($ids.Count -gt 5) { $more = ' ほか {0} 件' -f ($ids.Count - 5) }
+    Write-Warning ('{0}の同じ番号が、2 つ以上のファイルにあります: {1}{2}。同じ障害を 2 回読んでいないか（ツールの結果などを同じフォルダに置いていないか）確かめてください' -f $What, ($shown -join '、'), $more)
+}
+
 function Get-TestResultKind {
     #     テストの結果を OK・NG・保留・対象外・未実施にする（読めない値は未実施）
     param([string] $Text)
@@ -2736,6 +2796,95 @@ function ConvertTo-TestCases {
         })
     }
     return , $cases
+}
+
+function ConvertTo-CircledSuffix {
+    #     数字の後ろの丸数字（UT-001①・UT-001 ② など）を「_1」「_2」にする（全角・半角をそろえると前の数字とつながり、UT-0011 になるため）
+    param([string] $Text)
+    return [regex]::Replace([string]$Text, '(?<=\d)\s*[①-⑳⑴-⒇⒈-⒛]', [System.Text.RegularExpressions.MatchEvaluator] { param($m) '_' + ($m.Value.Normalize($script:Nfkc) -replace '\D', '') })
+}
+
+function ConvertTo-CaseKey {
+    #     テストID・シート名・ファイル名・目印を比べる形。全角・半角と大文字小文字をそろえ、前に付けた「■」「No.」「ケース」「テストID:」と
+    #     空白を除き、数字の前の 0 を除く（UT-001 と UT-1、No.01 と 1 を同じにする）。数字の後ろの丸数字は「_1」「_2」にする
+    param([string] $Text)
+    $t = (ConvertTo-CircledSuffix $Text).Normalize($script:Nfkc).ToUpperInvariant().Trim()
+    $t = $t -replace '^[■□●◆◇▼▽★☆※#【\[(]+\s*', ''
+    $t = $t -replace '^(テストケース|テスト|ケース|試験|確認)?(ID|NO\.?|番号)?\s*[:.]?\s*(?=\d)', ''
+    $t = $t -replace '^(テストケース|テスト|ケース|試験|確認)?(ID|NO\.?|番号)\s*:\s*', ''
+    $t = ($t -replace '[】\])]+$', '') -replace '\s', ''
+    $sb = New-Object System.Text.StringBuilder
+    $i = 0
+    while ($i -lt $t.Length) {
+        if (-not [char]::IsDigit($t[$i])) { [void]$sb.Append($t[$i]); $i++; continue }
+        $j = $i
+        while ($j -lt $t.Length -and [char]::IsDigit($t[$j])) { $j++ }
+        $digits = $t.Substring($i, $j - $i).TrimStart('0')
+        if (-not $digits) { $digits = '0' }
+        [void]$sb.Append($digits)
+        $i = $j
+    }
+    return $sb.ToString()
+}
+
+function Get-EvidenceFilePaths {
+    #     テスト仕様書の置き場所のファイルのうち、エビデンスの置き場所にあるもの（フォルダかファイルの名前が、ほかのファイルのケースの
+    #     テストID のもの。UT-001\エビデンス.xlsx・UT-001.xlsx など）のフルパスの集合。その中の表（確認した項目の一覧など）はテストケースではない。
+    #     分けたテスト仕様書（数字の名前のフォルダ・受注一覧_2.xlsx など）を除かないよう、名前はテストID そのもの（後ろの「_2」「(2)」を
+    #     除いたものも）だけを見て、数字だけの名前は見ない
+    #       Cases: ケース（ConvertTo-TestCases。Values のテストID と Place.Path を見る）。Paths: 確かめるファイル（省くとケースのあるファイル）
+    param($Cases, [string[]] $Paths)
+    $byKey = @{}   # テストID（ConvertTo-CaseKey）→ そのケースのあるファイルのパスの一覧
+    foreach ($c in $Cases) {
+        $k = ConvertTo-CaseKey ([string]$c.Values['テストID']).Trim()
+        if (-not $k) { continue }
+        if (-not $byKey.ContainsKey($k)) { $byKey[$k] = [System.Collections.Generic.List[string]]::new() }
+        if (-not $byKey[$k].Contains($c.Place.Path)) { $byKey[$k].Add($c.Place.Path) }
+    }
+    $find = {
+        param([string] $Name)
+        if (([string]$Name).Normalize($script:Nfkc).Trim() -match '^\d+$') { return }
+        $key = ConvertTo-CaseKey $Name
+        foreach ($k in @($key, ($key -replace '[_\-(]\d+\)?$', ''))) { if ($k -and $byKey.ContainsKey($k)) { return $byKey[$k].ToArray() } }
+    }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    if ($byKey.Count -eq 0) { return , $set }
+    if (-not $Paths) { $Paths = @($Cases | ForEach-Object { $_.Place.Path } | Select-Object -Unique) }
+    foreach ($p in $Paths) {
+        # フォルダの名前（ケースごとのフォルダ。UT-001\エビデンス.xlsx）、合わなければファイルの名前（UT-001.xlsx）
+        $found = @(& $find ([System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName($p))))
+        if ($found.Count -eq 0) { $found = @(& $find ([System.IO.Path]::GetFileNameWithoutExtension($p))) }
+        if (@($found | Where-Object { $_ -ne $p }).Count -gt 0) { [void]$set.Add($p) }
+    }
+    return , $set
+}
+
+# 読み取り結果の備考（エビデンスのブックとみなし、テスト仕様書として読まなかったファイル。Write-ReadLogSummary で分けて出す）
+$script:EvidenceReadLogNote = 'エビデンスのブックとみなし、テスト仕様書として読みません（フォルダかファイルの名前が、ほかのファイルのテストID）'
+
+function Remove-EvidenceCases {
+    #     ケース（ConvertTo-TestCases）から、エビデンスの置き場所にあるファイル（Get-EvidenceFilePaths）のケースを除く。
+    #     読み取り結果（ReadLog）のそのファイルの行は、エビデンスとみなしたことを書いた行にする（同じ名前のファイルに残すケースがあれば、そのまま）。
+    #     戻り値: 残したケースの一覧
+    param($Cases, $ReadLog)
+    $evidence = Get-EvidenceFilePaths $Cases
+    if ($evidence.Count -eq 0) { return , $Cases }
+    $kept = [System.Collections.Generic.List[object]]::new()
+    $evidenceNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($c in $Cases) {
+        if (-not $evidence.Contains($c.Place.Path)) { $kept.Add($c) }
+        elseif (-not $evidenceNames.Contains($c.Place.File)) { $evidenceNames.Add($c.Place.File) }
+    }
+    if ($null -ne $ReadLog) {
+        $specNames = @($kept | ForEach-Object { $_.Place.File })
+        $notes = [ordered]@{}
+        foreach ($l in @($ReadLog | Where-Object { $evidenceNames -contains $_.File -and $specNames -notcontains $_.File })) {
+            [void]$ReadLog.Remove($l)
+            $notes[('{0}|{1}' -f $l.What, $l.File)] = $l
+        }
+        foreach ($l in $notes.Values) { Add-ReadLog $ReadLog $l.What $l.File '' $null 0 $null @() $script:EvidenceReadLogNote }
+    }
+    return , $kept
 }
 
 # ---------------------------------------------------------------- セルの塗りつぶしを読む（Compare-Excel の -CompareFormat・Measure-Progress のガントチャート）
