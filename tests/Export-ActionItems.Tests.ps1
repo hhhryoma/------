@@ -55,7 +55,7 @@ Test-Case 'Export-ActionItems: テキストの議事録の宿題・決定事項�
 
     # CSV は課題管理表の形で、週次報告の -IssueList にそのまま渡せる
     $csv = @(Import-Csv -LiteralPath (Join-Path $dir '宿題.csv') -Encoding UTF8)
-    Assert-Equal 'No|区分|件名|担当|期限|状態|起票日|会議|メモ|出典' ((@($csv[0].PSObject.Properties | ForEach-Object { $_.Name })) -join '|')
+    Assert-Equal 'No|区分|件名|担当|期限|状態|起票日|完了日|会議|メモ|出典' ((@($csv[0].PSObject.Properties | ForEach-Object { $_.Name })) -join '|')
     Assert-Equal '1|宿題|画面設計書の受注日の桁数を直す|山田|2026/10/23|未対応|2026/10/20' ((@('No', '区分', '件名', '担当', '期限', '状態', '起票日') | ForEach-Object { $csv[0].$_ }) -join '|')
     Assert-Equal '議事録.txt 13 行目' $csv[0].'出典'
     $weekly = Get-HostText { $null = & (Join-Path $script:ToolsDir 'New-WeeklyReport.ps1') -IssueList (Join-Path $dir '宿題.csv') -AsOf '2026-10-28' }
@@ -190,7 +190,7 @@ Test-Case 'Export-ActionItems: 宿題の次の担当・期限だけの行（「�
         '説明会の資料を作る|佐藤||次回まで・先方の都合を確認') @($r | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Title, $_.Owner, $(if ($_.Due) { $_.Due.ToString('yyyy/MM/dd') } else { '' }), $_.Note })
 }
 
-Test-Case 'Export-ActionItems: 宿題の表の状況の列を状態にし、前の議事録から写した同じ宿題は会議の日の新しいものだけを残す（週次報告で完了を期限切れにしない）' {
+Test-Case 'Export-ActionItems: 宿題の表の状況の列を状態にし、前の議事録から写した同じ宿題は会議の日の新しいものだけを残す（週次報告で完了を期限切れにしない。完了日は完了になった会議の日）' {
     $dir = New-TestDir
     $old = Join-Path $dir '20261013_定例.md'
     @('# 定例 2026/10/13', '', '## 宿題', '', '| 内容 | 担当 | 期限 | 状況 |', '|---|---|---|---|', '| 画面設計書を直す | 山田 | 10/16 | 対応中 |', '| 手順書を書く | 鈴木 | 10/16 | 未着手 |') | Set-Content -LiteralPath $old -Encoding UTF8
@@ -201,9 +201,9 @@ Test-Case 'Export-ActionItems: 宿題の表の状況の列を状態にし、前�
     $null = & $ActionItems @($new, $old) -OutCsv $csv 6>$null
     $rows = @(Import-Csv -LiteralPath $csv -Encoding UTF8)
     Assert-Equal @(
-        '1|画面設計書を直す|山田|2026/10/16|完了|2026/10/13|20261020_定例',
-        '2|帳票を直す|佐藤|2026/10/30|未着手|2026/10/20|20261020_定例',
-        '3|手順書を書く|鈴木|2026/10/16|未着手|2026/10/13|20261013_定例') @($rows | ForEach-Object { $row = $_; (@('No', '件名', '担当', '期限', '状態', '起票日', '会議') | ForEach-Object { $row.$_ }) -join '|' }) '起票日は最初に出てきた会議の日'
+        '1|画面設計書を直す|山田|2026/10/16|完了|2026/10/13|2026/10/20|20261020_定例',
+        '2|手順書を書く|鈴木|2026/10/16|未着手|2026/10/13||20261013_定例',
+        '3|帳票を直す|佐藤|2026/10/30|未着手|2026/10/20||20261020_定例') @($rows | ForEach-Object { $row = $_; (@('No', '件名', '担当', '期限', '状態', '起票日', '完了日', '会議') | ForEach-Object { $row.$_ }) -join '|' }) '起票日は最初に出てきた会議の日。番号は起票日・議事録の中の順'
     $weekly = Get-HostText { $null = & (Join-Path $script:ToolsDir 'New-WeeklyReport.ps1') -IssueList $csv -AsOf '2026-10-21' }
     Assert-Match $weekly '・未完了: 2 件・うち期限切れ 1 件'
     Assert-NotMatch $weekly '【山田】'
@@ -249,6 +249,96 @@ Test-Case 'Export-ActionItems: 宿題の表で縦に結合した担当・期限�
     Edit-ZipText $xlsx 'xl/worksheets/sheet2.xml' { param($t) $t.Replace('<pageMargins', '<mergeCells count="1"><mergeCell ref="A2:A6"/></mergeCells><pageMargins') }
     $r = @(& $ActionItems $xlsx 6>$null)
     Assert-Equal @('画面設計書を直す|山田|2026/10/30', 'テーブル定義書を直す|山田|2026/10/30', 'IF 定義書を更新する|佐藤|2026/10/28') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Title, $_.Owner, $(if ($_.Due) { $_.Due.ToString('yyyy/MM/dd') } else { '' }) })
+}
+
+Test-Case 'Export-ActionItems: 議事録のフォルダに保存した前の結果（-OutXlsx の宿題・決定事項のシート）は、名前によらず議事録として読まない' {
+    $dir = New-TestDir
+    $minutes = Join-Path $dir '議事録'
+    New-Item -ItemType Directory -Path $minutes | Out-Null
+    @('# 週次定例', '', '日時: 2026/10/13', '', '## 宿題', '', '| 内容 | 担当 | 期限 | 状況 |', '|---|---|---|---|', '| 結合テストの計画を書く | 山田 | 10/30 | |', '| IF 定義書の文字コードを確認する | Kim | 10/16 | |') | Set-Content -LiteralPath (Join-Path $minutes '20261013_定例.md') -Encoding UTF8
+    # 会議のあとに、結果を議事録のフォルダに保存した（その結果の 1 行目の期限は 2026/10/30）
+    $null = & $ActionItems (Join-Path $minutes '20261013_定例.md') -OutXlsx (Join-Path $minutes '宿題_1013.xlsx') 6>$null
+    @('# 週次定例', '', '日時: 2026/10/20', '', '## 宿題', '', '| 内容 | 担当 | 期限 | 状況 |', '|---|---|---|---|', '| 結合テストの計画を書く | 山田 | 10/30 | 対応中 |', '| IF 定義書の文字コードを確認する | Kim | 10/16 | 完了 |') | Set-Content -LiteralPath (Join-Path $minutes '20261020_定例.md') -Encoding UTF8
+    $csv = Join-Path $dir '宿題.csv'
+    $text = Get-HostText { $script:r = @(& $ActionItems $minutes -OutCsv $csv) }
+    Assert-Match $text '結果のシートは、議事録として読みません: 宿題_1013\.xlsx（宿題・決定事項）'
+    Assert-Match $text '議事録 2 件: 宿題 2 件'
+    Assert-Equal @('結合テストの計画を書く|対応中|20261020_定例.md', 'IF 定義書の文字コードを確認する|完了|20261020_定例.md') @($script:r | ForEach-Object { '{0}|{1}|{2}' -f $_.Title, $_.Status, $_.Place.File }) '前の結果の未対応を、新しい会議のものとして残さない'
+    $weekly = Get-HostText { $null = & (Join-Path $script:ToolsDir 'New-WeeklyReport.ps1') -IssueList $csv -AsOf '2026-10-23' }
+    Assert-Match $weekly '・未完了: 1 件・うち期限切れ 0 件'
+}
+
+Test-Case 'Export-ActionItems: 日時の行もファイル名の日付も無い議事録は、表のセルや宿題の節の期限の日付を会議の日にしない（見出しの行の日付か、ファイルの更新日）' {
+    $dir = New-TestDir
+    $a = Join-Path $dir 'teirei_a.xlsx'
+    New-SheetsBook $a ([ordered]@{ '宿題' = @(@('内容', '担当', '期限'), @('画面設計書を直す', '山田', '2026/10/30')) })
+    $b = Join-Path $dir 'teirei_b.txt'
+    @('定例会議 議事録', '■ 宿題', '・帳票を直す（佐藤、2026/10/30まで）') | Set-Content -LiteralPath $b -Encoding UTF8
+    $c = Join-Path $dir 'teirei_c.txt'
+    @('定例会議 2026/10/20', '■ 宿題', '・IF を直す（田中、2026/10/30まで）') | Set-Content -LiteralPath $c -Encoding UTF8
+    foreach ($f in @($a, $b, $c)) { (Get-Item -LiteralPath $f).LastWriteTime = [datetime]'2026-10-14 09:00' }
+    $r = @(& $ActionItems @($a, $b, $c) 6>$null)
+    Assert-Equal @('画面設計書を直す|2026/10/30|2026/10/14', '帳票を直す|2026/10/30|2026/10/14', 'IF を直す|2026/10/30|2026/10/20') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Title, $_.Due.ToString('yyyy/MM/dd'), $_.MeetingDate.ToString('yyyy/MM/dd') })
+}
+
+Test-Case 'Export-ActionItems: 2 人の担当（山田さん、佐藤さん・山田・佐藤・（山田さん、佐藤さん、10/20まで））は 1 人ずつさん・氏・くんを除いて「山田、佐藤」にする' {
+    $dir = New-TestDir
+    @('日時: 2026/10/13', '■宿題',
+        '・メッセージ一覧の文言をそろえる（山田さん、佐藤さん、10/20まで）',
+        '・IF を直す（田中氏、10/23まで）',
+        '・帳票を直す 担当：山田・佐藤 期限：10/30', '',
+        '| 内容 | 担当 | 期限 |', '| --- | --- | --- |',
+        '| IF 定義書を直す | 山田さん、佐藤さん | 10/20 |',
+        '| 手順書を書く | 山田・佐藤くん | 10/20 |',
+        '| 移行手順を書く | ジョン・スミスさん | 10/30 |') | Set-Content -LiteralPath (Join-Path $dir '20261013_m.md') -Encoding UTF8
+    $r = @(& $ActionItems (Join-Path $dir '20261013_m.md') 6>$null)
+    Assert-Equal @(
+        'メッセージ一覧の文言をそろえる|山田、佐藤|2026/10/20',
+        'IF を直す|田中|2026/10/23',
+        '帳票を直す|山田、佐藤|2026/10/30',
+        'IF 定義書を直す|山田、佐藤|2026/10/20',
+        '手順書を書く|山田、佐藤|2026/10/20',
+        '移行手順を書く|ジョン・スミス|2026/10/30') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Title, $_.Owner, $_.Due.ToString('yyyy/MM/dd') }) 'カタカナの名前の中の「・」は区切りにしない'
+}
+
+Test-Case 'Export-ActionItems: 担当を決めた・書き方を変えた宿題は 1 件にまとめ（担当が 1 人も重ならないものは別の宿題）、完了日は完了になった最初の会議の日、番号は次の会議の議事録を足しても変えない' {
+    $dir = New-TestDir
+    $head = @('| 内容 | 担当 | 期限 | 状況 |', '|---|---|---|---|')
+    @(@('# 定例', '日時: 2026/10/13', '## 宿題') + $head + @(
+            '| メッセージ一覧の文言をそろえる | 山田さん、佐藤さん | 10/20 | |',
+            '| お客様に締め日の扱いを確認する | | 10/16 | 対応中 |',
+            '| 資料を確認する | 山田 | 10/16 | 対応中 |',
+            '| 帳票を直す | 鈴木 | 10/16 | 完了 |',
+            '| IF 定義書を直す | 田中 | 10/16 | 対応中 |')) | Set-Content -LiteralPath (Join-Path $dir '20261013_定例.md') -Encoding UTF8
+    $csv = Join-Path $dir '宿題.csv'
+    $null = & $ActionItems $dir -OutCsv $csv 6>$null
+    $first = @(Import-Csv -LiteralPath $csv -Encoding UTF8 | ForEach-Object { '{0}|{1}' -f $_.No, $_.'件名' })
+    Assert-Equal @('1|メッセージ一覧の文言をそろえる', '2|お客様に締め日の扱いを確認する', '3|資料を確認する', '4|帳票を直す', '5|IF 定義書を直す') $first
+    # 次の会議: 前回の宿題を並べ替えて写し、新しい宿題を先頭に足し、担当を決め・書き方を変え・完了にし、完了を戻した
+    @(@('# 定例', '日時: 2026/10/20', '## 宿題') + $head + @(
+            '| 結合テストの環境を申請する | 鈴木 | 10/23 | |',
+            '| IF 定義書を直す | 田中 | 10/16 | 完了 |',
+            '| 資料を確認する | 佐藤 | 10/23 | |',
+            '| お客様に締め日の扱いを確認する | 山田 | 10/16 | 完了 |',
+            '| メッセージ一覧の文言をそろえる | 山田・佐藤 | 10/20 | 完了 |',
+            '| 帳票を直す | 鈴木 | 10/16 | 対応中 |')) | Set-Content -LiteralPath (Join-Path $dir '20261020_定例.md') -Encoding UTF8
+    @(@('# 定例', '日時: 2026/10/27', '## 宿題') + $head + @(
+            '| メッセージ一覧の文言をそろえる | 山田、佐藤 | 10/20 | 完了 |',
+            '| IF 定義書を直す | 田中 | 10/16 | 完了 |')) | Set-Content -LiteralPath (Join-Path $dir '20261027_定例.md') -Encoding UTF8
+    $null = & $ActionItems $dir -OutCsv $csv 6>$null
+    Assert-Equal @(
+        '1|メッセージ一覧の文言をそろえる|山田、佐藤|完了|2026/10/13|2026/10/20',
+        '2|お客様に締め日の扱いを確認する|山田|完了|2026/10/13|2026/10/20',
+        '3|資料を確認する|山田|対応中|2026/10/13|',
+        '4|帳票を直す|鈴木|対応中|2026/10/13|',
+        '5|IF 定義書を直す|田中|完了|2026/10/13|2026/10/20',
+        '6|結合テストの環境を申請する|鈴木|未対応|2026/10/20|',
+        '7|資料を確認する|佐藤|未対応|2026/10/20|') @(Import-Csv -LiteralPath $csv -Encoding UTF8 | ForEach-Object { $row = $_; (@('No', '件名', '担当', '状態', '起票日', '完了日') | ForEach-Object { $row.$_ }) -join '|' })
+    # 週次報告: 今週（10/17～10/23）の完了は完了日で数え、前の週（10/16）の報告を作り直すと 10/20 の完了は未完了
+    $weekly = Get-HostText { $null = & (Join-Path $script:ToolsDir 'New-WeeklyReport.ps1') -IssueList $csv -AsOf '2026-10-23' }
+    Assert-Match $weekly '・今週: 起票 2 件・完了 3 件\n・未完了: 4 件・うち期限切れ 2 件'
+    $weekly = Get-HostText { $null = & (Join-Path $script:ToolsDir 'New-WeeklyReport.ps1') -IssueList $csv -AsOf '2026-10-16' }
+    Assert-Match $weekly '・未完了: 5 件・うち期限切れ 0 件'
 }
 
 Test-Case 'Export-ActionItems: Get-Help でヘルプが表示される' {

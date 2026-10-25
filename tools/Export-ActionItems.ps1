@@ -132,6 +132,18 @@ function Read-TextLines {
     return , $lines
 }
 
+# このツールの結果（-OutXlsx）の宿題・決定事項のシートの見出し（1 行目にこれらの見出しがあるシート。列を足したり並べ替えたりしたもの、
+# -OutCsv を Excel に写したものも）。議事録の宿題の表に、起票日・会議・出典の列は無い
+$ownOutputHeads = @(@('件名', '担当', '期限', '状態', '起票日', '会議', '出典'), @('決定事項', '日付', '会議', '出典', '原文'))
+function Test-OwnOutputSheet {
+    #     Grid は ConvertTo-DesignBooks のシート
+    param($Grid)
+    if ($Grid.Rows.Count -eq 0) { return $false }
+    $labels = @($Grid.Labels[$Grid.Rows[0]].Values)
+    foreach ($heads in $ownOutputHeads) { if (@($heads | Where-Object { $labels -notcontains $_ }).Count -eq 0) { return $true } }
+    return $false
+}
+
 # 対象のファイル（Excel・Word・テキスト）
 $excelPaths = New-Object System.Collections.Generic.List[string]
 $otherFiles = New-Object System.Collections.Generic.List[string]
@@ -162,8 +174,11 @@ if ($excelPaths.Count -gt 0) {
     $filledBooks = ConvertTo-DesignBooks @(& $searchScript @searchArgs -FillMerged 6>$null)
     foreach ($book in $books.Values) {
         $lines = New-Object System.Collections.Generic.List[object]
+        $ownSheets = @()
         foreach ($sheetName in $book.Sheets.Keys) {
             $grid = $book.Sheets[$sheetName]
+            # このツールの結果（-OutXlsx の宿題・決定事項のシート）は議事録として読まない（前に作った一覧を会議として読み、古い状態を残さないため）
+            if (Test-OwnOutputSheet $grid) { $ownSheets += $sheetName; continue }
             $filledGrid = $null
             if ($filledBooks.Contains($book.Path)) { $filledGrid = $filledBooks[$book.Path].Sheets[$sheetName] }
             foreach ($row in $grid.Rows) {
@@ -179,6 +194,8 @@ if ($excelPaths.Count -gt 0) {
             }
             $lines.Add((New-Line '' $null $null))
         }
+        if ($ownSheets.Count -gt 0) { Write-Host ('Export-ActionItems.ps1 の結果のシートは、議事録として読みません: {0}（{1}）' -f $book.File, ($ownSheets -join '・')) }
+        if ($ownSheets.Count -gt 0 -and $lines.Count -eq 0) { continue }
         $documents.Add([pscustomobject]@{ File = $book.File; Path = $book.Path; Lines = $lines })
     }
 }
@@ -226,9 +243,9 @@ function Get-WeekDay {
 }
 
 function Join-OwnerNames {
-    #     担当の名前（「山田、佐藤」「山田さん、佐藤さん」）を、さん・様を除いて「、」でつなぐ
+    #     担当の名前（「山田、佐藤」「山田さん、佐藤さん」「山田・佐藤」）を、1 人ずつさん・様・氏・くんを除いて「、」でつなぐ（Split-OwnerNames）
     param([string] $Text)
-    return (@($Text -split '\s*[、,]\s*' | ForEach-Object { ($_ -replace '(さん|様)$', '').Trim() } | Where-Object { $_ }) -join '、')
+    return (@(Split-OwnerNames $Text) -join '、')
 }
 
 function Split-ActionText {
@@ -246,8 +263,9 @@ function Split-ActionText {
     # 先頭の [山田]
     $m = & $take '^\s*\[(?<o>[^\]\d]{1,10})\]'
     if ($m.Success) { $owner = $m.Groups['o'].Value }
-    # （山田、10/30まで）・（山田、来週中）・（担当: 山田 / 期限: 10/30）
-    $m = & $take ('\(\s*(?:担当(?:者)?\s*[:：]?\s*)?(?<o>[^\s(),、:/\d][^\s(),、:/]{0,9}?)(?:さん|様)?\s*[、,/]\s*(?:期限\s*[:：]?\s*)?(?<d>' + $date + '|' + $dueWord + ')\s*(?:まで|迄)?\s*\)')
+    # （山田、10/30まで）・（山田、来週中）・（担当: 山田 / 期限: 10/30）・（山田さん、佐藤さん、10/20まで）。2 人目からは、期限の言葉を名前にしない
+    $namePattern = '[^\s(),、:/\d][^\s(),、:/]{0,9}?'
+    $m = & $take ('\(\s*(?:担当(?:者)?\s*[:：]?\s*)?(?<o>' + $namePattern + '(?:\s*[、,]\s*(?!期限|期日|締切|本日|今日|明日|今週|来週|次回)' + $namePattern + ')*)\s*[、,/]\s*(?:期限\s*[:：]?\s*)?(?<d>' + $date + '|' + $dueWord + ')\s*(?:まで|迄)?\s*\)')
     if ($m.Success) { if (-not $owner) { $owner = $m.Groups['o'].Value }; $dueText = $m.Groups['d'].Value }
     if (-not $owner) {
         # 担当: 山田・担当: 山田、佐藤（2 人目からは、日付と期限の言葉を名前にしない）
@@ -270,7 +288,7 @@ function Split-ActionText {
         # 文の中の「様」は仕様・様式などの言葉に多いため、「さん」だけを見る
         if (-not $m.Success) { $m = [regex]::Match($script:work, '(?<o>[^\s、,。をはがにでとのへもや()\[\]:]{1,6})さん') }
         # 「お客様」「皆様」などは担当にしない
-        if ($m.Success) { $o = Join-OwnerNames $m.Groups['o'].Value; if ($o -notmatch '^(お客|客|皆|先方|各位|ご担当者|担当者)$') { $owner = $o } }
+        if ($m.Success) { $o = Join-OwnerNames $m.Groups['o'].Value; if ($o -notmatch '^(お客|客|皆|先方|各位|ご担当者|担当者)(様|さん)?$') { $owner = $o } }
     }
     # 日付の無い期限（本日中・明日・今週中・来週中・来週金曜・次回まで）
     if (-not $dueText) {
@@ -282,7 +300,7 @@ function Split-ActionText {
     if (-not $due -and $dueText -match '^次回') { $note = '次回まで' }
     $title = $script:work -replace '\(\s*\)', '' -replace '\s{2,}', ' '
     $title = $title.Trim().TrimEnd('。', '、', ',', ':', '：', '/').Trim()
-    return [pscustomobject]@{ Title = $title; Owner = $owner.Trim(); Due = $due; Note = $note }
+    return [pscustomobject]@{ Title = $title; Owner = (Join-OwnerNames $owner); Due = $due; Note = $note }
 }
 
 # 節の見出しの印（● ○ ・ は箇条書きの印に使われるため、見出しの印にしない）。mark は、節の見出しと同じ印の行で節を終えるために使う
@@ -299,7 +317,7 @@ function Get-KindOf {
 }
 
 function Find-MeetingInfo {
-    #     会議の日（日時・開催日の行、ファイル名の日付、最初のほうの年のある日付、ファイルの更新日の順）と会議名
+    #     会議の日（日時・開催日の行、ファイル名の日付、最初のほうの見出し・表題の行の年のある日付、ファイルの更新日の順）と会議名
     param($Document)
     $head = @($Document.Lines | Select-Object -First 40 | ForEach-Object { ([string]$_.Text).Normalize($nfkc) })
     $day = $null; $name = ''
@@ -313,7 +331,14 @@ function Find-MeetingInfo {
         if ($m.Success) { try { $day = New-Object DateTime ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value), ([int]$m.Groups[3].Value) } catch { } }
     }
     if (-not $day) {
-        foreach ($t in @($head | Select-Object -First 10)) {
+        # 表のセル（宿題の表の期限など）の日付は会議の日にしない。宿題・決定事項の節か宿題の表の見出しまでの、セルが 2 つまでの行だけを見る
+        foreach ($line in @($Document.Lines | Select-Object -First 10)) {
+            $t = ([string]$line.Text).Normalize($nfkc)
+            if ([regex]::IsMatch($t, $headingPattern, $ignoreCase)) { break }
+            if ($line.Cells) {
+                if (Find-TableMap $line.Cells) { break }
+                if (@($line.Cells | Where-Object { $_ }).Count -gt 2) { continue }
+            }
             $m = [regex]::Match($t, '\d{4}\s*[/\-.年]\s*\d{1,2}\s*[/\-.月]\s*\d{1,2}')
             if ($m.Success) { $day = ConvertTo-DateValue $m.Value; break }
         }
@@ -329,7 +354,8 @@ function Find-MeetingInfo {
 
 $results = New-Object System.Collections.Generic.List[object]
 function Add-Action {
-    #     Status: 表の状況・状態の列の文字（無ければ、宿題は「未対応」）。Opened は起票日（会議の日。同じ宿題をまとめたときは最初の会議の日）
+    #     Status: 表の状況・状態の列の文字（無ければ、宿題は「未対応」）。Opened は起票日（会議の日。同じ宿題をまとめたときは最初の会議の日）。
+    #     ClosedOn は完了日（状態が完了などの宿題の、完了になった最初の会議の日）
     param([string] $Kind, $Parsed, $Meeting, $Line, [string] $Original, [string] $Status)
     if (-not $Parsed.Title) { return }
     if ($Parsed.Title -match '^(なし|特になし|無し|特に無し|-|―|ー)$') { return }
@@ -341,7 +367,7 @@ function Add-Action {
     }
     $item = [pscustomobject]@{
         Kind = $Kind; Title = $Parsed.Title; Owner = $Parsed.Owner; Due = $Parsed.Due; Note = ($notes -join '・'); Status = $Status
-        Meeting = $Meeting.Name; MeetingDate = $Meeting.Date; Opened = $Meeting.Date; Place = $Line.Place; Original = $Original.Trim()
+        Meeting = $Meeting.Name; MeetingDate = $Meeting.Date; Opened = $Meeting.Date; ClosedOn = $null; Place = $Line.Place; Original = $Original.Trim()
     }
     $item.PSObject.TypeNames.Insert(0, 'ActionItem')
     $results.Add($item)
@@ -412,7 +438,7 @@ foreach ($doc in $documents) {
                 elseif ($section -eq '決定事項') { $kind = '決定事項' }
                 $dueCell = & $cell 'Due'
                 $parsed = Split-ActionText $content $meeting.Date
-                $ownerCell = (& $cell 'Owner') -replace '(さん|様)$', ''
+                $ownerCell = Join-OwnerNames (& $cell 'Owner')
                 if ($ownerCell) { $parsed.Owner = $ownerCell }
                 if ($dueCell) { $d = ConvertTo-DueDate $dueCell $meeting.Date; if ($d) { $parsed.Due = $d } elseif ($dueCell -match '次回') { $parsed.Note = '次回まで' } }
                 $last = Add-Action $kind $parsed $meeting $line $raw (& $cell 'Status')
@@ -455,25 +481,46 @@ foreach ($doc in $documents) {
     }
 }
 
-# 前の会議の宿題の表を写した議事録が複数あるとき、同じ宿題（件名と担当が同じもの）は、会議の日の新しい議事録（同じ日なら後に読んだもの）のものだけを残す。
-# 状態・期限はその議事録のもの、起票日は最初に出てきた会議の日（1 つの議事録の中の同じ宿題は、そのまま残す）
-$keys = @(foreach ($a in $results) { if ($a.Kind -eq '宿題') { (ConvertTo-Label $a.Title).ToUpperInvariant() + '|' + (Get-OwnerKey $a.Owner) } else { '' } })
-$latest = @{}
-for ($i = 0; $i -lt $results.Count; $i++) {
-    if (-not $keys[$i]) { continue }
+# 前の会議の宿題の表を写した議事録が複数あるとき、同じ宿題は、会議の日の新しい議事録（同じ日なら後に読んだもの）のものだけを残す。
+# 同じ宿題は件名が同じもの。担当は、両方に書いてあって 1 人も重ならないときだけ別の宿題にする（担当を決めた・足した・書き方を変えた宿題を 2 件にしないため）。
+# 状態・期限はその議事録のもの、起票日は最初に出てきた会議の日、完了日は完了になった最初の会議の日（1 つの議事録の中の同じ宿題は、そのまま残す）
+# 終わった宿題の状態（New-WeeklyReport.ps1 の課題と同じ）
+$closedPattern = '完了|済|クローズ|close|done|解決|対応不要|不要|終了'
+$groupOf = @{}   # $results の位置 → 同じ宿題のまとまり
+$byTitle = @{}   # 件名 → まとまりの一覧
+# 会議の日の順（同じ日なら読んだ順）に見る
+$order = @(for ($i = 0; $i -lt $results.Count; $i++) { if ($results[$i].Kind -eq '宿題') { $i } })
+foreach ($i in @($order | Sort-Object @{ e = { $results[$_].MeetingDate } }, @{ e = { $_ } })) {
     $a = $results[$i]
-    $e = $latest[$keys[$i]]
-    if (-not $e) { $latest[$keys[$i]] = @{ Path = $a.Place.Path; Date = $a.MeetingDate; Opened = $a.MeetingDate }; continue }
-    if ($a.MeetingDate -lt $e.Opened) { $e.Opened = $a.MeetingDate }
-    if ($a.MeetingDate -ge $e.Date) { $e.Path = $a.Place.Path; $e.Date = $a.MeetingDate }
+    $title = (ConvertTo-Label $a.Title).ToUpperInvariant()
+    $owners = @(Split-OwnerNames $a.Owner | ForEach-Object { Get-OwnerKey $_ })
+    if (-not $byTitle.ContainsKey($title)) { $byTitle[$title] = New-Object System.Collections.Generic.List[object] }
+    $g = $null
+    foreach ($c in $byTitle[$title]) {
+        if ($c.Owners.Count -eq 0 -or $owners.Count -eq 0 -or @($owners | Where-Object { $c.Owners.Contains($_) }).Count -gt 0) { $g = $c; break }
+    }
+    if (-not $g) {
+        $g = [pscustomobject]@{ Owners = (New-Object 'System.Collections.Generic.HashSet[string]'); Path = ''; Opened = $a.MeetingDate; First = $i; ClosedOn = $null }
+        $byTitle[$title].Add($g)
+    }
+    foreach ($o in $owners) { [void]$g.Owners.Add($o) }
+    $g.Path = $a.Place.Path
+    # 完了の後の会議で完了でなくなったら、完了日を消す
+    if (Test-ClosedStatus $a.Status $closedPattern) { if ($null -eq $g.ClosedOn) { $g.ClosedOn = $a.MeetingDate } }
+    else { $g.ClosedOn = $null }
+    $groupOf[$i] = $g
 }
+# 宿題の番号（-OutCsv・-OutXlsx の No）は、最初に出てきた会議の日と、その議事録の中の順にする（次の会議の議事録を足しても、前からある宿題の番号は変わらない）
 $kept = New-Object System.Collections.Generic.List[object]
+$numbered = New-Object System.Collections.Generic.List[object]
 for ($i = 0; $i -lt $results.Count; $i++) {
     $a = $results[$i]
-    if ($keys[$i]) {
-        $e = $latest[$keys[$i]]
-        if ($a.Place.Path -ne $e.Path) { continue }
-        $a.Opened = $e.Opened
+    if ($groupOf.ContainsKey($i)) {
+        $g = $groupOf[$i]
+        if ($a.Place.Path -ne $g.Path) { continue }
+        $a.Opened = $g.Opened
+        if (Test-ClosedStatus $a.Status $closedPattern) { $a.ClosedOn = $g.ClosedOn; if ($null -eq $a.ClosedOn) { $a.ClosedOn = $a.MeetingDate } }
+        $numbered.Add([pscustomobject]@{ Item = $a; Opened = $g.Opened; First = $g.First; Index = $i })
     }
     $kept.Add($a)
 }
@@ -484,7 +531,8 @@ $results
 # ---------------------------------------------------------------- 保存・表示
 
 
-$actions = @($results | Where-Object { $_.Kind -eq '宿題' })
+# 宿題は番号の順（最初に出てきた会議の日・その議事録の中の順）
+$actions = @($numbered | Sort-Object Opened, First, Index | ForEach-Object { $_.Item })
 $decisions = @($results | Where-Object { $_.Kind -eq '決定事項' })
 function Format-DateCell {
     param($Date)
@@ -502,11 +550,11 @@ if ($OutCsv) {
     $i = 0
     $rows = @($actions | ForEach-Object {
             $i++
-            [pscustomobject][ordered]@{ 'No' = $i; '区分' = '宿題'; '件名' = $_.Title; '担当' = $_.Owner; '期限' = (Format-DateCell $_.Due); '状態' = $_.Status; '起票日' = (Format-DateCell $_.Opened); '会議' = $_.Meeting; 'メモ' = $_.Note; '出典' = (Format-PlaceText $_.Place) }
+            [pscustomobject][ordered]@{ 'No' = $i; '区分' = '宿題'; '件名' = $_.Title; '担当' = $_.Owner; '期限' = (Format-DateCell $_.Due); '状態' = $_.Status; '起票日' = (Format-DateCell $_.Opened); '完了日' = (Format-DateCell $_.ClosedOn); '会議' = $_.Meeting; 'メモ' = $_.Note; '出典' = (Format-PlaceText $_.Place) }
         })
     $text = ''
     if ($rows.Count -gt 0) { $text = ((($rows | ConvertTo-Csv -NoTypeInformation) -join "`r`n") + "`r`n") }
-    else { $text = '"No","区分","件名","担当","期限","状態","起票日","会議","メモ","出典"' + "`r`n" }
+    else { $text = '"No","区分","件名","担当","期限","状態","起票日","完了日","会議","メモ","出典"' + "`r`n" }
     [System.IO.File]::WriteAllText($OutCsv, $text, (New-Object System.Text.UTF8Encoding($true)))
 }
 if ($OutXlsx) {
@@ -514,9 +562,9 @@ if ($OutXlsx) {
     $i = 0
     foreach ($a in $actions) {
         $i++
-        # 期限・起票日は日付のセル（Excel で並べ替え・フィルター・計算ができる）
-        $row = @{ Values = @([double]$i, '宿題', $a.Title, $a.Owner, $a.Due, $a.Status, $a.Opened, $a.Meeting, $a.Note, (Format-PlaceText $a.Place), $a.Original) }
-        if ($a.Place.Sheet) { $row.Link = @{ Column = 9; Path = $a.Place.Path; Location = ("'{0}'!{1}" -f $a.Place.Sheet.Replace("'", "''"), $a.Place.Cell) } }
+        # 期限・起票日・完了日は日付のセル（Excel で並べ替え・フィルター・計算ができる）
+        $row = @{ Values = @([double]$i, '宿題', $a.Title, $a.Owner, $a.Due, $a.Status, $a.Opened, $a.ClosedOn, $a.Meeting, $a.Note, (Format-PlaceText $a.Place), $a.Original) }
+        if ($a.Place.Sheet) { $row.Link = @{ Column = 10; Path = $a.Place.Path; Location = ("'{0}'!{1}" -f $a.Place.Sheet.Replace("'", "''"), $a.Place.Cell) } }
         $actionRows.Add($row)
     }
     $decisionRows = New-Object System.Collections.Generic.List[object]
@@ -529,7 +577,7 @@ if ($OutXlsx) {
     }
     try {
         Export-Workbook -FilePath $OutXlsx -Sheets @(
-            @{ Name = '宿題'; Columns = @(@{ Header = 'No'; Width = 5 }, @{ Header = '区分'; Width = 6 }, @{ Header = '件名'; Width = 50 }, @{ Header = '担当'; Width = 12 }, @{ Header = '期限'; Width = 11 }, @{ Header = '状態'; Width = 8 }, @{ Header = '起票日'; Width = 11 }, @{ Header = '会議'; Width = 24 }, @{ Header = 'メモ'; Width = 20 }, @{ Header = '出典'; Width = 30 }, @{ Header = '原文'; Width = 50 }); Rows = $actionRows },
+            @{ Name = '宿題'; Columns = @(@{ Header = 'No'; Width = 5 }, @{ Header = '区分'; Width = 6 }, @{ Header = '件名'; Width = 50 }, @{ Header = '担当'; Width = 12 }, @{ Header = '期限'; Width = 11 }, @{ Header = '状態'; Width = 8 }, @{ Header = '起票日'; Width = 11 }, @{ Header = '完了日'; Width = 11 }, @{ Header = '会議'; Width = 24 }, @{ Header = 'メモ'; Width = 20 }, @{ Header = '出典'; Width = 30 }, @{ Header = '原文'; Width = 50 }); Rows = $actionRows },
             @{ Name = '決定事項'; Columns = @(@{ Header = 'No'; Width = 5 }, @{ Header = '決定事項'; Width = 60 }, @{ Header = '日付'; Width = 11 }, @{ Header = '会議'; Width = 24 }, @{ Header = '出典'; Width = 30 }, @{ Header = '原文'; Width = 50 }); Rows = $decisionRows })
     }
     catch {
@@ -556,19 +604,24 @@ if ($OutCsv) { Write-Host "宿題を CSV に保存しました（課題管理表
 #       表            内容（件名・項目・アクション）と、担当か期限の見出しがある表（Word の表・Excel）。状況・状態の列は宿題の状態にする
 #
 #     担当と期限は、行の中の「（山田、10/30まで）」「（山田、来週中）」「担当: 山田、佐藤」「期限: 10/30」「@山田」「山田さんが」「[山田]」などから
-#     取り出し、残りを件名にします。「今週中」「来週中」は会議の週・翌週の金曜日（「来週水曜」はその曜日）、「10月末」は月の最後の日、
-#     「次回まで」はメモに書きます。宿題の次の行が担当・期限だけなら、前の宿題の担当・期限にします。Excel のセルの中の改行は行の区切りにします。
-#     会議の日は「日時・開催日」の行（和暦も）、ファイル名の日付（20261020 など）、ファイルの更新日の順に探します（年の無い期限の年に使います）。
-#     同じ宿題（件名と担当が同じもの）が複数の議事録にあれば、会議の日の新しい議事録のものだけを残します（起票日は最初に出てきた会議の日）。
+#     取り出し、残りを件名にします。2 人以上の担当（山田さん、佐藤さん・山田・佐藤）は、1 人ずつさん・様・氏・くんを除いて「山田、佐藤」にします。
+#     「今週中」「来週中」は会議の週・翌週の金曜日（「来週水曜」はその曜日）、「10月末」は月の最後の日、「次回まで」はメモに書きます。
+#     宿題の次の行が担当・期限だけなら、前の宿題の担当・期限にします。Excel のセルの中の改行は行の区切りにします。
+#     会議の日は「日時・開催日」の行（和暦も）、ファイル名の日付（20261020 など）、最初のほうの見出し・表題の行の日付、ファイルの更新日の順に
+#     探します（年の無い期限の年に使います。表のセルや宿題の節の期限の日付は使いません）。
+#     同じ宿題（件名が同じもの。担当が両方に書いてあって 1 人も重ならないものは別の宿題）が複数の議事録にあれば、会議の日の新しい議事録のものだけを
+#     残します（起票日は最初に出てきた会議の日、完了日は状態が完了などになった最初の会議の日）。宿題の番号は、最初に出てきた会議の日と
+#     議事録の中の順です（次の会議の議事録を足しても、前からある宿題の番号は変わりません）。
+#     このツールの結果（-OutXlsx の宿題・決定事項のシート）は、議事録のフォルダに置いても議事録として読みません。
 #
-#     -OutCsv の CSV（No・区分・件名・担当・期限・状態・起票日など）は、課題管理表に貼り付けるか、
-#     New-WeeklyReport.ps1 の -IssueList に渡して、週次報告で期限切れを追えます（状態が「完了」などの宿題は、終わったものとして数えます）。
+#     -OutCsv の CSV（No・区分・件名・担当・期限・状態・起票日・完了日など）は、課題管理表に貼り付けるか、
+#     New-WeeklyReport.ps1 の -IssueList に渡して、週次報告で期限切れと今週の完了を追えます（状態が「完了」などの宿題は、終わったものとして数えます）。
 #
 # .PARAMETER Path
 #     議事録のファイルまたはフォルダ（.docx・.xlsx・.xlsm・.txt・.md。複数可）。
 #
 # .PARAMETER OutXlsx
-#     結果を xlsx に保存します（宿題・決定事項。期限・起票日は日付のセル。Excel の議事録は該当セルへのリンク付き）。
+#     結果を xlsx に保存します（宿題・決定事項。期限・起票日・完了日は日付のセル。Excel の議事録は該当セルへのリンク付き）。
 #
 # .PARAMETER OutCsv
 #     宿題を CSV（UTF-8）に保存します。
@@ -580,7 +633,7 @@ if ($OutCsv) { Write-Host "宿題を CSV に保存しました（課題管理表
 #     Excel を起動しません（.xls / .xlsb は読まなくなります）。
 #
 # .EXAMPLE
-#     .\Export-ActionItems.ps1 D:\PJ\議事録\20261020_定例.docx -OutXlsx D:\PJ\議事録\宿題.xlsx
+#     .\Export-ActionItems.ps1 D:\PJ\議事録\20261020_定例.docx -OutXlsx D:\PJ\宿題.xlsx
 #
 # .EXAMPLE
 #     # 議事録のフォルダから宿題を集め、週次報告で追う
