@@ -446,7 +446,7 @@ function Get-ReplacePlan {
         $sheets = New-Object System.Collections.Generic.List[object]
         foreach ($s in $wbDoc.SelectNodes("//*[local-name()='sheets']/*[local-name()='sheet']")) {
             $rel = $relById[(Get-RelationshipIdAttribute $s)]
-            if ($null -eq $rel -or ($rel.Kind -ne 'worksheet' -and $rel.Kind -ne 'macrosheet')) { continue }
+            if ($null -eq $rel -or ($rel.Kind -ne 'worksheet' -and $rel.Kind -notmatch 'macrosheet')) { continue }
             $name = $s.GetAttribute('name')
             $state = $s.GetAttribute('state')
             $included = $true

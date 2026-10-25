@@ -109,12 +109,13 @@ function Read-SharedStringList {
     return , $list
 }
 
-# 組み込みの表示形式のうち日付・時刻のもの（27〜36, 50〜58 は日本語ロケールの和暦・年月日）
-$builtinDateFormatIds = @(14..22) + @(27..36) + @(45..47) + @(50..58)
+# 組み込みの表示形式のうち日付・時刻のもの（27〜36, 50〜58 は日本語ロケールの和暦・年月日。46 は経過時間の [h]:mm:ss なので除く）
+$builtinDateFormatIds = @(14..22) + @(27..36) + @(45, 47) + @(50..58)
 
 function Read-DateStyleList {
     #     styles.xml の cellXfs を読み、書式の番号ごとに日付・時刻の表示形式かを返す（Search-Excel.ps1 の Read-DateStyles と同じ判定）。
-    #     ユーザー定義の形式は、文字（"..."・\x）や [赤]・[$-411] などを除いて y/m/d/h/s が残れば日付とみなす。経過時間（[h]:mm）は除く
+    #     ユーザー定義の形式は、文字（"..."・\x）や [赤]・[$-411] などと General（日本語の G/標準）を除いて
+    #     y/m/d/h/s、日本語の曜日の a（aaa）、元号の g（ggge）、和暦の年の e が残れば日付とみなす。経過時間（[h]:mm）は除く
     param($Package, [string] $PartName)
     $list = New-Object System.Collections.Generic.List[bool]
     $doc = $null
@@ -126,8 +127,8 @@ function Read-DateStyleList {
         if (-not [int]::TryParse($nf.GetAttribute('numFmtId'), [ref]$id)) { continue }
         $code = $nf.GetAttribute('formatCode')
         $s = $code.Split(';')[0]
-        foreach ($rx in @('"[^"]*"', '\\.', '[_*].', '\[[^\]]*\]', '(?i)General', '[Ee][+-]')) { $s = [regex]::Replace($s, $rx, '') }
-        $custom[$id] = ($code -notmatch '\[(h+|m+|s+)\]') -and ($s -match '[ymdhs]')
+        foreach ($rx in @('"[^"]*"', '\\.', '[_*].', '\[[^\]]*\]', '(?i)General|G/標準', '[Ee][+-]')) { $s = [regex]::Replace($s, $rx, '') }
+        $custom[$id] = ($code -notmatch '\[(h+|m+|s+)\]') -and ($s -match '[ymdhsage]')
     }
     foreach ($xf in $doc.SelectNodes("//*[local-name()='cellXfs']/*[local-name()='xf']")) {
         $id = 0

@@ -86,6 +86,16 @@ Test-Case 'ExcelTools: Read-BookDrawings は、位置で置いた図形・画像
     Assert-Equal '100|60|400|300' ('{0}|{1}|{2}|{3}' -f $items[0].Bounds.X, $items[0].Bounds.Y, $items[0].Bounds.W, $items[0].Bounds.H)
 }
 
+Test-Case 'ExcelTools: Read-BookDrawings は、図形の段落の中の改行（<a:br>。Shift+Enter の改行）も、段落の区切りと同じく改行にして読む（Search-Excel と同じ）' {
+    $path = Join-Path (New-TestDir) '図形.xlsx'
+    New-SheetsBook $path ([ordered]@{ 'S' = @(@('項目'), @('x')) })
+    Add-TestDrawing $path @(@{ Kind = 'sp'; Name = '図1'; Text = 'X'; From = @(1, 1); To = @(4, 4) })
+    Edit-ZipText $path 'xl/drawings/drawing1.xml' { param($x) $x.Replace('<a:p><a:r><a:t>X</a:t></a:r></a:p>', '<a:p><a:r><a:t>受注</a:t></a:r><a:br/><a:r><a:t>管理システム</a:t></a:r></a:p><a:p><a:r><a:t>概要</a:t></a:r></a:p>') }
+    $items = (Read-BookDrawings $path)['S'].ToArray()
+    # 改行は ↵ にして比べる
+    Assert-Equal @('図1|受注↵管理システム↵概要') @($items | ForEach-Object { '{0}|{1}' -f $_.Name, $_.Text.Replace("`n", '↵') })
+}
+
 Test-Case 'ExcelTools: Export-Workbook は日付（datetime）を日付のセルとして書き、Search-Excel では yyyy/MM/dd で読める' {
     $path = Join-Path (New-TestDir) '日付.xlsx'
     Export-Workbook -FilePath $path -Sheets @(@{ Name = '予定'; Columns = @(@{ Header = '開始'; Width = 12 }, @{ Header = '工数'; Width = 6 }, @{ Header = 'メモ'; Width = 10 }); Rows = @(@{ Values = @([datetime]'2026-11-02', 1.5, '2026/11/03') }) })

@@ -132,6 +132,30 @@ Test-Case 'Test-ExcelEstimate: 合計の範囲の上にある表の見出し（�
     Assert-Match $issues[0].Detail '範囲に B2 が入っていません'
 }
 
+Test-Case 'Test-ExcelEstimate: 合計の範囲の上の、元号（[$-411]ggge"年度"）・曜日（aaa）の表示形式の日付の見出しは入れ忘れとみなさない（G/標準"人"・経過時間 [h]:mm:ss の数値は指摘する）' {
+    # 年度別: 2 行目の見出しは年度の初日の日付を「令和8年度」と表示。曜日別: 2 行目の見出しは日付を「木」と表示。
+    # 人数・工数: 2 行目の設計の人数（G/標準"人"）・時間（組み込みの [h]:mm:ss）を合計に入れ忘れている
+    $file = New-EstimateBook ([ordered]@{
+        '年度別' = @(@('要員', '当年度', '翌年度'), @('', 46113, 46478), @('PM', 1, 1), @('SE', 2, 3), @('PG', 3, 4), @('合計', '=SUM(B3:B5)', '=SUM(C3:C5)'))
+        '曜日別' = @(@('作業', '初日', '翌日'), @('', 46296, 46297), @('設計', 1, 2), @('製造', 3, 4), @('合計', '=SUM(B3:B4)', '=SUM(C3:C4)'))
+        '人数' = @(@('項目', '人数'), @('設計', 3), @('製造', 5), @('テスト', 4), @('合計', '=SUM(B3:B4)'))
+        '工数' = @(@('項目', '時間'), @('設計', 0.5), @('製造', 1.25), @('テスト', 0.75), @('合計', '=SUM(B3:B4)')) })
+    # 2 行目の値に、上の表示形式（177〜179 と組み込みの 46）を付ける（シートの順に 5〜8 番の書式）
+    Edit-ZipText $file 'xl/styles.xml' {
+        param($x)
+        $x = $x.Replace('</numFmts>', '<numFmt numFmtId="177" formatCode="[$-411]ggge&quot;年度&quot;"/><numFmt numFmtId="178" formatCode="aaa"/><numFmt numFmtId="179" formatCode="G/標準&quot;人&quot;"/></numFmts>')
+        $x.Replace('<cellXfs count="5">', '<cellXfs count="9">').Replace('</cellXfs>', ((@(177, 178, 179, 46) | ForEach-Object { '<xf numFmtId="{0}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' -f $_ }) -join '') + '</cellXfs>')
+    }
+    for ($i = 1; $i -le 4; $i++) {
+        Edit-ZipText $file "xl/worksheets/sheet$i.xml" { param($x) $x.Replace('<c r="B2" s="2">', ('<c r="B2" s="{0}">' -f ($i + 4))).Replace('<c r="C2" s="2">', ('<c r="C2" s="{0}">' -f ($i + 4))) }
+    }
+    $issues = Invoke-Estimate @{ Path = $file }
+    $keys = @(Get-EstimateKeys $issues)
+    Assert-Equal 2 $keys.Count ($keys -join ', ')
+    Assert-True ($keys -contains '警告|合計の範囲|人数!B5') ($keys -join ', ')
+    Assert-True ($keys -contains '警告|合計の範囲|工数!B5') ($keys -join ', ')
+}
+
 Test-Case 'Test-ExcelEstimate: Get-Help でヘルプが表示される' {
     $h = Get-Help $EstimateTool
     Assert-Match $h.Synopsis '見積書'

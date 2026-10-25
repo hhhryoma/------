@@ -359,6 +359,20 @@ Test-Case 'Replace-Excel: ヘルプの注意書き（.NOTES）は、既定で置
     Assert-NotMatch $notes 'ヘッダー[^。]*置換しません'
 }
 
+Test-Case 'Replace-Excel: マクロシート（Excel 4.0 マクロ。リレーションの種類は xlMacrosheet）の文字も置換する' {
+    $file = Join-Path (New-TestDir) '集計.xlsm'
+    New-SheetsBook $file ([ordered]@{ '一覧' = @(@('項目'), @('受注管理')); 'マクロ' = @(@('項目'), @('受注集計')) })
+    Edit-ZipText $file 'xl/_rels/workbook.xml.rels' { param($t) $t.Replace('http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"', 'http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet" Target="worksheets/sheet2.xml"') }
+    Edit-ZipText $file '[Content_Types].xml' { param($t) $t.Replace('/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"', '/xl/worksheets/sheet2.xml" ContentType="application/vnd.ms-excel.macrosheet+xml"') }
+    Edit-ZipText $file 'xl/worksheets/sheet2.xml' { param($t) $t.Replace('<worksheet xmlns=', '<xm:macrosheet xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main" xmlns=').Replace('</worksheet>', '</xm:macrosheet>') }
+    $r = Invoke-Replace @{ Pattern = '受注'; Replacement = '販売'; Path = $file; Force = $true }
+    $changes = @($r | ForEach-Object { '{0}|{1}' -f $_.Location, $_.Change })
+    Assert-Equal 2 $changes.Count ($changes -join ' / ')
+    Assert-True ($changes -contains 'マクロ!A2|受注集計 → 販売集計') ($changes -join ' / ')
+    Assert-Match (Read-PartText $file 'xl/worksheets/sheet2.xml') '販売集計'
+    Assert-WellFormed $file
+}
+
 Test-Case 'Replace-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $ReplaceExcel
     Assert-Match $h.Synopsis '置換'
