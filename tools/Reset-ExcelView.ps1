@@ -54,7 +54,7 @@ function Get-XmlAttribute {
 function Update-SheetViews {
     #     シート XML の <sheetViews> だけを書き換えた文字列を返す（ほかの部分は 1 文字も変えない）。
     #       ・選択セルを A1（見出しを固定しているシートはスクロール領域の左上）に
-    #       ・表示位置を左上に、倍率を $Zoom に
+    #       ・表示位置を左上に、倍率を $Zoom に（見出しを固定しているシートは、固定した行・列を変えない）
     #       ・タブの選択は Selected が $true のシートだけに（作業グループの解除）
     #       ・-NormalView なら改ページプレビューなどを標準表示に
     param([string] $Xml, [bool] $Selected)
@@ -63,21 +63,11 @@ function Update-SheetViews {
     if (-not $m.Success) { return $Xml }
     $block = $m.Value
 
-    $block = [regex]::Replace($block, '<(\w+:)?sheetView\b[^>]*?/?>', {
-        param($t)
-        $tag = $t.Value
-        $tag = Set-XmlAttribute $tag 'topLeftCell' $null
-        $tag = Set-XmlAttribute $tag 'tabSelected' $null
-        if ($Selected) { $tag = Set-XmlAttribute $tag 'tabSelected' '1' }
-        $tag = Set-XmlAttribute $tag 'zoomScaleNormal' $null
-        if ($Zoom -eq 100) { $tag = Set-XmlAttribute $tag 'zoomScale' $null }
-        else { $tag = Set-XmlAttribute $tag 'zoomScale' ([string]$Zoom) }
-        if ($NormalView) { $tag = Set-XmlAttribute $tag 'view' $null }
-        return $tag
-    })
-
-    # ウィンドウ枠の固定: スクロール領域を固定位置の直後に戻し、そこを選択する
+    # ウィンドウ枠の固定: 固定した部分の左上（sheetView の topLeftCell。スクロールした状態で固定すると A1 でない）はそのままにし、
+    # スクロール領域を固定位置の直後に戻して、そこを選択する。固定していない向き（行だけを固定したときの列など）の
+    # topLeftCell はスクロールの位置なので、A 列・1 行目に戻す
     $homeCell = 'A1'
+    $origin = $null
     $activePane = $null
     $paneMatch = [regex]::Match($block, '<(\w+:)?pane\b[^>]*/>')
     if ($paneMatch.Success) {
@@ -86,11 +76,31 @@ function Update-SheetViews {
         if ($state -eq 'frozen' -or $state -eq 'frozenSplit') {
             $x = [int][double]('0' + (Get-XmlAttribute $pane 'xSplit'))
             $y = [int][double]('0' + (Get-XmlAttribute $pane 'ySplit'))
-            $homeCell = (ConvertTo-ColumnName ($x + 1)) + ($y + 1)
+            $col = 1; $row = 1
+            $topLeft = [regex]::Match([string](Get-XmlAttribute ([regex]::Match($block, '<(\w+:)?sheetView\b[^>]*>').Value) 'topLeftCell'), '^([A-Za-z]{1,3})(\d{1,7})$')
+            if ($topLeft.Success -and $x -gt 0) { $col = Get-ColumnIndex $topLeft.Groups[1].Value }
+            if ($topLeft.Success -and $y -gt 0) { $row = [int]$topLeft.Groups[2].Value }
+            # スクロール領域の左上がシートの外（XFD 列・1048576 行より先）になる値は書かない
+            if ($col + $x -gt 16384 -or $row + $y -gt 1048576) { $col = 1; $row = 1 }
+            if ($col -gt 1 -or $row -gt 1) { $origin = (ConvertTo-ColumnName $col) + $row }
+            $homeCell = (ConvertTo-ColumnName ($col + $x)) + ($row + $y)
             $activePane = Get-XmlAttribute $pane 'activePane'
             $block = $block.Replace($pane, (Set-XmlAttribute $pane 'topLeftCell' $homeCell))
         }
     }
+
+    $block = [regex]::Replace($block, '<(\w+:)?sheetView\b[^>]*?/?>', {
+        param($t)
+        $tag = $t.Value
+        $tag = Set-XmlAttribute $tag 'topLeftCell' $origin
+        $tag = Set-XmlAttribute $tag 'tabSelected' $null
+        if ($Selected) { $tag = Set-XmlAttribute $tag 'tabSelected' '1' }
+        $tag = Set-XmlAttribute $tag 'zoomScaleNormal' $null
+        if ($Zoom -eq 100) { $tag = Set-XmlAttribute $tag 'zoomScale' $null }
+        else { $tag = Set-XmlAttribute $tag 'zoomScale' ([string]$Zoom) }
+        if ($NormalView) { $tag = Set-XmlAttribute $tag 'view' $null }
+        return $tag
+    })
 
     $block = [regex]::Replace($block, '<(\w+:)?selection\b[^>]*/>', {
         param($t)
@@ -290,7 +300,7 @@ if ($renamed.Count -gt 0) { Write-Host ('  前に残したファイルと名前�
 #
 #       ・開いたときに、表示されている最初のシートが表示されるようにする
 #       ・各シートの選択セルを A1 に、表示位置を左上に、倍率を 100% にする
-#         （ウィンドウ枠を固定したシートは、スクロール領域の左上を選択する）
+#         （ウィンドウ枠を固定したシートは、固定した行・列はそのままで、スクロール領域の左上を選択する）
 #       ・複数シートの選択（作業グループ）を解除する
 #       ・-NormalView を付けると、改ページプレビューなどを標準表示に戻す
 #

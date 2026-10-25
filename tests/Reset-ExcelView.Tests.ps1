@@ -201,6 +201,40 @@ Test-Case 'Reset-ExcelView: -BackupDir に前に残したファイルは上書�
     Assert-Match $text '番号を付けて残し.*bad \(2\)\.xlsx'
 }
 
+Test-Case 'Reset-ExcelView: スクロールした状態でウィンドウ枠を固定したシートは、固定した行・列を変えずにスクロール領域の左上に戻す' {
+    # 固定した部分の左上は sheetView の topLeftCell。固定していない向き（列だけを固定したときの行など）は、スクロールの位置
+    $views = [ordered]@{
+        # 10〜11 行目（表の見出し）を固定し、スクロール領域を下へスクロールした
+        '行'       = '<sheetView tabSelected="1" topLeftCell="A10" workbookViewId="0"><pane ySplit="2" topLeftCell="A30" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A35" sqref="A35"/></sheetView>'
+        # 右へスクロールして J〜K 列を固定した（倍率だけを直す）
+        '列'       = '<sheetView topLeftCell="J1" zoomScale="85" workbookViewId="0"><pane xSplit="2" topLeftCell="L1" activePane="topRight" state="frozen"/><selection pane="topRight" activeCell="L1" sqref="L1"/></sheetView>'
+        # A〜B 列を固定して下へスクロールした
+        '列・下へ' = '<sheetView topLeftCell="A50" workbookViewId="0"><pane xSplit="2" topLeftCell="C50" activePane="topRight" state="frozen"/><selection pane="topRight" activeCell="C60" sqref="C60"/></sheetView>'
+        # 10〜11 行目を固定して右へスクロールした
+        '行・右へ' = '<sheetView topLeftCell="D10" workbookViewId="0"><pane ySplit="2" topLeftCell="D12" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="D12" sqref="D12"/></sheetView>'
+    }
+    $book = Join-Path (New-TestDir) '画面一覧.xlsx'
+    $sheets = [ordered]@{}
+    foreach ($name in $views.Keys) { $sheets[$name] = @(@('No', '項目'), @('1', 'x')) }
+    New-SheetsBook $book $sheets
+    $i = 0
+    foreach ($view in $views.Values) {
+        $i++
+        Edit-ZipText $book "xl/worksheets/sheet$i.xml" { param($t) [regex]::Replace($t, '<sheetViews>.*?</sheetViews>', '<sheetViews>' + $view + '</sheetViews>') }
+    }
+    $r = Invoke-Reset @{ Path = $book }
+    Assert-Equal '修正' $r[0].Result
+    Assert-Equal 0 (Get-ViewIssues $book).Count
+    $xml = Read-ZipTexts $book
+    $tags = { param($n) (@('sheetView', 'pane', 'selection') | ForEach-Object { [regex]::Match($xml["xl/worksheets/sheet$n.xml"], "<$_\b[^>]*>").Value }) -join ' ' }
+    Assert-Match (& $tags 1) '^<sheetView [^>]*topLeftCell="A10"[^>]*> <pane [^>]*topLeftCell="A12"[^>]*> <selection pane="bottomLeft" activeCell="A12" sqref="A12"/>$' '固定した 10〜11 行目はそのまま'
+    Assert-Match (& $tags 2) '^<sheetView [^>]*topLeftCell="J1"[^>]*> <pane [^>]*topLeftCell="L1"[^>]*> <selection pane="topRight" activeCell="L1" sqref="L1"/>$' '固定した J〜K 列はそのまま'
+    Assert-NotMatch (& $tags 2) 'zoomScale'
+    Assert-Match (& $tags 3) '^<sheetView [^>]*> <pane [^>]*topLeftCell="C1"[^>]*> <selection pane="topRight" activeCell="C1" sqref="C1"/>$' '列だけを固定したシートは 1 行目に戻す'
+    Assert-NotMatch (& $tags 3) '<sheetView [^>]*topLeftCell'
+    Assert-Match (& $tags 4) '^<sheetView [^>]*topLeftCell="A10"[^>]*> <pane [^>]*topLeftCell="A12"[^>]*> <selection pane="bottomLeft" activeCell="A12" sqref="A12"/>$' '行だけを固定したシートは A 列に戻す'
+}
+
 Test-Case 'Reset-ExcelView: Get-Help でヘルプが表示される' {
     $h = Get-Help $ResetView
     Assert-Match $h.Synopsis 'A1'
