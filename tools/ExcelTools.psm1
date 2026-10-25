@@ -1691,8 +1691,12 @@ function ConvertTo-Hours {
     return $null
 }
 
+# 合計・小計の行の値（ConvertTo-Label 済みの値の全体で比べる。「設計」は違う）
+$script:TotalLabelPattern = '^(総?合計|小計|総計|計|(sub|grand)?total)$'
+
 function Read-EffortLog {
     #     工数実績の表（1 行が日付・担当・WBS 番号かタスク・工数）を読む（Measure-Effort.ps1・New-WeeklyReport.ps1）。
+    #     その表が無いブック・CSV は、日付を列に並べた工数表（Read-EffortMatrix）として読む（1 つのファイルを両方の形では読まない）
     #       Headers: 見出しの候補の CSV。Tasks: Measure-Progress.ps1 のタスク（WBS 番号、無ければタスク名で対応付ける）
     #       WBS 番号は番号の部分で比べる（「ＷＢＳ１．１」「No.1.1」「1.1 画面設計」「1-1」は 1.1）。同じ番号のタスクが複数あれば
     #       （シートごとに番号を振り直した WBS など）タスク名で選び、決まらなければ対応付けずに警告する
@@ -1721,8 +1725,12 @@ function Read-EffortLog {
         if ($byName.ContainsKey($k)) { $byName[$k] = -1 } else { $byName[$k] = $i }   # 同じ名前のタスクが複数あれば名前では対応付けない
     }
     $fields = @('日付', '担当', 'WBS番号', 'タスク', '工数')
-    $records = Read-HeaderRecords -Inputs $Inputs -Candidates (Read-HeaderCandidates $Headers $fields) -Fields $fields -Need @('工数', @('WBS番号', 'タスク')) `
-        -Key @('工数') -What '工数実績' -Skip $Skip -Exclude $Exclude -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $ReadLog
+    $candidates = Read-HeaderCandidates $Headers $fields
+    # OnNoTable のスクリプトブロックは Read-HeaderRecords の中で呼ぶので、この関数の変数は名前の重ならない $matrixArgs で渡す
+    $matrixArgs = @{ Candidates = $candidates; AsOf = $AsOf; What = '工数実績'; ReadLog = $ReadLog }
+    $records = Read-HeaderRecords -Inputs $Inputs -Candidates $candidates -Fields $fields -Need @('工数', @('WBS番号', 'タスク')) `
+        -Key @('工数') -What '工数実績' -Skip $Skip -Exclude $Exclude -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $ReadLog `
+        -OnNoTable { param($Book) Read-EffortMatrix -Book $Book @matrixArgs }
     $entries = New-Object System.Collections.Generic.List[object]
     $unreadable = 0; $future = 0
     $ambiguous = New-Object System.Collections.Generic.List[string]; $ambiguousRows = 0
@@ -1731,7 +1739,7 @@ function Read-EffortLog {
         $v = $rec.Values
         # 合計・小計の行（日付・担当・WBS 番号・タスクの欄が「合計」「小計」「計」「Total」など。「設計」は違う）は数えない
         $isTotal = $false
-        foreach ($f in @('日付', '担当', 'WBS番号', 'タスク')) { if ((ConvertTo-Label $v[$f]) -match '^(総?合計|小計|総計|計|(sub|grand)?total)$') { $isTotal = $true; break } }
+        foreach ($f in @('日付', '担当', 'WBS番号', 'タスク')) { if ((ConvertTo-Label $v[$f]) -match $script:TotalLabelPattern) { $isTotal = $true; break } }
         if ($isTotal) { continue }
         $hours = ConvertTo-Hours $v['工数']
         if ($null -eq $hours) { $unreadable++; continue }
@@ -1775,6 +1783,288 @@ function Read-EffortLog {
         Write-Warning ('同じ WBS 番号のタスクが複数あり、タスク名でも決まらない工数 {0} 行は、WBS のタスクに対応付けていません（WBS 番号 {1}{2}）' -f $ambiguousRows, (@($ambiguous | Select-Object -First 5) -join '・'), $(if ($ambiguous.Count -gt 5) { ' ほか' } else { '' }))
     }
     return [pscustomobject]@{ Entries = $entries; Unreadable = $unreadable; Future = $future }
+}
+
+function Get-YearMonth {
+    #     工数表の上のセル・シート名・ファイル名の年月（2026年10月・令和8年10月・2026/10・2026-10・202610・10月・10月度）を読む。
+    #     日付（2026/10/01）は 1 日のものだけを年月とみなす（年月の書式の日付のセル。作成日などの日付と取り違えないため）
+    #       Whole: 文字の全体（後ろの「度」「分」「工数」「実績」「表」は除く）が年月のときだけ読む（月の名前のシート（10月度・10月実績）か）
+    #     戻り値: @{ Year（無ければ 0）; Month }。無ければ $null
+    param([string] $Text, [switch] $Whole)
+    $t = ([string]$Text).Replace('㋿', '令和').Replace('㍻', '平成').Normalize($script:Nfkc).Trim()
+    if (-not $t) { return $null }
+    foreach ($p in @(
+            '(?<!\d)(?<y>\d{4})\s*年\s*(?<m>\d{1,2})\s*月(?!\s*\d{1,2}\s*日)',
+            '(?<era>令和|平成)\s*(?<y>元|\d{1,2})\s*年\s*(?<m>\d{1,2})\s*月(?!\s*\d{1,2}\s*日)',
+            '(?<![\d/\-.])(?<y>\d{4})\s*[/\-.]\s*(?<m>\d{1,2})(?![\d/\-.])',
+            '(?<!\d)(?<y>(?:19|20)\d{2})(?<m>0[1-9]|1[0-2])(?!\d)',
+            '^(?<y>\d{4})/(?<m>\d{1,2})/0?1$',
+            '(?<![\d/\-.年])(?<m>\d{1,2})\s*月(?!\s*\d{1,2}\s*日)')) {
+        $m = [regex]::Match($t, $p)
+        if (-not $m.Success) { continue }
+        if ($Whole -and ($m.Index -ne 0 -or ($t.Substring($m.Length) -replace '\s', '') -notmatch '^(度|分)?(工数)?(実績)?(表)?$')) { continue }
+        $year = 0
+        if ($m.Groups['y'].Success) {
+            if ($m.Groups['y'].Value -eq '元') { $year = 1 } else { $year = [int]$m.Groups['y'].Value }
+            if ($m.Groups['era'].Success) { $year += @{ '令和' = 2018; '平成' = 1988 }[$m.Groups['era'].Value] }
+            if ($year -lt 1900 -or $year -gt 2100) { continue }
+        }
+        $month = [int]$m.Groups['m'].Value
+        if ($month -ge 1 -and $month -le 12) { return [pscustomobject]@{ Year = $year; Month = $month } }
+    }
+    return $null
+}
+
+function ConvertFrom-DateHeader {
+    #     工数表の日付の見出し（2026/10/01・2026年10月1日・10/1・10/1(水)・10月1日・1・1日・1(水)）を読む。後ろの曜日は読み飛ばす。
+    #     日付のセルは、表示形式（m/d・d・m/d(aaa)・d"日" など）によらず、Search-Excel が 2026/10/01 の形で返す
+    #     戻り値: @{ Year（無ければ 0）; Month（無ければ 0）; Day }。日付の見出しでなければ $null
+    param([string] $Text)
+    $t = ([string]$Text).Replace('↵', ' ').Normalize($script:Nfkc).Trim()
+    # 曜日は括弧の中か、空白・改行の後ろのもの（「10月」の「月」は曜日にしない）
+    $weekday = '(?:[月火水木金土日](?:曜日?)?|(?i:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?))'
+    $t = $t -replace ('(?:\s*\(\s*{0}\s*\)|\s+{0})$' -f $weekday), ''
+    $year = 0; $month = 0
+    $m = [regex]::Match($t, '^(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})\s*日?$')
+    if ($m.Success) { $year = [int]$m.Groups[1].Value; $month = [int]$m.Groups[2].Value; $day = [int]$m.Groups[3].Value }
+    else {
+        $m = [regex]::Match($t, '^(?:(\d{1,2})\s*[/月]\s*)?(\d{1,2})\s*日?$')
+        if (-not $m.Success) { return $null }
+        if ($m.Groups[1].Success) { $month = [int]$m.Groups[1].Value; if ($month -lt 1) { return $null } }
+        $day = [int]$m.Groups[2].Value
+    }
+    if ($month -gt 12 -or ($year -gt 0 -and $month -lt 1) -or $day -lt 1 -or $day -gt 31) { return $null }
+    return [pscustomobject]@{ Year = $year; Month = $month; Day = $day }
+}
+
+function Read-EffortMatrix {
+    #     日付を列に並べた工数表（行がタスク、列が日付のマトリクス）を読む（Read-EffortLog。工数実績の表が無いブック・CSV）。
+    #       見出しの行: WBS 番号かタスクの見出しの右に、日付の見出し（ConvertFrom-DateHeader）が 5 つ以上、日付の順に 7 日以内の間で並ぶ行。
+    #       日付はすぐ上・下の行でもよい（日付と曜日の 2 行の見出しなど）。開始・終了・期限・進捗の見出しもある行（日付を並べたガントチャートの WBS）は見出しの行にしない
+    #       日だけの見出し（1・2・…）の月は、見出しの行の見出しでも日付でもないセル（左上・日付の上の「2026年10月」など）と表の上のセル（近い順）、
+    #       シート名、ファイル名の順に探す（Get-YearMonth）。
+    #       年の無いもの（10/1・10月）は、そこで見つかった年、無ければ AsOf の前後半年の年（ConvertTo-DateValue と同じ）。日が左の列より小さければ次の月
+    #       日付の列でない列（合計・週計など）と、合計・小計の行、予定・計画の行（予定と実績を 2 行に書く表）は読まない。
+    #       実績の行の WBS 番号・タスク・担当が空なら、上の予定の行のもの。工数として読めないセル（休・-・×）と 0 は飛ばす（読めない行として数えない）
+    #       見出しの行か表の上に「(人日)」「単位: 人日」があれば、工数の見出しを「…人日」にする（Read-EffortLog が HoursPerDay を掛ける）
+    #       SheetCount: 表のあるシートの数。月の名前のシート（10月・2026年10月）は担当ではないので数えない（Read-EffortLog がファイル名を担当にする）
+    #     Book: ConvertTo-DesignBooks の 1 ブック。Candidates: 項目 → 見出しの候補（Read-HeaderCandidates）。ReadLog: 読み取り結果を足す
+    #     戻り値: Read-HeaderRecords と同じ形の行（工数のセルごと。Values の日付は yyyy/MM/dd、Row・Column は工数のセル）の一覧。表が無ければ $null
+    param($Book, [hashtable] $Candidates, [datetime] $AsOf, [string] $What, $ReadLog)
+    if (-not $Book) { return $null }
+    $fields = @('日付', '担当', 'WBS番号', 'タスク', '工数')
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $plain = @{}
+    foreach ($f in @('WBS番号', 'タスク', '担当')) { $plain[$f] = @(foreach ($n in $Candidates[$f]) { $n.TrimEnd('.') }) }
+    $newDate = {
+        param([int] $y, [int] $m, [int] $d)
+        if ($y -lt 1900 -or $y -gt 2100 -or $m -lt 1 -or $m -gt 12 -or $d -lt 1 -or $d -gt [DateTime]::DaysInMonth($y, $m)) { return $null }
+        return New-Object DateTime $y, $m, $d
+    }
+    # 日付の見出しを日付にする（Context: 年月。日だけの見出しは左の列の月、無ければ Context の月）。その月に無い日（2/30）の列は除く
+    $resolve = {
+        param($Tokens, $Context)
+        $dates = New-Object System.Collections.Generic.List[object]
+        $prev = $null
+        foreach ($tk in $Tokens) {
+            $d = $null
+            if ($tk.Year -gt 0) { $d = & $newDate $tk.Year $tk.Month $tk.Day }
+            elseif ($tk.Month -gt 0) {
+                $y = 0
+                if ($prev) { $y = $prev.Year; if ($tk.Month -lt $prev.Month) { $y++ } }
+                elseif ($Context -and $Context.Year -gt 0) { $y = $Context.Year; if ($tk.Month - $Context.Month -gt 6) { $y-- } elseif ($Context.Month - $tk.Month -gt 6) { $y++ } }
+                if ($y -gt 0) { $d = & $newDate $y $tk.Month $tk.Day } else { $d = ConvertTo-DateValue ('{0}/{1}' -f $tk.Month, $tk.Day) $AsOf }
+            }
+            elseif ($prev) {
+                $base = New-Object DateTime $prev.Year, $prev.Month, 1
+                if ($tk.Day -le $prev.Day) { $base = $base.AddMonths(1) }
+                $d = & $newDate $base.Year $base.Month $tk.Day
+            }
+            elseif ($Context) {
+                if ($Context.Year -gt 0) { $d = & $newDate $Context.Year $Context.Month $tk.Day } else { $d = ConvertTo-DateValue ('{0}/{1}' -f $Context.Month, $tk.Day) $AsOf }
+            }
+            else { return [pscustomobject]@{ Dates = $dates; NoMonth = $true } }
+            if ($d) { $dates.Add([pscustomobject]@{ Col = $tk.Col; Date = $d }); $prev = $d }
+        }
+        return [pscustomobject]@{ Dates = $dates; NoMonth = $false }
+    }
+    # 日付が 5 つ以上、左から日付の順に 7 日以内の間で並ぶか（土日を除いた日・週の初めの日も）
+    $valid = {
+        param($Dates)
+        if ($Dates.Count -lt 5) { return $false }
+        for ($i = 1; $i -lt $Dates.Count; $i++) {
+            $gap = ($Dates[$i].Date - $Dates[$i - 1].Date).TotalDays
+            if ($gap -lt 1 -or $gap -gt 7) { return $false }
+        }
+        return $true
+    }
+
+    # 行の、列 After より右の日付の見出し
+    $dateTokens = {
+        param($Grid, [int] $Row, [int] $After)
+        $list = New-Object System.Collections.Generic.List[object]
+        if (-not $Grid.Cells.ContainsKey($Row)) { return , $list }
+        foreach ($c in $Grid.Cols[$Row]) {
+            if ($c -le $After) { continue }
+            $tk = ConvertFrom-DateHeader $Grid.Cells[$Row][$c]
+            if ($tk) { $list.Add([pscustomobject]@{ Col = $c; Year = $tk.Year; Month = $tk.Month; Day = $tk.Day }) }
+        }
+        return , $list
+    }
+
+    # 見出しの行を探す（シートに表が複数あれば、それぞれ次の見出しの行の前まで）
+    $tables = New-Object System.Collections.Generic.List[object]
+    foreach ($sheetName in $Book.Sheets.Keys) {
+        $grid = $Book.Sheets[$sheetName]
+        $above = 0   # 表の上のセルは、前の表の見出しの行より下から探す
+        foreach ($row in $grid.Rows) {
+            $labels = $grid.Labels[$row]
+            # WBS 番号・タスク・担当の見出しの列（Read-HeaderRecords と同じく、候補の前のものから。後ろの「.」は除いて比べる）
+            $colOf = @{}
+            foreach ($c in $grid.Cols[$row]) { $p = $labels[$c].TrimEnd('.'); if (-not $colOf.ContainsKey($p)) { $colOf[$p] = $c } }
+            $cols = @{}; $map = @{}
+            foreach ($f in @('WBS番号', 'タスク', '担当')) {
+                foreach ($n in $plain[$f]) { if ($colOf.ContainsKey($n)) { $cols[$f] = $colOf[$n]; $map[$f] = $labels[$colOf[$n]]; break } }
+            }
+            $keyCol = 0
+            foreach ($f in @('WBS番号', 'タスク')) { if ($cols.ContainsKey($f) -and $cols[$f] -gt $keyCol) { $keyCol = $cols[$f] } }
+            if ($keyCol -eq 0) { continue }
+            # 日付は見出しの行か、すぐ上・下の行（日付と曜日の 2 行の見出しなど。WBS 番号・タスクの列が空か見出しと同じ行）
+            $dateRow = $row
+            $tokens = & $dateTokens $grid $row $keyCol
+            if ($tokens.Count -lt 5) {
+                foreach ($adj in @(($row - 1), ($row + 1))) {
+                    if (-not $grid.Cells.ContainsKey($adj)) { continue }
+                    $blank = $true
+                    foreach ($f in @('WBS番号', 'タスク')) {
+                        if (-not $cols.ContainsKey($f)) { continue }
+                        $l = $grid.Labels[$adj][$cols[$f]]
+                        if ($l -and $l -ne $map[$f]) { $blank = $false }
+                    }
+                    if (-not $blank) { continue }
+                    $tokens = & $dateTokens $grid $adj $keyCol
+                    if ($tokens.Count -ge 5) { $dateRow = $adj; break }
+                }
+            }
+            if ($tokens.Count -lt 5) { continue }
+            $firstCol = $tokens[0].Col
+            $gantt = $false
+            foreach ($r in @($row, $dateRow)) { foreach ($c in $grid.Cols[$r]) { if ($c -lt $firstCol -and $grid.Labels[$r][$c] -match '開始|終了|期限|進捗') { $gantt = $true } } }
+            if ($gantt) { continue }
+            # 日だけの見出しは、月が分からなくても AsOf の月として並びを確かめる（月は表ごとに後で探す）
+            if (-not (& $valid (& $resolve $tokens ([pscustomobject]@{ Year = $AsOf.Year; Month = $AsOf.Month })).Dates)) { continue }
+            if ($cols.ContainsKey('担当') -and $cols['担当'] -gt $firstCol) { $cols.Remove('担当'); $map.Remove('担当') }
+            $top = [math]::Min($row, $dateRow); $bottom = [math]::Max($row, $dateRow)
+            # 2 行の見出しのそれぞれの行を見出しの行としたとき（縦に結合した見出し・日付と同じ日付を曜日の書式で書いた行など）は、下の行のものにする
+            $from = $above
+            if ($tables.Count -gt 0) {
+                $prevTable = $tables[$tables.Count - 1]
+                if ($prevTable.Sheet -eq $sheetName -and $prevTable.Bottom -ge $top - 1) { $from = $prevTable.Above; $tables.RemoveAt($tables.Count - 1) }
+            }
+            $tables.Add([pscustomobject]@{ Sheet = $sheetName; Grid = $grid; Row = $row; DateRow = $dateRow; Top = $top; Bottom = $bottom; Above = $from; Cols = $cols; Map = $map; Tokens = $tokens; FirstCol = $firstCol })
+            $above = $bottom
+        }
+    }
+    if ($tables.Count -eq 0) { return $null }
+
+    $sheetCount = @($tables | ForEach-Object { $_.Sheet } | Select-Object -Unique | Where-Object { $null -eq (Get-YearMonth $_ -Whole) }).Count
+    $records = New-Object System.Collections.Generic.List[object]
+    $handled = $false
+    for ($ti = 0; $ti -lt $tables.Count; $ti++) {
+        $t = $tables[$ti]
+        $grid = $t.Grid
+        # 年月・単位を探すセル: 見出しの行（2 行なら両方）の、見出しでも日付でもないセル（日付より左のものから。左上の「2026年10月」、
+        # 日付の上の「10月」、右の「合計(人日)」など）と、表の上のセル（近い行から）
+        $dateCols = @{}
+        foreach ($tk in $t.Tokens) { $dateCols[$tk.Col] = $true }
+        $fieldCols = @($t.Cols.Values)
+        $near = New-Object System.Collections.Generic.List[string]
+        foreach ($left in @($true, $false)) {
+            foreach ($r in @(@($t.Top, $t.Bottom) | Select-Object -Unique)) {
+                foreach ($c in $grid.Cols[$r]) {
+                    if (($c -lt $t.FirstCol) -ne $left -or $fieldCols -contains $c -or ($r -eq $t.DateRow -and $dateCols.ContainsKey($c))) { continue }
+                    $near.Add($grid.Cells[$r][$c])
+                }
+            }
+        }
+        $aboveRows = @($grid.Rows | Where-Object { $_ -gt $t.Above -and $_ -lt $t.Top })
+        [array]::Reverse($aboveRows)
+        foreach ($r in $aboveRows) { foreach ($c in $grid.Cols[$r]) { $near.Add($grid.Cells[$r][$c]) } }
+        $context = $null
+        foreach ($text in ($near.ToArray() + @($t.Sheet, [System.IO.Path]::GetFileNameWithoutExtension($Book.File)))) {
+            $context = Get-YearMonth $text
+            if ($context) { break }
+        }
+        $resolved = & $resolve $t.Tokens $context
+        if ($resolved.NoMonth) {
+            $handled = $true
+            Write-Warning ('{0}{1}: 日付の列が日だけで月が分からないため、工数を読んでいません（表の上かシート名に「2026年10月」「10月」などを書いてください）' -f $Book.File, $(if ($t.Sheet) { ' ' + $t.Sheet } else { '' }))
+            Add-ReadLog $ReadLog $What $Book.File $t.Sheet $t.Row 0 $null $fields '日付の列の月が分かりません（日だけの見出し）'
+            continue
+        }
+        $dates = $resolved.Dates
+        if (-not (& $valid $dates)) { continue }
+        $handled = $true
+        # 人日の表か（「(人日)」「単位: 人日」。「予定工数(人日)」などの列の見出しは除く）
+        $perDay = $false
+        foreach ($text in $near) {
+            $l = ConvertTo-Label $text
+            if ($l -match '(^|[(\[:])人日[)\]]?$' -and $l -notmatch '予定|計画|見積') { $perDay = $true; break }
+        }
+        $labelMap = @{}
+        foreach ($f in $t.Map.Keys) { $labelMap[$f] = $t.Map[$f] }
+        $labelMap['日付'] = '{0}～{1} の列' -f $dates[0].Date.ToString('yyyy/MM/dd', $invariant), $dates[$dates.Count - 1].Date.ToString('yyyy/MM/dd', $invariant)
+        $labelMap['工数'] = '日付の列のセル'
+        if ($perDay) { $labelMap['工数'] = '日付の列のセル・人日' }
+        $end = [int]::MaxValue
+        if ($ti + 1 -lt $tables.Count -and $tables[$ti + 1].Sheet -eq $t.Sheet) { $end = $tables[$ti + 1].Top }
+        $count = 0
+        $planKey = $null   # 予定の行の WBS 番号・タスク・担当（下の実績の行が空なら使う）
+        foreach ($r in $grid.Rows) {
+            if ($r -le $t.Bottom -or $r -ge $end) { continue }
+            $cells = $grid.Cells[$r]
+            $lab = $grid.Labels[$r]
+            $v = @{}
+            foreach ($f in $t.Cols.Keys) { $v[$f] = [string]$cells[$t.Cols[$f]] }
+            # 見出しと同じ行（縦に結合した見出しの下の行・ページごとの見出し）
+            $repeated = $false
+            foreach ($f in @('WBS番号', 'タスク')) { if ($t.Cols.ContainsKey($f) -and $lab[$t.Cols[$f]] -eq $t.Map[$f]) { $repeated = $true } }
+            if ($repeated) { continue }
+            # 日付より左のセルが「合計」「小計」の行、「予定」「計画」の行（予定と実績を 2 行に書く表）と「実績」の行
+            $total = $false; $plan = $false; $actual = $false
+            foreach ($c in $grid.Cols[$r]) {
+                if ($c -ge $t.FirstCol) { break }
+                if ($lab[$c] -match $script:TotalLabelPattern) { $total = $true }
+                elseif ($lab[$c] -match '^(予定|計画)(工数)?$') { $plan = $true }
+                elseif ($lab[$c] -match '^実績(工数)?$') { $actual = $true }
+            }
+            if ($total) { continue }
+            $hasKey = ([string]$v['WBS番号']).Trim() -or ([string]$v['タスク']).Trim()
+            if ($plan) {
+                if ($hasKey) { $planKey = $v }
+                continue
+            }
+            if (-not $hasKey) {
+                if (-not $planKey -or -not $actual) { continue }
+                foreach ($f in $planKey.Keys) { if (-not ([string]$v[$f]).Trim()) { $v[$f] = $planKey[$f] } }
+            }
+            $count++
+            foreach ($d in $dates) {
+                $text = [string]$cells[$d.Col]
+                if (-not $text.Trim()) { continue }
+                $hours = ConvertTo-Hours $text
+                if ($null -eq $hours -or $hours -eq 0) { continue }
+                $values = @{}
+                foreach ($f in $v.Keys) { $values[$f] = $v[$f] }
+                $values['日付'] = $d.Date.ToString('yyyy/MM/dd', $invariant)
+                $values['工数'] = $text
+                $records.Add([pscustomobject]@{ Values = $values; Labels = $labelMap; Columns = $t.Cols; File = $Book.File; Path = $Book.Path; Sheet = $t.Sheet; Row = $r; Column = $d.Col; SheetCount = $sheetCount })
+            }
+        }
+        Add-ReadLog $ReadLog $What $Book.File $t.Sheet $t.Row $count $labelMap $fields ''
+    }
+    if (-not $handled) { return $null }
+    return , $records
 }
 
 function Get-EffortJudgement {
@@ -1852,9 +2142,11 @@ function Read-HeaderRecords {
     #       Key: 行があるかを決める項目（前から順に、見出しにあるもの）
     #       Skip: 読まないファイルのフルパスの集合。Exclude: 読まないファイル（結果の xlsx など）
     #       ReadLog: 渡すと、ファイル・シートごとの読み取り結果（Add-ReadLog）を足す
+    #       OnNoTable: 表が見つからないブック（ConvertTo-DesignBooks の 1 ブック。CSV は 1 行目を見出しの行にした同じ形）を渡して呼ぶ
+    #       スクリプトブロック。ほかの形の表として読んだら同じ形の行の一覧（読み取り結果も足す）を、読めなければ $null を返す
     #     戻り値: @{ Values = 項目 → 文字; Labels = 項目 → 見出し; Columns = 項目 → 列番号（CSV は 0）; File; Path; Sheet; Row;
     #             Column（Key の列）; SheetCount（そのブックで表のあるシートの数） }
-    param($Inputs, [hashtable] $Candidates, [string[]] $Fields, [object[]] $Need, [string[]] $Key, [string] $What, $Skip, [string] $Exclude, [switch] $NoRecurse, [switch] $NoExcel, $ReadLog)
+    param($Inputs, [hashtable] $Candidates, [string[]] $Fields, [object[]] $Need, [string[]] $Key, [string] $What, $Skip, [string] $Exclude, [switch] $NoRecurse, [switch] $NoExcel, $ReadLog, [scriptblock] $OnNoTable)
     $records = New-Object System.Collections.Generic.List[object]
     $test = {
         param($m)
@@ -1891,7 +2183,12 @@ function Read-HeaderRecords {
                     if (& $test $m) { $found.Add([pscustomobject]@{ Sheet = $sheetName; Grid = $grid; Map = $m }); break }
                 }
             }
-            if ($found.Count -eq 0) { Add-ReadLog $ReadLog $What $book.File '' $null 0 $null $Fields '表が見つかりません（必要な見出しの行がありません）' }
+            if ($found.Count -eq 0) {
+                $more = $null
+                if ($OnNoTable) { $more = & $OnNoTable $book }
+                if ($null -eq $more) { Add-ReadLog $ReadLog $What $book.File '' $null 0 $null $Fields '表が見つかりません（必要な見出しの行がありません）' }
+                else { foreach ($r in $more) { $records.Add($r) } }
+            }
             foreach ($entry in $found) {
                 $map = $entry.Map
                 $keyField = @($Key | Where-Object { $map[$_] })[0]
@@ -1916,6 +2213,19 @@ function Read-HeaderRecords {
         $map = @{}
         foreach ($f in $Fields) { foreach ($n in $names) { if (-not $map[$f] -and $plainCandidates[$f] -contains (ConvertTo-Label $n).TrimEnd('.')) { $map[$f] = $n } } }
         if (-not (& $test $map)) {
+            if ($OnNoTable) {
+                # 1 行目（見出し）と各行のセルを、Search-Excel の結果と同じ形にしてブックにする
+                $cells = New-Object System.Collections.Generic.List[object]
+                for ($j = 0; $j -le $rows.Count; $j++) {
+                    for ($i = 0; $i -lt $names.Count; $i++) {
+                        if ($j -eq 0) { $text = $names[$i] } else { $text = [string]$rows[$j - 1].($names[$i]) }
+                        if ($text -match '\S') { $cells.Add([pscustomobject]@{ File = $c.Name; Path = $c.FullName; Sheet = ''; Cell = ('{0}{1}' -f (ConvertTo-ColumnName ($i + 1)), ($j + 1)); Text = $text }) }
+                    }
+                }
+                $book = @((ConvertTo-DesignBooks $cells).Values)[0]
+                $more = & $OnNoTable $book
+                if ($null -ne $more) { foreach ($r in $more) { $records.Add($r) }; continue }
+            }
             Write-Warning ("{0}: {1}の列が見つかりません" -f $c.Name, $What)
             Add-ReadLog $ReadLog $What $c.Name '' $null 0 $null $Fields '表が見つかりません（必要な見出しの列がありません）'
             continue

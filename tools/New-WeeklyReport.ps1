@@ -279,7 +279,7 @@ if ($EffortLog) {
     # @() で包まない（New-Object で作った List を @() で包むと、PowerShell 7.4 では例外になる）
     $effortEntries = $log.Entries
     if ($log.Unreadable -gt 0) { Write-Warning ('工数が数として読めない行 {0} 件は数えていません' -f $log.Unreadable) }
-    if ($effortEntries.Count -eq 0) { Write-Warning '工数実績が見つかりませんでした（工数と、WBS 番号かタスクの見出しがある表を探します）' }
+    if ($effortEntries.Count -eq 0) { Write-Warning '工数実績が見つかりませんでした（工数と、WBS 番号かタスクの見出しがある表か、日付を列に並べた表を探します）' }
     else { $hasEffort = $true }
     $hoursOf = New-Object double[] ([math]::Max(1, $tasks.Count))
     foreach ($e in $effortEntries) { if ($e.Task -ge 0) { $hoursOf[$e.Task] += $e.Hours } }
