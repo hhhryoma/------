@@ -59,6 +59,8 @@ Test-Case 'Measure-Progress: -FillTemplate で遅延タスクと週ごとの完�
     Assert-Equal '3.2.1' $cells['02_遅延状況!B7'] '記入例の行は残す'
     Assert-Equal '1|1.2|テーブル設計|佐藤|2026/10/05|2026/10/09|2026/10/05|2026/10/16' ((@('A8', 'B8', 'C8', 'D8', 'E8', 'F8', 'G8', 'H8') | ForEach-Object { $cells["02_遅延状況!$_"] }) -join '|')
     Assert-Equal '2|1.3|IF 設計' ((@('A9', 'B9', 'C9') | ForEach-Object { $cells["02_遅延状況!$_"] }) -join '|')
+    # テンプレートの遅延日数は暦日（10/09 → 10/16 は 7）。このツールの遅れ（営業日）を備考に書く
+    Assert-Equal '遅延日数（暦日）|遅れ 4 営業日（土日・休日を除く）|遅れ 2 営業日（土日・休日を除く）' ((@('I6', 'N8', 'N9') | ForEach-Object { $cells["02_遅延状況!$_"] }) -join '|')
     Assert-Equal 'W2|2026/10/05|2|1' ((@('A7', 'B7', 'C7', 'D7') | ForEach-Object { $cells["08_週次モニタリング!$_"] }) -join '|')
     Assert-Equal 'W3|1|0' ((@('A8', 'C8', 'D8') | ForEach-Object { $cells["08_週次モニタリング!$_"] }) -join '|')
     # 遅延日数などの数式を開いたときに計算させる
@@ -150,6 +152,39 @@ Test-Case 'Measure-Progress: 基準日より後に終わったタスクは基準
     Assert-Equal @('1.2|1|0|完了|2026/10/21|2026/10/21', '1.3|0.8|1|遅延|2026/10/26|', '1.4|0.6|3|遅延|2026/10/27|', '2.1|0|-2|未着手|2026/10/28|') @($script:r | ForEach-Object { '{0}|{1}|{2}|{3}|{4:yyyy/MM/dd}|{5:yyyy/MM/dd}' -f $_.WbsNo, $_.Progress, $_.Delay, $_.Status, $_.ExpectedEnd, $_.DoneOn }) '進捗率は実績開始日（1.4 は予定開始日）から実績終了日までの営業日のうち、基準日までの割合'
     Assert-Match $text 'タスク 4 件（2026/10/23 時点。親のタスクは除く）: 完了 1・遅延 2・予定どおり 0・未着手 1'
     Assert-Match $text 'PV 15 / EV 13\.2 / BAC 20 / SPI 0\.88'
+}
+
+Test-Case 'Measure-Progress: 実績開始日が基準日より後のタスクは、基準日には進捗率 0 にする（記入された進捗率・完了の進捗率は後の状態のため）' {
+    $wbs = Join-Path (New-TestDir) 'WBS.xlsx'
+    New-SheetsBook $wbs ([ordered]@{ 'WBS' = @(@('WBS', 'タスク名', '担当者', '予定開始日', '予定終了日', '実績開始日', '実績終了日', '進捗率', '予定工数'),
+            @('4.1', '受注一覧の単体テスト', '山田', '2026/10/15', '2026/10/16', '2026/10/16', '', '30%', '2'),
+            @('4.2', '受注登録の単体テスト', '佐藤', '2026/10/16', '2026/10/19', '2026/10/22', '', '30%', '2'),
+            @('4.3', '受注詳細の単体テスト', '佐藤', '2026/10/19', '2026/10/20', '2026/10/21', '', '100%', '2')) })
+    $text = Get-HostText { $script:r = @(& $ProgressTool -Path $wbs -AsOf '2026-10-16') }
+    Assert-Equal @('4.1|0.3|1|遅延|False', '4.2|0|1|遅延|False', '4.3|0|0|未着手|False') @($script:r | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.WbsNo, $_.Progress, $_.Delay, $_.Status, $_.Done }) '10/22 に始めた 4.2 は 10/16 には 0%、10/21 に始めた 4.3 は 10/16 には完了していない'
+    Assert-Match $text 'PV 3 / EV 0\.6 / BAC 6 / SPI 0\.20'
+}
+
+Test-Case 'Measure-Progress: WBS のフォルダに置いた結果（-OutXlsx）・週次報告・リカバリ計画のテンプレート（書き込んだものも）は WBS として読まず、-Exclude のファイルも読まない' {
+    $dir = New-TestDir
+    $f = New-Wbs $dir
+    $null = & $ProgressTool -Path $f.Wbs -AsOf '2026-10-14' -Holidays $f.Holidays -FillTemplate $recoveryTemplate -OutFile (Join-Path $dir 'リカバリ計画_20261014.xlsx') -OutXlsx (Join-Path $dir '進捗_20261014.xlsx') 6>$null
+    $null = & (Join-Path $script:ToolsDir 'New-WeeklyReport.ps1') -Wbs $f.Wbs -AsOf '2026-10-14' -Holidays $f.Holidays -OutDir $dir 6>$null 3>$null
+    Copy-Item -LiteralPath $recoveryTemplate -Destination $dir
+    $text = Get-HostText { $script:r = @(& $ProgressTool -Path $dir -AsOf '2026-10-14' -Holidays $f.Holidays) }
+    Assert-Equal @('1.1', '1.2', '1.3', '2.1') @($script:r | ForEach-Object { $_.WbsNo }) 'WBS.xlsx のタスクだけ（記入例の 3.2.1 も読まない）'
+    Assert-Match $text 'タスク 4 件（2026/10/14 時点。親のタスクは除く）: 完了 1・遅延 2・予定どおり 0・未着手 1'
+    foreach ($name in @('リカバリ計画_20261014.xlsx', '進捗_20261014.xlsx', '週次報告_20261014.xlsx', 'スケジュール遅延リカバリ計画_テンプレート.xlsx')) {
+        Assert-Match $text ('読まなかったブック（進捗・週次報告の結果とリカバリ計画のテンプレート）: .*' + [regex]::Escape($name))
+    }
+
+    # ほかの WBS の写し（読まないもの）は -Exclude で除く
+    Copy-Item -LiteralPath $f.Wbs -Destination (Join-Path $dir 'WBS_旧.xlsx')
+    Assert-Equal 8 @(& $ProgressTool -Path $dir -AsOf '2026-10-14' 6>$null).Count '写しも読む'
+    Assert-Equal 4 @(& $ProgressTool -Path $dir -AsOf '2026-10-14' -Exclude (Join-Path $dir 'WBS_旧.xlsx') 6>$null).Count
+    $warnings = @()
+    $null = & $ProgressTool -Path (Join-Path $dir '進捗_20261014.xlsx') -AsOf '2026-10-14' -WarningVariable +warnings -WarningAction SilentlyContinue 6>$null
+    Assert-Match ($warnings -join ' ') 'WBS（タスク・予定開始・予定終了の見出しのある表）が見つかりませんでした。進捗・週次報告の結果とリカバリ計画のテンプレートは読みません: 進捗_20261014\.xlsx'
 }
 
 Test-Case 'Measure-Progress: 親のタスクはシートごとに見分ける（工程ごとのシートで番号を振り直した WBS）' {

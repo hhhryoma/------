@@ -193,8 +193,11 @@ try {
             if ($OutDir) { $reportArgs['OutDir'] = $OutDir; $dir = $OutDir }
             $title = '週次報告'
             if ($settings.Contains('Title')) { $title = $settings.Title }
+            # 報告の日: 設定の基準日（金曜日のような曜日なら、今日か、その前のいちばん近いその曜日）。無ければ今日
+            $asOf = Get-Date
+            if ($settings.Contains('AsOf')) { $asOf = $settings.AsOf }
             $null = & $tool @reportArgs
-            $name = '{0}_{1}' -f $title, (Get-Date).ToString('yyyyMMdd', [System.Globalization.CultureInfo]::InvariantCulture)
+            $name = '{0}_{1}' -f $title, $asOf.ToString('yyyyMMdd', [System.Globalization.CultureInfo]::InvariantCulture)
             $out = Join-Path $dir ($name + '.xlsx')
             # 報告の文章は、メールやチャットにそのまま貼れるようにクリップボードに写す
             $textFile = Join-Path $dir ($name + '.txt')

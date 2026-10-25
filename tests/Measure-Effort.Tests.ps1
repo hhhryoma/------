@@ -63,6 +63,23 @@ Test-Case 'Measure-Effort: 工数実績をタスクごとに集計し、WBS の�
     Assert-Equal '0|5|1.13|6.13' ((@('B', 'C', 'D', 'E') | ForEach-Object { $sato[$_] }) -join '|')
 }
 
+Test-Case 'Measure-Effort: 実績の合計と CPI は、タスクごとに丸める前の実績で出す（週次報告の実績・CPI と同じ値）' {
+    $dir = New-TestDir
+    $wbs = Join-Path $dir 'WBS.xlsx'
+    New-SheetsBook $wbs ([ordered]@{ 'WBS' = @(@('WBS', 'タスク名', '担当者', '予定開始日', '予定終了日', '進捗率', '予定工数'),
+            @('1.1', '画面設計', '山田', '2026/10/19', '2026/10/23', '10%', '1'),
+            @('1.2', 'テーブル設計', '山田', '2026/10/19', '2026/10/23', '10%', '1'),
+            @('1.3', 'IF 設計', '山田', '2026/10/19', '2026/10/23', '10%', '1')) })
+    $logDir = Join-Path $dir '工数'
+    New-Item -ItemType Directory -Path $logDir | Out-Null
+    @('日付,氏名,WBS,時間', '2026/10/19,山田,1.1,1', '2026/10/19,山田,1.2,1', '2026/10/19,山田,1.3,1') | Set-Content -LiteralPath (Join-Path $logDir '工数実績.csv') -Encoding UTF8
+    $text = Get-HostText { $script:r = @(& $EffortTool $logDir -Wbs $wbs -AsOf '2026-10-23') }
+    Assert-Equal @('0.13', '0.13', '0.13') @($script:r | ForEach-Object { [string]$_.Actual }) 'タスクごとの実績の表示は 0.01 に丸める（1 時間 = 0.125 人日）'
+    Assert-Match $text '予定工数のあるタスク 3 件: 予定 3 / 実績 0\.4（人日） / EV 0\.3 / CPI 0\.80' 'EV 0.3 ÷ 実績 0.375（丸めた 0.39 で割ると 0.77）'
+    $weekly = Get-HostText { & (Join-Path $script:ToolsDir 'New-WeeklyReport.ps1') -Wbs $wbs -EffortLog $logDir -AsOf '2026-10-23' | Out-Null }
+    Assert-Match $weekly '・予定工数のあるタスク 3 件: 予定 3 / 実績 0\.38（人日）・CPI 0\.80'
+}
+
 Test-Case 'Measure-Effort: 担当の列が無い人ごとの工数表はファイル名を担当にし、1時間30分・0:45・2h・人日の見出しを読む（WBS なし）' {
     $dir = New-TestDir
     @('日付,作業,工数', '2026/10/01,設計,1時間30分', '2026/10/01,レビュー,0:45', '2026/10/02,設計,2h', '2026/10/02,設計,たくさん') | Set-Content -LiteralPath (Join-Path $dir '田中.csv') -Encoding UTF8

@@ -144,6 +144,11 @@ Test-Case 'Invoke-SendTo: 品質評価は、案件のフォルダの品質評価
     $files = @(Get-ChildItem -LiteralPath (Join-Path $dir '週次報告') -File | ForEach-Object { $_.Name } | Sort-Object)
     $day = (Get-Date).ToString('yyyyMMdd')
     Assert-Equal @("週次報告_$day.txt", "週次報告_$day.xlsx") $files
+    # 設定の基準日（土日や翌週に作っても金曜日の報告にするときなど）の報告を作り、その日の名前の結果を開く
+    @('項目,値', '指摘管理表,レビュー', '基準日,2026/10/23') | Set-Content -LiteralPath (Join-Path $dir '週次報告の設定.csv') -Encoding UTF8
+    $text = Get-HostText { & $SendTo -Action Weekly -NoOpen -NoPause $dir | Out-Null }
+    Assert-Match $text '結果: .*週次報告_20261023\.xlsx'
+    Assert-True (Test-Path -LiteralPath (Join-Path $dir '週次報告/週次報告_20261023.txt')) '基準日の報告の文章'
     Assert-Throws { & $SendTo -Action Weekly -NoOpen -NoPause $dir (Join-Path $dir 'レビュー') 6>$null } '1 つ選んでください'
 
     # 品質評価の定性分析: × と △ の定性分析・対策が記入済みなら、依頼を作らずに知らせる（クリップボードを使わない）
