@@ -87,33 +87,48 @@ function Read-Findings {
     $records = Read-HeaderRecords -Inputs (Get-InputFiles $Paths "${Source}の指摘" -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
         -Need @('指摘内容', '設計書') -Key @('指摘内容') -What "${Source}の指摘" -Exclude $OutXlsx -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $readLog
     $list = New-Object System.Collections.Generic.List[object]
+    $lastDocument = @{}   # 表（ファイル・シート）ごとの上の行の設計書（結合したセルや、2 行目以降を空けた表の空欄を埋める）
     foreach ($rec in $records) {
         $v = $rec.Values
+        # 設計書が空欄の行は、同じ表の上の行の設計書（数えない行の設計書も引き継ぐ）
+        $tableKey = $rec.Path + '|' + $rec.Sheet
+        $documentText = ([string]$v['設計書']).Trim()
+        if ($documentText) { $lastDocument[$tableKey] = $documentText }
+        elseif ($lastDocument.ContainsKey($tableKey)) { $documentText = $lastDocument[$tableKey] }
         if (([string]$v['状態']) -match $excludedPattern) { continue }
-        # AI のレビュー結果は、判定が OK の行を指摘として数えない
-        if (([string]$v['判定']).Normalize($nfkc).Trim() -match '^(OK|○|〇)$') { continue }
+        # AI のレビュー結果は、判定が OK の行を指摘として数えない（人の指摘管理表の判定は、直したかの確認なので見ない）
+        if ($Source -eq 'AI' -and ([string]$v['判定']).Normalize($nfkc).Trim() -match '^(OK|○|〇)$') { continue }
         $place = ([string]$v['場所']).Normalize($nfkc).Trim()
         $sheet = ([string]$v['シート']).Trim()
         $row = 0; $col = 0
         $m = [regex]::Match($place, "^\s*'?(?<sheet>[^!']+?)'?\s*!\s*\`$?(?<col>[A-Za-z]{1,3})\`$?(?<row>\d+)")
-        $spaced = $false
-        if (-not $m.Success) { $m = [regex]::Match($place, '(?<![A-Za-z])\$?(?<col>[A-Za-z]{1,3})\$?(?<row>\d+)(?!\d)'); $spaced = $true }
+        # Word の設計書の「本文!段落 12」「本文!表 1 の 3 行目」「本文!テキストボックス 1」（Invoke-DesignReview.ps1 の場所）
+        if (-not $m.Success) { $m = [regex]::Match($place, '段落\s*(?<row>\d+)|表\s*(?<table>\d+)\s*の\s*(?<row>\d+)\s*行目|テキストボックス\s*(?<box>\d+)') }
+        if (-not $m.Success) {
+            # 「画面項目定義 M11」「画面項目定義（M11）」「IF001 B6」のように、シート名の後に書いたセルは、最後のセル番地（範囲・並びはその先頭）。
+            # 「IF001」「T01」のような 0 で始まる番号や、長い語の一部はセル番地とみなさない
+            $cells = [regex]::Matches($place, '(?<![A-Za-z0-9])\$?(?<col>[A-Za-z]{1,3})\$?(?<row>[1-9]\d{0,6})(?:\s*[:~〜\-、,・]\s*\$?[A-Za-z]{1,3}\$?[1-9]\d{0,6})*(?![A-Za-z0-9])')
+            if ($cells.Count -gt 0) { $m = $cells[$cells.Count - 1] }
+        }
         if ($m.Success) {
             if ($m.Groups['sheet'].Success) { $sheet = $m.Groups['sheet'].Value.Trim() }
-            # 「画面項目定義 M11」のように、シート名とセルを空白で区切って書いた場所
-            elseif ($spaced -and -not $sheet -and $m.Index -gt 0) { $sheet = $place.Substring(0, $m.Index).Trim() }
-            $row = [int]$m.Groups['row'].Value
-            $col = Get-ColumnIndex $m.Groups['col'].Value.ToUpperInvariant()
+            # シート名（Word は本文などの部分）の後に、空白・かっこ・コロンなどで区切って書いた場所
+            elseif (-not $sheet -and $m.Index -gt 0) { $sheet = $place.Substring(0, $m.Index) -replace '[\s!:(\[{<【「『〔〈《]+$', '' }
+            if ($m.Groups['row'].Success) { $row = [int]$m.Groups['row'].Value }
+            if ($m.Groups['col'].Success) { $col = Get-ColumnIndex $m.Groups['col'].Value.ToUpperInvariant() }
+            # Word の表の行は同じ表の行と、テキストボックスは同じテキストボックスとだけ比べる（段落の番号とは別に数える）
+            if ($sheet -and $m.Groups['table'].Success) { $sheet = '{0}!表{1}' -f $sheet, $m.Groups['table'].Value }
+            elseif ($sheet -and $m.Groups['box'].Success) { $sheet = '{0}!テキストボックス{1}' -f $sheet, $m.Groups['box'].Value; $row = 1 }
         }
         elseif (-not $sheet -and $place) { $sheet = $place }
         # 場所は「シート!セル」の形にそろえる（シートの列に書いた指摘も）
         $location = $place
         if ($place -and ([string]$v['シート']).Trim() -and $place -notmatch '!') { $location = '{0}!{1}' -f ([string]$v['シート']).Trim(), $place }
         if (-not $location -and $sheet) { $location = $sheet }
-        $document = ([string]$v['設計書']).Trim()
+        $document = $documentText
         if ($document -match '\.(xlsx|xlsm|xls|xlsb|pdf)$') { $document = [System.IO.Path]::GetFileNameWithoutExtension($document) }
         $list.Add([pscustomobject]@{
-            Source = $Source; Document = $document; DocKey = (ConvertTo-NameKey $v['設計書']); Content = ([string]$v['指摘内容']).Trim()
+            Source = $Source; Document = $document; DocKey = (ConvertTo-NameKey $documentText); Content = ([string]$v['指摘内容']).Trim()
             Location = $location; SheetKey = (ConvertTo-Label $sheet).ToUpperInvariant(); Row = $row; Col = $col
             PointId = ([string]$v['観点ID']).Trim(); Category = ([string]$v['分類']).Trim(); Severity = ([string]$v['重要度']).Trim()
             # Invoke-DesignReview.ps1 のツールの確認の指摘（判定元が「ツール（…）」）

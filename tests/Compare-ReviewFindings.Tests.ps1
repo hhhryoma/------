@@ -105,6 +105,66 @@ Test-Case 'Compare-ReviewFindings: 人だけの指摘と AI だけの指摘か�
     Assert-Equal 4 $book.Rows.Count '判定基準を見直す案が無い'
 }
 
+Test-Case 'Compare-ReviewFindings: 判定が OK の行を数えないのは AI のレビュー結果だけで、人の指摘管理表の判定（修正の確認）が OK の指摘は数える' {
+    $dir = New-TestDir
+    $scr = 'DD02_画面設計書_SCR001_受注一覧'
+    @('設計書,指摘内容,場所,判定', "$scr.xlsx,受注ステータスの桁数が無い,画面項目定義!AB11,NG", "$scr.xlsx,-,,OK") | Set-Content -LiteralPath (Join-Path $dir 'ai.csv') -Encoding UTF8
+    @('設計書,指摘内容,場所,対応状況,判定',
+        "$scr,受注ステータスの桁数が未記入,画面項目定義!AB12,完了,OK",
+        "$scr,画面の目的が不明確,画面概要!C5,完了,OK") | Set-Content -LiteralPath (Join-Path $dir 'human.csv') -Encoding UTF8
+    $r = @(& $CompareFindings (Join-Path $dir 'ai.csv') (Join-Path $dir 'human.csv') 6>$null)
+    Assert-Equal @('一致|場所|画面項目定義!AB11|画面項目定義!AB12', '人だけ|||画面概要!C5') @($r | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Status, $_.Basis, $_.AiLocation, $_.HumanLocation }) 'AI の判定が OK の行は数えない'
+}
+
+Test-Case 'Compare-ReviewFindings: 設計書が空欄の行（結合したセルなど）は、同じシートの上の行の設計書とみなす' {
+    $dir = New-TestDir
+    $scr = 'DD02_画面設計書_SCR001_受注一覧'
+    # 対象成果物を B2:B4 で結合する（値は左上の B2 にだけある）。別のシートの空欄は、前のシートの設計書を引き継がない
+    $book = Join-Path $dir '指摘管理表.xlsx'
+    New-SheetsBook -Path $book -Sheets ([ordered]@{
+            '指摘' = @(
+                @('No', '対象成果物', 'シート', '箇所', '指摘内容', '対応状況'),
+                @('1', $scr, '画面項目定義', 'AB12', '受注ステータスの桁数が未記入', '完了'),
+                @('2', '', 'イベント定義', 'J20', '「押下」と「クリック」が混在', '完了'),
+                @('3', '', '画面概要', 'C5', '画面の目的が不明確', '完了'))
+            '指摘2' = @(
+                @('No', '対象成果物', 'シート', '箇所', '指摘内容', '対応状況'),
+                @('1', '', 'イベント定義', 'J21', 'ボタン名の誤り', '完了'))
+        })
+    Edit-ZipText -Path $book -Name 'xl/worksheets/sheet1.xml' -Change { param($t) $t -replace '</sheetData>', '</sheetData><mergeCells count="1"><mergeCell ref="B2:B4"/></mergeCells>' }
+    @('設計書,指摘内容,場所', "$scr.xlsx,受注ステータスの桁数が無い,画面項目定義!AB11", "$scr.xlsx,「押下」と「クリック」が混在している,イベント定義!J20") | Set-Content -LiteralPath (Join-Path $dir 'ai.csv') -Encoding UTF8
+    $r = @(& $CompareFindings (Join-Path $dir 'ai.csv') $book 6>$null)
+    Assert-Equal @(
+        '|人だけ||イベント定義!J21',
+        "$scr|一致|イベント定義!J20|イベント定義!J20",
+        "$scr|一致|画面項目定義!AB11|画面項目定義!AB12",
+        "$scr|人だけ||画面概要!C5") @($r | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Document, $_.Status, $_.AiLocation, $_.HumanLocation })
+}
+
+Test-Case 'Compare-ReviewFindings: 「IF001 B6」「画面項目定義（AB12）」「画面項目定義：AB12」や、Word の「本文!段落 12」「本文!表 1 の 3 行目」の場所も、場所の近さで対応付ける' {
+    $dir = New-TestDir
+    # 設計書ごとに AI と人の指摘を 1 件ずつ。指摘内容は似せず、場所だけで対応付くかを見る
+    $cases = @(
+        , @('01_IF定義書', 'IF001!B5', 'IF001 B6')                           # 0 で始まる ID はセル番地ではない
+        , @('02_テーブル定義書', 'T01!E7', 'T01 E8')
+        , @('03_IF定義書', 'IF1!B5', 'IF1 B6')                               # シート名の後の、最後のセル番地
+        , @('04_画面設計書', '画面項目定義!AB11', '画面項目定義（AB12）')
+        , @('05_画面設計書', '画面項目定義!AB11', '画面項目定義：AB12')
+        , @('06_画面設計書', '画面項目定義!AB11', '画面項目定義 AB12:AB15')   # 範囲は先頭のセル
+        , @('07_基本設計書', '本文!段落 12', '本文!段落12')
+        , @('08_基本設計書', '本文!表 1 の 3 行目', '本文!表 1 の 4 行目')
+        , @('09_基本設計書', '本文!表 2 の 3 行目', '本文!表 1 の 3 行目'))   # 別の表の行は近くない
+    $aiLines = @('設計書,指摘内容,場所'); $humanLines = @('設計書,指摘内容,場所')
+    $n = 0
+    foreach ($c in $cases) { $n++; $aiLines += ('{0},AI の指摘その{1},{2}' -f $c[0], $n, $c[1]); $humanLines += ('{0},全く違う書き方{1},{2}' -f $c[0], $n, $c[2]) }
+    $aiLines | Set-Content -LiteralPath (Join-Path $dir 'ai.csv') -Encoding UTF8
+    $humanLines | Set-Content -LiteralPath (Join-Path $dir 'human.csv') -Encoding UTF8
+    $r = @(& $CompareFindings (Join-Path $dir 'ai.csv') (Join-Path $dir 'human.csv') 6>$null)
+    Assert-Equal @(
+        '01_IF定義書|一致|場所', '02_テーブル定義書|一致|場所', '03_IF定義書|一致|場所', '04_画面設計書|一致|場所', '05_画面設計書|一致|場所', '06_画面設計書|一致|場所',
+        '07_基本設計書|一致|場所', '08_基本設計書|一致|場所', '09_基本設計書|AI だけ|', '09_基本設計書|人だけ|') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Document, $_.Status, $_.Basis })
+}
+
 Test-Case 'Compare-ReviewFindings: Get-Help でヘルプが表示される' {
     $h = Get-Help $CompareFindings
     Assert-Match $h.Synopsis 'AI'
