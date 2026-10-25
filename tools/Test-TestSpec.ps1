@@ -39,6 +39,8 @@ $nfkc = [System.Text.NormalizationForm]::FormKC
 $errorKindPattern = '異常|エラー|準正常|例外|NG系|不正'
 $errorTextPattern = 'エラー|[EW]\d{4}|不正|できない|されない|超え|超過|未入力|異常|警告|拒否|失敗'
 $boundaryPattern = '桁|文字|最大|最小|上限|下限|境界|超え|超過|オーバー|ちょうど|未満|以上|以下'
+# 区分の列の値とみなす言葉（値がどれもこのどれかを含むときだけ区分の列として使う。観点・分類の列の「必須チェック」などは区分ではない）
+$kindPattern = '正常|境界|OK系|' + $errorKindPattern
 # 必須項目の未入力のケース、型（日付・数値・半角）の不正な値のケースとみなす言葉
 $requiredPattern = '未入力|入力なし|入力しない|空欄|空白|空の|空で|ブランク|null|必須'
 $typePatterns = [ordered]@{
@@ -88,6 +90,13 @@ function Get-Text {
     return ([string]$Case.Values[$Field]).Normalize($nfkc).Trim()
 }
 
+function Get-CaseText {
+    #     ケースの Fields の列の文字を、Fields の順につなぐ（全角・半角はそろえる。Values はハッシュテーブルで、並びが実行ごとに変わるため）。
+    #     同じ列を 2 つの項目として読むこともあるので、同じ文字は 1 回だけ入れる
+    param($Case, [string[]] $Fields)
+    return (@($Fields | Where-Object { $Case.Values.ContainsKey($_) } | ForEach-Object { $Case.Values[$_] } | Select-Object -Unique) -join ' ').Normalize($nfkc)
+}
+
 $seenIds = @{}
 $seenContents = @{}
 foreach ($c in $cases) {
@@ -132,7 +141,9 @@ $functions = New-Object System.Collections.Generic.List[object]
 foreach ($g in @($cases | Group-InOrder Key)) {
     $group = @($g.Group)
     $first = $group[0]
-    $hasKind = [bool]$first.Place.Labels['区分']
+    # 区分の列は、値がどれも正常・異常など（$kindPattern）のときだけ使う。観点の列を区分として読んだときや空欄のときは、期待結果の言葉から推定する
+    $kinds = @($group | ForEach-Object { Get-Text $_ '区分' } | Where-Object { $_ })
+    $hasKind = $first.Place.Labels['区分'] -and $kinds.Count -gt 0 -and @($kinds | Where-Object { $_ -notmatch $kindPattern }).Count -eq 0
     $errors = @($group | Where-Object {
             if ($hasKind) { (Get-Text $_ '区分') -match $errorKindPattern }
             else { ('{0} {1} {2}' -f (Get-Text $_ '期待結果'), (Get-Text $_ 'テスト内容'), (Get-Text $_ '入力値')) -match $errorTextPattern }
@@ -177,25 +188,29 @@ if ($DesignPath) {
     $messages = $design.Messages
     # 出力だけの項目（入出力が O）は入力のテストが無い
     foreach ($item in $design.Items) { if ($item.Input) { $inputItems.Add($item) } }
-    # 画面ごとの項目名（揺れとみなさないため）
+    # 画面ごとの項目名（揺れとみなさないため）。画面 ID は、ケースの機能名などと同じく全角・半角をそろえて比べる（ＳＣＲ００１ も SCR001）
     $screenItems = @{}
     foreach ($item in $inputItems) {
-        if (-not $screenItems.ContainsKey($item.Screen)) { $screenItems[$item.Screen] = New-Object 'System.Collections.Generic.HashSet[string]' }
-        [void]$screenItems[$item.Screen].Add((ConvertTo-Label $item.Item).ToUpperInvariant())
+        $screen = $item.Screen.Normalize($nfkc)
+        if (-not $screenItems.ContainsKey($screen)) { $screenItems[$screen] = New-Object 'System.Collections.Generic.HashSet[string]' }
+        [void]$screenItems[$screen].Add((ConvertTo-Label $item.Item).ToUpperInvariant())
     }
+    # 未入力・不正な値・桁数などの言葉と数字を探す列（テストID・予定日などの数字を、桁数や日付と読まないよう、ほかの列は見ない）
+    $textFields = @('テスト内容', '期待結果', '手順', '前提条件', '入力値', '区分')
     foreach ($item in $inputItems) {
-        $screenRx = New-Object System.Text.RegularExpressions.Regex(('(?<![A-Za-z0-9]){0}(?![A-Za-z0-9])' -f [regex]::Escape($item.Screen)), 'IgnoreCase')
+        $screen = $item.Screen.Normalize($nfkc)
+        $screenRx = New-Object System.Text.RegularExpressions.Regex(('(?<![A-Za-z0-9]){0}(?![A-Za-z0-9])' -f [regex]::Escape($screen)), 'IgnoreCase')
         $screenCases = @($cases | Where-Object { $screenRx.IsMatch(('{0} {1} {2}' -f $_.Function, $_.Place.File, $_.Place.Sheet).Normalize($nfkc)) })
         if ($screenCases.Count -eq 0) { continue }
         $itemLabel = ConvertTo-Label $item.Item
-        # その項目の名前が出てくるケースの文字
-        $itemTexts = @($screenCases | ForEach-Object { (@($_.Values.Values) -join ' ').Normalize($nfkc) } | Where-Object { (ConvertTo-Label $_).Contains($itemLabel) })
+        # その項目の名前が出てくるケースの、確認内容・期待結果・手順などの列（$textFields）の文字
+        $itemTexts = @($screenCases | Where-Object { (ConvertTo-Label (Get-CaseText $_ $fields)).Contains($itemLabel) } | ForEach-Object { Get-CaseText $_ $textFields })
         $where = '{0} {1} {2} 行目' -f $item.File, $item.Sheet, $item.Row
 
         # 項目名の揺れ: 設計書の項目名と違う書き方（受注番号 → 受注No など）がケースに出てくる
         $upper = $itemLabel.ToUpperInvariant()
         foreach ($variant in (Get-NameVariants $upper)) {
-            if ($screenItems[$item.Screen].Contains($variant)) { continue }
+            if ($screenItems[$screen].Contains($variant)) { continue }
             # 別の書き方が設計書の項目名より短いときは、項目名の部分を除いて探す（「顧客名称」の中の「顧客名」を揺れとしない）
             $hit = @($screenCases | Where-Object {
                     $t = (ConvertTo-Label (@($_.Values.Values) -join ' ').Normalize($nfkc)).ToUpperInvariant()
@@ -239,9 +254,9 @@ if ($DesignPath) {
 
 
 function Test-MessageText {
-    #     テストに書いた文言が、メッセージ一覧の文言（{0} などは何かの文字）と合うか。全角・半角、空白と最後の「。」の違いは見ない
+    #     テストに書いた文言が、メッセージ一覧の文言（{0} などは何かの文字）と合うか。全角・半角、空白・セル内の改行（↵）と最後の「。」の違いは見ない
     param([string] $Template, [string] $Text)
-    $strip = { param($t) ($t.Normalize($nfkc) -replace '\s', '').TrimEnd('。') }
+    $strip = { param($t) ($t.Normalize($nfkc) -replace '[\s↵]', '').TrimEnd('。') }
     $pattern = [regex]::Escape((& $strip $Template)) -replace '\\\{\d+\}', '.+?'
     return (& $strip $Text) -match ('^' + $pattern + '$')
 }
@@ -253,8 +268,8 @@ if ($messages.Count -gt 0) {
     foreach ($c in $cases) {
         $field = ''
         if ($c.Values.ContainsKey('期待結果')) { $field = '期待結果' }
-        # 同じ列を 2 つの項目として読むこともあるので、同じ文字は 1 回だけ見る
-        $text = (@($c.Values.Values | Select-Object -Unique) -join ' ').Normalize($nfkc)
+        # ケースのすべての列の文字（項目の順。指摘の並びと、文言の違いに書くメッセージ ID の並びが実行ごとに変わらないように）
+        $text = Get-CaseText $c $fields
         $ids = @($idRx.Matches($text) | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique)
         foreach ($id in @($ids | Where-Object { -not $messages.ContainsKey($_) })) {
             Add-Issue '警告' 'メッセージIDが一覧に無い' $c $field ("メッセージ ID {0} がメッセージ一覧にありません（誤記か、一覧への追加漏れ）" -f $id)
@@ -316,7 +331,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 #       期待結果が空・あいまいな期待結果（「正しく」「適切に」「仕様どおり」など）・手順が空
 #       テストIDの重複・同じ内容のケース（前提条件・手順・入力値・期待結果がすべて同じ）・結果の値が読めない
-#       異常系が少ない機能（区分の列、無ければ期待結果の言葉から推定。-MinErrorRatio 未満）
+#       異常系が少ない機能（区分の列（値がどれも正常・異常などのとき）、無ければ期待結果の言葉から推定。-MinErrorRatio 未満）
 #       境界値のテストが無い入力項目（-DesignPath の画面項目定義の桁数。項目名と、桁・文字・最大などの言葉か桁数の数字が出てくるケースを探す）
 #       必須のテストが無い入力項目（必須 ○ の項目。項目名と、未入力・空欄などの言葉が出てくるケースを探す）
 #       型のテストが無い入力項目（型が日付・数値・半角の項目。項目名と、その型として正しくない値の言葉が出てくるケースを探す）
@@ -324,6 +339,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       メッセージ一覧に無いメッセージ ID と、メッセージ一覧と違う文言（-DesignPath のメッセージ一覧。「」で書いた文言を比べる）
 #       項目名の揺れ（画面のケースに、画面項目定義の項目名の別の書き方（受注番号 → 受注No・顧客コード → 顧客CD など）が出てくる）
 #
+#     必須・型・境界値・コード値の言葉と桁数の数字は、ケースの確認内容・期待結果・手順・前提条件・入力値・区分の列から探します（テスト ID・予定日などの数字は見ません）。
 #     見出しの候補は tools\test-quality\見出し.csv（Measure-TestQuality.ps1 と同じ）で足せます。
 #
 # .PARAMETER Path
