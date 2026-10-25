@@ -79,9 +79,9 @@ function Test-InRange {
 }
 
 function Format-Short {
-    #     一覧の文章に載せる長さにする（改行と続く空白は 1 つの空白に）
+    #     一覧の文章に載せる長さにする（改行と続く空白は 1 つの空白に。Excel のセル内の改行は Search-Excel が ↵ にしている）
     param([string] $Text, [int] $Max = 40)
-    $t = ([string]$Text -replace '\s+', ' ').Trim()
+    $t = ([string]$Text -replace '[\s↵]+', ' ').Trim()
     if ($t.Length -gt $Max) { $t = $t.Substring(0, $Max) + '…' }
     return $t
 }
@@ -96,14 +96,14 @@ function Format-Day {
 # ---------------------------------------------------------------- 担当者
 
 
-# 担当者の名前は、全角・半角と空白の違いをそろえて同じ人とみなす（表示は最初に出てきた書き方）
+# 担当者の名前は、全角・半角、英字の大文字・小文字と空白の違いをそろえて同じ人とみなす（Get-OwnerKey。表示は最初に出てきた書き方）
 $ownerNames = @{}
 $noOwner = '（担当なし）'
-function Get-OwnerKey {
+function Add-OwnerName {
+    #     担当者の名前の比べる形（Get-OwnerKey）を返す。初めて出てきた人なら、この書き方を表示の名前にする
     param([string] $Name)
-    $key = (([string]$Name).Normalize($nfkc) -replace '\s', '')
-    if (-not $key) { return '' }
-    if (-not $ownerNames.ContainsKey($key)) { $ownerNames[$key] = ([string]$Name).Trim() }
+    $key = Get-OwnerKey $Name
+    if ($key -and -not $ownerNames.ContainsKey($key)) { $ownerNames[$key] = ([string]$Name).Trim() }
     return $key
 }
 function Get-OwnerName {
@@ -127,7 +127,7 @@ if ($Wbs) {
     if ($NoExcel) { $progressArgs['NoExcel'] = $true }
     $tasks = @(& (Join-Path $PSScriptRoot 'Measure-Progress.ps1') @progressArgs 6>$null)
 }
-foreach ($t in $tasks) { $t | Add-Member -NotePropertyName OwnerKey -NotePropertyValue (Get-OwnerKey $t.Owner) -Force }
+foreach ($t in $tasks) { $t | Add-Member -NotePropertyName OwnerKey -NotePropertyValue (Add-OwnerName $t.Owner) -Force }
 $delayed = @($tasks | Where-Object { $_.Status -eq '遅延' } | Sort-Object @{ e = { $_.Delay }; Descending = $true }, PlanEnd)
 $doneInPeriod = @($tasks | Where-Object { $_.Done -and (Test-InRange $_.DoneOn $Since $AsOf) } | Sort-Object DoneOn, WbsNo)
 $plannedInPeriod = @($tasks | Where-Object { Test-InRange $_.PlanEnd $Since $AsOf })
@@ -164,7 +164,7 @@ function Add-Issue {
     if ($Record.Sheet) { $cell = '{0}{1}' -f (ConvertTo-ColumnName $Record.Column), $Record.Row } else { $cell = '{0} 行目' -f $Record.Row }
     $open = -not $Closed
     $issues.Add([pscustomobject]@{
-            Kind = $Kind; Id = $Id; Target = $Target; Content = $Content; Severity = $Severity; Owner = $Owner; OwnerKey = (Get-OwnerKey $Owner); Status = $Status
+            Kind = $Kind; Id = $Id; Target = $Target; Content = $Content; Severity = $Severity; Owner = $Owner; OwnerKey = (Add-OwnerName $Owner); Status = $Status
             Opened = $Opened; Due = $Due; ClosedOn = $ClosedOn; Closed = $Closed
             Overdue = ($open -and $null -ne $Due -and $Due -lt $AsOf); DueSoon = ($open -and (Test-InRange $Due $AsOf $nextEnd))
             OpenedInPeriod = (Test-InRange $Opened $Since $AsOf); ClosedInPeriod = ($Closed -and (Test-InRange $ClosedOn $Since $AsOf))
@@ -299,7 +299,7 @@ if ($EffortLog) {
     $effortWeek = (@($effortEntries | Where-Object { Test-InRange $_.Date $Since $AsOf }) | Measure-Object Hours -Sum).Sum
     $byOwner = @{}
     foreach ($e in $effortEntries) {
-        $key = Get-OwnerKey $e.Owner
+        $key = Add-OwnerName $e.Owner
         if (-not $byOwner.ContainsKey($key)) { $byOwner[$key] = [pscustomobject]@{ Owner = (Get-OwnerName $key); Week = 0.0; Total = 0.0 } }
         $byOwner[$key].Total += $e.Hours
         if (Test-InRange $e.Date $Since $AsOf) { $byOwner[$key].Week += $e.Hours }
@@ -809,5 +809,5 @@ if ($HistoryCsv) {
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに ExcelTools.psm1・Search-Excel.ps1・Measure-Progress.ps1 が必要です。
-#     担当者の名前は、全角・半角と空白の違いをそろえて同じ人とみなします（「山田」と「山田 太郎」は別の人になります）。
+#     担当者の名前は、全角・半角、英字の大文字・小文字と空白の違いをそろえて同じ人とみなします（「山田」と「山田 太郎」は別の人になります）。
 #     今週の完了は、WBS の実績終了日・表の完了日で数えます（日付の無い完了は数えません）。

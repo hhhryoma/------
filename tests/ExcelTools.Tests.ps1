@@ -153,6 +153,16 @@ Test-Case 'ExcelTools: 版数は「第1.1版」を読み「第2回」は読ま�
     Assert-True ($null -eq (ConvertTo-DateValue 'VER8.1.2')) '英字の後ろの R・H・S は和暦にしない'
 }
 
+Test-Case 'ExcelTools: ConvertTo-DateValue は、年の無い日付を AsOf の前後半年の年にし（年明けの 12/28 は前の年）、後ろの曜日（(木)・（木）・(Thu)）も読む' {
+    $read = {
+        param([string] $Text, [string] $AsOf)
+        $d = ConvertTo-DateValue $Text ([datetime]$AsOf)
+        if ($d) { $d.ToString('yyyy/MM/dd', [System.Globalization.CultureInfo]::InvariantCulture) } else { "（読めない: $Text）" }
+    }
+    Assert-Equal @('2026/12/28', '2027/01/07', '2027/01/07', '2027/01/07', '2027/06/30', '2026/07/15') @(@('12/28', '1/7(木)', '1月7日（木）', '1/7 (Thu)', '6/30', '7/15') | ForEach-Object { & $read $_ '2027-01-08' }) '年明け（基準日 2027/01/08）'
+    Assert-Equal @('2027/01/05', '2026/10/01') @(@('1/5(火)', '10/1') | ForEach-Object { & $read $_ '2026-12-20' }) '年末（基準日 2026/12/20）'
+}
+
 Test-Case 'ExcelTools: Resolve-PhaseName は、「コードレビュー」のように別名に書いた名前はそのまま読み、「詳細設計レビュー」は「レビュー」を除いて読む' {
     $phases = Read-PhaseList (Join-Path $script:ToolsDir 'test-quality/工程.csv')
     $names = @(@('コードレビュー', '詳細設計レビュー', 'DDレビュー', '製造工程', 'UT', '設計', '') | ForEach-Object { $p = Resolve-PhaseName $phases $_; if ($p) { $p.Name } else { '（読めない）' } })

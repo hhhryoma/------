@@ -1552,13 +1552,18 @@ function Measure-SourceLines {
 
 
 function ConvertTo-Hours {
-    #     工数の文字（1.5・1.5h・1時間30分・1:30・90分）を時間にする（読めなければ $null）
+    #     工数の文字（1.5・1.5h・1時間30分・1:30・90分）を時間にする（読めなければ $null）。
+    #     時刻・経過時間の書式のセルは Search-Excel が「07:30:00」「31:15」の形で返すので、秒も読む
     param([string] $Text)
     $t = ([string]$Text).Normalize($script:Nfkc).Trim() -replace '[,\s]', ''
     if (-not $t) { return $null }
     $invariant = [System.Globalization.CultureInfo]::InvariantCulture
-    $m = [regex]::Match($t, '^(\d+):(\d{1,2})$')
-    if ($m.Success) { return [double]$m.Groups[1].Value + [double]$m.Groups[2].Value / 60 }
+    $m = [regex]::Match($t, '^(\d+):(\d{1,2})(?::(\d{1,2}))?$')
+    if ($m.Success) {
+        $h = [double]$m.Groups[1].Value + [double]$m.Groups[2].Value / 60
+        if ($m.Groups[3].Success) { $h += [double]$m.Groups[3].Value / 3600 }
+        return $h
+    }
     $m = [regex]::Match($t, '^(?:(\d+(?:\.\d+)?)時間)?(?:(\d+(?:\.\d+)?)分)?$')
     if ($m.Success -and ($m.Groups[1].Success -or $m.Groups[2].Success)) {
         $h = 0.0
@@ -1575,15 +1580,29 @@ function ConvertTo-Hours {
 function Read-EffortLog {
     #     工数実績の表（1 行が日付・担当・WBS 番号かタスク・工数）を読む（Measure-Effort.ps1・New-WeeklyReport.ps1）。
     #       Headers: 見出しの候補の CSV。Tasks: Measure-Progress.ps1 のタスク（WBS 番号、無ければタスク名で対応付ける）
-    #       工数は時間で読む（見出しに「人日」があれば HoursPerDay を掛ける）。AsOf より後の日付の行は数えない
+    #       WBS 番号は番号の部分で比べる（「ＷＢＳ１．１」「No.1.1」「1.1 画面設計」「1-1」は 1.1）。同じ番号のタスクが複数あれば
+    #       （シートごとに番号を振り直した WBS など）タスク名で選び、決まらなければ対応付けずに警告する
+    #       工数は時間で読む（見出しに「人日」があれば HoursPerDay を掛ける）。AsOf より後の日付の行と、合計・小計の行は数えない
     #       日付・担当が空の行は同じ表の上の行のもの。担当の列が無い表は、シート名（表が複数のブック）かファイル名を担当にする
     #     戻り値: @{ Entries = @(@{ Date; Owner; WbsNo; TaskName; Hours; Task（Tasks の位置。対応しなければ -1）; Place }); Unreadable; Future }
     param($Inputs, [string] $Headers, $Tasks, [datetime] $AsOf, [double] $HoursPerDay = 8, $Skip, [string] $Exclude, [switch] $NoRecurse, [switch] $NoExcel, $ReadLog)
-    $byWbs = @{}
+    # WBS 番号の比べる形（番号の前の WBS・No.・# と、番号の後ろのタスク名などを除く。番号で始まらなければ全体）
+    $wbsKey = {
+        param([string] $Text)
+        $t = ([string]$Text).Normalize($script:Nfkc).Trim()
+        $m = [regex]::Match($t, '^(?:(?:WBS|No|#)[\s.:#\-_]*)*((?>\d+(?:[.\-_]\d+)*))(?![0-9A-Za-z])', 'IgnoreCase')
+        if ($m.Success) { $t = $m.Groups[1].Value }
+        return ($t -replace '[\-_]', '.').TrimEnd('.')
+    }
+    $byWbs = @{}   # WBS 番号 → タスクの位置の一覧（同じ番号のタスクが複数あれば、すべて）
     $byName = @{}
     $list = @($Tasks)
     for ($i = 0; $i -lt $list.Count; $i++) {
-        if ($list[$i].WbsNo) { $byWbs[$list[$i].WbsNo] = $i }
+        $no = & $wbsKey $list[$i].WbsNo
+        if ($no) {
+            if (-not $byWbs.ContainsKey($no)) { $byWbs[$no] = New-Object System.Collections.Generic.List[int] }
+            $byWbs[$no].Add($i)
+        }
         $k = ConvertTo-NameKey $list[$i].Task
         if ($byName.ContainsKey($k)) { $byName[$k] = -1 } else { $byName[$k] = $i }   # 同じ名前のタスクが複数あれば名前では対応付けない
     }
@@ -1592,9 +1611,14 @@ function Read-EffortLog {
         -Key @('工数') -What '工数実績' -Skip $Skip -Exclude $Exclude -NoRecurse:$NoRecurse -NoExcel:$NoExcel -ReadLog $ReadLog
     $entries = New-Object System.Collections.Generic.List[object]
     $unreadable = 0; $future = 0
+    $ambiguous = New-Object System.Collections.Generic.List[string]; $ambiguousRows = 0
     $last = @{}   # 表ごとの前の行の日付・担当（結合したセルや、同じ日の 2 行目以降の空欄を埋める）
     foreach ($rec in $records) {
         $v = $rec.Values
+        # 合計・小計の行（日付・担当・WBS 番号・タスクの欄が「合計」「小計」「計」「Total」など。「設計」は違う）は数えない
+        $isTotal = $false
+        foreach ($f in @('日付', '担当', 'WBS番号', 'タスク')) { if ((ConvertTo-Label $v[$f]) -match '^(総?合計|小計|総計|計|(sub|grand)?total)$') { $isTotal = $true; break } }
+        if ($isTotal) { continue }
         $hours = ConvertTo-Hours $v['工数']
         if ($null -eq $hours) { $unreadable++; continue }
         if ($rec.Labels['工数'] -match '人日') { $hours = $hours * $HoursPerDay }
@@ -1608,10 +1632,23 @@ function Read-EffortLog {
         elseif ($rec.Labels['担当']) { $owner = $last[$table].Owner }
         elseif ($rec.SheetCount -gt 1) { $owner = $rec.Sheet }
         else { $owner = [System.IO.Path]::GetFileNameWithoutExtension($rec.File) }
-        $wbsNo = ((([string]$v['WBS番号']).Normalize($script:Nfkc).Trim() -replace '[\-_]', '.').TrimEnd('.'))
+        $wbsNo = & $wbsKey $v['WBS番号']
         $taskName = ([string]$v['タスク']).Trim()
         $task = -1
-        if ($wbsNo -and $byWbs.ContainsKey($wbsNo)) { $task = $byWbs[$wbsNo] }
+        if ($wbsNo -and $byWbs.ContainsKey($wbsNo)) {
+            $found = $byWbs[$wbsNo]
+            if ($found.Count -eq 1) { $task = $found[0] }
+            else {
+                # 同じ番号のタスクが複数あれば、タスク名の同じものを選ぶ。決まらなければ、どれかに決めつけない
+                $nameKey = ConvertTo-NameKey $taskName
+                $same = @($found | Where-Object { $taskName -and (ConvertTo-NameKey $list[$_].Task) -eq $nameKey })
+                if ($same.Count -eq 1) { $task = $same[0] }
+                else {
+                    $ambiguousRows++
+                    if (-not $ambiguous.Contains($wbsNo)) { $ambiguous.Add($wbsNo) }
+                }
+            }
+        }
         elseif ($taskName -and $byName.ContainsKey((ConvertTo-NameKey $taskName))) { $task = $byName[(ConvertTo-NameKey $taskName)] }
         $cell = '{0} 行目' -f $rec.Row
         if ($rec.Sheet) { $cell = '{0}{1}' -f (ConvertTo-ColumnName $rec.Column), $rec.Row }
@@ -1619,6 +1656,9 @@ function Read-EffortLog {
                 Date = $date; Owner = $owner; WbsNo = $wbsNo; TaskName = $taskName; Hours = $hours; Task = $task
                 Place = [pscustomobject]@{ File = $rec.File; Path = $rec.Path; Sheet = $rec.Sheet; Cell = $cell }
             })
+    }
+    if ($ambiguous.Count -gt 0) {
+        Write-Warning ('同じ WBS 番号のタスクが複数あり、タスク名でも決まらない工数 {0} 行は、WBS のタスクに対応付けていません（WBS 番号 {1}{2}）' -f $ambiguousRows, (@($ambiguous | Select-Object -First 5) -join '・'), $(if ($ambiguous.Count -gt 5) { ' ほか' } else { '' }))
     }
     return [pscustomobject]@{ Entries = $entries; Unreadable = $unreadable; Future = $future }
 }
@@ -1966,9 +2006,17 @@ function ConvertTo-NameKey {
     return (ConvertTo-Label $n).ToUpperInvariant()
 }
 
+function Get-OwnerKey {
+    #     担当者の名前を比べる形（全角・半角と英字の大文字・小文字をそろえ、空白を除く。「山田 太郎」「山田　太郎」「山田太郎」は同じ人）。
+    #     名前が空なら ''。この形でまとめ、表示には最初に出てきた書き方を使う（Measure-Effort.ps1・New-WeeklyReport.ps1）
+    param([string] $Name)
+    return (ConvertTo-Label $Name).ToUpperInvariant()
+}
+
 function ConvertTo-DateValue {
     #     日付の文字（2026/10/1・2026-10-01・2026年10月1日・令和8年10月1日・R8.10.1・10/1）を日付にする（無ければ $null）。
-    #     年の無い日付は AsOf の年
+    #     年の無い日付（10/1・10月1日。後ろの曜日 (木)・（木）・(Thu) は読み飛ばす）は、AsOf の前後半年に入る年にする
+    #     （AsOf が 1 月なら 12/28 は前の年、12 月なら 1/5 は次の年）
     param([string] $Text, [datetime] $AsOf = (Get-Date))
     # 元号の合字（㋿・㍻・㍼）は、Windows PowerShell 5.1 の NFKC では分けられないことがあるので先に置き換える
     $t = ([string]$Text).Replace('㋿', '令和').Replace('㍻', '平成').Replace('㍼', '昭和').Normalize($script:Nfkc).Trim()
@@ -1984,8 +2032,14 @@ function ConvertTo-DateValue {
             if ($m.Groups[2].Value -ne '元') { $year = [int]$m.Groups[2].Value }
             return New-Object DateTime ($base + $year), ([int]$m.Groups[3].Value), ([int]$m.Groups[4].Value)
         }
-        $m = [regex]::Match($t, '^(\d{1,2})\s*[/月]\s*(\d{1,2})日?$')
-        if ($m.Success) { return New-Object DateTime $AsOf.Year, ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value) }
+        $m = [regex]::Match($t, '^(\d{1,2})\s*[/月]\s*(\d{1,2})日?\s*(?:\(\s*(?:[月火水木金土日](?:曜日?)?|(?i:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?))\s*\))?$')
+        if ($m.Success) {
+            $month = [int]$m.Groups[1].Value; $day = [int]$m.Groups[2].Value
+            $year = $AsOf.Year
+            $d = New-Object DateTime $year, $month, $day
+            if (($d - $AsOf).TotalDays -gt 183) { $year-- } elseif (($AsOf - $d).TotalDays -gt 183) { $year++ }
+            return New-Object DateTime $year, $month, $day
+        }
     }
     catch { }
     return $null

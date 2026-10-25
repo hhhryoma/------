@@ -234,6 +234,38 @@ Test-Case 'New-WeeklyReport: Redmine の CSV（見出しの「#」）を課題�
     Assert-Match $text '・今週: 起票 2 件・完了 1 件'
 }
 
+Test-Case 'New-WeeklyReport: 英字の大文字・小文字だけが違う担当者（Nguyen・NGUYEN・nguyen）は同じ人として 1 つにまとめる' {
+    $dir = New-TestDir
+    @('障害番号,障害内容,状態,起票日,担当者,修正予定日', 'B-1,登録できない,未対応,2026/10/20,Nguyen,2026/10/21', 'B-2,合計が違う,未対応,2026/10/20,NGUYEN,2026/10/21') | Set-Content -LiteralPath (Join-Path $dir '障害管理表.csv') -Encoding UTF8
+    @('課題No,件名,状態,回答期限,担当', 'Q-1,締め日の確認,回答待ち,2026/10/22,nguyen') | Set-Content -LiteralPath (Join-Path $dir '課題管理表.csv') -Encoding UTF8
+    $out = Join-Path $dir '週次報告'
+    $text = Get-HostText { $null = & $WeeklyReport -BugList (Join-Path $dir '障害管理表.csv') -IssueList (Join-Path $dir '課題管理表.csv') -AsOf '2026-10-23' -OutDir $out }
+    Assert-Equal @('【Nguyen】期限切れ 3') @($text -split "`n" | Where-Object { $_ -match '^【' }) '表示は最初に出てきた書き方'
+    $people = Read-XlsxSheet -Path (Join-Path $out '週次報告_20261023.xlsx') -Index 2
+    Assert-Equal @('Nguyen|0|0|2|2|1|1') @(2..$people.Rows.Count | ForEach-Object { $row = $people.Rows[$_]; (@('A', 'B', 'C', 'D', 'E', 'F', 'G') | ForEach-Object { $row[$_] }) -join '|' }) '担当・遅延・来週終了・障害の未完了・うち期限切れ・課題の未完了・うち期限切れ'
+    $ownerDir = Join-Path $out '週次報告_20261023_担当者別'
+    Assert-Equal @('Nguyen.txt') @(Get-ChildItem -LiteralPath $ownerDir -File | ForEach-Object { $_.Name })
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $ownerDir 'Nguyen.txt'))) '■ 遅延・期限切れ（3 件）'
+}
+
+Test-Case 'New-WeeklyReport: Excel のセル内で改行した指摘（↵）は、報告の一覧では空白にして 1 行に書く' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $cols = @('No', '設計書', '指摘内容', '対応状況', '対応期限', '対応者') | ForEach-Object { @{ Header = $_; Width = 12 } }
+    Export-Workbook -FilePath (Join-Path $dir '指摘管理表.xlsx') -Sheets @(@{ Name = '指摘'; Columns = $cols; Rows = @(@{ Values = @('1', 'DD03 テーブル定義書', "型が誤り`n桁数も違う", '未対応', '2026/10/21', '佐藤') }) })
+    $text = Get-HostText { $null = & $WeeklyReport -Findings (Join-Path $dir '指摘管理表.xlsx') -AsOf '2026-10-23' }
+    Assert-Match $text '  - 期限 10/21 DD03 テーブル定義書: 型が誤り 桁数も違う（佐藤）\n'
+    Assert-Match $text '【佐藤】期限切れ 1\n  - \[期限切れ\] 指摘: DD03 テーブル定義書: 型が誤り 桁数も違う（期限 10/21・未対応）'
+}
+
+Test-Case 'New-WeeklyReport: 年の無い期限（12/25・1/12(火)）は基準日の前後半年の年とみなす（年明けの報告で、前の年の 12/25 は期限切れ）' {
+    $dir = New-TestDir
+    @('課題No,件名,状態,回答期限,担当', 'Q-1,締め日の確認,回答待ち,12/25,田中', 'Q-2,端数処理,回答待ち,1/12(火),田中') | Set-Content -LiteralPath (Join-Path $dir '課題管理表.csv') -Encoding UTF8
+    $text = Get-HostText { $script:items = @(& $WeeklyReport -IssueList (Join-Path $dir '課題管理表.csv') -AsOf '2027-01-08') }
+    Assert-Equal @('期限切れ|Q-1: 締め日の確認|2026/12/25', '期限間近|Q-2: 端数処理|2027/01/12') @($script:items | ForEach-Object { '{0}|{1}|{2}' -f $_.State, $_.Title, $(if ($_.Date) { $_.Date.ToString('yyyy/MM/dd', [System.Globalization.CultureInfo]::InvariantCulture) }) })
+    Assert-Match $text '・未完了: 2 件・うち期限切れ 1 件\n  - 期限 12/25 Q-1: 締め日の確認（田中）\n'
+}
+
 Test-Case 'New-WeeklyReport: Get-Help でヘルプが表示される' {
     $h = Get-Help $WeeklyReport
     Assert-Match $h.Synopsis '週次報告'

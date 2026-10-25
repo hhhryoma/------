@@ -74,6 +74,95 @@ Test-Case 'Measure-Effort: 担当の列が無い人ごとの工数表はファ�
     Assert-Throws { & $EffortTool $dir -HoursPerDay 0 6>$null } '0 より大きい数'
 }
 
+Test-Case 'Measure-Effort: 時刻（h:mm）・経過時間（[h]:mm）の書式のセルに入れた工数（7:30・31:15）を時間で読む' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $log = Join-Path $dir '工数実績.xlsx'
+    $logCols = @('日付', '氏名', '作業内容', '時間') | ForEach-Object { @{ Header = $_; Width = 10 } }
+    $logRows = @(@('2026/10/05', '佐藤', '設計', 0.3125), @('2026/10/06', '佐藤', '設計', 0.3125), @('2026/10/07', '佐藤', '設計', (31.25 / 24)))
+    Export-Workbook -FilePath $log -Sheets @(@{ Name = '10月'; Columns = $logCols; Rows = @($logRows | ForEach-Object { @{ Values = $_ } }) })
+    # Excel で 7:30 と入れたセル: D2 は時刻の h:mm（組み込みの 20）、D3・D4 は経過時間の [h]:mm
+    Edit-ZipText $log 'xl/styles.xml' {
+        param($x)
+        $x = $x.Replace('</numFmts>', '<numFmt numFmtId="177" formatCode="[h]:mm"/></numFmts>')
+        $x.Replace('<cellXfs count="5">', '<cellXfs count="7">').Replace('</cellXfs>', '<xf numFmtId="20" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="177" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>')
+    }
+    Edit-ZipText $log 'xl/worksheets/sheet1.xml' { param($x) $x.Replace('<c r="D2" s="2">', '<c r="D2" s="5">').Replace('<c r="D3" s="2">', '<c r="D3" s="6">').Replace('<c r="D4" s="2">', '<c r="D4" s="6">') }
+    $warnings = @()
+    $r = @(& $EffortTool $dir -AsOf '2026-10-23' -Unit 時間 -WarningVariable +warnings -WarningAction SilentlyContinue 6>$null)
+    Assert-Equal @('設計|46.25|佐藤') @($r | ForEach-Object { '{0}|{1}|{2}' -f $_.Task, $_.Actual, $_.Owner }) '7:30 + 7:30 + 31:15'
+    Assert-Equal 0 $warnings.Count ($warnings -join ' ')
+}
+
+Test-Case 'Measure-Effort: 年の無い日付（12/28・1/5(火)）は基準日の前後半年の年とみなし、年明けの集計で年末の行を基準日より後にしない' {
+    $dir = New-TestDir
+    @('日付,氏名,作業内容,時間', '12/28,佐藤,設計,8', '12/29(火),佐藤,設計,8', '1/5（火）,佐藤,設計,8', '1/6,佐藤,設計,8') | Set-Content -LiteralPath (Join-Path $dir '工数.csv') -Encoding UTF8
+    $text = Get-HostText { $null = & $EffortTool $dir -AsOf '2027-01-08' -Unit 時間 }
+    Assert-Match $text '工数の実績: 32 時間（4 人日。2026/12/28～2027/01/06・1 人・4 行）'
+    Assert-NotMatch $text '基準日（2027/01/08）より後の日付の行'
+}
+
+Test-Case 'Measure-Effort: 合計・小計の行（日付・担当・WBS・作業の欄が「小計」「Total」「合 計」など）は数えない（「設計」のように計を含むだけの作業は数える）' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $logCols = @('日付', '氏名', 'WBS', '作業内容', '時間') | ForEach-Object { @{ Header = $_; Width = 10 } }
+    $logRows = @(
+        @('2026/10/19', '佐藤', '1.1', '画面設計', [double]8),
+        @('2026/10/20', '佐藤', '1.1', '画面設計', [double]8),
+        @('小計', '', '', '', [double]16),
+        @('2026/10/21', '鈴木', '', '設計', [double]4),
+        @('', 'Total', '', '', [double]4),
+        @('', '', 'Grand Total', '', [double]20),
+        @('', '', '', '合 計', [double]20))
+    Export-Workbook -FilePath (Join-Path $dir '工数実績.xlsx') -Sheets @(@{ Name = '10月'; Columns = $logCols; Rows = @($logRows | ForEach-Object { @{ Values = $_ } }) })
+    $text = Get-HostText { $script:r = @(& $EffortTool $dir -AsOf '2026-10-23' -Unit 時間) }
+    Assert-Equal @('1.1 画面設計|16|佐藤', '設計|4|鈴木') @($script:r | ForEach-Object { '{0}|{1}|{2}' -f $_.Task, $_.Actual, $_.Owner })
+    Assert-Match $text '工数の実績: 20 時間（2\.5 人日。2026/10/19～2026/10/21・2 人・3 行）'
+}
+
+Test-Case 'Measure-Effort: 工数実績の WBS 番号は、書き方（ＷＢＳ１．１・No.1.3・1.1 画面設計・1-1）が WBS と違っても番号の部分で対応付ける' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $wbsCols = @('WBS', 'タスク名', '担当者', '予定開始日', '予定終了日', '進捗率', '予定工数') | ForEach-Object { @{ Header = $_; Width = 10 } }
+    $wbsRows = @(@('1.1', '画面設計', '山田', '2026/10/05', '2026/10/09', '50%', '4'), @('1.2', 'テーブル設計', '佐藤', '2026/10/12', '2026/10/16', '0%', '4'), @('1.3', 'IF設計', '佐藤', '2026/10/12', '2026/10/16', '0%', '4'))
+    $wbs = Join-Path $dir 'WBS.xlsx'
+    Export-Workbook -FilePath $wbs -Sheets @(@{ Name = 'WBS'; Columns = $wbsCols; Rows = @($wbsRows | ForEach-Object { @{ Values = $_ } }) })
+    New-Item -ItemType Directory -Path (Join-Path $dir '工数') | Out-Null
+    @('日付,氏名,WBS,時間', '2026/10/05,山田,1-1,8', '2026/10/06,山田,ＷＢＳ１．１,8', '2026/10/07,山田,1.1 画面設計,8', '2026/10/12,佐藤,1．2,8', '2026/10/13,佐藤,No.1.3,8') | Set-Content -LiteralPath (Join-Path $dir '工数/工数.csv') -Encoding UTF8
+    $text = Get-HostText { $script:r = @(& $EffortTool (Join-Path $dir '工数') -Wbs $wbs -AsOf '2026-10-23' -Unit 時間) }
+    Assert-Equal @('1.1|24', '1.2|8', '1.3|8') @($script:r | ForEach-Object { '{0}|{1}' -f $_.WbsNo, $_.Actual })
+    Assert-Match $text 'WBS のタスクに対応した工数: 40 時間（100%）'
+    Assert-NotMatch $text 'WBS に無い作業'
+}
+
+Test-Case 'Measure-Effort: シートごとに番号を振り直した WBS（同じ WBS 番号のタスクが複数）は、作業の名前でタスクを選び、決まらない工数は対応付けずに警告する' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $wbsCols = @('WBS', 'タスク名', '担当者', '予定開始日', '予定終了日', '進捗率', '予定工数') | ForEach-Object { @{ Header = $_; Width = 10 } }
+    $basic = @(@('1.1', '画面設計', '山田', '2026/10/05', '2026/10/09', '50%', '16'), @('1.2', '帳票設計', '山田', '2026/10/12', '2026/10/16', '0%', '16'))
+    $detail = @(@('1.1', '画面詳細', '佐藤', '2026/10/19', '2026/10/23', '0%', '16'), @('1.2', '帳票詳細', '佐藤', '2026/10/26', '2026/10/30', '0%', '16'))
+    $wbs = Join-Path $dir 'WBS.xlsx'
+    Export-Workbook -FilePath $wbs -Sheets @(@{ Name = '基本設計'; Columns = $wbsCols; Rows = @($basic | ForEach-Object { @{ Values = $_ } }) }, @{ Name = '詳細設計'; Columns = $wbsCols; Rows = @($detail | ForEach-Object { @{ Values = $_ } }) })
+    New-Item -ItemType Directory -Path (Join-Path $dir '工数') | Out-Null
+    @('日付,氏名,WBS,作業内容,時間', '2026/10/05,山田,1.1,画面設計,8', '2026/10/19,佐藤,1.1,画面詳細,4', '2026/10/12,山田,1.2,,2', '2026/10/13,山田,1.2,打合せ,1') | Set-Content -LiteralPath (Join-Path $dir '工数/工数.csv') -Encoding UTF8
+    $text = Get-HostText { $script:r = @(& $EffortTool (Join-Path $dir '工数') -Wbs $wbs -AsOf '2026-10-23' -Unit 時間) }
+    $actual = @{}
+    foreach ($t in $script:r) { $actual[$t.Task] = $t.Actual }
+    Assert-Equal '8|0|4|0' ('{0}|{1}|{2}|{3}' -f $actual['画面設計'], $actual['帳票設計'], $actual['画面詳細'], $actual['帳票詳細']) '同じ番号のタスクは作業の名前で選ぶ。決まらなければ、最後のシートのタスクにしない'
+    Assert-Match $text '同じ WBS 番号のタスクが複数あり、タスク名でも決まらない工数 2 行は、WBS のタスクに対応付けていません（WBS 番号 1\.2）'
+}
+
+Test-Case 'Measure-Effort: 担当者の名前は、全角・半角、英字の大文字・小文字と空白の違い（山田 太郎・山田太郎・山田　太郎、Nguyen・NGUYEN）をそろえて同じ人とみなす' {
+    $dir = New-TestDir
+    @('日付,氏名,作業内容,時間', '2026/10/19,山田 太郎,設計,8', '2026/10/20,山田太郎,設計,8', '2026/10/21,山田　太郎,設計,8', '2026/10/21,Nguyen,設計,4', '2026/10/22,NGUYEN,設計,4') | Set-Content -LiteralPath (Join-Path $dir '工数.csv') -Encoding UTF8
+    $out = Join-Path $dir '工数集計.xlsx'
+    $text = Get-HostText { $script:r = @(& $EffortTool $dir -AsOf '2026-10-23' -Unit 時間 -OutXlsx $out) }
+    Assert-Match $text '工数の実績: 32 時間（4 人日。2026/10/19～2026/10/22・2 人・5 行）'
+    Assert-Equal @('設計|山田 太郎、Nguyen') @($script:r | ForEach-Object { '{0}|{1}' -f $_.Task, $_.Owner }) '表示は最初に出てきた書き方'
+    $weeks = Read-XlsxSheet -Path $out -Index 2
+    Assert-Equal @('Nguyen|8', '山田 太郎|24') @(2..$weeks.Rows.Count | ForEach-Object { '{0}|{1}' -f $weeks.Rows[$_]['A'], $weeks.Rows[$_]['C'] }) '担当者×週は 1 人 1 行'
+}
+
 Test-Case 'Measure-Effort: Get-Help でヘルプが表示される' {
     $h = Get-Help $EffortTool
     Assert-Match $h.Synopsis '工数'
