@@ -200,6 +200,19 @@ Test-Case 'Start-ExcelTools: ツールを別の実行空間で動かし、Write-
     Assert-True (Wait-GuiToolRun $run -TimeoutSeconds 10).Stopped '中止'
 }
 
+Test-Case 'Start-ExcelTools: ツールが中で呼んだツールの、6>$null・3>$null で捨てた Write-Host・警告は記録の欄に出さない' {
+    $dir = New-TestDir
+    $utf8 = New-Object System.Text.UTF8Encoding($true)
+    $inner = Join-Path $dir 'inner.ps1'
+    [System.IO.File]::WriteAllText($inner, "Write-Host '中のツール'`r`nWrite-Information '中の情報'`r`nWrite-Warning '中の警告'`r`n'中の出力'`r`n", $utf8)
+    $outer = Join-Path $dir 'outer.ps1'
+    [System.IO.File]::WriteAllText($outer, ("Write-Host '始めます' -ForegroundColor Cyan`r`n`$x = @(& '{0}' 6>`$null 3>`$null)`r`nWrite-Warning ('受け取った ' + `$x.Count)`r`nWrite-Host '終わり'`r`n'結果'`r`n" -f $inner.Replace("'", "''")), $utf8)
+    $r = Wait-GuiToolRun (Start-GuiToolRun $outer @{}) -TimeoutSeconds 60
+    Assert-True $r.Succeeded $r.Error
+    Assert-Equal @('始めます|Cyan', '警告: 受け取った 1|DarkYellow', '終わり|') @($r.Messages | ForEach-Object { '{0}|{1}' -f $_.Text, $_.Color })
+    Assert-Equal 1 $r.Summary.Count '出力の件数'
+}
+
 Test-Case 'Start-ExcelTools: ファイル・フォルダを選ぶ画面を開く場所（名前だけ・使えない文字でも止まらない）' {
     $dir = New-TestDir
     $file = Join-Path $dir '設計書.xlsx'
@@ -441,6 +454,7 @@ Test-Case 'Start-ExcelTools: 試しに実行（-WhatIf）では、雛形から�
     Assert-Match ([string]$r.Summary.Text) 'SCR001\.xlsx\s+作成予定' '作るファイル'
     Assert-Match ([string]$r.Summary.Text) 'SCR002\.xlsx\s+作成予定'
     Assert-True (@($r.Messages | Where-Object { $_.Text -match '^2 ファイルを作る予定です' }).Count -eq 1) (($r.Messages | ForEach-Object { $_.Text }) -join ' / ')
+    Assert-True (@($r.Messages | Where-Object { $_.Text -match '件ヒット' }).Count -eq 0) ('中で呼んだ検索の行は出さない: ' + (($r.Messages | ForEach-Object { $_.Text }) -join ' / '))
     Assert-True (-not (Test-Path -LiteralPath $out)) 'ファイルは作らない'
 }
 

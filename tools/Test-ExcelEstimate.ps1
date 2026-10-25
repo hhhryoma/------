@@ -435,7 +435,8 @@ function Test-Book {
         }
         foreach ($s in $wbDoc.SelectNodes("//*[local-name()='sheets']/*[local-name()='sheet']")) {
             $rel = $relById[(Get-RelationshipIdAttribute $s)]
-            if ($null -eq $rel -or $rel.Kind -ne 'worksheet') { continue }
+            # マクロシート（Excel 4.0 マクロ。種類は xlMacrosheet・xlIntlMacrosheet）もセルの並びは同じなので見る
+            if ($null -eq $rel -or ($rel.Kind -ne 'worksheet' -and $rel.Kind -notmatch 'macrosheet')) { continue }
             Test-Sheet -Sheet $s.GetAttribute('name') -Rows (Read-SheetCells $pkg $rel.Target $strings) -Book $book
         }
     }

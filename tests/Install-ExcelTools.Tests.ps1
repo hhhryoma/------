@@ -142,6 +142,27 @@ Test-Case 'Install-ExcelTools: 相対パスの -OutDir・-SendToDir・-ShortcutD
     Assert-Equal @((Join-Path $work '結果'), (Join-Path $work 'links'), (Join-Path $work 'メニュー')) @($info.OutDir, $info.SendToDir, $info.ShortcutDir)
 }
 
+Test-Case 'Install-ExcelTools: 前の版が相対パスのまま覚えた -OutDir・-SendToDir・-ShortcutDir は、更新の確認のときにホームのフォルダからの絶対パスにして覚え直す（tools フォルダの中にしない）' {
+    $share = New-ToolsShare
+    $dir = Join-Path (New-TestDir) 'ExcelTools'
+    $null = & (Join-Path $share 'Install-ExcelTools.ps1') -InstallDir $dir -NoSendTo 6>$null
+    $path = Join-Path $dir 'install.json'
+    $expected = @((Join-Path $HOME '結果'), (Join-Path $HOME 'links'), (Join-Path $HOME 'メニュー'))
+    foreach ($option in @('CheckOnly', 'Update')) {
+        $text = [System.IO.File]::ReadAllText($path) -replace '"OutDir":\s*(null|"[^"]*")', '"OutDir": "結果"' -replace '"SendToDir":\s*(null|"[^"]*")', '"SendToDir": "links"' -replace '"ShortcutDir":\s*(null|"[^"]*")', '"ShortcutDir": "メニュー"'
+        [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
+        # 「送る」や画面からの更新の確認は、tools フォルダで動く
+        $optionArgs = @{ $option = $true }
+        Push-Location -LiteralPath (Join-Path $dir 'tools')
+        try { $r = & (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir @optionArgs -WarningVariable w 6>$null 3>$null }
+        finally { Pop-Location }
+        Assert-Equal @{ CheckOnly = '確認済み'; Update = '最新' }[$option] $r.Result $option
+        $info = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Equal $expected @($info.OutDir, $info.SendToDir, $info.ShortcutDir) $option
+        Assert-Match ($w -join ' ') '相対パスで覚えていたフォルダを、ホームのフォルダからのパスにしました（-OutDir 結果 → '
+    }
+}
+
 Test-Case 'Install-ExcelTools: 更新で写せないファイル（開いている Excel など）があっても残りは写し、写せなかったファイルは次の確認で写し直す' {
     $share = New-ToolsShare
     $dir = Join-Path (New-TestDir) 'ExcelTools'

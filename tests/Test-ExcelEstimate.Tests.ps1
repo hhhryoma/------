@@ -95,6 +95,18 @@ Test-Case 'Test-ExcelEstimate: Excel で開いている（書き込みでロッ�
     Assert-Equal $expectedEstimate (Get-EstimateKeys $issues)
 }
 
+Test-Case 'Test-ExcelEstimate: マクロシート（Excel 4.0 マクロ。リレーションの種類は xlMacrosheet）の数式もチェックする' {
+    $file = New-EstimateBook ([ordered]@{
+        '表紙' = @(@('見積書', ''), @('件名', '受注管理システム'))
+        '見積' = @(@('工程', '金額'), @('設計', 100000), @('製造', 200000), @('試験', 300000), @('合計', '=SUM(B2:B3)')) })
+    Edit-ZipText $file 'xl/_rels/workbook.xml.rels' { param($t) $t.Replace('http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"', 'http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet" Target="worksheets/sheet2.xml"') }
+    Edit-ZipText $file '[Content_Types].xml' { param($t) $t.Replace('/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"', '/xl/worksheets/sheet2.xml" ContentType="application/vnd.ms-excel.macrosheet+xml"') }
+    Edit-ZipText $file 'xl/worksheets/sheet2.xml' { param($t) $t.Replace('<worksheet xmlns=', '<xm:macrosheet xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main" xmlns=').Replace('</worksheet>', '</xm:macrosheet>') }
+    $issues = Invoke-Estimate @{ Path = $file }
+    Assert-Equal @('警告|合計の範囲|見積!B5') (Get-EstimateKeys $issues)
+    Assert-Match $issues[0].Detail 'B4 が入っていません'
+}
+
 Test-Case 'Test-ExcelEstimate: 率を掛ける数式（*20%・*8%）は、換算の日数・時間とみなさない' {
     # 人月の換算は 21 日、人時の換算は 7.5 時間にそろっている。PM 管理の 20%・8% は換算ではない
     $file = New-EstimateBook ([ordered]@{ '見積' = @(
