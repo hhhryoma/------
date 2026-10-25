@@ -84,33 +84,50 @@ function Save-InstallInfo {
 }
 
 function Sync-ToolsFolder {
-    #     配布元の tools フォルダを、この PC の tools フォルダにそろえる（変わったファイルだけを写し、配布元に無いファイルは消す）
+    #     配布元の tools フォルダを、この PC の tools フォルダにそろえる（変わったファイルだけを写し、配布元に無いファイルは消す）。
+    #     写せない・消せないファイル（Excel で開いている CSV など）があっても止めずに残りをそろえ、そのファイルを Failed に返す
+    #     （途中で止めると、新しいファイルと古いファイルが混ざったままになる）
     param([string] $From, [string] $To)
     $src = Get-ToolFiles $From
     if (-not (Test-Path -LiteralPath $To)) { New-Item -ItemType Directory -Force -Path $To | Out-Null }
     $dst = Get-ToolFiles $To
     $copied = 0; $removed = 0
+    $failed = New-Object System.Collections.Generic.List[string]
     foreach ($rel in $src.Keys) {
         $s = $src[$rel]
         if ($dst.Contains($rel) -and $dst[$rel].Length -eq $s.Length -and $dst[$rel].LastWriteTimeUtc -eq $s.LastWriteTimeUtc) { continue }
         $target = Join-Path $To $rel
-        $dir = Split-Path -Parent $target
-        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-        Copy-Item -LiteralPath $s.FullName -Destination $target -Force
-        # 次の比較のため、更新日時を配布元とそろえる（Copy-Item が日時を写さない環境がある）
-        (Get-Item -LiteralPath $target).LastWriteTimeUtc = $s.LastWriteTimeUtc
-        # 共有フォルダやダウンロードから写したファイルの「ブロック」を外す（実行のたびに確認が出ないように）
-        if ($isWin -and (Get-Command Unblock-File -ErrorAction SilentlyContinue)) { Unblock-File -LiteralPath $target -ErrorAction SilentlyContinue }
-        $copied++
+        try {
+            $dir = Split-Path -Parent $target
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+            Copy-Item -LiteralPath $s.FullName -Destination $target -Force
+            # 次の比較のため、更新日時を配布元とそろえる（Copy-Item が日時を写さない環境がある）
+            (Get-Item -LiteralPath $target).LastWriteTimeUtc = $s.LastWriteTimeUtc
+            # 共有フォルダやダウンロードから写したファイルの「ブロック」を外す（実行のたびに確認が出ないように）
+            if ($isWin -and (Get-Command Unblock-File -ErrorAction SilentlyContinue)) { Unblock-File -LiteralPath $target -ErrorAction SilentlyContinue }
+            $copied++
+        }
+        catch { $failed.Add(('{0}（{1}）' -f $rel, $_.Exception.Message)) }
     }
     foreach ($rel in $dst.Keys) {
-        if (-not $src.Contains($rel)) { Remove-Item -LiteralPath $dst[$rel].FullName -Force; $removed++ }
+        if ($src.Contains($rel)) { continue }
+        try { Remove-Item -LiteralPath $dst[$rel].FullName -Force; $removed++ }
+        catch { $failed.Add(('{0}（{1}）' -f $rel, $_.Exception.Message)) }
     }
-    # 空になったフォルダを消す
+    # 空になったフォルダを消す（消せなければ残す）
     foreach ($d in @(Get-ChildItem -LiteralPath $To -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending)) {
-        if (@(Get-ChildItem -LiteralPath $d.FullName -Force).Count -eq 0) { Remove-Item -LiteralPath $d.FullName -Force }
+        if (@(Get-ChildItem -LiteralPath $d.FullName -Force).Count -eq 0) { Remove-Item -LiteralPath $d.FullName -Force -ErrorAction SilentlyContinue }
     }
-    return [pscustomobject]@{ Copied = $copied; Removed = $removed; Total = $src.Count }
+    return [pscustomobject]@{ Copied = $copied; Removed = $removed; Total = $src.Count; Failed = $failed.ToArray() }
+}
+
+function Save-SyncedInfo {
+    #     そろえたあとに、配布元と中身の目印を覚える。写せなかったファイルがあれば知らせ、目印と確かめた日時は覚えない
+    #     （次に「送る」や画面を使ったときに、確認の間隔を待たずに写し直す）
+    param([string] $From, [string] $Fingerprint, $Sync)
+    if ($Sync.Failed.Count -eq 0) { Save-InstallInfo $From $Fingerprint (Get-Date); return }
+    Save-InstallInfo $From '' ([datetime]::MinValue)
+    Write-Warning ('写せなかったファイルがあります（ほかのアプリで開いていれば閉じてください。次の確認のときに写し直します）: {0}' -f ($Sync.Failed -join '、'))
 }
 
 function Register-SendTo {
@@ -174,6 +191,11 @@ if ($info) {
     if (-not $PSBoundParameters.ContainsKey('ShortcutDir') -and $info.ShortcutDir) { $ShortcutDir = $info.ShortcutDir }
     if (-not $PSBoundParameters.ContainsKey('Desktop') -and $info.Desktop) { $Desktop = [switch]$true }
 }
+# 指定したフォルダが相対パスなら、いまのフォルダからの絶対パスにして覚える
+# （更新は「送る」や画面から tools フォルダで動くので、相対パスのままでは別の場所になる）
+if ($PSBoundParameters.ContainsKey('OutDir') -and $OutDir) { $OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir) }
+if ($PSBoundParameters.ContainsKey('SendToDir') -and $SendToDir) { $SendToDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SendToDir) }
+if ($PSBoundParameters.ContainsKey('ShortcutDir') -and $ShortcutDir) { $ShortcutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ShortcutDir) }
 
 # ---------------------------------------------------------------- 削除
 
@@ -186,8 +208,13 @@ if ($Uninstall) {
         $null = & (Join-Path $toolsDir 'Install-SendTo.ps1') @sendArgs 6>$null
     }
     if (-not $NoSendTo -and (Test-Path -LiteralPath (Join-Path $toolsDir 'ExcelTools.psm1'))) { Unregister-Launcher }
-    Remove-Item -LiteralPath $InstallDir -Recurse -Force
-    Write-Host "Excel ツールを削除しました（「送る」の項目とスタートメニューの「Excel ツール」も消しました）: $InstallDir"
+    # 入れたもの（tools フォルダと install.json）だけを消す。-InstallDir のフォルダは、ほかのファイルが無ければ消す
+    if (Test-Path -LiteralPath $toolsDir) { Remove-Item -LiteralPath $toolsDir -Recurse -Force }
+    Remove-Item -LiteralPath $infoPath -Force
+    $kept = ''
+    if (@(Get-ChildItem -LiteralPath $InstallDir -Force).Count -eq 0) { Remove-Item -LiteralPath $InstallDir -Force }
+    else { $kept = '。ほかのファイルがあるため、フォルダは残しました' }
+    Write-Host "Excel ツールを削除しました（「送る」の項目とスタートメニューの「Excel ツール」も消しました$kept）: $InstallDir"
     [pscustomobject]@{ Result = '削除'; InstallDir = $InstallDir; Source = $null; Copied = 0; Removed = 0 }
     return
 }
@@ -221,11 +248,13 @@ if ($Update -or $CheckOnly) {
         return
     }
     $r = Sync-ToolsFolder $Source $toolsDir
-    Save-InstallInfo $Source $fp (Get-Date)
+    Save-SyncedInfo $Source $fp $r
     Register-SendTo
     Register-Launcher
     Write-Host ("Excel ツールを新しい版に更新しました（{0} ファイル。削除 {1}）: {2}" -f $r.Copied, $r.Removed, $Source)
-    [pscustomobject]@{ Result = '更新'; InstallDir = $InstallDir; Source = $Source; Copied = $r.Copied; Removed = $r.Removed }
+    $result = '更新'
+    if ($r.Failed.Count -gt 0) { $result = '一部を更新' }
+    [pscustomobject]@{ Result = $result; InstallDir = $InstallDir; Source = $Source; Copied = $r.Copied; Removed = $r.Removed; Failed = $r.Failed }
     return
 }
 
@@ -240,10 +269,16 @@ if (-not $Source) {
 $Source = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Source).TrimEnd('\', '/')
 if (-not (Test-ToolsFolder $Source)) { throw "配布する tools フォルダではありません（ExcelTools.psm1 と Invoke-SendTo.ps1 が要ります）: $Source" }
 if ([string]::Equals($Source, $toolsDir.TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase)) { throw "配布元と入れる先が同じです。配布元（共有フォルダ）の Install-ExcelTools.cmd から実行してください: $Source" }
+# このスクリプトで入れたもの（install.json がある）ではない tools フォルダには入れない（配布元に無いファイルを消してしまうため）
+if (-not (Test-Path -LiteralPath $infoPath) -and (Test-Path -LiteralPath $toolsDir) -and @(Get-ChildItem -LiteralPath $toolsDir -Force).Count -gt 0) {
+    throw "入れる先に、Install-ExcelTools.ps1 で入れたものではない tools フォルダがあります（中のファイルを消さないように、入れずに止めました）。-InstallDir にほかのフォルダを指定するか、この tools フォルダを移してから実行してください: $toolsDir"
+}
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+# 配布元の目印は写す前に取る（写している間に配布元が変わったら、次の確認で写す）
+$fp = Get-ToolsFingerprint $Source
 $r = Sync-ToolsFolder $Source $toolsDir
-Save-InstallInfo $Source (Get-ToolsFingerprint $Source) (Get-Date)
+Save-SyncedInfo $Source $fp $r
 Register-SendTo
 Register-Launcher
 $result = '入れた'
@@ -254,7 +289,7 @@ if (-not $NoSendTo -and $isWin) {
     Write-Host 'エクスプローラーでファイルを右クリック →「送る」→「Excel …」からも使えます。'
 }
 Write-Host ("配布元: {0}（ここが更新されると、「送る」で使ったあとに自動で新しい版にします）" -f $Source)
-[pscustomobject]@{ Result = $result; InstallDir = $InstallDir; Source = $Source; Copied = $r.Copied; Removed = $r.Removed }
+[pscustomobject]@{ Result = $result; InstallDir = $InstallDir; Source = $Source; Copied = $r.Copied; Removed = $r.Removed; Failed = $r.Failed }
 
 # .SYNOPSIS
 #     共有フォルダなどに置いた Excel ツールを、この PC に入れて「送る」に登録します。更新・削除もします（管理者の権限は不要）。
@@ -265,7 +300,8 @@ Write-Host ("配布元: {0}（ここが更新されると、「送る」で使�
 #       ・配布元の tools フォルダを、この PC の「%LOCALAPPDATA%\ExcelTools\tools」に写し、右クリックの「送る」に各ツールを登録します
 #         （共有フォルダから直接動かすより速く、ネットワークが切れても使えます）
 #       ・スタートメニューに、ツールの画面（Start-ExcelTools.ps1）を開く「Excel ツール」を作ります（-Desktop でデスクトップにも）
-#       ・配布元が更新されると、「送る」でツールを使ったあとに自動で新しい版を写します（確認は 12 時間に 1 回まで。次の実行から新しい版になります）
+#       ・配布元が更新されると、「送る」でツールを使ったあとに自動で新しい版を写します（確認は 12 時間に 1 回まで。次の実行から新しい版になります）。
+#         写せないファイル（開いている Excel など）があっても残りは写し、写せなかったファイルは次の確認で写し直します
 #       ・もう一度実行すると、すぐに入れ直します。-Uninstall で「送る」の項目・スタートメニューの「Excel ツール」とこの PC の写しを消します
 #
 # .PARAMETER Source
@@ -273,12 +309,14 @@ Write-Host ("配布元: {0}（ここが更新されると、「送る」で使�
 #
 # .PARAMETER InstallDir
 #     この PC に入れるフォルダ。既定は「%LOCALAPPDATA%\ExcelTools」（tools フォルダと install.json を置きます）。
+#     このスクリプトで入れたものではない tools フォルダがあれば、中のファイルを消さないように、入れずに止めます。
 #
 # .PARAMETER Action
 #     「送る」に登録する処理（Install-SendTo.ps1 の -Action）。既定はすべて。
 #
 # .PARAMETER OutDir
 #     「送る」の結果を保存するフォルダ（Install-SendTo.ps1 の -OutDir）。既定は「ドキュメント\Excel ツールの結果」。
+#     相対パスは、いまのフォルダからの絶対パスにして覚えます（-SendToDir・-ShortcutDir も同じ）。
 #
 # .PARAMETER SendToDir
 #     ショートカットを作るフォルダ（Install-SendTo.ps1 の -SendToDir）。既定は、ログインしている人の「送る」のフォルダ。
@@ -302,7 +340,8 @@ Write-Host ("配布元: {0}（ここが更新されると、「送る」で使�
 #     -CheckOnly で配布元を見る間隔（時間）。既定は 12。
 #
 # .PARAMETER Uninstall
-#     「送る」の項目と、この PC に入れたツールを消します。
+#     「送る」の項目と、この PC に入れたツール（-InstallDir の tools フォルダと install.json）を消します。
+#     -InstallDir のフォルダは、ほかのファイルが無ければ消します（ほかのファイルは消しません）。
 #
 # .EXAMPLE
 #     # 担当者: 配布元の Install-ExcelTools.cmd をダブルクリックする（PowerShell からなら次のとおり）

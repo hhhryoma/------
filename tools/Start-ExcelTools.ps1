@@ -24,29 +24,43 @@ if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Thr
     return
 }
 
-Import-Module (Join-Path $PSScriptRoot 'ExcelToolsGui.psm1') -Force -DisableNameChecking
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.Application]::EnableVisualStyles()
+$failure = $null
+try {
+    Import-Module (Join-Path $PSScriptRoot 'ExcelToolsGui.psm1') -Force -DisableNameChecking
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# 「送る」から渡されたパスを直す（ドライブの直下 "D:\" は D:" になって届く）
-$paths = @($Path | Where-Object { $_ -and $_.Trim() } | ForEach-Object {
-        $v = $_.Trim().Trim('"')
-        if ($v -match '^[A-Za-z]:$') { $v += '\' }
-        $v
-    })
+    # 「送る」から渡されたパスを直す（ドライブの直下 "D:\" は D:" になって届く）
+    $paths = @($Path | Where-Object { $_ -and $_.Trim() } | ForEach-Object {
+            $v = $_.Trim().Trim('"')
+            if ($v -match '^[A-Za-z]:$') { $v += '\' }
+            $v
+        })
 
-$windowArgs = @{ Path = $paths }
-if ($Tool) { $windowArgs['Tool'] = $Tool }
-if ($SettingsPath) { $windowArgs['SettingsPath'] = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SettingsPath) }
-$form = New-GuiWindow @windowArgs
-try { [System.Windows.Forms.Application]::Run($form) }
-finally { $form.Dispose() }
+    $windowArgs = @{ Path = $paths }
+    if ($Tool) { $windowArgs['Tool'] = $Tool }
+    if ($SettingsPath) { $windowArgs['SettingsPath'] = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SettingsPath) }
+    $form = New-GuiWindow @windowArgs
+    try { [System.Windows.Forms.Application]::Run($form) }
+    finally { $form.Dispose() }
+}
+catch {
+    # 画面は隠した PowerShell で動くため、開けなかったとき（ファイルの欠け・ツールの一覧の誤りなど）は、メッセージの画面で知らせる
+    $failure = $_
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        [void][System.Windows.Forms.MessageBox]::Show(('Excel ツールの画面でエラーが起きました: ' + $failure.Exception.Message), 'Excel ツール', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+    catch { }
+}
 
-# Install-ExcelTools.ps1 で入れたツールなら、閉じたあとに配布元が更新されていないかを確かめる（12 時間に 1 回まで。次に開いたときから新しい版になる）
+# Install-ExcelTools.ps1 で入れたツールなら、閉じたあとに配布元が更新されていないかを確かめる（12 時間に 1 回まで。次に開いたときから新しい版になる）。
+# 開けなかったときも確かめる（新しい版で直っていることがある）
 $installDir = Split-Path -Parent $PSScriptRoot
 if (Test-Path -LiteralPath (Join-Path $installDir 'install.json')) {
     try { $null = & (Join-Path $PSScriptRoot 'Install-ExcelTools.ps1') -InstallDir $installDir -CheckOnly 6>$null } catch { }
 }
+if ($failure) { throw $failure }
 
 # .SYNOPSIS
 #     Excel ツールを画面（ウィンドウ）から使います。やりたいことを選び、ファイルやフォルダを入れて「実行」を押すだけで、PowerShell を使わずに各ツールを実行できます。
@@ -56,6 +70,7 @@ if (Test-Path -LiteralPath (Join-Path $installDir 'install.json')) {
 #
 #       ・ファイルやフォルダは、「ファイル…」「フォルダ…」のボタンで選ぶか、エクスプローラーから画面にドラッグ＆ドロップします
 #       ・結果の保存先を空欄にすると、「ドキュメント\Excel ツールの結果」に「名前_日時.xlsx」で保存し、終わったら開きます
+#         （画面が入れた名前のまま、もう一度実行すると、新しい日時の名前にします）
 #       ・ファイルを書き換える処理（置換・表示を整えるなど）は、最初は「試しに実行」で、書き換える箇所を確かめられます
 #       ・「詳細な設定も表示する」で、各ツールのすべての引数を入力できます（説明は各欄の下とマウスを重ねたときに出ます）
 #       ・実行中の様子（ツールの出力）は下の記録の欄に出ます。「中止」で止められます

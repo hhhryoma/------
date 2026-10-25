@@ -180,6 +180,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Create') {
     if (-not $WhatIfPreference -and -not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
     $invalid = [regex]::Escape(-join [System.IO.Path]::GetInvalidFileNameChars())
     $created = 0
+    $planned = 0
     foreach ($row in $rows) {
         $values = @{}
         foreach ($k in $builtin.Keys) { $values[$k] = $builtin[$k] }
@@ -192,7 +193,11 @@ if ($PSCmdlet.ParameterSetName -eq 'Create') {
         $outName = [regex]::Replace((Expand-Placeholder $FileName $values), "[$invalid]", '_')
         $target = Join-Path $OutDir $outName
         if (Test-Path -LiteralPath $target) { New-Result $outName '既存' '同じ名前のファイルがあるため作りません' $target; continue }
-        if (-not $PSCmdlet.ShouldProcess($outName, '雛形から作成')) { continue }
+        if (-not $PSCmdlet.ShouldProcess($outName, '雛形から作成')) {
+            # -WhatIf（画面の「試しに実行」）では、作るファイルを結果の行で知らせる（画面の記録の欄には What if: の行が出ないため）
+            if ($WhatIfPreference) { $planned++; New-Result $outName '作成予定' '' $target }
+            continue
+        }
 
         # 雛形が読み取り専用でも、作った設計書は書き換えられるようにする（Replace-Excel.ps1 は読み取り専用のファイルを書き換えない）
         (Copy-Item -LiteralPath $Template -Destination $target -PassThru).IsReadOnly = $false
@@ -203,7 +208,8 @@ if ($PSCmdlet.ParameterSetName -eq 'Create') {
         New-Result $outName '作成' '' $target
     }
     Write-Host ''
-    Write-Host ('{0} ファイルを作りました（一覧の {1} 行）: {2}' -f $created, $rows.Count, $OutDir)
+    if ($WhatIfPreference) { Write-Host ('{0} ファイルを作る予定です（一覧の {1} 行。-WhatIf のため、まだ作っていません）: {2}' -f $planned, $rows.Count, $OutDir) }
+    else { Write-Host ('{0} ファイルを作りました（一覧の {1} 行）: {2}' -f $created, $rows.Count, $OutDir) }
     return
 }
 
@@ -384,6 +390,12 @@ if ($PSCmdlet.ParameterSetName -eq 'AddSheet') {
         Write-Host ''
         Write-Host ('{0} シートを足しました: {1}' -f $planned.Count, $Book)
     }
+    elseif ($planned.Count -gt 0 -and $WhatIfPreference) {
+        # -WhatIf（画面の「試しに実行」）では、足すシートを結果の行で知らせる（画面の記録の欄には What if: の行が出ないため）
+        foreach ($p in $planned) { New-Result $p.Name '作成予定' ('雛形のシート「{0}」から作ります' -f $TemplateSheet) $Book }
+        Write-Host ''
+        Write-Host ('{0} シートを足す予定です（-WhatIf のため、まだ足していません）: {1}' -f $planned.Count, $Book)
+    }
     return
 }
 
@@ -508,6 +520,8 @@ $maxHistoryRows = 20
 function Get-HistoryDrafts {
     #     前の版と比べ、改訂履歴に書く行（改訂箇所・改訂内容）の下書きを求める（Compare-Excel.ps1 -OutHistory）
     param([string] $OldPath, [string] $NewPath)
+    # 下書きは一時ファイルなので、-WhatIf でも書く（-WhatIf を引き継ぐと Compare-Excel.ps1 が下書きを保存せず、前の版と同じ内容とみなしてしまう）
+    $WhatIfPreference = $false
     $csv = Join-Path ([System.IO.Path]::GetTempPath()) ('history-' + [guid]::NewGuid().ToString('N') + '.csv')
     try {
         $null = & $compareScript -Old $OldPath -New $NewPath -OutHistory $csv -HistorySheet $HistorySheet -NoExcel -WarningAction SilentlyContinue 6>$null
@@ -660,8 +674,8 @@ foreach ($f in $files) {
         $what = '版数 {0} → {1}' -f $current, $newVersion
         $shown = $f.Name
         if ($outPath) { $shown = '{0} → {1}' -f $f.Name, [System.IO.Path]::GetFileName($outPath) }
-        if (-not $PSCmdlet.ShouldProcess($shown, $what)) { continue }
 
+        # 書き換えはメモリの上で行い、保存する前に確かめる（-WhatIf でも、書き換える場所を知らせられるように）
         $changes = @{}
         $done = New-Object System.Collections.Generic.List[string]
         if ($coverVersion) {
@@ -725,9 +739,15 @@ foreach ($f in $files) {
     }
     finally { $pkg.Zip.Dispose() }
 
+    $detail = '{0}（{1}）' -f $what, ($done -join '・')
+    if (-not $PSCmdlet.ShouldProcess($shown, $what)) {
+        # -WhatIf（画面の「試しに実行」）では、版数と書き換える場所を結果の行で知らせる（画面の記録の欄には What if: の行が出ないため）
+        if ($WhatIfPreference) { New-Result $shown '版上げ予定' $detail $f.FullName }
+        continue
+    }
     if ($outPath) { Save-ZipPackage -FilePath $f.FullName -Changes $changes -OutPath $outPath; $resultPath = $outPath }
     else { Save-ZipPackage -FilePath $f.FullName -Changes $changes; $resultPath = $f.FullName }
-    New-Result ([System.IO.Path]::GetFileName($resultPath)) '版上げ' ('{0}（{1}）' -f $what, ($done -join '・')) $resultPath
+    New-Result ([System.IO.Path]::GetFileName($resultPath)) '版上げ' $detail $resultPath
 }
 
 # .SYNOPSIS

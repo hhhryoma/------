@@ -108,6 +108,97 @@ Test-Case 'Install-ExcelTools: 「送る」とスタートメニューの「Exce
     Assert-Equal 0 @(Get-ChildItem -LiteralPath $menu -Filter '*.lnk').Count '画面のショートカットも消す'
 }
 
+Test-Case 'Install-ExcelTools: 削除では入れたもの（tools と install.json）だけを消し、ほかのファイルのあるフォルダは残す。このスクリプトで入れていない tools フォルダには入れない' {
+    $share = New-ToolsShare
+    # 自分のファイルのあるフォルダに入れてから消す
+    $dir = Join-Path (New-TestDir) '仕事'
+    New-Item -ItemType Directory -Force -Path (Join-Path $dir '報告書') | Out-Null
+    Set-Content -LiteralPath (Join-Path $dir '報告書/週報.txt') -Value '自分のファイル' -Encoding UTF8
+    $null = & (Join-Path $share 'Install-ExcelTools.ps1') -InstallDir $dir -NoSendTo 6>$null
+    $text = Get-HostText { & (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -Uninstall | Out-Null }
+    Assert-Match $text 'ほかのファイルがあるため、フォルダは残しました'
+    Assert-Equal @('報告書') @(Get-ChildItem -LiteralPath $dir -Force | ForEach-Object { $_.Name }) 'tools と install.json だけを消す'
+    Assert-Equal '自分のファイル' ([System.IO.File]::ReadAllText((Join-Path $dir '報告書/週報.txt')).Trim())
+
+    # 自分のスクリプトを置いた tools フォルダには入れない（配布元に無いファイルを消してしまうため）
+    $own = Join-Path (New-TestDir) '作業'
+    New-Item -ItemType Directory -Force -Path (Join-Path $own 'tools') | Out-Null
+    Set-Content -LiteralPath (Join-Path $own 'tools/自作マクロ.ps1') -Value '# 自分のスクリプト' -Encoding UTF8
+    Assert-Throws { & (Join-Path $share 'Install-ExcelTools.ps1') -InstallDir $own -NoSendTo 6>$null } 'Install-ExcelTools\.ps1 で入れたものではない tools フォルダがあります'
+    Assert-Equal @('自作マクロ.ps1') @(Get-ChildItem -LiteralPath (Join-Path $own 'tools') -Force | ForEach-Object { $_.Name })
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $own 'install.json'))) '入れたことにしない'
+}
+
+Test-Case 'Install-ExcelTools: 相対パスの -OutDir・-SendToDir・-ShortcutDir は、いまのフォルダからの絶対パスにして覚える（更新のときに tools フォルダからのパスにならない）' {
+    $share = New-ToolsShare
+    $base = New-TestDir
+    $dir = Join-Path $base 'ExcelTools'
+    $work = Join-Path $base 'work'
+    New-Item -ItemType Directory -Path $work | Out-Null
+    Push-Location -LiteralPath $work
+    try { $null = & (Join-Path $share 'Install-ExcelTools.ps1') -InstallDir $dir -OutDir '結果' -SendToDir 'links' -ShortcutDir 'メニュー' -NoSendTo 6>$null }
+    finally { Pop-Location }
+    $info = Get-Content -LiteralPath (Join-Path $dir 'install.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Equal @((Join-Path $work '結果'), (Join-Path $work 'links'), (Join-Path $work 'メニュー')) @($info.OutDir, $info.SendToDir, $info.ShortcutDir)
+}
+
+Test-Case 'Install-ExcelTools: 更新で写せないファイル（開いている Excel など）があっても残りは写し、写せなかったファイルは次の確認で写し直す' {
+    $share = New-ToolsShare
+    $dir = Join-Path (New-TestDir) 'ExcelTools'
+    $null = & (Join-Path $share 'Install-ExcelTools.ps1') -InstallDir $dir -NoSendTo 6>$null
+    foreach ($rel in @('Compare-Excel.ps1', 'estimate/係数表_サンプル.csv', 'Search-Excel.ps1')) { Add-Content -LiteralPath (Join-Path $share $rel) -Value '# 新しい版' -Encoding UTF8 }
+    $data = New-TestDir
+    Copy-Item -LiteralPath (Join-Path $script:Fixtures 'deliverable/bad.xlsx') -Destination (Join-Path $data 'a.xlsx')
+    # 係数表の見本を、ほかのアプリが書き込ませずに開いている
+    $open = [System.IO.File]::Open((Join-Path $dir 'tools/estimate/係数表_サンプル.csv'), 'Open', 'ReadWrite', 'None')
+    try {
+        $r = & (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -Update -WarningVariable warned -WarningAction SilentlyContinue 6>$null
+        # 「送る」で使ったあとの確認でも（確認の間隔を待たずに）写し直し、写せなかったファイルを知らせる
+        $text = Get-HostText { & (Join-Path $dir 'tools/Invoke-SendTo.ps1') -Action Search -Text 'x' -OutDir (Join-Path $data 'out') -NoOpen -NoPause (Join-Path $data 'a.xlsx') | Out-Null }
+    }
+    finally { $open.Dispose() }
+    Assert-Equal '一部を更新|2' ('{0}|{1}' -f $r.Result, $r.Copied)
+    Assert-Match ($r.Failed -join ' / ') '係数表_サンプル\.csv'
+    Assert-Match ($warned -join ' / ') '写せなかったファイルがあります.*係数表_サンプル\.csv'
+    foreach ($rel in @('Compare-Excel.ps1', 'Search-Excel.ps1')) { Assert-Match ([System.IO.File]::ReadAllText((Join-Path $dir "tools/$rel"))) '# 新しい版' "写せないファイルの前後の $rel も写す" }
+    Assert-Match $text '写せなかったファイルがあります.*係数表_サンプル\.csv'
+    # ファイルを閉じたあとの次の確認で写す
+    $r = & (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -CheckOnly 6>$null
+    Assert-Equal '更新|1' ('{0}|{1}' -f $r.Result, $r.Copied)
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $dir 'tools/estimate/係数表_サンプル.csv'))) '# 新しい版'
+}
+
+Test-Case 'Install-ExcelTools: 入れている間に配布元が変わっても、次の確認で写す（配布元の目印は写す前に取る）' {
+    $share = New-ToolsShare
+    $dir = Join-Path (New-TestDir) 'ExcelTools'
+    # Search-Excel.ps1 を写したところで、管理者が配布元の README.md（写し終えたもの）を更新したことにする
+    # （このテストの中だけの Copy-Item。入れるスクリプトの Copy-Item はこれを呼ぶ）
+    $readme = Join-Path $share 'README.md'
+    function Copy-Item {
+        param([string] $LiteralPath, [string] $Destination, [switch] $Force)
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force
+        if ((Split-Path -Leaf $LiteralPath) -eq 'Search-Excel.ps1') { Add-Content -LiteralPath $readme -Value '入れている間の更新' -Encoding UTF8 }
+    }
+    $null = & (Join-Path $share 'Install-ExcelTools.ps1') -InstallDir $dir -NoSendTo 6>$null
+    Remove-Item -Path Function:\Copy-Item
+    Assert-NotMatch ([System.IO.File]::ReadAllText((Join-Path $dir 'tools/README.md'))) '入れている間の更新'
+    $r = & (Join-Path $dir 'tools/Install-ExcelTools.ps1') -InstallDir $dir -Update 6>$null
+    Assert-Equal '更新|1' ('{0}|{1}' -f $r.Result, $r.Copied)
+    Assert-Match ([System.IO.File]::ReadAllText((Join-Path $dir 'tools/README.md'))) '入れている間の更新'
+}
+
+Test-Case 'Install-ExcelTools: 「送る」→「ツールの画面で開く」では更新を確かめない（開いた画面が読むファイルを書き換えない。画面を閉じたあとに確かめる）' {
+    $share = New-ToolsShare
+    $dir = Join-Path (New-TestDir) 'ExcelTools'
+    $null = & (Join-Path $share 'Install-ExcelTools.ps1') -InstallDir $dir -NoSendTo 6>$null
+    Add-Content -LiteralPath (Join-Path $share 'README.md') -Value '更新した版' -Encoding UTF8
+    Set-LastCheck $dir
+    $text = Get-HostText { & (Join-Path $dir 'tools/Invoke-SendTo.ps1') -Action Gui -NoOpen (New-TestDir) | Out-Null }
+    Assert-Match $text '画面を開くコマンド'
+    Assert-NotMatch $text '更新しました'
+    Assert-NotMatch ([System.IO.File]::ReadAllText((Join-Path $dir 'tools/README.md'))) '更新した版'
+}
+
 Test-Case 'Install-ExcelTools: Get-Help でヘルプが表示される' {
     $h = Get-Help $InstallTools
     Assert-Match $h.Synopsis 'この PC に入れて'

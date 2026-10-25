@@ -117,9 +117,9 @@ Test-Case 'Start-ExcelTools: 結果の既定の保存先（名前_日時。同�
     Assert-Equal '差分_20261023_101500(2).html' (Split-Path -Leaf $outs['OutHtml'])
 
     $arguments = [ordered]@{ Old = "D:\旧'版"; New = 'D:\新'; KeyColumn = [string[]]@('物理名', '項目ID'); NoRecurse = $true; AsOf = (Get-Date '2026-10-20'); MinBugs = 5 }
-    Assert-Equal "& 'C:\tools\Compare-Excel.ps1' -Old 'D:\旧''版' -New 'D:\新' -KeyColumn '物理名', '項目ID' -NoRecurse -AsOf [datetime]'2026-10-20' -MinBugs 5" (Format-GuiCommandLine 'C:\tools\Compare-Excel.ps1' $arguments)
-    Assert-Equal "[datetime]'2026-10-20'" (Invoke-InWareki { ConvertTo-GuiLiteral ([datetime]'2026-10-20') }) '和暦の設定でも、日付は西暦で書く'
-    Assert-Equal "[datetime]'2026-10-20'|09:05:03" (Invoke-InDashDate { '{0}|{1}' -f (ConvertTo-GuiLiteral ([datetime]'2026-10-20')), (Format-GuiTime ([datetime]'2026-10-20 09:05:03')) }) '日付・時刻の区切りを変えた設定でも、- と : で書く'
+    Assert-Equal "& 'C:\tools\Compare-Excel.ps1' -Old 'D:\旧''版' -New 'D:\新' -KeyColumn '物理名', '項目ID' -NoRecurse -AsOf ([datetime]'2026-10-20') -MinBugs 5" (Format-GuiCommandLine 'C:\tools\Compare-Excel.ps1' $arguments)
+    Assert-Equal "([datetime]'2026-10-20')" (Invoke-InWareki { ConvertTo-GuiLiteral ([datetime]'2026-10-20') }) '和暦の設定でも、日付は西暦で書く'
+    Assert-Equal "([datetime]'2026-10-20')|09:05:03" (Invoke-InDashDate { '{0}|{1}' -f (ConvertTo-GuiLiteral ([datetime]'2026-10-20')), (Format-GuiTime ([datetime]'2026-10-20 09:05:03')) }) '日付・時刻の区切りを変えた設定でも、- と : で書く'
 
     # フォルダに保存する処理の結果: 実行を始めてから書いた Excel を、文字や古いファイルより先にする
     $results = Join-Path $dir '報告'
@@ -359,6 +359,89 @@ Test-Case 'Start-ExcelTools: 画面で処理を選び、入力して実行する
         Assert-Equal 'Check' $s.Entry.Id
     }
     finally { $form.Dispose() }
+}
+
+Test-Case 'Start-ExcelTools: 1 つの数の欄は区切らずに読み（8,000 は 8000）、ほかのカンマ（7,5）は誤りとして知らせる。複数の数の欄は区切って読む' {
+    $review = Get-TestEntry 'Review'
+    $r = ConvertTo-GuiArguments $review (Get-GuiFields $review) @{ Path = @('a.xlsx'); OutDir = 'out'; MaxChars = '8,000' }
+    Assert-Equal 0 $r.Errors.Count ($r.Errors -join ' / ')
+    Assert-Equal '8000|Int32' ('{0}|{1}' -f $r.Arguments['MaxChars'], $r.Arguments['MaxChars'].GetType().Name) '3 桁ごとのカンマを除いて読む'
+    $r = ConvertTo-GuiArguments $review (Get-GuiFields $review) @{ Path = @('a.xlsx'); OutDir = 'out'; MaxChars = '１２，０００' }
+    Assert-Equal '12000' ([string]$r.Arguments['MaxChars']) '全角の数字とカンマも読む'
+    $data = Get-TestEntry 'TestData'
+    $r = ConvertTo-GuiArguments $data (Get-GuiFields $data) @{ Path = @('a.xlsx'); OutDir = 'out'; Rows = '1,000' }
+    Assert-Equal '1000' ([string]$r.Arguments['Rows'])
+
+    $effort = Get-TestEntry 'Effort'
+    $r = ConvertTo-GuiArguments $effort (Get-GuiFields $effort) @{ Path = @('a.xlsx'); HoursPerDay = '7,5' }
+    Assert-Equal @('「1 人日の時間」は数で入れてください') $r.Errors '小数点のつもりのカンマは、黙って 7 にしない'
+    Assert-Equal @('HoursPerDay') $r.ErrorFields
+    $r = ConvertTo-GuiArguments $effort (Get-GuiFields $effort) @{ Path = @('a.xlsx'); HoursPerDay = '1,234.5'; Tolerance = '8 000' }
+    Assert-Equal '1234.5' ([string]$r.Arguments['HoursPerDay'])
+    Assert-Equal @('Tolerance') $r.ErrorFields '空白で区切った 1 つの数の欄も誤り'
+
+    $limits = Get-TestEntry 'Limits'
+    $r = ConvertTo-GuiArguments $limits (Get-GuiFields $limits) @{ Path = @('a.csv'); Percentiles = '10, 90' }
+    Assert-Equal @('10', '90') @($r.Arguments['Percentiles'] | ForEach-Object { [string]$_ }) '複数の数の欄は、カンマ・読点・空白で区切る'
+}
+
+Test-Case 'Start-ExcelTools: 画面が入れた結果の保存先のまま、もう一度実行すると、新しい名前にする（前の結果を上書きしない）' {
+    $dir = New-TestDir
+    $search = Get-TestEntry 'Search'
+    $fields = Get-GuiFields $search
+    $now = Get-Date '2026-10-23 10:15:00'
+    $first = Get-GuiDefaultOutputs $search $fields @{ OutXlsx = '' } -Dir $dir -Now $now
+    Assert-Equal '検索_20261023_101500.xlsx' (Split-Path -Leaf $first['OutXlsx'])
+    [System.IO.File]::WriteAllText($first['OutXlsx'], 'x')
+    # 1 回目のあと、結果の欄には画面が入れた名前が出ている
+    $again = Get-GuiDefaultOutputs $search $fields @{ OutXlsx = $first['OutXlsx'] } -Dir $dir -Now $now -AutoFilled $first
+    Assert-Equal '検索_20261023_101500(2).xlsx' (Split-Path -Leaf $again['OutXlsx'])
+    $later = Get-GuiDefaultOutputs $search $fields @{ OutXlsx = $first['OutXlsx'] } -Dir $dir -Now $now.AddMinutes(5) -AutoFilled $first
+    Assert-Equal '検索_20261023_102000.xlsx' (Split-Path -Leaf $later['OutXlsx'])
+    # 自分で入れ直した保存先はそのまま
+    $typed = Get-GuiDefaultOutputs $search $fields @{ OutXlsx = (Join-Path $dir '自分で決めた.xlsx') } -Dir $dir -Now $now -AutoFilled $first
+    Assert-Equal 0 $typed.Count '入れ直した保存先'
+}
+
+Test-Case 'Start-ExcelTools: 同じことをするコマンド・スクリプトは、日付の引数と、Word などが書く右の引用符（U+2019）を含む文字でも、そのまま動く' {
+    $dir = New-TestDir
+    $tool = Join-Path $dir "Customer$([char]0x2019)s tool.ps1"
+    [System.IO.File]::WriteAllText($tool, "param([datetime] `$AsOf, [string] `$Path, [string[]] `$Names)`r`n'{0}|{1}|{2}' -f `$AsOf.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture), `$Path, (`$Names -join '+')`r`n", (New-Object System.Text.UTF8Encoding($true)))
+    $path = "D:\資料\Customer$([char]0x2019)s 要件$([char]0x2018)案$([char]0x201A)$([char]0x201B).xlsx"
+    $arguments = [ordered]@{ AsOf = (Get-Date '2026-10-20'); Path = $path; Names = [string[]]@("O'Brien", 'x') }
+    $command = Format-GuiCommandLine $tool $arguments
+    Assert-Equal "2026-10-20|$path|O'Brien+x" (Invoke-Expression $command) "コマンドをコピーで写すコマンド: $command"
+    Assert-Equal '2026-10-20' (Invoke-Expression (ConvertTo-GuiLiteral ([datetime]'2026-10-20'))).ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) '式でも日付'
+
+    # PowerShell の画面で実行するスクリプト（AI レビュー・品質評価の定性分析）
+    $script = New-GuiConsoleScript $tool $arguments '定性分析' -Dir $dir
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$errors)
+    Assert-Equal 0 @($errors).Count (@($errors | ForEach-Object { $_.Message }) -join ' / ')
+    # スクリプトの引数の行を実行すると、元と同じ値になる
+    $arguments = @{}
+    foreach ($line in @([System.IO.File]::ReadAllLines($script) | Where-Object { $_ -like '$arguments`[*' })) { Invoke-Expression $line }
+    Assert-Equal "2026-10-20|$path|O'Brien+x" ('{0}|{1}|{2}' -f $arguments['AsOf'].ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture), $arguments['Path'], ($arguments['Names'] -join '+'))
+}
+
+Test-Case 'Start-ExcelTools: 試しに実行（-WhatIf）では、雛形から作るファイルを記録の欄で確かめられる（ファイルは作らない）' {
+    $dir = New-TestDir
+    $tpl = Join-Path $dir '画面設計書_雛形.xlsx'
+    New-SheetsBook $tpl ([ordered]@{ '画面概要' = @(@('項目', '値'), @('画面ID', '{{画面ID}}')) })
+    $list = Join-Path $dir 'list.csv'
+    @('画面ID', 'SCR001', 'SCR002') | Set-Content -LiteralPath $list -Encoding UTF8
+    $out = Join-Path $dir 'out'
+    $entry = Get-TestEntry 'NewDoc'
+    $built = ConvertTo-GuiArguments $entry (Get-GuiFields $entry) @{ Template = $tpl; List = $list; FileName = '{{画面ID}}.xlsx'; OutDir = $out }
+    Assert-Equal 0 $built.Errors.Count ($built.Errors -join ' / ')
+    # 「試しに実行」を選んでいるときに画面が付ける引数
+    $built.Arguments['WhatIf'] = $true
+    $r = Wait-GuiToolRun (Start-GuiToolRun $entry.ToolPath $built.Arguments) -TimeoutSeconds 120
+    Assert-True $r.Succeeded $r.Error
+    Assert-Match ([string]$r.Summary.Text) 'SCR001\.xlsx\s+作成予定' '作るファイル'
+    Assert-Match ([string]$r.Summary.Text) 'SCR002\.xlsx\s+作成予定'
+    Assert-True (@($r.Messages | Where-Object { $_.Text -match '^2 ファイルを作る予定です' }).Count -eq 1) (($r.Messages | ForEach-Object { $_.Text }) -join ' / ')
+    Assert-True (-not (Test-Path -LiteralPath $out)) 'ファイルは作らない'
 }
 
 Test-Case 'Start-ExcelTools: Get-Help でヘルプが表示される' {
