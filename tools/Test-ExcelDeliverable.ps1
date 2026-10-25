@@ -544,9 +544,13 @@ function Test-VersionConsistency {
     }
     $latest = $histVersion
     if (-not $latest) { $latest = $coverVersion }
-    $fm = [regex]::Match([System.IO.Path]::GetFileNameWithoutExtension($FileName).Normalize([System.Text.NormalizationForm]::FormKC), '(?i)(?:(?<![a-z])v(?:er)?\.?\s*|第\s*)(\d+(?:\.\d+)*)')
-    if ($latest -and $fm.Success) {
-        $fileVersion = ConvertTo-VersionText $fm.Groups[1].Value
+    # ファイル名の版数（_v1.0・第1.0版 など。「第2期」「第3章」は版数にしない）。版数が 2 つあれば後ろのもの
+    $fms = [regex]::Matches([System.IO.Path]::GetFileNameWithoutExtension($FileName).Normalize([System.Text.NormalizationForm]::FormKC), '(?i)(?<![a-z])v(?:er)?\.?\s*(\d+(?:\.\d+)*)|第\s*(\d+(?:\.\d+)*)\s*版')
+    if ($latest -and $fms.Count -gt 0) {
+        $fm = $fms[$fms.Count - 1]
+        $g = $fm.Groups[1]
+        if (-not $g.Success) { $g = $fm.Groups[2] }
+        $fileVersion = ConvertTo-VersionText $g.Value
         if ((Compare-VersionText $fileVersion $latest) -ne 0) {
             $where = '改訂履歴の最後の版数'
             if (-not $histVersion) { $where = '表紙の版数' }

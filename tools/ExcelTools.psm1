@@ -2172,7 +2172,8 @@ function Get-SheetRowElement {
     }
     if (-not $Create) { return $null }
     $new = $Doc.CreateElement($sheetData.Prefix, 'row', $sheetData.NamespaceURI)
-    if ($TemplateRow) { foreach ($a in @($TemplateRow.Attributes)) { if ($a.Name -ne 'r') { $new.SetAttribute($a.Name, $a.Value) } } }
+    # 属性は名前空間ごと写す（Excel が書く x14ac:dyDescent の接頭辞を落とすと、Excel が修復を求める）
+    if ($TemplateRow) { foreach ($a in @($TemplateRow.Attributes)) { if ($a.Name -ne 'r') { [void]$new.Attributes.Append($a.Clone()) } } }
     $new.SetAttribute('r', [string]$Row)
     if ($next) { [void]$sheetData.InsertBefore($new, $next) } else { [void]$sheetData.AppendChild($new) }
     return $new

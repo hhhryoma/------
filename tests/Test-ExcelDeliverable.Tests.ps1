@@ -163,6 +163,14 @@ Test-Case 'Test-ExcelDeliverable: 表紙の版数・更新日と、改訂履歴�
     Assert-Equal 0 $ok.Count ((Get-IssueKeys $ok) -join ', ')
 }
 
+Test-Case 'Test-ExcelDeliverable: ファイル名の「第2期」「第3章」は版数とみなさない' {
+    $dir = New-TestDir
+    $path = Join-Path $dir '受注システム第2期_第3章_仕様書_第1.1版.xlsx'
+    Copy-Item -LiteralPath (Join-Path $printDir '仕様書_第1.1版.xlsx') -Destination $path
+    $ok = Invoke-Check @{ Path = $path; Check = 'Version' }
+    Assert-Equal 0 $ok.Count ((@($ok | ForEach-Object { $_.Detail })) -join ' / ')
+}
+
 Test-Case 'Test-ExcelDeliverable: 詳細設計サンプルは印刷・版数を含めて指摘なし' {
     $issues = Invoke-Check @{ Path = (Join-Path $script:RepoRoot 'docs/design-sample') }
     Assert-Equal 0 $issues.Count ((@($issues | ForEach-Object { '{0} {1}' -f $_.File, $_.Detail })) -join ' / ')
