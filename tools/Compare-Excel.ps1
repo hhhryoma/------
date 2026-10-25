@@ -210,52 +210,7 @@ function Get-WrappedLines {
 
 $script:FormatSep = [string][char]0x1F
 $script:FormatOrder = @('太字', '斜体', '下線', '取り消し線', '文字色', '塗りつぶし', '部分書式')
-$script:ThemeColorNames = @('背景1', 'テキスト1', '背景2', 'テキスト2', 'アクセント1', 'アクセント2', 'アクセント3', 'アクセント4', 'アクセント5', 'アクセント6', 'ハイパーリンク', '表示済みのハイパーリンク')
-# 既定のカラーパレット（indexed の 0～63。64・65 はシステムの前景色・背景色）
-$script:IndexedColors = @(
-    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
-    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
-    '800000', '008000', '000080', '808000', '800080', '008080', 'C0C0C0', '808080',
-    '9999FF', '993366', 'FFFFCC', 'CCFFFF', '660066', 'FF8080', '0066CC', 'CCCCFF',
-    '000080', 'FF00FF', 'FFFF00', '00FFFF', '800080', '800000', '008080', '0000FF',
-    '00CCFF', 'CCFFFF', 'CCFFCC', 'FFFF99', '99CCFF', 'FF99CC', 'CC99FF', 'FFCC99',
-    '3366FF', '33CCCC', '99CC00', 'FFCC00', 'FF9900', 'FF6600', '666699', '969696',
-    '003366', '339966', '003300', '333300', '993300', '993366', '333399', '333333')
-# Excel の「標準の色」と黒・白は名前で表す
-$script:ColorNames = @{
-    'C00000' = '濃い赤'; 'FF0000' = '赤'; 'FFC000' = 'オレンジ'; 'FFFF00' = '黄'; '92D050' = '薄い緑'
-    '00B050' = '緑'; '00B0F0' = '薄い青'; '0070C0' = '青'; '002060' = '濃い青'; '7030A0' = '紫'
-    '000000' = '黒'; 'FFFFFF' = '白'
-}
-
-function Get-ColorText {
-    #     色の指定（rgb / theme / indexed / auto）を「赤」「#1F4E79」「アクセント1 +40%」のような文字にする。自動は ''
-    param([string] $Rgb, [string] $Theme, [string] $Indexed, [string] $Tint, [string] $Auto)
-
-    if ($Auto -eq '1' -or $Auto -eq 'true') { return '' }
-    $n = 0
-    $hex = $null
-    if ($Rgb -and $Rgb.Length -ge 6) { $hex = $Rgb.Substring($Rgb.Length - 6).ToUpperInvariant() }
-    elseif ($Indexed -and [int]::TryParse($Indexed, [ref]$n)) {
-        if ($n -ge $script:IndexedColors.Count) { return '' }
-        $hex = $script:IndexedColors[$n]
-    }
-    elseif ($Theme -and [int]::TryParse($Theme, [ref]$n)) {
-        $name = "テーマの色$n"
-        if ($n -lt $script:ThemeColorNames.Count) { $name = $script:ThemeColorNames[$n] }
-        $tint = 0.0
-        if ($Tint -and [double]::TryParse($Tint, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$tint) -and [math]::Abs($tint) -ge 0.005) {
-            # 正は明るく、負は暗くした色
-            $sign = ''
-            if ($tint -gt 0) { $sign = '+' }
-            $name += ' {0}{1}%' -f $sign, [math]::Round($tint * 100)
-        }
-        return $name
-    }
-    if (-not $hex) { return '' }
-    if ($script:ColorNames.ContainsKey($hex)) { return $script:ColorNames[$hex] }
-    return "#$hex"
-}
+# 色の名前（Get-ColorText）と塗りつぶし（Get-FillText）は ExcelTools.psm1
 
 function Set-FontAttribute {
     #     フォントの子要素（b / i / u / strike / color）1 つを、書式の辞書に反映する
@@ -352,21 +307,7 @@ function Read-StyleFormats {
         $fonts.Add($f)
     }
     $fills = New-Object System.Collections.Generic.List[string]
-    foreach ($fill in $doc.SelectNodes("//*[local-name()='fills']/*[local-name()='fill']")) {
-        $text = ''
-        $pf = $fill.SelectSingleNode("*[local-name()='patternFill']")
-        if ($pf) {
-            $type = $pf.GetAttribute('patternType')
-            if ($type -and $type -ne 'none' -and $type -ne 'gray125') {
-                $fg = $pf.SelectSingleNode("*[local-name()='fgColor']")
-                if ($fg) { $text = Get-ColorText $fg.GetAttribute('rgb') $fg.GetAttribute('theme') $fg.GetAttribute('indexed') $fg.GetAttribute('tint') $fg.GetAttribute('auto') }
-                if (-not $text) { $text = '自動' }
-                if ($type -ne 'solid') { $text += "（模様 $type）" }
-            }
-        }
-        elseif ($fill.SelectSingleNode("*[local-name()='gradientFill']")) { $text = 'グラデーション' }
-        $fills.Add($text)
-    }
+    foreach ($fill in $doc.SelectNodes("//*[local-name()='fills']/*[local-name()='fill']")) { $fills.Add((Get-FillText $fill)) }
     foreach ($xf in $doc.SelectNodes("//*[local-name()='cellXfs']/*[local-name()='xf']")) {
         $fontId = 0; $fillId = 0
         [void][int]::TryParse($xf.GetAttribute('fontId'), [ref]$fontId)
