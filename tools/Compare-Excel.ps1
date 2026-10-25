@@ -44,7 +44,9 @@ Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChe
 
 $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
 $maxAlignCells = 1000000   # 行の対応付けを厳密な LCS で行う「旧の行数 × 新の行数」の上限（超えたら patience diff）
-$pairWindow = 50           # 一致しなかった行どうしを「変更された行」として対応付けるとき、先を探す行数
+$pairWindow = 50           # 一致しなかった行どうしを「変更された行」として対応付けるとき、行の位置のずれを見る幅（前後の行数）
+$maxPairCells = 400000     # 一致しなかった行どうしの似ている度合いを求める組の数の上限（超えたら、目印の行で区切ってから比べる。Find-SimilarRows）
+$ordinal = [System.StringComparison]::Ordinal   # セルの文字の比べ方（ゼロ幅スペースなどの見えない文字や、大文字・小文字の違いも区別する）
 
 if ($OutXlsx) {
     $OutXlsx = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutXlsx)
@@ -106,6 +108,12 @@ function Read-Book {
                 $s.Shapes[$key] = [pscustomobject]@{ Text = $h.Text; Cell = $h.Cell }
             }
         }
+    }
+    # シートを 1 つも読めなかったブック（-NoExcel を付けた .xls / .xlsb、Excel のブックでないファイル）は、「同じ」にせず比較できなかったことにする
+    if ($book.Count -eq 0) {
+        $reason = 'シートを読めませんでした'
+        if ($NoExcel) { $reason += '（-NoExcel を付けると .xls / .xlsb は読めません）' }
+        throw ('{0}: {1}' -f [System.IO.Path]::GetFileName($FilePath), $reason)
     }
 
     # 図形・画像の位置と画像の中身（.xlsx / .xlsm）。読めないブック（.xls など）は、図形の名前と文字だけを比べる
@@ -549,29 +557,65 @@ function Read-BookFormat {
     finally { $pkg.Zip.Dispose() }
 }
 
-function Get-RowSignature {
-    # 行の内容を 1 つの文字列にする（同じ内容の行は同じ文字列になる）
-    param($Row)
-    $parts = New-Object System.Collections.Generic.List[string]
-    foreach ($c in ($Row.V.Keys | Sort-Object { (Get-ColumnIndex $_) })) { $parts.Add("$c`t" + $Row.V[$c]) }
-    foreach ($c in ($Row.F.Keys | Sort-Object { (Get-ColumnIndex $_) })) { $parts.Add("$c=`t" + $Row.F[$c]) }
-    return ($parts -join "`n")
+# 数式の中のセル参照（A1・$A$1・A:A・1:1）。ExcelTools.psm1 の Move-FormulaReference と同じ書き方（文字列・シート名・テーブルの列名は飛ばす）
+$script:FormulaRefPattern = New-Object System.Text.RegularExpressions.Regex(
+    '"(?:[^"]|"")*"|''(?:[^'']|'''')*''|\[[^\]]*\]|(?<![A-Za-z0-9_.$])(?:(\$?)([A-Z]{1,3})(\$?)([0-9]{1,7})|(\$?)([A-Z]{1,3}):(\$?)([A-Z]{1,3})|(\$?)([0-9]{1,7}):(\$?)([0-9]{1,7}))(?![A-Za-z0-9_.(!])')
+
+function Get-RelativeFormula {
+    #     数式を、セルの位置によらない形にする。相対参照の行をセルの行（Row）からの隔たり（R[-1] など）で表し、Col（列番号）を指定すれば列も（C[-2] など）。
+    #     行の挿入でずれただけの =B3*C3（3 行目）と =B4*C4（4 行目）は同じ形になる（行・列の挿入でセルと一緒にずれた数式は、Move-FormulaReference でずらした数式と同じ）。
+    #     Move-FormulaReference は数式ごとに時間がかかるので、行の多いシートでも速いよう、参照を 1 つずつ読み替える
+    param([string] $Formula, [int] $Row, [int] $Col = 0)
+    $ms = $script:FormulaRefPattern.Matches($Formula)
+    if ($ms.Count -eq 0) { return $Formula }
+    $sb = New-Object System.Text.StringBuilder
+    $last = 0
+    foreach ($m in $ms) {
+        $g = $m.Groups
+        if ($g[2].Success) { $parts = @(@('C', $g[1].Value, $g[2].Value), @('R', $g[3].Value, $g[4].Value)); $sep = '' }
+        elseif ($g[6].Success) { $parts = @(@('C', $g[5].Value, $g[6].Value), @('C', $g[7].Value, $g[8].Value)); $sep = ':' }
+        elseif ($g[10].Success) { $parts = @(@('R', $g[9].Value, $g[10].Value), @('R', $g[11].Value, $g[12].Value)); $sep = ':' }
+        else { continue }   # 文字列・シート名・テーブルの列名
+        [void]$sb.Append($Formula, $last, $m.Index - $last)
+        for ($k = 0; $k -lt 2; $k++) {
+            $p = $parts[$k]
+            if ($k -gt 0) { [void]$sb.Append($sep) }
+            if ($p[1]) { [void]$sb.Append('$').Append($p[2]) }   # 絶対参照はそのまま
+            elseif ($p[0] -eq 'R') { [void]$sb.Append('R[').Append([int]$p[2] - $Row).Append(']') }
+            elseif ($Col -gt 0) { [void]$sb.Append('C[').Append((Get-ColumnIndex $p[2]) - $Col).Append(']') }
+            else { [void]$sb.Append($p[2]) }
+        }
+        $last = $m.Index + $m.Length
+    }
+    [void]$sb.Append($Formula, $last, $Formula.Length - $last)
+    return $sb.ToString()
 }
 
-function Get-RowSimilarity {
-    #     2 つの行がどれだけ似ているか（0〜1）。同じ列で同じ内容なら 1 点、同じ列に何か入っているだけなら 0.5 点
-    param($A, $B)
-    $cols = @{}
-    foreach ($k in @($A.V.Keys) + @($A.F.Keys) + @($B.V.Keys) + @($B.F.Keys)) { $cols[$k] = $true }
-    if ($cols.Count -eq 0) { return 1.0 }
-    $score = 0.0
-    foreach ($c in $cols.Keys) {
-        $ia = $A.V.ContainsKey($c) -or $A.F.ContainsKey($c)
-        $ib = $B.V.ContainsKey($c) -or $B.F.ContainsKey($c)
-        if (-not ($ia -and $ib)) { continue }
-        if ($A.V[$c] -ceq $B.V[$c] -and $A.F[$c] -ceq $B.F[$c]) { $score += 1.0 } else { $score += 0.5 }
+function Get-RowCells {
+    #     行のセルを列の順に並べ、列ごとの内容（値と、行の位置によらない形にした数式）にする（行の対応付けに使う）。
+    #     返り値: Cols（列番号。小さい順）、Cells（Cols の列ごとの内容）、Signature（行の内容を 1 つにした文字列。同じ内容の行は同じ文字列になる）
+    param($Row, [int] $Number)
+    $names = @{}
+    foreach ($c in $Row.V.Keys) { $names[(Get-ColumnIndex $c)] = $c }
+    foreach ($c in $Row.F.Keys) { $names[(Get-ColumnIndex $c)] = $c }
+    $cols = [int[]]@($names.Keys)
+    [Array]::Sort($cols)
+    $cells = New-Object string[] $cols.Length
+    $parts = New-Object string[] $cols.Length
+    for ($k = 0; $k -lt $cols.Length; $k++) {
+        $c = $names[$cols[$k]]
+        $f = $Row.F[$c]
+        if ($null -ne $f) { $f = Get-RelativeFormula $f $Number }
+        $cells[$k] = [string]$Row.V[$c] + [char]0x1F + $f
+        $parts[$k] = $c + "`t" + $cells[$k]
     }
-    return $score / $cols.Count
+    return [pscustomobject]@{ Cols = $cols; Cells = $cells; Signature = ($parts -join "`n") }
+}
+
+function Get-RowSignature {
+    #     行の内容を 1 つの文字列にする（同じ内容の行は同じ文字列になる。Get-RowCells）
+    param($Row, [int] $Number)
+    return (Get-RowCells $Row $Number).Signature
 }
 
 # ---------------------------------------------------------------- 行の対応付け
@@ -580,7 +624,8 @@ function Get-RowSimilarity {
 function Get-RowMapping {
     #     旧と新の行を対応付ける。返り値は Pairs（旧行, 新行）、Removed（旧だけの行）、Added（新だけの行）。
     #     1) 先頭と末尾の同じ行を対応付け  2) 残りを LCS（同じ内容の行の最長共通部分列）で対応付け
-    #     3) 間に残った行は、似ている行どうしを順に「変更された行」として対応付ける
+    #     3) 間に残った行は、似ている行どうしを、順序を保って「変更された行」として対応付ける（Find-SimilarRows）
+    #     行の内容は、数式を行の位置によらない形にして比べる（行の挿入で =B3*C3 が =B4*C4 になった行も同じ内容）
     param([string[]] $OldRows, [string[]] $NewRows, $OldBook, $NewBook)
 
     $pairs = New-Object System.Collections.Generic.List[object]
@@ -599,14 +644,20 @@ function Get-RowMapping {
         return [pscustomobject]@{ Pairs = $pairs; Removed = $removed; Added = $added }
     }
 
-    $a = @($OldRows | ForEach-Object { Get-RowSignature $OldBook.Rows[$_] })
-    $b = @($NewRows | ForEach-Object { Get-RowSignature $NewBook.Rows[$_] })
-    $n = $a.Count; $m = $b.Count
+    # 行の内容を番号にする（同じ内容の行は同じ番号。文字は序数で比べ、見えない文字や大文字・小文字の違いも区別する）
+    $oldCells = @(for ($i = 0; $i -lt $OldRows.Count; $i++) { Get-RowCells $OldBook.Rows[$OldRows[$i]] ([int]$OldRows[$i]) })
+    $newCells = @(for ($j = 0; $j -lt $NewRows.Count; $j++) { Get-RowCells $NewBook.Rows[$NewRows[$j]] ([int]$NewRows[$j]) })
+    $n = $oldCells.Count; $m = $newCells.Count
+    $ids = New-Object 'System.Collections.Generic.Dictionary[string,int]'
+    $a = New-Object int[] $n
+    $b = New-Object int[] $m
+    for ($i = 0; $i -lt $n; $i++) { $s = $oldCells[$i].Signature; if (-not $ids.ContainsKey($s)) { $ids.Add($s, $ids.Count) }; $a[$i] = $ids[$s] }
+    for ($j = 0; $j -lt $m; $j++) { $s = $newCells[$j].Signature; if (-not $ids.ContainsKey($s)) { $ids.Add($s, $ids.Count) }; $b[$j] = $ids[$s] }
 
     $head = 0
-    while ($head -lt $n -and $head -lt $m -and $a[$head] -ceq $b[$head]) { $pairs.Add(@($OldRows[$head], $NewRows[$head])); $head++ }
+    while ($head -lt $n -and $head -lt $m -and $a[$head] -eq $b[$head]) { $pairs.Add(@($OldRows[$head], $NewRows[$head])); $head++ }
     $tail = 0
-    while ($tail -lt ($n - $head) -and $tail -lt ($m - $head) -and $a[$n - 1 - $tail] -ceq $b[$m - 1 - $tail]) { $tail++ }
+    while ($tail -lt ($n - $head) -and $tail -lt ($m - $head) -and $a[$n - 1 - $tail] -eq $b[$m - 1 - $tail]) { $tail++ }
 
     $oi = $head; $oEnd = $n - $tail
     $ni = $head; $nEnd = $m - $tail
@@ -618,14 +669,14 @@ function Get-RowMapping {
             $dp = New-Object 'int[,]' ($on + 1), ($nn + 1)
             for ($i = $on - 1; $i -ge 0; $i--) {
                 for ($j = $nn - 1; $j -ge 0; $j--) {
-                    if ($a[$oi + $i] -ceq $b[$ni + $j]) { $dp[$i, $j] = $dp[($i + 1), ($j + 1)] + 1 }
+                    if ($a[$oi + $i] -eq $b[$ni + $j]) { $dp[$i, $j] = $dp[($i + 1), ($j + 1)] + 1 }
                     elseif ($dp[($i + 1), $j] -ge $dp[$i, ($j + 1)]) { $dp[$i, $j] = $dp[($i + 1), $j] }
                     else { $dp[$i, $j] = $dp[$i, ($j + 1)] }
                 }
             }
             $i = 0; $j = 0
             while ($i -lt $on -and $j -lt $nn) {
-                if ($a[$oi + $i] -ceq $b[$ni + $j]) { $matches.Add(@(($oi + $i), ($ni + $j))); $i++; $j++ }
+                if ($a[$oi + $i] -eq $b[$ni + $j]) { $matches.Add(@(($oi + $i), ($ni + $j))); $i++; $j++ }
                 elseif ($dp[($i + 1), $j] -ge $dp[$i, ($j + 1)]) { $i++ }
                 else { $j++ }
             }
@@ -633,9 +684,9 @@ function Get-RowMapping {
         else {
             # 行数が多いときは patience diff: 旧と新のどちらでも 1 回しか出てこない行を目印にし、
             # 順序が保たれる最長の組（最長増加部分列）を一致とする
-            $countA = @{}; $countB = @{}; $posB = @{}
-            for ($i = $oi; $i -lt $oEnd; $i++) { $countA[$a[$i]] = 1 + [int]$countA[$a[$i]] }
-            for ($j = $ni; $j -lt $nEnd; $j++) { $countB[$b[$j]] = 1 + [int]$countB[$b[$j]]; $posB[$b[$j]] = $j }
+            $countA = New-Object int[] $ids.Count; $countB = New-Object int[] $ids.Count; $posB = New-Object int[] $ids.Count
+            for ($i = $oi; $i -lt $oEnd; $i++) { $countA[$a[$i]]++ }
+            for ($j = $ni; $j -lt $nEnd; $j++) { $countB[$b[$j]]++; $posB[$b[$j]] = $j }
             $cand = New-Object System.Collections.Generic.List[object]
             for ($i = $oi; $i -lt $oEnd; $i++) {
                 if ($countA[$a[$i]] -eq 1 -and $countB[$a[$i]] -eq 1) { $cand.Add(@($i, $posB[$a[$i]])) }
@@ -660,32 +711,182 @@ function Get-RowMapping {
 
     $po = $oi; $pn = $ni
     foreach ($mt in $matches) {
-        $gapOld = @(); if ($mt[0] -gt $po) { $gapOld = @($po..($mt[0] - 1)) }
-        $gapNew = @(); if ($mt[1] -gt $pn) { $gapNew = @($pn..($mt[1] - 1)) }
-        $usedNew = @{}
-        $next = 0
-        foreach ($x in $gapOld) {
-            $best = -1; $bestScore = 0.5
-            $limit = [math]::Min($gapNew.Count, $next + $pairWindow)
-            for ($k = $next; $k -lt $limit; $k++) {
-                $score = Get-RowSimilarity $OldBook.Rows[$OldRows[$x]] $NewBook.Rows[$NewRows[$gapNew[$k]]]
-                if ($score -ge $bestScore -and ($best -lt 0 -or $score -gt $bestScore)) { $best = $k; $bestScore = $score }
-            }
-            if ($best -ge 0) {
-                $pairs.Add(@($OldRows[$x], $NewRows[$gapNew[$best]]))
-                for ($k = $next; $k -lt $best; $k++) { $added.Add($NewRows[$gapNew[$k]]); $usedNew[$k] = $true }
-                $usedNew[$best] = $true
-                $next = $best + 1
-            }
-            else { $removed.Add($OldRows[$x]) }
+        if ($mt[0] -gt $po -or $mt[1] -gt $pn) {
+            $gapOld = @(for ($x = $po; $x -lt $mt[0]; $x++) { $oldCells[$x] })
+            $gapNew = @(for ($y = $pn; $y -lt $mt[1]; $y++) { $newCells[$y] })
+            $found = Find-SimilarRows $gapOld $gapNew
+            foreach ($p in $found.Pairs) { $pairs.Add(@($OldRows[$po + $p[0]], $NewRows[$pn + $p[1]])) }
+            foreach ($x in $found.Removed) { $removed.Add($OldRows[$po + $x]) }
+            foreach ($y in $found.Added) { $added.Add($NewRows[$pn + $y]) }
         }
-        for ($k = $next; $k -lt $gapNew.Count; $k++) { if (-not $usedNew.ContainsKey($k)) { $added.Add($NewRows[$gapNew[$k]]) } }
         if ($mt[0] -lt $oEnd) { $pairs.Add(@($OldRows[$mt[0]], $NewRows[$mt[1]])) }
         $po = $mt[0] + 1; $pn = $mt[1] + 1
     }
     for ($t = 0; $t -lt $tail; $t++) { $pairs.Add(@($OldRows[$oEnd + $t], $NewRows[$nEnd + $t])) }
 
     return [pscustomobject]@{ Pairs = $pairs; Removed = $removed; Added = $added }
+}
+
+function Find-SimilarRows {
+    #     一致した行の間に残った旧の行（Old）と新の行（New）を、似ている行どうしの組にする（Get-RowMapping の 3）。
+    #     似ている度合い（同じ列で同じ内容なら 1 点、同じ列に何か入っているだけなら 0.5 点を足し、どちらかに入っている列の数で割る）が
+    #     0.5 以上の組だけを使い、（似ている度合い - 0.49）の合計が最大になる、順序を保った組を求める（Get-ColumnMapping と同じ考え方）。
+    #     先に出会った似た行と組にしないので、行を削除して No を振り直した表でも、すぐ下の似た行と取り違えない。
+    #     比べるのは、旧の i 番目と新の j 番目のずれ（j - i）が、0 から行数の差までの前後 $pairWindow 行の組だけ（大きな表でも遅くならないように）。
+    #     その組の数が $maxPairCells を超えるときは、目印の組（Find-RowAnchors）で区切った範囲ごとに比べ、目印も無ければ、
+    #     行数の比で引いた斜めの線の前後 $pairWindow 行の組だけを比べる。
+    #     Old・New: Get-RowCells の結果。返り値: Pairs（Old と New の位置の組）、Removed（組にならなかった Old の位置）、Added（同じく New の位置）
+    param($Old, $New)
+
+    $Old = @($Old); $New = @($New)
+    $ga = $Old.Count; $gb = $New.Count
+    $pairs = New-Object System.Collections.Generic.List[object]
+    $removed = New-Object System.Collections.Generic.List[int]
+    $added = New-Object System.Collections.Generic.List[int]
+    if ($ga -gt 0 -and $gb -gt 0) {
+        # 列ごとの内容を番号 + 1 にする（0 は空）。旧の行は列の位置と番号の並び、新の行は列の位置 → 番号の表
+        $colAt = @{}
+        $ids = New-Object 'System.Collections.Generic.Dictionary[string,int]'
+        foreach ($r in ($Old + $New)) { foreach ($c in $r.Cols) { if (-not $colAt.ContainsKey($c)) { $colAt[$c] = $colAt.Count } } }
+        $oCols = New-Object 'object[]' $ga; $oIds = New-Object 'object[]' $ga
+        for ($i = 0; $i -lt $ga; $i++) {
+            $r = $Old[$i]
+            $cs = New-Object int[] $r.Cols.Length; $vs = New-Object int[] $r.Cols.Length
+            for ($t = 0; $t -lt $cs.Length; $t++) {
+                $s = $r.Cells[$t]
+                if (-not $ids.ContainsKey($s)) { $ids.Add($s, $ids.Count + 1) }
+                $cs[$t] = $colAt[$r.Cols[$t]]; $vs[$t] = $ids[$s]
+            }
+            $oCols[$i] = $cs; $oIds[$i] = $vs
+        }
+        $nVals = New-Object 'object[]' $gb; $nCount = New-Object int[] $gb
+        for ($j = 0; $j -lt $gb; $j++) {
+            $r = $New[$j]
+            $vs = New-Object int[] $colAt.Count
+            for ($t = 0; $t -lt $r.Cols.Length; $t++) {
+                $s = $r.Cells[$t]
+                if (-not $ids.ContainsKey($s)) { $ids.Add($s, $ids.Count + 1) }
+                $vs[$colAt[$r.Cols[$t]]] = $ids[$s]
+            }
+            $nVals[$j] = $vs; $nCount[$j] = $r.Cols.Length
+        }
+
+        # 比べる組の範囲（旧の i 番目について、新の Lo[i] 番目から Hi[i] 番目まで）
+        $diff = $gb - $ga
+        $lo = New-Object int[] ($ga + 1); $hi = New-Object int[] ($ga + 1)
+        $cells = 0
+        for ($i = 0; $i -le $ga; $i++) {
+            $lo[$i] = [math]::Max(0, $i + [math]::Min(0, $diff) - $pairWindow)
+            $hi[$i] = [math]::Min($gb, $i + [math]::Max(0, $diff) + $pairWindow)
+            $cells += $hi[$i] - $lo[$i] + 1
+        }
+        if ($cells -gt $maxPairCells) {
+            $anchors = Find-RowAnchors $oCols $oIds $nVals $nCount $ids.Count
+            if ($anchors.Count -gt 0) {
+                $anchors.Add(@($ga, $gb))   # 番兵
+                $po = 0; $pn = 0
+                foreach ($an in $anchors) {
+                    if ($an[0] -gt $po -or $an[1] -gt $pn) {
+                        $subOld = @(); if ($an[0] -gt $po) { $subOld = @($Old[$po..($an[0] - 1)]) }
+                        $subNew = @(); if ($an[1] -gt $pn) { $subNew = @($New[$pn..($an[1] - 1)]) }
+                        $sub = Find-SimilarRows $subOld $subNew
+                        foreach ($p in $sub.Pairs) { $pairs.Add(@(($po + $p[0]), ($pn + $p[1]))) }
+                        foreach ($x in $sub.Removed) { $removed.Add($po + $x) }
+                        foreach ($y in $sub.Added) { $added.Add($pn + $y) }
+                    }
+                    if ($an[0] -lt $ga) { $pairs.Add(@($an[0], $an[1])) }
+                    $po = $an[0] + 1; $pn = $an[1] + 1
+                }
+                return [pscustomobject]@{ Pairs = $pairs; Removed = $removed; Added = $added }
+            }
+            $cells = 0
+            for ($i = 0; $i -le $ga; $i++) {
+                $lo[$i] = [math]::Max(0, [int][math]::Floor($i * $gb / $ga) - $pairWindow)
+                $hi[$i] = [math]::Min($gb, [int][math]::Ceiling(($i + 1) * $gb / $ga) + $pairWindow)
+                $cells += $hi[$i] - $lo[$i] + 1
+            }
+            Write-Verbose ("行数が多いため、似ている行は行数の比の位置の前後 {0} 行から探します（{1} 行 × {2} 行）" -f $pairWindow, $ga, $gb)
+        }
+
+        # 後ろから、(i, j) から先の最大の合計（Score）と、そこでの選択（Step。1: 旧の行を削除、2: 新の行を追加、3: 組にする）を求める。
+        # 旧か新の行が尽きたところは 0 点（残りはすべて削除・追加）
+        $at = New-Object int[] ($ga + 1)
+        $total = 0
+        for ($i = 0; $i -le $ga; $i++) { $at[$i] = $total - $lo[$i]; $total += $hi[$i] - $lo[$i] + 1 }
+        $score = New-Object double[] $total
+        $step = New-Object byte[] $total
+        for ($i = $ga - 1; $i -ge 0; $i--) {
+            $j0 = $lo[$i]; $j1 = $hi[$i]; $a0 = $at[$i]
+            $k0 = $lo[$i + 1]; $k1 = $hi[$i + 1]; $a1 = $at[$i + 1]
+            $ca = $oCols[$i]; $va = $oIds[$i]; $na = $ca.Length
+            for ($j = [math]::Min($j1, $gb - 1); $j -ge $j0; $j--) {
+                $best = -1.0e9; $choice = 0
+                if ($j -ge $k0 -and $j -le $k1) { $best = $score[$a1 + $j]; $choice = 1 }
+                if ($j -lt $j1) { $v = $score[$a0 + $j + 1]; if ($v -gt $best) { $best = $v; $choice = 2 } }
+                if ($j + 1 -ge $k0 -and $j + 1 -le $k1) {
+                    $vb = $nVals[$j]; $both = 0; $same = 0
+                    for ($t = 0; $t -lt $na; $t++) { $x = $vb[$ca[$t]]; if ($x -ne 0) { $both++; if ($x -eq $va[$t]) { $same++ } } }
+                    $sim = ($same + $both) / (2.0 * ($na + $nCount[$j] - $both))
+                    if ($sim -ge 0.5) { $v = $score[$a1 + $j + 1] + $sim - 0.49; if ($v -ge $best) { $best = $v; $choice = 3 } }
+                }
+                $score[$a0 + $j] = $best; $step[$a0 + $j] = $choice
+            }
+        }
+        $i = 0; $j = 0
+        while ($i -lt $ga -and $j -lt $gb) {
+            $choice = $step[$at[$i] + $j]
+            if ($choice -eq 3) { $pairs.Add(@($i, $j)); $i++; $j++ }
+            elseif ($choice -eq 1) { $removed.Add($i); $i++ }
+            elseif ($choice -eq 2) { $added.Add($j); $j++ }
+            else { break }
+        }
+    }
+    else { $i = 0; $j = 0 }
+    for (; $i -lt $ga; $i++) { $removed.Add($i) }
+    for (; $j -lt $gb; $j++) { $added.Add($j) }
+    return [pscustomobject]@{ Pairs = $pairs; Removed = $removed; Added = $added }
+}
+
+function Find-RowAnchors {
+    #     大きな範囲を区切る目印の組を探す（Find-SimilarRows）。同じ列で同じ内容のセルが、旧の範囲にも新の範囲にも 1 回しか出てこなければ、
+    #     その旧の行と新の行を組の候補にし、旧の行ごとに、そのようなセルがいちばん多い新の行（似ている度合いが 0.5 以上のもの）を選ぶ。
+    #     候補のうち、順序が保たれる最長の並び（Get-LisIndexes）を目印とする（No を振り直した大きな表に、まとめて行を挿入したときなど）。
+    #     OldCols・OldIds: 旧の行の列の位置と内容の番号、NewVals: 新の行の列の位置 → 内容の番号、NewCount: 新の行のセルの数、IdCount: 内容の番号の数。
+    #     返り値: 目印の組（旧・新の位置。旧の順）の一覧
+    param($OldCols, $OldIds, $NewVals, $NewCount, [int] $IdCount)
+    $width = [long]$IdCount + 1
+    $oldSeen = @{}; $newSeen = @{}; $newAt = @{}
+    for ($i = 0; $i -lt $OldCols.Count; $i++) {
+        $ca = $OldCols[$i]; $va = $OldIds[$i]
+        for ($t = 0; $t -lt $ca.Length; $t++) { $k = $ca[$t] * $width + $va[$t]; $oldSeen[$k] = 1 + [int]$oldSeen[$k] }
+    }
+    for ($j = 0; $j -lt $NewVals.Count; $j++) {
+        $vb = $NewVals[$j]
+        for ($c = 0; $c -lt $vb.Length; $c++) { if ($vb[$c] -ne 0) { $k = $c * $width + $vb[$c]; $newSeen[$k] = 1 + [int]$newSeen[$k]; $newAt[$k] = $j } }
+    }
+    $cand = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt $OldCols.Count; $i++) {
+        $ca = $OldCols[$i]; $va = $OldIds[$i]
+        $votes = @{}
+        for ($t = 0; $t -lt $ca.Length; $t++) {
+            $k = $ca[$t] * $width + $va[$t]
+            if ($oldSeen[$k] -eq 1 -and $newSeen[$k] -eq 1) { $votes[$newAt[$k]] = 1 + [int]$votes[$newAt[$k]] }
+        }
+        # いちばん多い新の行（同じ数の行が複数あれば選ばない）
+        $best = -1; $most = 0; $tie = $false
+        foreach ($j in $votes.Keys) {
+            if ($votes[$j] -gt $most) { $best = $j; $most = $votes[$j]; $tie = $false }
+            elseif ($votes[$j] -eq $most) { $tie = $true }
+        }
+        if ($best -lt 0 -or $tie) { continue }
+        $vb = $NewVals[$best]; $both = 0; $same = 0
+        for ($t = 0; $t -lt $ca.Length; $t++) { $x = $vb[$ca[$t]]; if ($x -ne 0) { $both++; if ($x -eq $va[$t]) { $same++ } } }
+        if (($same + $both) / (2.0 * ($ca.Length + $NewCount[$best] - $both)) -ge 0.5) { $cand.Add(@($i, $best)) }
+    }
+    $lis = Get-LisIndexes ([int[]]@($cand | ForEach-Object { $_[1] }))
+    $anchors = New-Object System.Collections.Generic.List[object]
+    for ($k = 0; $k -lt $cand.Count; $k++) { if ($lis.ContainsKey($k)) { $anchors.Add($cand[$k]) } }
+    return , $anchors
 }
 
 # ---------------------------------------------------------------- 差分の出力
@@ -774,12 +975,18 @@ function Get-TextDiff {
     $ta = @($script:TokenPattern.Matches($A) | ForEach-Object { $_.Value })
     $tb = @($script:TokenPattern.Matches($B) | ForEach-Object { $_.Value })
     $n = $ta.Count; $m = $tb.Count
+    # 語を番号にして比べる（同じ語は同じ番号。序数で比べ、ゼロ幅スペースなどの見えない文字も区別する）
+    $ids = New-Object 'System.Collections.Generic.Dictionary[string,int]'
+    $ka = New-Object int[] $n
+    $kb = New-Object int[] $m
+    for ($i = 0; $i -lt $n; $i++) { if (-not $ids.ContainsKey($ta[$i])) { $ids.Add($ta[$i], $ids.Count) }; $ka[$i] = $ids[$ta[$i]] }
+    for ($j = 0; $j -lt $m; $j++) { if (-not $ids.ContainsKey($tb[$j])) { $ids.Add($tb[$j], $ids.Count) }; $kb[$j] = $ids[$tb[$j]] }
 
     # 先頭と末尾の一致を除いた残りを LCS で比べる
     $pre = 0
-    while ($pre -lt $n -and $pre -lt $m -and $ta[$pre] -ceq $tb[$pre]) { $pre++ }
+    while ($pre -lt $n -and $pre -lt $m -and $ka[$pre] -eq $kb[$pre]) { $pre++ }
     $suf = 0
-    while ($suf -lt ($n - $pre) -and $suf -lt ($m - $pre) -and $ta[$n - 1 - $suf] -ceq $tb[$m - 1 - $suf]) { $suf++ }
+    while ($suf -lt ($n - $pre) -and $suf -lt ($m - $pre) -and $ka[$n - 1 - $suf] -eq $kb[$m - 1 - $suf]) { $suf++ }
 
     $ops = New-Object System.Collections.Generic.List[object]
     for ($i = 0; $i -lt $pre; $i++) { $ops.Add(@('=', $ta[$i])) }
@@ -788,9 +995,9 @@ function Get-TextDiff {
         $w = $nb + 1
         $dp = New-Object 'int[]' (($na + 1) * $w)
         for ($i = $na - 1; $i -ge 0; $i--) {
-            $x = $ta[$pre + $i]
+            $x = $ka[$pre + $i]
             for ($j = $nb - 1; $j -ge 0; $j--) {
-                if ($x -ceq $tb[$pre + $j]) { $dp[$i * $w + $j] = $dp[($i + 1) * $w + $j + 1] + 1 }
+                if ($x -eq $kb[$pre + $j]) { $dp[$i * $w + $j] = $dp[($i + 1) * $w + $j + 1] + 1 }
                 else {
                     $down = $dp[($i + 1) * $w + $j]; $right = $dp[$i * $w + $j + 1]
                     if ($down -ge $right) { $dp[$i * $w + $j] = $down } else { $dp[$i * $w + $j] = $right }
@@ -799,7 +1006,7 @@ function Get-TextDiff {
         }
         $i = 0; $j = 0
         while ($i -lt $na -and $j -lt $nb) {
-            if ($ta[$pre + $i] -ceq $tb[$pre + $j]) { $ops.Add(@('=', $ta[$pre + $i])); $i++; $j++ }
+            if ($ka[$pre + $i] -eq $kb[$pre + $j]) { $ops.Add(@('=', $ta[$pre + $i])); $i++; $j++ }
             elseif ($dp[($i + 1) * $w + $j] -ge $dp[$i * $w + $j + 1]) { $ops.Add(@('-', $ta[$pre + $i])); $i++ }
             else { $ops.Add(@('+', $tb[$pre + $j])); $j++ }
         }
@@ -847,9 +1054,9 @@ function Get-TextDiff {
                     $da = @($script:TokenPattern.Matches($dt) | ForEach-Object { $_.Value })
                     $ia = @($script:TokenPattern.Matches($it) | ForEach-Object { $_.Value })
                     $p = 0
-                    while ($p -lt $da.Count -and $p -lt $ia.Count -and $da[$p] -ceq $ia[$p]) { $p++ }
+                    while ($p -lt $da.Count -and $p -lt $ia.Count -and [string]::Equals($da[$p], $ia[$p], $ordinal)) { $p++ }
                     $q = 0
-                    while ($q -lt $da.Count - $p -and $q -lt $ia.Count - $p -and $da[$da.Count - 1 - $q] -ceq $ia[$ia.Count - 1 - $q]) { $q++ }
+                    while ($q -lt $da.Count - $p -and $q -lt $ia.Count - $p -and [string]::Equals($da[$da.Count - 1 - $q], $ia[$ia.Count - 1 - $q], $ordinal)) { $q++ }
                     if ($p -gt 0 -or $q -gt 0) {
                         & $addSame (Join-Tokens $da 0 $p)
                         $t = (Join-Tokens $da ($da.Count - $q) $q) + $t
@@ -1067,8 +1274,8 @@ function Get-SheetSimilarity {
     #     2 つのシートの中身がどれだけ似ているか（行の内容の集まりの Jaccard 係数）。シート名の変更の判定に使う
     param($A, $B)
     $ba = @{}; $bb = @{}
-    foreach ($r in $A.Rows.Values) { $s = Get-RowSignature $r; $ba[$s] = 1 + [int]$ba[$s] }
-    foreach ($r in $B.Rows.Values) { $s = Get-RowSignature $r; $bb[$s] = 1 + [int]$bb[$s] }
+    foreach ($r in $A.Rows.Keys) { $s = Get-RowSignature $A.Rows[$r] ([int]$r); $ba[$s] = 1 + [int]$ba[$s] }
+    foreach ($r in $B.Rows.Keys) { $s = Get-RowSignature $B.Rows[$r] ([int]$r); $bb[$s] = 1 + [int]$bb[$s] }
     if ($ba.Count -eq 0 -and $bb.Count -eq 0) { return 0.0 }
     return Get-BagSimilarity $ba $bb
 }
@@ -1149,16 +1356,16 @@ function Compare-Sheet {
     $map = Get-RowMapping -OldRows $restOld -NewRows $restNew -OldBook $oldView -NewBook $newView
     foreach ($p in $map.Pairs) { $pairs.Add($p) }
 
-    # 削除と追加に同じ内容の行があれば、行の移動とみなす
-    $addedBySig = @{}
+    # 削除と追加に同じ内容の行があれば、行の移動とみなす（内容は序数で比べる。大文字・小文字だけが違う行は移動にしない）
+    $addedBySig = New-Object 'System.Collections.Generic.Dictionary[string,object]'
     foreach ($r in $map.Added) {
-        $sig = Get-RowSignature $newView.Rows[$r]
+        $sig = Get-RowSignature $newView.Rows[$r] ([int]$r)
         if (-not $addedBySig.ContainsKey($sig)) { $addedBySig[$sig] = New-Object System.Collections.Generic.List[string] }
         $addedBySig[$sig].Add($r)
     }
     $movedNew = @{}
     foreach ($r in $map.Removed) {
-        $sig = Get-RowSignature $oldView.Rows[$r]
+        $sig = Get-RowSignature $oldView.Rows[$r] ([int]$r)
         if ($addedBySig.ContainsKey($sig) -and $addedBySig[$sig].Count -gt 0) {
             $to = $addedBySig[$sig][0]; $addedBySig[$sig].RemoveAt(0)
             $moved.Add(@($r, $to)); $movedNew[$to] = $true
@@ -1178,15 +1385,20 @@ function Compare-Sheet {
             foreach ($c in @($o[$kind[0]].Keys) + @($n[$kind[0]].Keys)) { $cols[$c] = $true }
             foreach ($c in ($cols.Keys | Sort-Object { (Get-ColumnIndex $_) })) {
                 $ov = $o[$kind[0]][$c]; $nv = $n[$kind[0]][$c]
-                if ($ov -ceq $nv) { continue }
+                # 序数で比べる（ゼロ幅スペースなどの見えない文字だけの変更も見落とさない）
+                if ([string]::Equals($ov, $nv, $ordinal)) { continue }
                 $newCell = (& $L $c) + $p[1]; $oldCell = "$c$($p[0])"
+                # 行・列の挿入・削除でセルと一緒にずれただけの相対参照の数式（=B3*C3 → =B4*C4）は、変更にしない
+                if ($kind[0] -eq 'F' -and $null -ne $ov -and $null -ne $nv -and
+                    [string]::Equals((Get-RelativeFormula $ov ([int]$p[0]) (Get-ColumnIndex $c)), (Get-RelativeFormula $nv ([int]$p[1]) (Get-ColumnIndex $newCell)), $ordinal)) { continue }
                 if ($null -eq $ov) { Add-Diff $Sheet $newCell $oldCell $kind[1] '追加' $null $nv }
                 elseif ($null -eq $nv) { Add-Diff $Sheet $newCell $oldCell $kind[1] '削除' $ov $null }
                 else { Add-Diff $Sheet $newCell $oldCell $kind[1] '変更' $ov $nv }
             }
         }
     }
-    foreach ($mv in ($moved | Sort-Object { [int]$_[1] })) {
+    # @() で囲む（移動した行が 1 つだけのとき、旧・新の行の組がほどけないように）
+    foreach ($mv in @($moved | Sort-Object { [int]$_[1] })) {
         Add-Diff $Sheet "A$($mv[1])" "A$($mv[0])" '行' '移動' (Format-RowContent $oldView.Rows[$mv[0]]) (Format-RowContent $newView.Rows[$mv[1]])
     }
     foreach ($r in ($added | Sort-Object { [int]$_ })) {
@@ -1208,17 +1420,30 @@ function Compare-Sheet {
 
     if ($CompareFormat) { Compare-SheetFormat -Sheet $Sheet -Pairs $pairs -OldSheet $OldSheet -NewSheet $NewSheet -OldView $oldView -NewView $newView -ColumnMap $cm -ToNew $toNew }
 
-    # ---- コメント: 旧の位置を行・列の対応で新の位置に読み替えて比べる
+    # ---- コメント: 旧の位置を行・列の対応で新の位置に読み替えて比べる。削除した行・列のコメントは削除とする。
+    #      対応の付いた行のコメントから順に読み替え、読み替えた位置が重なったもの（対応の無い行のコメント）は、上書きせずに削除とする
+    $goneRows = @{}
+    foreach ($r in $removed) { $goneRows[$r] = $true }
+    $goneCols = @{}
+    if ($cm) { foreach ($c in $cm.RemovedCols) { $goneCols[$c] = $true } }
+    $commentCells = @(foreach ($cell in $OldSheet.Comments.Keys) {
+            $m = [regex]::Match($cell, '^([A-Z]+)(\d+)$')
+            [pscustomobject]@{ Cell = $cell; Col = $m.Groups[1].Value; Row = $m.Groups[2].Value; Unaligned = -not $rowMap.ContainsKey($m.Groups[2].Value); R = [int]$m.Groups[2].Value; C = (Get-ColumnIndex $cell) }
+        })
     $oldComments = @{}
-    foreach ($cell in $OldSheet.Comments.Keys) {
-        $m = [regex]::Match($cell, '^([A-Z]+)(\d+)$')
-        $row = $m.Groups[2].Value
-        if ($rowMap.ContainsKey($row)) { $row = $rowMap[$row] }
-        $oldComments[(& $L $m.Groups[1].Value) + $row] = @($cell, $OldSheet.Comments[$cell])
+    foreach ($x in @($commentCells | Sort-Object Unaligned, R, C)) {
+        $at = $null
+        if (-not $goneRows.ContainsKey($x.Row) -and -not $goneCols.ContainsKey($x.Col)) {
+            $row = $x.Row
+            if ($rowMap.ContainsKey($row)) { $row = $rowMap[$row] }
+            $at = (& $L $x.Col) + $row
+        }
+        if (-not $at -or $oldComments.ContainsKey($at)) { Add-Diff $Sheet $null $x.Cell 'コメント' '削除' $OldSheet.Comments[$x.Cell] $null; continue }
+        $oldComments[$at] = @($x.Cell, $OldSheet.Comments[$x.Cell])
     }
     foreach ($cell in $NewSheet.Comments.Keys) {
         if ($oldComments.ContainsKey($cell)) {
-            if ($oldComments[$cell][1] -cne $NewSheet.Comments[$cell]) { Add-Diff $Sheet $cell $oldComments[$cell][0] 'コメント' '変更' $oldComments[$cell][1] $NewSheet.Comments[$cell] }
+            if (-not [string]::Equals($oldComments[$cell][1], $NewSheet.Comments[$cell], $ordinal)) { Add-Diff $Sheet $cell $oldComments[$cell][0] 'コメント' '変更' $oldComments[$cell][1] $NewSheet.Comments[$cell] }
             $oldComments.Remove($cell)
         }
         else { Add-Diff $Sheet $cell $null 'コメント' '追加' $null $NewSheet.Comments[$cell] }
@@ -1241,7 +1466,7 @@ function Compare-Sheet {
             $ns = $NewSheet.Shapes[$name]
             if ($OldSheet.Shapes.ContainsKey($name)) {
                 $os = $OldSheet.Shapes[$name]
-                if ($os.Text -cne $ns.Text) { Add-Diff $Sheet $ns.Cell $os.Cell '図形' '変更' $os.Text $ns.Text }
+                if (-not [string]::Equals($os.Text, $ns.Text, $ordinal)) { Add-Diff $Sheet $ns.Cell $os.Cell '図形' '変更' $os.Text $ns.Text }
             }
             else { Add-Diff $Sheet $ns.Cell $null '図形' '追加' $null $ns.Text }
         }
@@ -1426,7 +1651,7 @@ function Compare-SheetDrawing {
     # ---- 図形（文字の変化は、これまでどおり文字で出す）
     foreach ($p in $shapes.Pairs) {
         $o = $p[0]; $n = $p[1]
-        if ($o.Kind -ne 'grpSp' -and $o.Text -cne $n.Text) { Add-Diff $Sheet $n.Cell $o.Cell '図形' '変更' $o.Text $n.Text -Shape (& $shapeOf $o $n) }
+        if ($o.Kind -ne 'grpSp' -and -not [string]::Equals($o.Text, $n.Text, $ordinal)) { Add-Diff $Sheet $n.Cell $o.Cell '図形' '変更' $o.Text $n.Text -Shape (& $shapeOf $o $n) }
         $move = Get-DrawingMove $o $n $rows $cols
         if ($move) {
             $verb = '図形を移動'
@@ -1479,7 +1704,7 @@ function Compare-SheetFormat {
             $ok = ''; $nk = ''
             if ($of -and $of.ContainsKey($oc)) { $ok = $of[$oc] }
             if ($nf -and $nf.ContainsKey($nc)) { $nk = $nf[$nc] }
-            if ($ok -ceq $nk) { continue }
+            if ([string]::Equals($ok, $nk, $ordinal)) { continue }
             $o = ConvertFrom-FormatKey $ok
             $n = ConvertFrom-FormatKey $nk
             # 文字列そのものが変わったセルの部分書式は比べない（変更は値の差分でわかる）
@@ -1487,11 +1712,11 @@ function Compare-SheetFormat {
                 $ov = $null; $nv = $null
                 if ($OldView.Rows.ContainsKey($oldRow)) { $ov = $OldView.Rows[$oldRow].V[$oc] }
                 if ($NewView.Rows.ContainsKey($newRow)) { $nv = $NewView.Rows[$newRow].V[$oc] }
-                if ($ov -cne $nv) { $o.Remove('部分書式'); $n.Remove('部分書式') }
+                if (-not [string]::Equals($ov, $nv, $ordinal)) { $o.Remove('部分書式'); $n.Remove('部分書式') }
             }
             $changes = @()
             foreach ($k in $script:FormatOrder) {
-                if ($o[$k] -cne $n[$k]) { $changes += ('{0} {1} → {2}' -f $k, (Get-FormatValueText $k $o[$k]), (Get-FormatValueText $k $n[$k])) }
+                if (-not [string]::Equals($o[$k], $n[$k], $ordinal)) { $changes += ('{0} {1} → {2}' -f $k, (Get-FormatValueText $k $o[$k]), (Get-FormatValueText $k $n[$k])) }
             }
             if ($changes.Count -eq 0) { continue }
             $found.Add([pscustomobject]@{
@@ -1547,7 +1772,8 @@ function Merge-Renumbering {
     param([int] $From)
 
     $items = $script:Diffs.GetRange($From, $script:Diffs.Count - $From).ToArray()
-    $isNum = { param($d) $d.Kind -eq '値' -and $d.Change -eq '変更' -and $d.Old -match '^-?\d+$' -and $d.New -match '^-?\d+$' }
+    # 番号は半角の数字で 18 桁まで（全角の数字や、long に収まらない桁の多い数字で止まらないように）
+    $isNum = { param($d) $d.Kind -eq '値' -and $d.Change -eq '変更' -and $d.Old -match '^-?[0-9]{1,18}$' -and $d.New -match '^-?[0-9]{1,18}$' }
     $runs = New-Object System.Collections.Generic.List[object]
     $byCol = @{}
     for ($i = 0; $i -lt $items.Count; $i++) {
@@ -1692,15 +1918,15 @@ function Compare-Book {
 
 
 function ConvertTo-NotationKey {
-    #     表記の違い（全角・半角、空白・改行、英字の大文字・小文字）をそろえた文字
+    #     表記の違い（全角・半角、空白・改行（Search-Excel がセルの中の改行を表す ↵ も）、英字の大文字・小文字）をそろえた文字
     param([string] $Text)
-    return (([string]$Text).Normalize([System.Text.NormalizationForm]::FormKC) -replace '\s', '').ToUpperInvariant()
+    return (([string]$Text).Normalize([System.Text.NormalizationForm]::FormKC) -replace '[\s↵]', '').ToUpperInvariant()
 }
 
 function Set-DiffTags {
     #     First 番目からの差分に分類（Tag）を付ける
     #       表記    値・数式・コメント・図形の変更のうち、全角・半角、空白・改行、英字の大文字・小文字だけが違うもの
-    #       版情報  改訂履歴のシートの変更と、版数・更新日・更新者などの欄（左隣の見出しで判断）の値の変更
+    #       版情報  改訂履歴のシートの変更と、版数・更新日・更新者などの欄（左隣の見出しで判断。表の中の行は除く）の値の変更
     param($OldBook, $NewBook, [int] $First)
     for ($i = $First; $i -lt $script:Diffs.Count; $i++) {
         $d = $script:Diffs[$i]
@@ -1708,7 +1934,8 @@ function Set-DiffTags {
         if ($d.Kind -ne 'シート' -and $d.Sheet -match $HistorySheet) { $tag = '版情報' }
         elseif (@('値', '数式') -contains $d.Kind -and (($d.NewCell -and $NewBook.Contains($d.Sheet) -and (Test-BookkeepingCell $NewBook[$d.Sheet] $d.NewCell)) -or
                 ($d.OldCell -and $OldBook.Contains($d.OldSheet) -and (Test-BookkeepingCell $OldBook[$d.OldSheet] $d.OldCell)))) { $tag = '版情報' }
-        elseif ($d.Change -eq '変更' -and @('値', '数式', 'コメント', '図形') -contains $d.Kind -and $d.Old -ne $d.New -and (ConvertTo-NotationKey $d.Old) -eq (ConvertTo-NotationKey $d.New)) { $tag = '表記' }
+        elseif ($d.Change -eq '変更' -and @('値', '数式', 'コメント', '図形') -contains $d.Kind -and -not [string]::Equals($d.Old, $d.New, $ordinal) -and
+                [string]::Equals((ConvertTo-NotationKey $d.Old), (ConvertTo-NotationKey $d.New), $ordinal)) { $tag = '表記' }
         if (-not $tag) { continue }
         $d.Tag = $tag
         if ($tag -eq '表記') { $d.Detail += '（表記のみ）' } else { $d.Detail += '（版情報）' }
@@ -1773,7 +2000,8 @@ $script:BookkeepingLabel = '^(版数|版|改訂版数|バージョン|Version|Ve
 $script:HistoryDrafts = New-Object System.Collections.Generic.List[object]
 
 function Test-BookkeepingCell {
-    #     版数・更新日・更新者などの欄のセルか（同じ行で左にある、いちばん近い値を見出しとみなす）
+    #     版数・更新日・更新者などの欄のセルか（同じ行で左にある、いちばん近い値を見出しとみなす）。
+    #     表の中の行（テーブル定義書の「更新者」のカラムの行など。Test-TableRow）は、版を上げるたびに変わる欄ではないので除く
     param($Sheet, [string] $Cell)
     $m = [regex]::Match([string]$Cell, '^([A-Z]+)(\d+)$')
     if (-not $m.Success -or -not $Sheet) { return $false }
@@ -1782,7 +2010,25 @@ function Test-BookkeepingCell {
     $col = Get-ColumnIndex $m.Groups[1].Value
     $left = @($row.V.Keys | Where-Object { (Get-ColumnIndex $_) -lt $col } | Sort-Object { Get-ColumnIndex $_ })
     if ($left.Count -eq 0) { return $false }
-    return (ConvertTo-Label $row.V[$left[-1]]) -match $script:BookkeepingLabel
+    if ((ConvertTo-Label $row.V[$left[-1]]) -notmatch $script:BookkeepingLabel) { return $false }
+    # 表紙やシートの上部の欄は、「作成者 | 山田 | 作成日 | 2026/10/01」のように 1 行に見出しが 2 つ以上並ぶことが多い。見出しが 1 つの行だけ、表の中の行かを調べる
+    if (@($row.V.Values | Where-Object { (ConvertTo-Label $_) -match $script:BookkeepingLabel }).Count -ge 2) { return $true }
+    return -not (Test-TableRow $Sheet $left[-1] ([int]$m.Groups[2].Value))
+}
+
+function Test-TableRow {
+    #     Col 列・Row 行の見出しのセルが、表の中の行にあるか。上の行へたどり、その列に値があって、
+    #     数値・日付でないセルが 3 つ以上ある行（表の見出しの行や、表の中の行）があれば、表の中とみなす。
+    #     その列の値が版数・更新日などの見出しの行（表紙やシートの上部で「作成者」「更新者」と縦に並ぶ欄）は飛ばす
+    param($Sheet, [string] $Col, [int] $Row)
+    for ($r = $Row - 1; $r -ge 1; $r--) {
+        $data = $Sheet.Rows["$r"]
+        if (-not $data) { continue }
+        $text = $data.V[$Col]
+        if (-not $text -or (ConvertTo-Label $text) -match $script:BookkeepingLabel) { continue }
+        if (@($data.V.Values | Where-Object { $_ -notmatch '^\s*-?[\d.,]+\s*$|^\s*\d{4}[/-]\d{1,2}[/-]\d{1,2}' }).Count -ge 3) { return $true }
+    }
+    return $false
 }
 
 function Get-ChangeGroups {
@@ -1833,7 +2079,7 @@ function Get-ChangeGroups {
                 $data = $sheet.Rows[$row]
                 # 行を表す語から、変わった値そのものは除く
                 $rowTerms = Get-RowLabelTerms $data
-                $terms = @($rowTerms | Where-Object { $_ -cne ([string]$d.New).Trim() -and $_ -cne ([string]$d.Old).Trim() })
+                $terms = @($rowTerms | Where-Object { -not [string]::Equals($_, ([string]$d.New).Trim(), $ordinal) -and -not [string]::Equals($_, ([string]$d.Old).Trim(), $ordinal) })
                 $header = $null
                 # 見出しと値だけの行（表紙の「システム名 | 受注管理」など）は、左の見出しを項目名にする
                 if ($d.Kind -ne '行' -and $data -and $data.V.Count -le 2) {
@@ -2982,7 +3228,9 @@ if ($OutHistory) {
 #     図形・画像（.xlsx / .xlsm）は、文字の変更と追加・削除に加えて、位置・大きさの変化（行・列の挿入でセルと一緒に動いただけのものは除く）と、
 #     画像の中身の変化（画面のスクリーンショットの貼り替えなど）も出します。画像は中身（データ）で比べるので、同じ画面を撮り直しただけでも「変更」になります。
 #     行や列を挿入・削除した場合でも、それより下（右）のセルがすべて「変更」にならないよう、
-#     同じ内容の行・列どうしを対応付けてから比べます（-NoRowAlign で無効にできます）。
+#     同じ内容の行・列どうしを対応付けてから比べます（-NoRowAlign で無効にできます）。対応の付かない行は、似ている行どうしを、順序を保って
+#     似ている度合いの合計が最大になるよう組にします（行を削除して No を振り直した表でも、すぐ下の似た行と取り違えません）。
+#     行・列の挿入・削除でセルと一緒にずれただけの相対参照の数式（=B3*C3 → =B4*C4）は、変更にしません。
 #     内容が同じまま場所が変わった行は「移動」、中身がよく似たシートの名前が変わった場合は「名前変更」として出力します。
 #     行の挿入・削除で No などの連番が振り直された場合は、番号のセルの変更を「連番の振り直し」1 件にまとめます。
 #     長い文字列の変更は、変わった部分だけを「…受注を[-登録-]{+更新+}する…」の形で示します。
@@ -3041,7 +3289,7 @@ if ($OutHistory) {
 # .PARAMETER Ignore
 #     結果から外す差分の分類（複数可）。
 #       表記    全角・半角、空白・改行、英字の大文字・小文字だけが違う変更（表記ゆれを直したときなど）
-#       版情報  改訂履歴のシートの変更と、版数・更新日・更新者などの欄の変更（版を上げるたびに変わるもの）
+#       版情報  改訂履歴のシートの変更と、版数・更新日・更新者などの欄の変更（版を上げるたびに変わるもの。表の中の行は除く）
 #     指定しなくても、これらの差分は分類（Tag。一覧の「分類」の列）を付けて出力し、HTML では絞り込みで隠せます。
 #
 # .PARAMETER OutHistory
@@ -3055,7 +3303,7 @@ if ($OutHistory) {
 #     フォルダを比べるとき、サブフォルダを見ません。
 #
 # .PARAMETER NoExcel
-#     Excel を起動しません（.xls / .xlsb は比較できなくなります）。
+#     Excel を起動しません（.xls / .xlsb は比較できず、結果は「失敗」になります）。
 #
 # .PARAMETER OutXlsx
 #     結果を xlsx に保存します（差分一覧・ファイル別。場所をクリックすると該当セルが開きます）。
