@@ -217,6 +217,23 @@ Test-Case 'New-WeeklyReport: 指摘の状態の「未完了」「完了予定」
     Assert-Equal @('佐藤|期限間近|DD03 テーブル定義書: 型が違う', '山田|期限間近|DD02 画面設計書: 桁数が違う') @($items | ForEach-Object { '{0}|{1}|{2}' -f $_.Owner, $_.State, $_.Title })
 }
 
+Test-Case 'New-WeeklyReport: Redmine の CSV（見出しの「#」）を課題・障害の管理表として読み、「終了」は完了、「キャンセル」は数えない' {
+    $dir = New-TestDir
+    @('#,トラッカー,ステータス,題名,担当者,開始日,期日,終了日',
+        '101,タスク,終了,一覧の並び順を決める,佐藤,2026/10/05,2026/10/09,2026/10/08',
+        '102,タスク,終了,登録の権限を決める,佐藤,2026/10/05,2026/10/12,2026/10/12',
+        '103,タスク,キャンセル,税の端数の扱い,鈴木,2026/10/05,2026/10/12,',
+        '104,タスク,進行中,合計の出し方,鈴木,2026/10/19,2026/10/30,') | Set-Content -LiteralPath (Join-Path $dir 'redmine_issues.csv') -Encoding UTF8
+    @('#,トラッカー,ステータス,優先度,題名,担当者,期日,作成日,終了日',
+        '201,バグ,終了,通常,一覧の並び順が逆,佐藤,2026/10/21,2026/10/19 10:15,2026/10/21 17:30',
+        '202,バグ,キャンセル,通常,税の端数,鈴木,2026/10/20,2026/10/19 11:00,',
+        '203,バグ,新規,高め,登録できない,鈴木,2026/10/22,2026/10/20 09:00,') | Set-Content -LiteralPath (Join-Path $dir 'redmine_bugs.csv') -Encoding UTF8
+    $text = Get-HostText { $script:items = @(& $WeeklyReport -IssueList (Join-Path $dir 'redmine_issues.csv') -BugList (Join-Path $dir 'redmine_bugs.csv') -AsOf '2026-10-23') }
+    Assert-Equal @('鈴木|期限切れ|障害|203: 登録できない|10/22', '鈴木|期限間近|課題|104: 合計の出し方|10/30') @($script:items | ForEach-Object { '{0}|{1}|{2}|{3}|{4:MM/dd}' -f $_.Owner, $_.State, $_.Kind, $_.Title, $_.Date } | Sort-Object) '終了・キャンセルは載せない'
+    Assert-Match $text '■ 課題・QA\n・今週: 起票 0 件・完了 0 件\n・未完了: 1 件・うち期限切れ 0 件\n'
+    Assert-Match $text '・今週: 起票 2 件・完了 1 件'
+}
+
 Test-Case 'New-WeeklyReport: Get-Help でヘルプが表示される' {
     $h = Get-Help $WeeklyReport
     Assert-Match $h.Synopsis '週次報告'

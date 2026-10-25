@@ -44,7 +44,7 @@ if ($OutXlsx -and [System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw 
 Update-TypeData -TypeName 'ReviewCompare.Pair' -DefaultDisplayPropertySet Status, Document, AiLocation, HumanLocation, Basis, AiContent, HumanContent -Force -WhatIf:$false
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
-$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|誤指摘'
+$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|誤指摘|キャンセル|cancel'
 
 # 指摘管理表の見出しの候補に、場所・観点・判定・判定元の候補を足す（CSV に書けば CSV が優先）
 $fields = @('設計書', '指摘内容', '状態', '重要度', '分類', '場所', 'シート', '観点ID', '判定', '判定元')

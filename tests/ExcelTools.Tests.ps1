@@ -34,6 +34,29 @@ Test-Case 'ExcelTools: Test-ClosedStatus は、完了・済を含んでも「未
     Assert-Equal @($false, $false, $false, $false, $false, $false, $false, $false, $false, $false) @(@('未完了', '未済', '未解決', '完了予定', '完了待ち', '対応済（差し戻し）', 'Not done', 'reopen', '対応中', '') | ForEach-Object { Test-ClosedStatus $_ $pattern }) '終わっていないもの'
 }
 
+Test-Case 'ExcelTools: Test-ClosedStatus は、「終了」を終わったものにし、「未終了」「終了予定」「終了待ち」は終わったものにしない' {
+    $pattern = '完了|済|クローズ|close|done|解決|対応不要|終了'
+    Assert-Equal @($true, $true, $true) @(@('終了', '対応終了', 'Closed') | ForEach-Object { Test-ClosedStatus $_ $pattern }) '終わったもの'
+    Assert-Equal @($false, $false, $false) @(@('未終了', '終了予定', '終了待ち') | ForEach-Object { Test-ClosedStatus $_ $pattern }) '終わっていないもの'
+}
+
+Test-Case 'ExcelTools: Read-CsvFile は、見出しが「#」で始まる CSV（Redmine の書き出し）も読み、「#」の列を「＃」にする（「#TYPE」の行は読み飛ばす）' {
+    $dir = New-TestDir
+    # 「#」で始まる行は、ConvertFrom-Csv が注釈として読み飛ばす（引用符で囲んでも同じ）
+    @('#,トラッカー,ステータス,題名', '101,バグ,終了,一覧の並び順が逆', '102,バグ,新規,登録できない') | Set-Content -LiteralPath (Join-Path $dir 'redmine.csv') -Encoding UTF8
+    @('"#","題名"', '"101","一覧の並び順が逆"') | Set-Content -LiteralPath (Join-Path $dir 'quoted.csv') -Encoding UTF8
+    $rows = Read-CsvFile (Join-Path $dir 'redmine.csv') @('題名') '課題管理表'
+    Assert-Equal 2 $rows.Count '行の数'
+    Assert-Equal '＃|トラッカー|ステータス|題名' ((@($rows[0].PSObject.Properties | ForEach-Object { $_.Name })) -join '|')
+    Assert-Equal '101|102' (($rows | ForEach-Object { $_.'＃' }) -join '|')
+    $rows = Read-CsvFile (Join-Path $dir 'quoted.csv') @('題名') '課題管理表'
+    Assert-Equal '101|一覧の並び順が逆' ('{0}|{1}' -f $rows[0].'＃', $rows[0].'題名') '引用符で囲んだ「#」'
+    # Windows PowerShell の Export-Csv が書く型の行は、これまでどおり読み飛ばす
+    @('#TYPE System.Management.Automation.PSCustomObject', '"No","題名"', '"1","一覧の並び順が逆"') | Set-Content -LiteralPath (Join-Path $dir 'typed.csv') -Encoding UTF8
+    $rows = Read-CsvFile (Join-Path $dir 'typed.csv') @('No', '題名') '課題管理表'
+    Assert-Equal '1|1|一覧の並び順が逆' ('{0}|{1}|{2}' -f $rows.Count, $rows[0].No, $rows[0].'題名') '#TYPE の行'
+}
+
 Test-Case 'ExcelTools: Get-LeafName は、\ と（拡張子で終わる名前の）/ でフォルダを除き、「外部I/F設計書」の / は残す（PowerShell 5.1 と 7 で同じ）' {
     Assert-Equal @('基本設計書.xlsx', '基本設計書.xlsx', '基本設計書', '外部I/F設計書', '外部I/F設計書 v1.10', '') @(@('D:\納品物\基本設計書.xlsx', '設計書/基本設計書.xlsx', ' sub\基本設計書 ', '外部I/F設計書', '外部I/F設計書 v1.10', '') | ForEach-Object { Get-LeafName $_ })
     Assert-Equal (ConvertTo-NameKey '基本設計書') (ConvertTo-NameKey 'D:\納品物\基本設計書.xlsx') 'フォルダと拡張子を除く'

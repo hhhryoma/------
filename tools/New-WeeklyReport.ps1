@@ -187,8 +187,8 @@ $readArgs = @{ NoRecurse = $NoRecurse; NoExcel = $NoExcel }
 $hasFindings = $false
 if ($Findings) {
     # 対応が終わった・指摘として数えない状態（Measure-ReviewQuality.ps1 と同じ）
-    $closedPattern = '完了|済|クローズ|close|done|対応不要|不要|対処なし'
-    $excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|誤指摘'
+    $closedPattern = '完了|済|クローズ|close|done|対応不要|不要|対処なし|終了'
+    $excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|誤指摘|キャンセル|cancel'
     $fields = @('設計書', '指摘内容', '分類', '重要度', '状態', '対応要否', '起票日', '期限', '完了日', '対応者')
     $candidates = Read-HeaderCandidates (Join-Path $PSScriptRoot 'review-quality/指摘管理表の見出し.csv') $fields
     $records = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $Findings '指摘管理表' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
@@ -210,8 +210,8 @@ if ($Findings) {
 $hasBugs = $false
 if ($BugList) {
     # 対応が終わった・障害として数えない状態（Measure-TestQuality.ps1 と同じ）
-    $closedPattern = '完了|済|クローズ|close|done|解決|対応不要'
-    $excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない'
+    $closedPattern = '完了|済|クローズ|close|done|解決|対応不要|終了'
+    $excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない|キャンセル|cancel'
     $fields = @('障害ID', '機能', '障害内容', '起票日', '完了日', '状態', '重要度', '担当', '期限')
     $candidates = Read-HeaderCandidates (Join-Path $PSScriptRoot 'test-quality/見出し.csv') $fields
     $records = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $BugList '障害管理表' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `
@@ -232,8 +232,8 @@ if ($BugList) {
 $hasIssues = $false
 if ($IssueList) {
     # 課題・QA の管理表。回答済み・解決は終わったもの、取下げ・重複などは数えない
-    $closedPattern = '完了|済|クローズ|close|done|解決|対応不要|不要'
-    $excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複'
+    $closedPattern = '完了|済|クローズ|close|done|解決|対応不要|不要|終了'
+    $excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|キャンセル|cancel'
     $fields = @('課題ID', '区分', '件名', '内容', '重要度', '状態', '起票日', '期限', '完了日', '担当')
     $candidates = Read-HeaderCandidates (Join-Path $PSScriptRoot 'weekly-report/課題管理表の見出し.csv') $fields
     $records = Read-HeaderRecords @readArgs -Inputs (Get-InputFiles $IssueList '課題管理表' -NoRecurse:$NoRecurse) -Candidates $candidates -Fields $fields `

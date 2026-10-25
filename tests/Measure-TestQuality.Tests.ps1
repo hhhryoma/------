@@ -197,6 +197,17 @@ Test-Case 'Measure-TestQuality: 障害の状態の「取消」「取り消し」
     Assert-Match $text 'バグ 1 件（未完了 0 件。取下げなどで数えなかったもの 3 件）'
 }
 
+Test-Case 'Measure-TestQuality: Redmine の CSV（見出しの「#」・題名・作成日・終了日）を障害管理表として読み、「終了」は完了、「キャンセル」は数えない' {
+    $dir = New-TestDir
+    New-SheetBook (Join-Path $dir 'UT.xlsx') @(@{ Name = 'SCR201'; Header = @('項番', 'テスト項目', '実施日', '判定'); Rows = @(, @('1', '確認', '2026/11/01', 'OK')) })
+    @('#,トラッカー,ステータス,優先度,題名,担当者,期日,作成日,終了日',
+        '101,バグ,終了,通常,一覧の並び順が逆,佐藤,2026/11/04,2026/11/01 10:15,2026/11/02 17:30',
+        '102,バグ,キャンセル,通常,税の端数,鈴木,,2026/11/01 11:00,',
+        '103,バグ,新規,高め,登録できない,鈴木,2026/11/10,2026/11/02 09:00,') | Set-Content -LiteralPath (Join-Path $dir 'redmine.csv') -Encoding UTF8
+    $text = Get-HostText { & $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'redmine.csv') -AsOf '2026-11-06' 3>$null | Out-Null }
+    Assert-Match $text 'バグ 2 件（未完了 1 件。取下げなどで数えなかったもの 1 件）'
+}
+
 Test-Case 'Measure-TestQuality: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestQualityTool
     Assert-Match $h.Synopsis 'テスト'

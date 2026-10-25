@@ -35,7 +35,7 @@ Update-TypeData -TypeName 'DefectRemoval.Phase' -DefaultDisplayPropertySet Phase
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
 # 数えない状態（取下げ・重複など）
-$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない|誤指摘'
+$excludedPattern = '取下げ|取り下げ|取消|取り消|却下|対象外|重複|仕様どおり|仕様通り|障害ではない|非障害|バグではない|誤指摘|キャンセル|cancel'
 $unknown = '（不明）'
 
 # ---------------------------------------------------------------- 工程
