@@ -349,6 +349,41 @@ Test-Case 'Test-ExcelDeliverable: スクリーンショットの縮尺がシー�
     Assert-Equal 'スクリーンショットの縮尺がシートによって違います（100%: 受注一覧 / 70%: 受注登録）。並べたときに文字の大きさがそろいません（撮った画面の拡大率が違うときは、そのままでかまいません）' $issues[0].Detail
 }
 
+Test-Case 'Test-ExcelDeliverable: -Fix の -BackupDir には、別々のフォルダの同じ名前のファイルをフォルダごとに分けて残し、前に残したファイルは上書きしない' {
+    $dir = New-TestDir
+    $hashes = New-Object System.Collections.Generic.List[string]
+    foreach ($round in @('第1回', '第2回')) {
+        $file = Join-Path $dir "$round/見積書.xlsx"
+        New-Item -ItemType Directory -Force -Path (Split-Path $file -Parent) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $delivDir 'bad.xlsx') -Destination $file
+        Set-CellValues $file '詳細' @{ A1 = $round }
+        $hashes.Add((Get-FileHash -LiteralPath $file).Hash)
+    }
+    $roots = @((Join-Path $dir '第1回'), (Join-Path $dir '第2回'))
+    $backup = Join-Path $dir 'bk'
+    # 1 回目はプロパティだけを直す
+    $null = Invoke-Check @{ Path = $roots; Check = 'Property'; Fix = $true; BackupDir = $backup }
+    Assert-Equal $hashes.ToArray() @(@('第1回', '第2回') | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $backup "$_/見積書.xlsx")).Hash }) '指定したフォルダの名前のフォルダに、元のファイルを残す'
+
+    # 2 回目（表示の状態を直す）でも、前に残したファイルは上書きせず、番号を付けて残す
+    $fixed = (Get-FileHash -LiteralPath (Join-Path $dir '第1回/見積書.xlsx')).Hash
+    $text = Get-HostText { $null = & $Deliverable -Path $roots -Check View -Fix -BackupDir $backup }
+    Assert-Equal $hashes[0] (Get-FileHash -LiteralPath (Join-Path $backup '第1回/見積書.xlsx')).Hash '1 回目に残した元のファイル'
+    Assert-Equal $fixed (Get-FileHash -LiteralPath (Join-Path $backup '第1回/見積書 (2).xlsx')).Hash '2 回目に直す前のファイル'
+    Assert-Match $text '番号を付けて残し.*見積書 \(2\)\.xlsx'
+}
+
+Test-Case 'Test-ExcelDeliverable: -BackupDir の中のファイルはチェックせず、前に残したファイルを直さない' {
+    $dir = New-TestDir
+    Copy-Item -LiteralPath (Join-Path $delivDir 'bad.xlsx') -Destination $dir
+    $hash = (Get-FileHash -LiteralPath (Join-Path $dir 'bad.xlsx')).Hash
+    $backup = Join-Path $dir '直す前'
+    $null = Invoke-Check @{ Path = $dir; Fix = $true; BackupDir = $backup }
+    $issues = Invoke-Check @{ Path = $dir; Fix = $true; BackupDir = $backup }
+    Assert-Equal @('bad.xlsx') @($issues | ForEach-Object { $_.File } | Sort-Object -Unique) '-BackupDir の中のファイル'
+    Assert-Equal $hash (Get-FileHash -LiteralPath (Join-Path $backup 'bad.xlsx')).Hash '前に残した直す前のファイル'
+}
+
 Test-Case 'Test-ExcelDeliverable: Get-Help でヘルプが表示される' {
     $h = Get-Help $Deliverable
     Assert-Match $h.Synopsis '提出'

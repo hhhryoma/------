@@ -243,6 +243,28 @@ Test-Case 'Replace-Excel: 置換後の文字と大文字・小文字だけが違
     Assert-Equal 0 $r.Count '「DOCUMENT」の「DOC」は置換しない（「DocumentUMENT」にしない）'
 }
 
+Test-Case 'Replace-Excel: -BackupDir には、別々のフォルダの同じ名前のファイルをフォルダごとに分けて残し、前に残したファイルは上書きしない' {
+    $dir = New-TestDir
+    $hashes = New-Object System.Collections.Generic.List[string]
+    foreach ($round in @('第1回', '第2回')) {
+        $file = Join-Path $dir "$round/仕様書.xlsx"
+        New-Item -ItemType Directory -Force -Path (Split-Path $file -Parent) | Out-Null
+        New-SheetsBook $file ([ordered]@{ 'S' = @(@('項目'), @("受注管理システム $round"), @('TODO')) })
+        $hashes.Add((Get-FileHash -LiteralPath $file).Hash)
+    }
+    $roots = @((Join-Path $dir '第1回'), (Join-Path $dir '第2回'))
+    $backup = Join-Path $dir 'bk'
+    $null = Invoke-Replace @{ Pattern = '受注'; Replacement = '販売'; Path = $roots; Force = $true; BackupDir = $backup }
+    Assert-Equal $hashes.ToArray() @(@('第1回', '第2回') | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $backup "$_/仕様書.xlsx")).Hash }) '指定したフォルダの名前のフォルダに、元のファイルを残す'
+
+    # 2 回目の置換でも、前に残したファイルは上書きせず、番号を付けて残す
+    $replaced = (Get-FileHash -LiteralPath (Join-Path $dir '第1回/仕様書.xlsx')).Hash
+    $text = Get-HostText { $null = & $ReplaceExcel -Pattern 'TODO' -Replacement '済み' -Path $roots -Force -BackupDir $backup }
+    Assert-Equal $hashes[0] (Get-FileHash -LiteralPath (Join-Path $backup '第1回/仕様書.xlsx')).Hash '1 回目に残した元のファイル'
+    Assert-Equal $replaced (Get-FileHash -LiteralPath (Join-Path $backup '第1回/仕様書 (2).xlsx')).Hash '2 回目に書き換える前のファイル'
+    Assert-Match $text '番号を付けて残し.*仕様書 \(2\)\.xlsx'
+}
+
 Test-Case 'Replace-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $ReplaceExcel
     Assert-Match $h.Synopsis '置換'

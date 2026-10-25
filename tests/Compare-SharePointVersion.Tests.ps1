@@ -41,8 +41,8 @@ Test-Case 'Compare-SharePointVersion: URL の版（_vti_history/番号）と現�
         'https://contoso.sharepoint.com/sites/juchu/_vti_history/1536/Shared%20Documents/%E8%A8%AD%E8%A8%88/DD03.xlsx',
         'https://contoso.sharepoint.com/sites/juchu/Shared%20Documents/%E8%A8%AD%E8%A8%88/DD03.xlsx') @($log)
     Assert-Equal 'Data!B2|値|変更' (@($diffs | ForEach-Object { '{0}|{1}|{2}' -f $_.Location, $_.Kind, $_.Change }) -join ' / ')
-    Assert-True (Test-Path -LiteralPath (Join-Path $out 'DD03_v3.0-現在.html')) '差分の HTML'
-    Assert-True (Test-Path -LiteralPath (Join-Path $out 'DD03_v3.0.xlsx')) '取り出した版を残す'
+    Assert-True (Test-Path -Path (Join-Path $out '設計_*/DD03_v3.0-現在.html')) '差分の HTML（SharePoint のフォルダごとのサブフォルダ）'
+    Assert-True (Test-Path -Path (Join-Path $out '設計_*/DD03_v3.0.xlsx')) '取り出した版を残す'
 
     # 番号の付いた版は取り出し直さない。版の指定は 3・v3.0 などでもよく、新を指定すると版どうしで比べる。旧と新が逆なら入れ替える
     $log.Clear()
@@ -69,7 +69,7 @@ Test-Case 'Compare-SharePointVersion: OneDrive で同期しているファイル
     $diffs = @(& $SpVersion $local 2 -OutDir (Join-Path $dir 'out') -NoOpen -Fetcher $fetch -SyncRoots $roots 6>$null)
     Assert-Equal @('https://contoso.sharepoint.com/sites/juchu/_vti_history/1024/Shared%20Documents/%E8%A8%AD%E8%A8%88/DD03%20%E3%83%86%E3%83%BC%E3%83%96%E3%83%AB%E5%AE%9A%E7%BE%A9%E6%9B%B8.xlsx') @($log) '一番深い同期フォルダの URL'
     Assert-Equal 1 $diffs.Count
-    Assert-True (Test-Path -LiteralPath (Join-Path $dir 'out/DD03 テーブル定義書_v2.0-現在.html'))
+    Assert-True (Test-Path -Path (Join-Path $dir 'out/設計_*/DD03 テーブル定義書_v2.0-現在.html'))
 
     # サブサイトは -SiteUrl で指定する
     $log.Clear()
@@ -90,6 +90,52 @@ Test-Case 'Compare-SharePointVersion: 使えない URL・同期していない�
     Assert-Throws { & $SpVersion $url '三' @o 6>$null } 'バージョン履歴'
     Assert-Throws { & $SpVersion $url '現在' @o 6>$null } 'どちらも現在の版'
     Assert-Throws { & $SpVersion $url 9.0 @o 6>$null } 'v9\.0 を取り出せませんでした: その版はありません'
+}
+
+Test-Case 'Compare-SharePointVersion: 別のフォルダ・サイトにある同じ名前のファイルの版を、前に取り出したものと取り違えない' {
+    $dir = New-TestDir
+    New-SpBook (Join-Path $dir 'src/wip_v3.xlsx') '作業中の版3'
+    New-SpBook (Join-Path $dir 'src/wip_now.xlsx') '作業中の現在'
+    New-SpBook (Join-Path $dir 'src/dlv.xlsx') '納品の版3'
+    $out = Join-Path $dir 'out'
+    $log = New-Object System.Collections.Generic.List[string]
+    $fetch = New-SpFetcher @{ '1536' = (Join-Path $dir 'src/wip_v3.xlsx'); 'current' = (Join-Path $dir 'src/wip_now.xlsx') } $log
+    $null = & $SpVersion 'https://contoso.sharepoint.com/sites/juchu/Shared%20Documents/wip/DD03.xlsx' 3.0 -OutDir $out -NoOpen -Fetcher $fetch 6>$null
+
+    # 別のフォルダ・別のサイト・別のテナントの DD03.xlsx（どれも版 3.0 から変わっていない）は、それぞれの版 3.0 を取り出す
+    $fetch = New-SpFetcher @{ '1536' = (Join-Path $dir 'src/dlv.xlsx'); 'current' = (Join-Path $dir 'src/dlv.xlsx') } $log
+    foreach ($url in @(
+            'https://contoso.sharepoint.com/sites/juchu/Shared%20Documents/dlv/DD03.xlsx',
+            'https://contoso.sharepoint.com/sites/hanbai/Shared%20Documents/wip/DD03.xlsx',
+            'https://fabrikam.sharepoint.com/sites/juchu/Shared%20Documents/wip/DD03.xlsx')) {
+        $log.Clear()
+        $diffs = @(& $SpVersion $url 3.0 -OutDir $out -NoOpen -Fetcher $fetch 6>$null)
+        Assert-Equal 2 $log.Count "版 3.0 も取り出す: $url"
+        Assert-Equal 0 $diffs.Count "差分: $url"
+    }
+    # 取り出した版と差分の HTML は、SharePoint のフォルダごとのサブフォルダ（フォルダの名前_場所の短いハッシュ）に置く
+    $subs = @(Get-ChildItem -LiteralPath $out -Directory | ForEach-Object { $_.Name } | Sort-Object)
+    Assert-Equal @('dlv_#', 'wip_#', 'wip_#', 'wip_#') @($subs | ForEach-Object { $_ -replace '_[0-9a-f]{8}$', '_#' }) 'サブフォルダ'
+}
+
+Test-Case 'Compare-SharePointVersion: 同期しているファイルの名前の「#」「%」も、名前のとおりのファイルの URL にする' {
+    $dir = New-TestDir
+    $mount = Join-Path $dir '会社 - 受注システム - ドキュメント'
+    $roots = @([pscustomobject]@{ MountPoint = $mount; UrlNamespace = 'https://contoso.sharepoint.com/sites/juchu/Shared Documents/'; WebUrl = 'https://contoso.sharepoint.com/sites/juchu' })
+    New-SpBook (Join-Path $dir 'src/v2.xlsx') '受注'
+    $log = New-Object System.Collections.Generic.List[string]
+    $fetch = New-SpFetcher @{ '1024' = (Join-Path $dir 'src/v2.xlsx'); 'current' = (Join-Path $dir 'src/v2.xlsx') } $log
+    foreach ($name in @('課題管理表#2.xlsx', '進捗_100%25.xlsx')) {
+        New-SpBook (Join-Path $mount $name) '受注'
+        $null = & $SpVersion (Join-Path $mount $name) 2 -OutDir (Join-Path $dir 'out') -NoOpen -Fetcher $fetch -SyncRoots $roots 6>$null
+    }
+    # URL で指定したもの（「%」はもう %25 になっている）は、二重に変換しない
+    $null = & $SpVersion 'https://contoso.sharepoint.com/sites/juchu/Shared%20Documents/%E9%80%B2%E6%8D%97_100%2525.xlsx' 2 -OutDir (Join-Path $dir 'out2') -NoOpen -Fetcher $fetch 6>$null
+    Assert-Equal @(
+        'https://contoso.sharepoint.com/sites/juchu/_vti_history/1024/Shared%20Documents/%E8%AA%B2%E9%A1%8C%E7%AE%A1%E7%90%86%E8%A1%A8%232.xlsx',
+        'https://contoso.sharepoint.com/sites/juchu/_vti_history/1024/Shared%20Documents/%E9%80%B2%E6%8D%97_100%2525.xlsx',
+        'https://contoso.sharepoint.com/sites/juchu/_vti_history/1024/Shared%20Documents/%E9%80%B2%E6%8D%97_100%2525.xlsx',
+        'https://contoso.sharepoint.com/sites/juchu/Shared%20Documents/%E9%80%B2%E6%8D%97_100%2525.xlsx') @($log)
 }
 
 Test-Case 'Compare-SharePointVersion: Get-Help でヘルプが表示される' {

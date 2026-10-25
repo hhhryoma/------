@@ -119,6 +119,8 @@ function Resolve-SharePointFile {
         throw "OneDrive で同期している SharePoint のフォルダのファイルではありません。SharePoint の URL を指定してください（Excel でファイルを開き、「ファイル」→「情報」→「パスのコピー」）: $full"
     }
     $rel = $full.Substring($best.Mount.Length).TrimStart('\', '/').Replace('\', '/')
+    # 名前の「#」「%」などを URL の記号と読まないように、フォルダ・ファイルの名前を 1 つずつ URL の形（%XX）にする
+    $rel = @($rel.Split('/') | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
     $url = ([string]$best.Root.UrlNamespace).TrimEnd('/') + '/' + $rel
     if (-not $Site -and $best.Root.WebUrl) { $Site = $best.Root.WebUrl }
     $loc = ConvertTo-SharePointLocation $url $Site
@@ -152,6 +154,20 @@ function Get-VersionUrl {
     $x = $Label.Split('.')
     $id = [int]$x[0] * 512 + [int]$x[1]
     return '{0}_vti_history/{1}/{2}' -f $base, $id, (& $escape $Location.File)
+}
+
+function Get-LocationFolderName {
+    #     取り出した版と差分を置くサブフォルダの名前（設計_1a2b3c4d）。SharePoint のフォルダの名前と、その場所（サーバー・サイト・フォルダ）の
+    #     短いハッシュ。別のフォルダ・サイトにある同じ名前のファイルの版と取り違えないように、フォルダごとに分ける。
+    #     SharePoint の URL は大文字・小文字を区別しないので、ハッシュは小文字にそろえて求める
+    param($Location)
+    $path = $Location.Web + '/' + $Location.File
+    $folder = $path.Substring(0, $path.LastIndexOf('/'))
+    $name = $folder.Substring($folder.LastIndexOf('/') + 1)
+    if (-not $name) { $name = $Location.Origin -replace '^\w+://', '' }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(($Location.Origin + $folder).ToLowerInvariant())) } finally { $sha.Dispose() }
+    return '{0}_{1}' -f ($name -replace '[\\/:*?"<>|]', '_'), ([BitConverter]::ToString($hash, 0, 4).Replace('-', '').ToLowerInvariant())
 }
 
 # ---------------------------------------------------------------- 版を取り出す
@@ -264,7 +280,9 @@ if (-not $OutDir) {
     $OutDir = Join-Path (Join-Path $docs 'Excel ツールの結果') 'SharePoint の版'
 }
 $OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
-New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+# 取り出した版と差分は、SharePoint のフォルダごとのサブフォルダに置く（前に取り出した版は、同じ場所の同じファイルのものだけを使う）
+$saveDir = Join-Path $OutDir (Get-LocationFolderName $loc)
+New-Item -ItemType Directory -Force -Path $saveDir | Out-Null
 
 $base = [System.IO.Path]::GetFileNameWithoutExtension($loc.Name)
 $ext = [System.IO.Path]::GetExtension($loc.Name)
@@ -274,7 +292,7 @@ $sides = foreach ($label in @($oldLabel, $newLabel)) {
     $url = Get-VersionUrl $loc $label
     $browserUrl = $url
     if (-not $label) { $browserUrl = $url + '?download=1' }   # 現在の版は、ブラウザーで開かずにダウンロードさせる
-    [pscustomobject]@{ Label = $text; Version = $label; Url = $url; BrowserUrl = $browserUrl; Dest = (Join-Path $OutDir ('{0}_{1}{2}' -f $base, $text, $ext)); File = $null; Error = $null }
+    [pscustomobject]@{ Label = $text; Version = $label; Url = $url; BrowserUrl = $browserUrl; Dest = (Join-Path $saveDir ('{0}_{1}{2}' -f $base, $text, $ext)); File = $null; Error = $null }
 }
 
 Write-Host ('SharePoint: {0}' -f (Get-VersionUrl $loc $null))
@@ -320,7 +338,7 @@ if ($pending.Count -gt 0) {
     }
 }
 
-if (-not $OutHtml) { $OutHtml = Join-Path $OutDir ('{0}_{1}-{2}.html' -f $base, $sides[0].Label, $sides[1].Label) }
+if (-not $OutHtml) { $OutHtml = Join-Path $saveDir ('{0}_{1}-{2}.html' -f $base, $sides[0].Label, $sides[1].Label) }
 $compareArgs = @{ Old = $sides[0].File; New = $sides[1].File; OutHtml = $OutHtml }
 if ($OutXlsx) { $compareArgs['OutXlsx'] = $OutXlsx }
 if ($CompareFormat) { $compareArgs['CompareFormat'] = $true }
@@ -341,8 +359,9 @@ if (-not $NoOpen -and (Test-Path -LiteralPath $OutHtml)) { Invoke-Item -LiteralP
 #         同期しているファイルなら、現在の版はそのファイルをそのまま使います
 #       ・版は Excel で開いて取り出します（Office にサインインしているアカウントで読むので、アプリの登録やモジュールは要りません）。
 #         Excel で開けないときは、既定のブラウザーでダウンロードします（ブラウザーのサインインで読みます）
-#       ・取り出した版は -OutDir（既定は「ドキュメント\Excel ツールの結果\SharePoint の版」）に「名前_v3.0.xlsx」の形で残り、
-#         同じ番号の版は次から取り出し直しません
+#       ・取り出した版は -OutDir（既定は「ドキュメント\Excel ツールの結果\SharePoint の版」）の、SharePoint のフォルダごとのサブフォルダ
+#         （「設計_1a2b3c4d」のように、フォルダの名前と、場所ごとに決まる 8 文字の英数字）に「名前_v3.0.xlsx」の形で残り、
+#         同じファイルの同じ番号の版は次から取り出し直しません（別のフォルダ・サイトにある同じ名前のファイルの版とは分けて残します）
 #
 #     SharePoint の版の URL は「サイト/_vti_history/番号/ライブラリ/ファイル」で、番号は 大きい番号 × 512 + 小さい番号です（3.0 は 1536）。
 #
@@ -363,10 +382,11 @@ if (-not $NoOpen -and (Test-Path -LiteralPath $OutHtml)) { Invoke-Item -LiteralP
 #     版の取り出し方。Auto（既定。Excel で開けなければブラウザー）・Excel・Browser。
 #
 # .PARAMETER OutDir
-#     取り出した版と差分の HTML を保存するフォルダ。既定は「ドキュメント\Excel ツールの結果\SharePoint の版」。
+#     取り出した版と差分の HTML を保存するフォルダ（この中の、SharePoint のフォルダごとのサブフォルダに保存します）。
+#     既定は「ドキュメント\Excel ツールの結果\SharePoint の版」。
 #
 # .PARAMETER OutHtml
-#     差分の HTML のパス。既定は -OutDir の「名前_v3.0-現在.html」。
+#     差分の HTML のパス。既定は、取り出した版と同じサブフォルダの「名前_v3.0-現在.html」。
 #
 # .PARAMETER OutXlsx
 #     差分の一覧を Excel にも保存します（Compare-Excel.ps1 の -OutXlsx）。
