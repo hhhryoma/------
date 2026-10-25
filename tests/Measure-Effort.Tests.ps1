@@ -304,6 +304,75 @@ Test-Case 'Measure-Effort: 1 行が 1 件の工数実績の表のあるブック
     Assert-Equal 0 $warnings.Count ('■ のセルは数として読めない行にしない: ' + ($warnings -join ' '))
 }
 
+Test-Case 'Measure-Effort: WBS に 1.1 と 1.10 があるとき、数のセル（1.10 が 1.1 になる）と CSV の 1.1 はタスク名、次に担当で選び、決まらなければ警告する（文字のセルはそのまま。担当者と違う人の工数を知らせる）' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $wbsCols = @('WBS番号', 'タスク名', '担当者', '予定開始', '予定終了', '進捗率', '予定工数') | ForEach-Object { @{ Header = $_; Width = 10 } }
+    $wbsRows = @(@('1.1', '画面設計', '山田', '2026/10/05', '2026/10/09', '50%', '16'), @('1.2', 'テーブル設計', '佐藤', '2026/10/05', '2026/10/09', '0%', '8'), @('1.10', '帳票設計', '佐藤', '2026/10/12', '2026/10/16', '0%', '16'))
+    $wbs = Join-Path $dir 'WBS.xlsx'
+    Export-Workbook -FilePath $wbs -Sheets @(@{ Name = 'WBS'; Columns = $wbsCols; Rows = @($wbsRows | ForEach-Object { @{ Values = $_ } }) })
+    New-Item -ItemType Directory -Path (Join-Path $dir '日報') | Out-Null
+    # 標準の書式のセルに 1.10 と入れると数の 1.1 になる（[double]1.1）。文字の書式のセルは '1.1'・'1.10' のまま
+    New-SheetsBook (Join-Path $dir '日報/日報.xlsx') ([ordered]@{
+            '日報' = @(
+                @('日付', '氏名', 'WBS番号', '作業内容', '時間'),
+                @('2026/10/05', '佐藤', [double]1.1, '', [double]2),
+                @('2026/10/05', '山田', [double]1.1, '', [double]3),
+                @('2026/10/06', '鈴木', [double]1.1, '', [double]1),
+                @('2026/10/06', '鈴木', [double]1.1, '帳票設計', [double]1.5),
+                @('2026/10/07', '鈴木', '1.1', '', [double]4),
+                @('2026/10/07', '山田', '1.10', '', [double]0.5))
+        })
+    @('日付,氏名,WBS,時間', '2026/10/08,佐藤,1.1,1') | Set-Content -LiteralPath (Join-Path $dir '日報/日報.csv') -Encoding UTF8
+    # 日付を列に並べた佐藤の工数表（担当はファイル名）の数の 1.1
+    New-SheetsBook (Join-Path $dir '日報/佐藤.xlsx') ([ordered]@{ '2026年10月' = @(@('WBS番号', '5(月)', '6(火)', '7(水)', '8(木)', '9(金)'), @([double]1.1, '', [double]2, '', '', '')) })
+    $text = Get-HostText { $script:r = @(& $EffortTool (Join-Path $dir '日報') -Wbs $wbs -AsOf '2026-10-23' -Unit 時間) }
+    Assert-Equal @('1.1|画面設計|7', '1.2|テーブル設計|0', '1.10|帳票設計|7') @($script:r | ForEach-Object { '{0}|{1}|{2}' -f $_.WbsNo, $_.Task, $_.Actual }) '1.1: 山田の数の 1.1 3 + 文字の 1.1 4。1.10: 佐藤の数の 1.1 2 + 帳票設計 1.5 + 文字の 1.10 0.5 + CSV の佐藤 1 + 佐藤の工数表 2'
+    Assert-Match $text '1\.1 か 1\.10 か分からず、タスク名・担当でも決まらない工数 1 行は、WBS のタスクに対応付けていません（WBS 番号 1\.1/1\.10）'
+    Assert-Match $text 'WBS のタスクに対応した工数: 14 時間（93%） / WBS に無い作業: 1\.1 1（時間）'
+    Assert-Match $text '担当者と違う人がつけた工数 1 件: 1\.10 帳票設計（佐藤）に 山田 0\.5（時間）。手伝いでなければ、WBS 番号を確かめてください'
+}
+
+Test-Case 'Measure-Effort: 担当の列が無い人ごと・月ごとのファイル（工数実績_佐藤_202610.xlsx・日報_山田_2026年10月.csv）と月ごとのシートは、年月と工数実績などのことばを除いたファイル名（WBS にあれば WBS の書き方）を担当にし、読み取り結果に書く' {
+    $dir = New-TestDir
+    Import-Module (Join-Path $script:ToolsDir 'ExcelTools.psm1') -Force -DisableNameChecking
+    $wbsCols = @('WBS番号', 'タスク名', '担当者', '予定開始', '予定終了', '進捗率', '予定工数') | ForEach-Object { @{ Header = $_; Width = 10 } }
+    $wbsRows = @(@('1.1', '画面設計', '山田', '2026/10/26', '2026/11/06', '50%', '16'), @('1.2', 'テーブル設計', '佐藤 花子', '2026/10/26', '2026/11/06', '50%', '16'))
+    $wbs = Join-Path $dir 'WBS.xlsx'
+    Export-Workbook -FilePath $wbs -Sheets @(@{ Name = 'WBS'; Columns = $wbsCols; Rows = @($wbsRows | ForEach-Object { @{ Values = $_ } }) })
+    $log = Join-Path $dir '工数実績'
+    New-Item -ItemType Directory -Path $log | Out-Null
+    New-SheetsBook (Join-Path $log '工数実績_佐藤花子_202610.xlsx') ([ordered]@{
+            '2026年10月' = @(
+                @('WBS番号', 'タスク名', '26(月)', '27(火)', '28(水)', '29(木)', '30(金)'),
+                @('1.2', 'テーブル設計', [double]4, [double]4, '', [double]2, ''))
+        })
+    New-SheetsBook (Join-Path $log '工数実績_佐藤花子_202611.xlsx') ([ordered]@{
+            '2026年11月' = @(
+                @('WBS番号', 'タスク名', '2(月)', '4(水)', '5(木)', '6(金)', '9(月)'),
+                @('1.2', 'テーブル設計', [double]3, '', [double]1, '', ''))
+        })
+    @('日付,WBS,時間', '2026/10/26,1.1,8', '2026/11/02,1.1,6') | Set-Content -LiteralPath (Join-Path $log '日報_山田_2026年10月.csv') -Encoding UTF8
+    # 1 行が 1 件の表を、月ごとのシートに分けた鈴木のブック（シート名は担当にしない）
+    New-SheetsBook (Join-Path $log '作業日報（鈴木）.xlsx') ([ordered]@{ '10月' = @(@('日付', 'WBS', '時間'), @('2026/10/30', '1.1', [double]1)); '11月' = @(@('日付', 'WBS', '時間'), @('2026/11/04', '1.1', [double]2)) })
+    $out = Join-Path $dir '工数集計.xlsx'
+    $text = Get-HostText { $script:r = @(& $EffortTool $log -Wbs $wbs -AsOf '2026-11-06' -Unit 時間 -OutXlsx $out) }
+    Assert-Match $text '工数の実績: 31 時間（3\.9 人日。2026/10/26～2026/11/05・3 人・9 行）'
+    Assert-True (-not $text.Contains('担当者と違う人')) ('WBS に無い鈴木は知らせない: ' + $text)
+    $weeks = Read-XlsxSheet -Path $out -Index 2
+    $byOwner = @{}
+    foreach ($n in @($weeks.Rows.Keys | Where-Object { $_ -gt 1 })) { $row = $weeks.Rows[$n]; $byOwner[$row['A']] = (@('B', 'C', 'D') | ForEach-Object { $row[$_] }) -join '|' }
+    Assert-Equal @('佐藤 花子', '山田', '鈴木') @($byOwner.Keys | Sort-Object { [int][char]$_[0] }) '月ごとのファイル・シートを 1 人にまとめ、WBS にあれば WBS の書き方にする'
+    Assert-Equal @('10|4|14', '8|6|14', '1|2|3') @($byOwner['佐藤 花子'], $byOwner['山田'], $byOwner['鈴木'])
+    $readLog = Read-XlsxSheet -Path $out -Index 4
+    $found = @{}
+    foreach ($n in @($readLog.Rows.Keys | Where-Object { $_ -gt 1 })) { $row = $readLog.Rows[$n]; $found['{0}|{1}' -f $row['B'], $row['C']] = '{0}|{1}' -f $row['F'], $row['G'] }
+    Assert-Equal '日付（2026/10/26～2026/10/30 の列）、担当（ファイル名から「佐藤 花子」）、WBS番号、タスク（タスク名）、工数（日付の列のセル）|' $found['工数実績_佐藤花子_202610.xlsx|2026年10月']
+    Assert-Equal '日付（2026/11/02～2026/11/09 の列）、担当（ファイル名から「佐藤 花子」）、WBS番号、タスク（タスク名）、工数（日付の列のセル）|' $found['工数実績_佐藤花子_202611.xlsx|2026年11月']
+    Assert-Equal '日付、担当（ファイル名から「山田」）、WBS番号（WBS）、工数（時間）|タスク' $found['日報_山田_2026年10月.csv|']
+    Assert-Equal '日付、担当（ファイル名から「鈴木」）、WBS番号（WBS）、工数（時間）|タスク' $found['作業日報（鈴木）.xlsx|11月']
+}
+
 Test-Case 'Measure-Effort: Get-Help でヘルプが表示される' {
     $h = Get-Help $EffortTool
     Assert-Match $h.Synopsis '工数'

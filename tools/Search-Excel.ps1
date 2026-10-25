@@ -110,6 +110,8 @@ class SearchExcelHit : System.ICloneable {
     [string] $Text
     [string] $Name
     [string] $Path
+    # 値が数のセル（日付・時刻の書式のものを除く）か。表示・CSV・xlsx には出さない（工数実績の WBS 番号 1.10 が 1.1 の数になったかを見分けるため）
+    hidden [bool] $Number
 
     SearchExcelHit([string] $file, [string] $location, [string] $sheet, [string] $cell, [string] $kind, [string] $text, [string] $name, [string] $path) {
         $this.File = $file; $this.Location = $location; $this.Sheet = $sheet; $this.Cell = $cell
@@ -118,7 +120,9 @@ class SearchExcelHit : System.ICloneable {
 
     # 読み取り結果の使い回し（PSObject.Copy）で、写しを作れるようにする
     [object] Clone() {
-        return [SearchExcelHit]::new($this.File, $this.Location, $this.Sheet, $this.Cell, $this.Kind, $this.Text, $this.Name, $this.Path)
+        $copy = [SearchExcelHit]::new($this.File, $this.Location, $this.Sheet, $this.Cell, $this.Kind, $this.Text, $this.Name, $this.Path)
+        $copy.Number = $this.Number
+        return $copy
     }
 }
 
@@ -422,6 +426,7 @@ function Search-WorksheetCells {
     # -FillMerged: 値のヒットのセル → 文字と、結合したセルの範囲（mergeCells はセルの後ろにあるので、シートを読み終えてから返す）
     $fill = $FillMerged -and $wantValue
     $filled = @{}
+    $filledNumbers = @{}   # そのうち値が数のセル
     $merges = New-Object System.Collections.Generic.List[string]
 
     # セルごとの処理は回数が多いため、関数呼び出しを避けて直接書いている
@@ -527,6 +532,7 @@ function Search-WorksheetCells {
 
                 if ($wantValue) {
                     $text = $null
+                    $isNumber = $false
                     if ($type -eq 's') {
                         if ([int]::TryParse($value, [ref]$idx) -and $idx -ge 0 -and $idx -lt $sstStrings.Count) {
                             # 回数が多いので New-Hit を呼ばずに作る（共有文字列は読むときに 1 行にしてある）
@@ -552,7 +558,7 @@ function Search-WorksheetCells {
                                 if ($DateStyles[$style] -is [string]) { $text = Format-ExcelElapsed -Serial $num -Code $DateStyles[$style] }
                                 else { $text = Format-ExcelDate -Serial $num -Date1904 $Date1904 }
                             }
-                            else { $text = $num.ToString('G15', $invariant) }
+                            else { $text = $num.ToString('G15', $invariant); $isNumber = $true }
                         }
                         else { $text = $value }
                     }
@@ -562,8 +568,10 @@ function Search-WorksheetCells {
                         if ($normalize) { $probe = $probe.Normalize($nfkc) }
                         if ($rx.IsMatch($probe)) {
                             if ($text.IndexOf([char]10) -ge 0 -or $text.IndexOf([char]13) -ge 0) { $text = ConvertTo-OneLine $text }
-                            if ($fill) { $filled[$ref] = $text }
-                            [SearchExcelHit]::new($file, $SheetName + '!' + $ref, $SheetName, $ref, '値', $text, '', $path)
+                            if ($fill) { $filled[$ref] = $text; if ($isNumber) { $filledNumbers[$ref] = $true } }
+                            $hit = [SearchExcelHit]::new($file, $SheetName + '!' + $ref, $SheetName, $ref, '値', $text, '', $path)
+                            $hit.Number = $isNumber
+                            $hit
                         }
                     }
                 }
@@ -583,7 +591,11 @@ function Search-WorksheetCells {
         if (-not $filled.ContainsKey($topLeft)) { continue }
         for ($r = [int]$g.Groups[2].Value + 1; $r -le [int]$g.Groups[3].Value; $r++) {
             $cell = $g.Groups[1].Value + $r
-            if (-not $filled.ContainsKey($cell)) { [SearchExcelHit]::new($file, $SheetName + '!' + $cell, $SheetName, $cell, '値', $filled[$topLeft], '', $path) }
+            if (-not $filled.ContainsKey($cell)) {
+                $hit = [SearchExcelHit]::new($file, $SheetName + '!' + $cell, $SheetName, $cell, '値', $filled[$topLeft], '', $path)
+                $hit.Number = $filledNumbers.ContainsKey($topLeft)
+                $hit
+            }
         }
     }
 }
@@ -1001,7 +1013,9 @@ function Search-ComWorkbook {
                             $text = Format-ComValue $v
                             if ($text -and (Test-TextMatch $text)) {
                                 if (-not $addr) { $addr = (ConvertTo-ColumnName ($left + $c - 1)) + ($top + $r - 1) }
-                                New-Hit -Kind '値' -Sheet $sheetName -Cell $addr -Text $text
+                                $hit = New-Hit -Kind '値' -Sheet $sheetName -Cell $addr -Text $text
+                                $hit.Number = ($v -is [double] -or $v -is [decimal])
+                                $hit
                             }
                         }
                     }

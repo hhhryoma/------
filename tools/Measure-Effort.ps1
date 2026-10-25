@@ -216,6 +216,18 @@ if ($Wbs) {
             Write-Host ('  - [{0}] {1} {2}（{3}）: 予定 {4} / 実績 {5} / 進捗 {6}% → 完了見込 {7}' -f $f.Judgement, $f.WbsNo, $f.Task, $f.Owner, (Format-Number $f.Planned), (Format-Number $f.Actual), [math]::Round($f.Progress * 100, 0, $away), (Format-Number $f.Eac))
         }
     }
+    # WBS の担当者が、ほかの人のタスクにつけた工数（手伝いか、WBS 番号の書き間違い）。WBS に無い人・担当の無いタスクは除く
+    $wbsOwners = @($tasks | ForEach-Object { $_.Owner } | Where-Object { $_ } | Select-Object -Unique)
+    $otherOwner = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $entries) {
+        if ($e.Task -lt 0 -or -not $tasks[$e.Task].Owner -or (Test-SameOwner $e.Owner $tasks[$e.Task].Owner)) { continue }
+        foreach ($o in $wbsOwners) { if (Test-SameOwner $e.Owner $o) { $otherOwner.Add($e); break } }
+    }
+    if ($otherOwner.Count -gt 0) {
+        $groups = @($otherOwner | Group-InOrder { '{0}|{1}' -f $_.Task, (Get-OwnerKey $_.Owner) })
+        $items = @($groups | Select-Object -First 5 | ForEach-Object { $t = $tasks[$_.Group[0].Task]; '{0} {1}（{2}）に {3} {4}' -f $t.WbsNo, $t.Task, $t.Owner, $_.Group[0].Owner, (Format-Number (($_.Group | Measure-Object Hours -Sum).Sum / $perUnit) 2) })
+        Write-Host ('担当者と違う人がつけた工数 {0} 件: {1}{2}（{3}）。手伝いでなければ、WBS 番号を確かめてください' -f $groups.Count, ($items -join '・'), $(if ($groups.Count -gt 5) { ' ほか' } else { '' }), $Unit)
+    }
 }
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
@@ -240,7 +252,8 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .PARAMETER Path
 #     工数実績の表のファイルまたはフォルダ（Excel・CSV。複数可）。担当の列が無い表は、シート名（ブックに表が複数あるとき。
-#     日付を列に並べた表の 10月 など月の名前のシートは除く）かファイル名を担当とみなします（人ごとの日報など）。
+#     10月 など月の名前のシートは除く）かファイル名を担当とみなします（人ごとの日報など）。
+#     ファイル名からは、年月・日付と「工数実績」「日報」などのことばを除きます（工数実績_佐藤_202610.xlsx は 佐藤）。
 #
 # .PARAMETER Wbs
 #     WBS のファイルまたはフォルダ（予定工数・進捗率。読み方は Measure-Progress.ps1 と同じ）。

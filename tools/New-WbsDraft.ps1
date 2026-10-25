@@ -343,3 +343,4 @@ if ($OutCsv) { Write-Host "CSV を保存しました: $OutCsv" }
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに ExcelTools.psm1・Search-Excel.ps1・Measure-DesignSize.ps1 が必要です。
 #     下書きです。タスクの依存関係・レビューの日程・担当者の得意な機能などは、作ったあとに直してください。
+#     機能が 10 以上あると、WBS 番号は 1.10・2.10 にもなります。Excel は標準の書式のセルに入れた 1.10 を 1.1 にするので、日報の WBS 番号の列は文字列の書式にしてください。
