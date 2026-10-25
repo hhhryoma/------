@@ -387,12 +387,19 @@ function Start-GuiToolRun {
     $runspace.Open()
     $ps = [powershell]::Create()
     $ps.Runspace = $runspace
+    # Write-Host と警告は、出力に混ぜて受け取ってから Queue に分ける。実行空間の Streams で受け取ると、ツールが中で呼んだツールの
+    # 出力を 6>$null・3>$null で捨てても届いてしまい、記録の欄に関係のない行（「1 ファイル中 1 ファイルで 607 件ヒット」など）が出る
+    $queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
     $runner = {
-        param($ToolPath, $Arguments)
+        param($ToolPath, $Arguments, $Queue)
         $ErrorActionPreference = 'Stop'
+        filter Split-HostRecord {
+            if ($_ -is [System.Management.Automation.InformationRecord] -or $_ -is [System.Management.Automation.WarningRecord]) { $Queue.Enqueue($_) }
+            else { $_ }
+        }
         # 失敗を exit 1 で知らせるツール（PDF にする）のため、終了コードも受け取る
         $global:LASTEXITCODE = 0
-        $result = @(& $ToolPath @Arguments)
+        $result = @(& $ToolPath @Arguments 3>&1 6>&1 | Split-HostRecord)
         $code = $global:LASTEXITCODE
         $text = ''
         if ($result.Count -gt 0) { $text = ($result | Select-Object -First 200 | Format-Table -AutoSize -Wrap | Out-String -Width 220).Trim() }
@@ -400,12 +407,27 @@ function Start-GuiToolRun {
     }
     $splat = @{}
     foreach ($k in $Arguments.Keys) { $splat[$k] = $Arguments[$k] }
-    [void]$ps.AddScript($runner.ToString()).AddArgument($ToolPath).AddArgument($splat)
+    [void]$ps.AddScript($runner.ToString()).AddArgument($ToolPath).AddArgument($splat).AddArgument($queue)
     $handle = $ps.BeginInvoke()
     return [pscustomobject]@{
         PowerShell = $ps; Runspace = $runspace; Handle = $handle; Started = (Get-Date)
-        InfoIndex = 0; WarningIndex = 0; ErrorIndex = 0; Stopping = $false; Done = $false
+        Queue = $queue; ErrorIndex = 0; Stopping = $false; Done = $false
     }
+}
+
+function ConvertTo-GuiRunMessage {
+    #     Write-Host・Write-Information・警告の記録を、記録の欄の 1 行にする
+    param($Record)
+    if ($Record -is [System.Management.Automation.WarningRecord]) {
+        return [pscustomobject]@{ Kind = '警告'; Text = ('警告: ' + $Record.Message); Color = 'DarkYellow'; NoNewLine = $false }
+    }
+    $data = $Record.MessageData
+    if ($data -is [System.Management.Automation.HostInformationMessage]) {
+        $color = ''
+        if ($null -ne $data.ForegroundColor) { $color = [string]$data.ForegroundColor }
+        return [pscustomobject]@{ Kind = '情報'; Text = [string]$data.Message; Color = $color; NoNewLine = [bool]$data.NoNewLine }
+    }
+    return [pscustomobject]@{ Kind = '情報'; Text = [string]$data; Color = ''; NoNewLine = $false }
 }
 
 function Receive-GuiToolRun {
@@ -414,21 +436,8 @@ function Receive-GuiToolRun {
     param($Run)
     $messages = New-Object System.Collections.Generic.List[object]
     $streams = $Run.PowerShell.Streams
-    $info = $streams.Information
-    while ($Run.InfoIndex -lt $info.Count) {
-        $data = $info[$Run.InfoIndex].MessageData
-        $Run.InfoIndex++
-        if ($data -is [System.Management.Automation.HostInformationMessage]) {
-            $color = ''
-            if ($null -ne $data.ForegroundColor) { $color = [string]$data.ForegroundColor }
-            $messages.Add([pscustomobject]@{ Kind = '情報'; Text = [string]$data.Message; Color = $color; NoNewLine = [bool]$data.NoNewLine })
-        }
-        else { $messages.Add([pscustomobject]@{ Kind = '情報'; Text = [string]$data; Color = ''; NoNewLine = $false }) }
-    }
-    while ($Run.WarningIndex -lt $streams.Warning.Count) {
-        $messages.Add([pscustomobject]@{ Kind = '警告'; Text = ('警告: ' + $streams.Warning[$Run.WarningIndex].Message); Color = 'DarkYellow'; NoNewLine = $false })
-        $Run.WarningIndex++
-    }
+    $record = $null
+    while ($Run.Queue.TryDequeue([ref]$record)) { $messages.Add((ConvertTo-GuiRunMessage $record)) }
     while ($Run.ErrorIndex -lt $streams.Error.Count) {
         $messages.Add([pscustomobject]@{ Kind = 'エラー'; Text = ('エラー: ' + $streams.Error[$Run.ErrorIndex].Exception.Message); Color = 'Red'; NoNewLine = $false })
         $Run.ErrorIndex++
@@ -477,15 +486,12 @@ function Receive-GuiToolRunTail {
     param($Run)
     $streams = $Run.PowerShell.Streams
     $list = New-Object System.Collections.Generic.List[object]
-    while ($Run.InfoIndex -lt $streams.Information.Count) {
-        $data = $streams.Information[$Run.InfoIndex].MessageData
-        $Run.InfoIndex++
-        $text = [string]$data
-        $color = ''
-        if ($data -is [System.Management.Automation.HostInformationMessage]) { $text = [string]$data.Message; if ($null -ne $data.ForegroundColor) { $color = [string]$data.ForegroundColor } }
-        $list.Add([pscustomobject]@{ Kind = '情報'; Text = $text; Color = $color; NoNewLine = $false })
+    $record = $null
+    while ($Run.Queue.TryDequeue([ref]$record)) {
+        $m = ConvertTo-GuiRunMessage $record
+        $m.NoNewLine = $false
+        $list.Add($m)
     }
-    while ($Run.WarningIndex -lt $streams.Warning.Count) { $list.Add([pscustomobject]@{ Kind = '警告'; Text = ('警告: ' + $streams.Warning[$Run.WarningIndex].Message); Color = 'DarkYellow'; NoNewLine = $false }); $Run.WarningIndex++ }
     while ($Run.ErrorIndex -lt $streams.Error.Count) { $list.Add([pscustomobject]@{ Kind = 'エラー'; Text = ('エラー: ' + $streams.Error[$Run.ErrorIndex].Exception.Message); Color = 'Red'; NoNewLine = $false }); $Run.ErrorIndex++ }
     return $list.ToArray()
 }

@@ -183,6 +183,17 @@ function Unregister-Launcher {
 
 # 指定が無ければ、入れたときの「送る」の登録の指定を使う（更新・削除も同じ指定で行う）
 $info = Read-InstallInfo
+# 前の版が相対パスのまま覚えた指定は、ホームのフォルダ（PowerShell を開いたときのフォルダ）からの絶対パスにする
+# （更新は「送る」や画面から tools フォルダで動くので、相対パスのままでは tools の中のフォルダになり、次の更新で消える）
+$repairedPaths = @()
+if ($info) {
+    foreach ($name in @('OutDir', 'SendToDir', 'ShortcutDir')) {
+        $p = [string]$info.$name
+        if (-not $p -or [System.IO.Path]::IsPathRooted($p)) { continue }
+        $info.$name = [System.IO.Path]::GetFullPath((Join-Path $HOME $p))
+        $repairedPaths += ('-{0} {1} → {2}' -f $name, $p, $info.$name)
+    }
+}
 if ($info) {
     if (-not $PSBoundParameters.ContainsKey('Action') -and $info.Action) { $Action = @($info.Action | Where-Object { $_ }) }
     if (-not $PSBoundParameters.ContainsKey('OutDir') -and $info.OutDir) { $OutDir = $info.OutDir }
@@ -229,6 +240,13 @@ if ($Update -or $CheckOnly) {
     $last = [datetime]::MinValue
     if ($info.LastCheck -is [datetime]) { $last = $info.LastCheck }
     elseif ($info.LastCheck) { try { $last = [datetime]::ParseExact([string]$info.LastCheck, 'yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) } catch { } }
+    if ($repairedPaths.Count -gt 0) {
+        # 直した指定をすぐに覚え直し、登録し直す（前の更新で、tools の中のフォルダを「送る」に登録していることがある）
+        Save-InstallInfo $info.Source $info.Fingerprint $last
+        Register-SendTo
+        Register-Launcher
+        Write-Warning ('相対パスで覚えていたフォルダを、ホームのフォルダからのパスにしました（{0}）。ほかのフォルダにするときは、指定し直して入れ直してください' -f ($repairedPaths -join '、'))
+    }
     if ($CheckOnly -and $last.AddHours($CheckHours) -gt (Get-Date)) {
         [pscustomobject]@{ Result = '確認済み'; InstallDir = $InstallDir; Source = $Source; Copied = 0; Removed = 0 }
         return
@@ -317,6 +335,7 @@ Write-Host ("配布元: {0}（ここが更新されると、「送る」で使�
 # .PARAMETER OutDir
 #     「送る」の結果を保存するフォルダ（Install-SendTo.ps1 の -OutDir）。既定は「ドキュメント\Excel ツールの結果」。
 #     相対パスは、いまのフォルダからの絶対パスにして覚えます（-SendToDir・-ShortcutDir も同じ）。
+#     前の版が相対パスのまま覚えた指定は、更新の確認のときにホームのフォルダからの絶対パスにして覚え直します。
 #
 # .PARAMETER SendToDir
 #     ショートカットを作るフォルダ（Install-SendTo.ps1 の -SendToDir）。既定は、ログインしている人の「送る」のフォルダ。
