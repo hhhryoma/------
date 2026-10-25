@@ -325,6 +325,24 @@ Test-Case 'Search-Excel: 経過時間の表示形式（[h]:mm・[h]:mm:ss など
     Assert-Equal @('7:30', '31:15', '31:15:00', '450:00', '7時間30分', '07:30:00', '0.3125') @(2..8 | ForEach-Object { $c = 'B' + $_; @($hits | Where-Object { $_.Cell -eq $c })[0].Text }) '経過時間は 24 時間を超えても時間で数える。時刻・数値の書式はこれまでどおり'
 }
 
+Test-Case 'Search-Excel: -FillMerged は、結合したセルの値を範囲の最初の列の下の行にも返す（右の列には返さない。付けなければ左上のセルだけ）' {
+    $path = Join-Path (New-TestDir) '結合.xlsx'
+    New-SheetsBook $path ([ordered]@{ 'ケース' = @(@('No', '手順', '期待結果', '備考', ''), @('1', '検索する', '一覧に表示される', '横に結合', ''), @('2', '', '', '', ''), @('3', '', '', '縦横に結合', '')) })
+    # B2:B4・C2:C3 は縦に、D2:E2 は横に、D4:E5 は縦横に結合する
+    Edit-ZipText $path 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('<pageMargins', '<mergeCells count="4"><mergeCell ref="B2:B4"/><mergeCell ref="C2:C3"/><mergeCell ref="D2:E2"/><mergeCell ref="D4:E5"/></mergeCells><pageMargins') }
+    $cells = { param($hits) @($hits | ForEach-Object { '{0}|{1}' -f $_.Cell, $_.Text }) }
+    $global:ExcelToolsSearchCache = @{ '__Reused' = 0 }
+    try {
+        $plain = Invoke-Search -Pattern '\S' -Path $path -Target Value
+        $filled = Invoke-Search -Pattern '\S' -Path $path -Target Value -FillMerged
+        Assert-Equal 0 $global:ExcelToolsSearchCache['__Reused'] '-FillMerged の有無は、読み取り結果の使い回しでは別の条件'
+    }
+    finally { Remove-Variable -Name ExcelToolsSearchCache -Scope Global -ErrorAction SilentlyContinue }
+    $topLeft = @('A1|No', 'B1|手順', 'C1|期待結果', 'D1|備考', 'A2|1', 'B2|検索する', 'C2|一覧に表示される', 'D2|横に結合', 'A3|2', 'A4|3', 'D4|縦横に結合')
+    Assert-Equal $topLeft (& $cells $plain) '付けなければ、これまでどおり左上のセルだけ'
+    Assert-Equal ($topLeft + @('B3|検索する', 'B4|検索する', 'C3|一覧に表示される', 'D5|縦横に結合')) (& $cells $filled) '右の列（E2・E4・E5）には返さない'
+}
+
 Test-Case 'Search-Excel: Get-Help でヘルプが表示される' {
     $h = Get-Help $SearchExcel
     Assert-Match $h.Synopsis 'grep'

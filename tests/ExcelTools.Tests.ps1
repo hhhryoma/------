@@ -63,6 +63,29 @@ Test-Case 'ExcelTools: Get-LeafName は、\ と（拡張子で終わる名前の
     Assert-True ((ConvertTo-NameKey '外部I/F設計書') -ne (ConvertTo-NameKey '内部I/F設計書')) '「I/F」の前が違う名前は別のもの'
 }
 
+Test-Case 'ExcelTools: Find-DesignTables は「■」の行で表を終える。-List（一覧の表）では終えずに、値がすべて「■」で始まる行とキーの列が見出しと同じ行を飛ばす' {
+    # 2 行目は縦に結合した見出し（No）の下の行、4 行目はグループの見出し、5 行目は「■」で始まる指摘
+    $hits = foreach ($c in @('A1=No', 'B1=指摘内容', 'C1=対応状況', 'A2=No', 'B2=内容', 'C2=状態', 'A3=1', 'B3=型が違う', 'C3=対応中', 'A4=■索引', 'A5=2', 'B5=■索引: 一意索引が足りない', 'C5=対応中', 'A6=3', 'B6=桁数が違う', 'C6=完了')) {
+        $p = $c.Split('=')
+        [pscustomobject]@{ File = '指摘.xlsx'; Path = '指摘.xlsx'; Sheet = '指摘'; Cell = $p[0]; Text = $p[1] }
+    }
+    $grid = (ConvertTo-DesignBooks $hits)['指摘.xlsx'].Sheets['指摘']
+    $rows = { param($tables) @($tables | ForEach-Object { (@($_.Rows | ForEach-Object { $_.Row })) -join ',' }) }
+    Assert-Equal @('2,3') (& $rows (Find-DesignTables $grid @('No', '指摘内容', '対応状況') 'No')) '設計書の表は、これまでどおり「■」の行（次の節）まで'
+    Assert-Equal @('3,5,6') (& $rows (Find-DesignTables $grid @('No', '指摘内容', '対応状況') 'No' -List))
+}
+
+Test-Case 'ExcelTools: Read-BookDrawings は、位置で置いた図形・画像（absoluteAnchor）も、その位置のセルとセルの左上からのずれで読む（シートの上の位置は置いた位置のまま）' {
+    $path = Join-Path (New-TestDir) '画面.xlsx'
+    New-SheetsBook $path ([ordered]@{ '画面' = @(, @('項目', '値', '備考')) })
+    Add-TestDrawing $path @(@{ Kind = 'pic'; Name = '図 1'; Png = 'Screen'; From = @(1, 2); To = @(8, 20) })
+    # A〜C 列は 70 ピクセル、行は 24 ピクセル。左から 100・上から 60 ピクセル（B3 の中）に、400 × 300 ピクセルで置く
+    Edit-ZipText $path 'xl/drawings/drawing1.xml' { param($t) $t -replace '<xdr:twoCellAnchor>.*?</xdr:to>', '<xdr:absoluteAnchor><xdr:pos x="952500" y="571500"/><xdr:ext cx="3810000" cy="2857500"/>' -replace '</xdr:twoCellAnchor>', '</xdr:absoluteAnchor>' }
+    $items = (Read-BookDrawings $path -Bounds)['画面'].ToArray()
+    Assert-Equal @('図 1|pic|B3|3|2|30|12|400|300') @($items | ForEach-Object { $a = $_.Anchor; '{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}' -f $_.Name, $_.Kind, $_.Cell, $a.R1, $a.C1, $a.OX, $a.OY, $a.W, $a.H })
+    Assert-Equal '100|60|400|300' ('{0}|{1}|{2}|{3}' -f $items[0].Bounds.X, $items[0].Bounds.Y, $items[0].Bounds.W, $items[0].Bounds.H)
+}
+
 Test-Case 'ExcelTools: Export-Workbook は日付（datetime）を日付のセルとして書き、Search-Excel では yyyy/MM/dd で読める' {
     $path = Join-Path (New-TestDir) '日付.xlsx'
     Export-Workbook -FilePath $path -Sheets @(@{ Name = '予定'; Columns = @(@{ Header = '開始'; Width = 12 }, @{ Header = '工数'; Width = 6 }, @{ Header = 'メモ'; Width = 10 }); Rows = @(@{ Values = @([datetime]'2026-11-02', 1.5, '2026/11/03') }) })

@@ -105,6 +105,16 @@ Test-Case 'Test-Screenshots: -OutXlsx に画面ごとの状態と、元のシー
     Assert-Equal @('表紙|（印刷範囲なし）|設計書に無い', '受注一覧|A1:F20|使っている', '受注登録|A1:F20|使っている') @(2..4 | ForEach-Object { '{0}|{1}|{2}' -f $sheets.Rows[$_]['B'], $sheets.Rows[$_]['C'], $sheets.Rows[$_]['D'] })
 }
 
+Test-Case 'Test-Screenshots: 位置で置いた（absoluteAnchor）スクリーンショットも読み、その位置のセルを場所にする' {
+    $set = New-ScreenshotSet (New-TestDir)
+    # 受注一覧のスクリーンショットを、セルではなく位置（左から 100・上から 60 ピクセル。B3 の中）で、400 × 300 ピクセルに置く
+    $pos = '<xdr:absoluteAnchor><xdr:pos x="952500" y="571500"/><xdr:ext cx="3810000" cy="2857500"/>'
+    Edit-ZipText (Join-Path $set.Design 'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx') 'xl/drawings/drawing2.xml' { param($t) $t -replace '<xdr:twoCellAnchor>.*?</xdr:to>', $pos -replace '</xdr:twoCellAnchor>', '</xdr:absoluteAnchor>' }
+    $results = Invoke-Screenshots @{ Path = $set.Design; Wireframe = $set.Wire }
+    Assert-Equal @('受注一覧|記録なし', '受注登録|記録なし', '受注詳細|元のシートなし') (Get-ScreenStates $results)
+    Assert-Equal 'DD02_画面設計書_SCR001_受注一覧_v1.0.xlsx 受注一覧!B3' $results[0].Location
+}
+
 Test-Case 'Test-Screenshots: -Screen は -Record と一緒に使う。Get-Help でヘルプが表示される' {
     Assert-Throws { & $ScreenshotsTool -Path '.' -Wireframe '.' -Screen '受注登録' } '-Record と一緒に'
     $h = Get-Help $ScreenshotsTool

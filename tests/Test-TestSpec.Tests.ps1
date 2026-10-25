@@ -246,6 +246,39 @@ Test-Case 'Test-TestSpec: -DesignPath のメッセージの指摘は、ケース
             ('メッセージの文言が違う|「他のユーザーにより更新されています。」が、メッセージ一覧の {0} と合いません' -f $defined))) @($issues | ForEach-Object { '{0}|{1}' -f $_.Item, $_.Detail })
 }
 
+Test-Case 'Test-TestSpec: 縦に結合した手順・期待結果は、結合した各行の値として読む（見出しを 2 行に分けて縦に結合した表も読む）' {
+    $dir = New-TestDir
+    $path = Join-Path $dir 'UT_SCR001.xlsx'
+    New-SpecBook $path @('No', '機能', '区分', '前提条件', '手順', '入力値', '期待結果', '結果') @(
+        @('1', 'SCR001', '異常', '', '受注番号に次の値を入れて検索する', 'ABC-001', 'E0003「受注番号は半角英数字で入力してください。」が表示される', ''),
+        @('2', '', '異常', '', '', 'あいう', '', ''),
+        @('3', '', '異常', '', '', '１２３', '', ''))
+    Edit-ZipText $path 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('<pageMargins', '<mergeCells count="2"><mergeCell ref="E2:E4"/><mergeCell ref="G2:G4"/></mergeCells><pageMargins') }
+    Assert-Equal @() @(& $TestSpecTool -Path $path 6>$null | ForEach-Object { '{0}|{1}' -f $_.Item, $_.Location }) '手順・期待結果を縦に結合した 3 ケース'
+
+    # No・手順・期待結果を 2 行に縦に結合し、結果は横に結合して下の行に判定・実施日
+    $two = Join-Path $dir 'UT_SCR002.xlsx'
+    New-SpecBook $two @('No', '手順', '期待結果', '結果', '') @(
+        @('', '', '', '判定', '実施日'),
+        @('1', '登録ボタンを押す', '受注が登録される', 'OK', '2026/11/02'),
+        @('2', 'クリアボタンを押す', '入力が空になる', 'OK', '2026/11/02'))
+    Edit-ZipText $two 'xl/worksheets/sheet1.xml' { param($t) $t.Replace('<pageMargins', '<mergeCells count="4"><mergeCell ref="A1:A2"/><mergeCell ref="B1:B2"/><mergeCell ref="C1:C2"/><mergeCell ref="D1:E1"/></mergeCells><pageMargins') }
+    Assert-Equal @() @(& $TestSpecTool -Path $two 6>$null | ForEach-Object { '{0}|{1}' -f $_.Item, $_.Location }) '見出しの 2 行目はケースにしない'
+    Assert-Match (Get-HostText { & $TestSpecTool -Path $two | Out-Null }) 'テストケース 2 件'
+}
+
+Test-Case 'Test-TestSpec: テストID の列の見出しが「No.」「テストNo.」（後ろに「.」）でも読む（Excel・CSV）' {
+    $dir = New-TestDir
+    foreach ($h in @('No.', 'テストNo.')) {
+        $path = Join-Path $dir ('UT_{0}.xlsx' -f $h.TrimEnd('.'))
+        New-SpecBook $path @($h, '手順', '期待結果', '結果') @(@('1', '検索ボタンを押す', '受注が 1 件表示される', ''), @('1', 'クリアボタンを押す', '検索条件が空になる', ''))
+        Assert-Equal @('テストIDの重複|テストケース!A3|1') @(& $TestSpecTool -Path $path 6>$null | ForEach-Object { '{0}|{1}|{2}' -f $_.Item, $_.Location, $_.Id }) $h
+    }
+    $csv = Join-Path $dir 'cases.csv'
+    @('No.,手順,期待結果,結果', '1,検索ボタンを押す,受注が 1 件表示される,', '1,クリアボタンを押す,検索条件が空になる,') | Set-Content -LiteralPath $csv -Encoding UTF8
+    Assert-Equal @('テストIDの重複|3 行目|1') @(& $TestSpecTool -Path $csv 6>$null | ForEach-Object { '{0}|{1}|{2}' -f $_.Item, $_.Location, $_.Id }) 'CSV'
+}
+
 Test-Case 'Test-TestSpec: Get-Help でヘルプが表示される' {
     $h = Get-Help $TestSpecTool
     Assert-Match $h.Synopsis 'テスト仕様書'

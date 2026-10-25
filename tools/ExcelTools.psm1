@@ -383,7 +383,8 @@ function Read-SheetDrawingItems {
     #     シートの図形・画像（描画パーツ）を、文書の順に読む（グループの中のものも。互換用の代替表示（mc:Fallback）は除く）。
     #       Name・Kind（sp 図形 / pic 画像 / grpSp グループ / graphicFrame グラフ / cxnSp 線）・Text
     #       Path（グループの中なら「グループ名/名前」）・Key（Path#同じ Path の何番目か）・Group（グループの中なら、いちばん外のグループの名前）
-    #       Cell（シートに置いた図形の左上のセル）・Anchor（R1 C1 OX OY と、R2 C2 EX EY（セルに合わせる）または W H。ピクセル）
+    #       Cell（シートに置いた図形の左上のセル）・Anchor（R1 C1 OX OY と、R2 C2 EX EY（セルに合わせる）または W H。ピクセル。
+    #       位置で置いたもの（absoluteAnchor）は、その位置のセルとセルの左上からのずれ。列の幅・行の高さは Get-SheetGeometry の目安）
     #       Box（グループの中のもの。いちばん外のグループの中での X Y W H の割合）・Hidden（非表示）
     #       Size（表示の大きさ W H。EMU。わからなければ $null）・Bounds（シートの上の位置と大きさ。Set-DrawingBounds で求める）
     #       Crop（画像のトリミング L T R B の割合。無ければ $null）・Look（名前を除いた見た目（位置・書式・文字）の要約）
@@ -393,17 +394,31 @@ function Read-SheetDrawingItems {
     $items = New-Object System.Collections.Generic.List[object]
     $px = { param($node, $name) $n = $node.SelectSingleNode("*[local-name()='$name']"); if ($n) { [int][math]::Round([double]$n.InnerText / 9525) } else { 0 } }
     $num = { param($node, $name) $n = $node.SelectSingleNode("*[local-name()='$name']"); if ($n) { [int]$n.InnerText } else { 0 } }
+    $geometry = $null
     # Get-PartRelationships は一覧を 1 つのまとまりで返すので、いったん変数に入れてから絞り込む
     $rels = Get-PartRelationships -Package $Package -PartName $SheetPart
     foreach ($rel in @($rels | Where-Object { $_.Kind -eq 'drawing' })) {
         $doc = Read-PartXml -Package $Package -PartName $rel.Target
         if (-not $doc) { continue }
         $drawingRels = Get-PartRelationships -Package $Package -PartName $rel.Target
-        foreach ($a in $doc.SelectNodes("//*[(local-name()='twoCellAnchor' or local-name()='oneCellAnchor') and not(ancestor::*[local-name()='Fallback'])]")) {
+        foreach ($a in $doc.SelectNodes("//*[(local-name()='twoCellAnchor' or local-name()='oneCellAnchor' or local-name()='absoluteAnchor') and not(ancestor::*[local-name()='Fallback'])]")) {
             $obj = $a.SelectSingleNode("*[local-name()='sp' or local-name()='pic' or local-name()='graphicFrame' or local-name()='grpSp' or local-name()='cxnSp']")
             $from = $a.SelectSingleNode("*[local-name()='from']")
-            if (-not $obj -or -not $from) { continue }
-            $anchor = [ordered]@{ R1 = (& $num $from 'row') + 1; C1 = (& $num $from 'col') + 1; OX = (& $px $from 'colOff'); OY = (& $px $from 'rowOff') }
+            $pos = $a.SelectSingleNode("*[local-name()='pos']")
+            if (-not $obj -or -not ($from -or $pos)) { continue }
+            if ($from) { $anchor = [ordered]@{ R1 = (& $num $from 'row') + 1; C1 = (& $num $from 'col') + 1; OX = (& $px $from 'colOff'); OY = (& $px $from 'rowOff') } }
+            else {
+                # 位置で置いたもの（absoluteAnchor）は、シートの左上からの位置（EMU）にあるセルと、セルの左上からのずれにする
+                if ($null -eq $geometry) {
+                    $styles = @((Get-PartRelationships -Package $Package -PartName (Get-WorkbookSheetParts $Package).WorkbookPart) | Where-Object { $_.Kind -eq 'styles' } | ForEach-Object { $_.Target })[0]
+                    $geometry = Get-SheetGeometry (Read-PartXml -Package $Package -PartName $SheetPart) (Get-MaxDigitWidth $Package $styles)
+                }
+                $x = [double]$pos.GetAttribute('x') / 9525; $y = [double]$pos.GetAttribute('y') / 9525
+                $m = [regex]::Match((Get-SheetCell $geometry $x $y), '^([A-Z]+)(\d+)$')
+                $anchor = [ordered]@{ R1 = [int]$m.Groups[2].Value; C1 = (Get-ColumnIndex $m.Groups[1].Value) }
+                $p = Get-SheetPoint $geometry $anchor.C1 $anchor.R1
+                $anchor.OX = [int][math]::Round($x - $p[0]); $anchor.OY = [int][math]::Round($y - $p[1])
+            }
             $to = $a.SelectSingleNode("*[local-name()='to']")
             $ext = $a.SelectSingleNode("*[local-name()='ext']")
             if ($to) { $anchor.R2 = (& $num $to 'row') + 1; $anchor.C2 = (& $num $to 'col') + 1; $anchor.EX = (& $px $to 'colOff'); $anchor.EY = (& $px $to 'rowOff') }
@@ -1268,9 +1283,11 @@ function Find-DesignTables {
     #     見出し（ConvertTo-Label 済み）がすべてそろっている行を探し、その下で KeyHeader の列に値のある行を返す。
     #     「■」で始まる行（次の節）までを 1 つの表とみなす。KeyHeader が無い表では最初の見出しの列を使う
     #     見出しと同じ行（印刷のページごとにくり返した見出し）は、表の続きとみなして飛ばす
+    #     List（一覧の表。Read-HeaderRecords）: 「■」の行で表を終えない。値がすべて「■」で始まる行（グループの見出し）と、
+    #     キーの列が見出しと同じ行（縦に結合した見出しの下の行）は飛ばす。「■」で始まる値のほかにも値のある行（「■索引: …」の指摘など）は読む
     #     Grid は ConvertTo-DesignBooks のシート
     #     戻り値: @{ HeaderRow; ColumnOf = 見出し → 列番号; Rows = @(@{ Row; Cells = 列番号 → 文字 }) } の一覧
-    param($Grid, [string[]] $Headers, [string] $KeyHeader)
+    param($Grid, [string[]] $Headers, [string] $KeyHeader, [switch] $List)
     $tables = New-Object System.Collections.Generic.List[object]
     if (@($Headers).Count -eq 0) { return , $tables }
     $rows = $Grid.Rows
@@ -1288,10 +1305,16 @@ function Find-DesignTables {
             $r = $Grid.Cells[$rows[$j]]
             $section = $false
             foreach ($v in $r.Values) { if ($v.TrimStart().StartsWith('■')) { $section = $true; break } }
-            if ($section) { break }
+            if ($section) {
+                if (-not $List) { break }
+                $heading = $true
+                foreach ($v in $r.Values) { if (-not $v.TrimStart().StartsWith('■')) { $heading = $false; break } }
+                if ($heading) { continue }
+            }
             $repeated = $true
             foreach ($hdr in $Headers) { if ($Grid.Labels[$rows[$j]][$colOf[$hdr]] -ne $hdr) { $repeated = $false; break } }
             if ($repeated) { continue }
+            if ($List -and $Grid.Labels[$rows[$j]][$keyCol] -eq $labels[$keyCol]) { continue }
             if ($r.ContainsKey($keyCol) -and $r[$keyCol].Trim()) { $dataRows.Add([pscustomobject]@{ Row = $rows[$j]; Cells = $r }) }
         }
         $tables.Add([pscustomobject]@{ HeaderRow = $rows[$i]; ColumnOf = $colOf; Rows = $dataRows })
@@ -1801,6 +1824,7 @@ function Get-FilePathSet {
 
 function Read-HeaderRecords {
     #     見出しの候補で表を探し、1 行ずつ読む（Excel は Search-Excel.ps1 で、CSV はそのまま）。
+    #     Excel は、縦に結合したセルを結合した各行の値として読み、「■」の行は一覧の表として扱う（Find-DesignTables の List）
     #       Candidates: 項目 → 見出しの候補（Read-HeaderCandidates）。Fields: 読む項目
     #       Need: 見出しの行の条件。文字は必ず要る項目、配列はそのうちどれか 1 つが要る項目
     #       Key: 行があるかを決める項目（前から順に、見出しにあるもの）
@@ -1815,13 +1839,17 @@ function Read-HeaderRecords {
         foreach ($g in $Need) { if (@(@($g) | Where-Object { $m[$_] }).Count -eq 0) { return $false } }
         return $true
     }
+    # 見出しと候補は、後ろの「.」を除いて比べる（「No.」「テストNo.」も読む）。表の列を探すため、シートの見出しのまま返す
+    $plainCandidates = @{}
+    foreach ($f in $Fields) { $plainCandidates[$f] = @(foreach ($n in $Candidates[$f]) { $n.TrimEnd('.') }) }
     $findLabel = {
-        param($labels, $names)
-        foreach ($n in $names) { if ($labels -contains $n) { return $n } }
+        param($labels, $plain, $names)
+        foreach ($n in $names) { if ($plain -contains $n) { for ($i = 0; $i -lt $plain.Count; $i++) { if ($plain[$i] -eq $n) { return $labels[$i] } } } }
         return $null
     }
     if ($Inputs.Excel.Count -gt 0) {
-        $searchArgs = @{ Pattern = '\S'; Path = $Inputs.Excel.ToArray(); Target = 'Value' }
+        # 縦に結合したセル（手順・期待結果など）は、結合した各行の値として読む
+        $searchArgs = @{ Pattern = '\S'; Path = $Inputs.Excel.ToArray(); Target = 'Value'; FillMerged = $true }
         if ($NoRecurse) { $searchArgs['NoRecurse'] = $true }
         if ($NoExcel) { $searchArgs['NoExcel'] = $true }
         $hits = @(& (Join-Path $PSScriptRoot 'Search-Excel.ps1') @searchArgs 6>$null | Where-Object {
@@ -1835,8 +1863,9 @@ function Read-HeaderRecords {
                 $grid = $book.Sheets[$sheetName]
                 foreach ($row in $grid.Rows) {
                     $labels = @($grid.Labels[$row].Values)
+                    $plain = @($labels -replace '\.+$', '')
                     $m = @{}
-                    foreach ($f in $Fields) { $l = & $findLabel $labels $Candidates[$f]; if ($l) { $m[$f] = $l } }
+                    foreach ($f in $Fields) { $l = & $findLabel $labels $plain $plainCandidates[$f]; if ($l) { $m[$f] = $l } }
                     if (& $test $m) { $found.Add([pscustomobject]@{ Sheet = $sheetName; Grid = $grid; Map = $m }); break }
                 }
             }
@@ -1844,7 +1873,7 @@ function Read-HeaderRecords {
             foreach ($entry in $found) {
                 $map = $entry.Map
                 $keyField = @($Key | Where-Object { $map[$_] })[0]
-                foreach ($t in (Find-DesignTables $entry.Grid @($map.Values | Sort-Object -Unique) $map[$keyField])) {
+                foreach ($t in (Find-DesignTables $entry.Grid @($map.Values | Sort-Object -Unique) $map[$keyField] -List)) {
                     Add-ReadLog $ReadLog $What $book.File $entry.Sheet $t.HeaderRow $t.Rows.Count $map $Fields ''
                     $cols = @{}
                     foreach ($f in $map.Keys) { $cols[$f] = $t.ColumnOf[$map[$f]] }
@@ -1863,7 +1892,7 @@ function Read-HeaderRecords {
         if ($rows.Count -eq 0) { continue }
         $names = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
         $map = @{}
-        foreach ($f in $Fields) { foreach ($n in $names) { if (-not $map[$f] -and $Candidates[$f] -contains (ConvertTo-Label $n)) { $map[$f] = $n } } }
+        foreach ($f in $Fields) { foreach ($n in $names) { if (-not $map[$f] -and $plainCandidates[$f] -contains (ConvertTo-Label $n).TrimEnd('.')) { $map[$f] = $n } } }
         if (-not (& $test $map)) {
             Write-Warning ("{0}: {1}の列が見つかりません" -f $c.Name, $What)
             Add-ReadLog $ReadLog $What $c.Name '' $null 0 $null $Fields '表が見つかりません（必要な見出しの列がありません）'
