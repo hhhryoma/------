@@ -161,8 +161,8 @@ Test-Case 'Measure-TestQuality: -DesignPath では画面・IF などだけを機
     $r = @(& $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -BugList (Join-Path $dir 'bugs.csv') -DesignPath $design -FunctionMap (Join-Path $dir 'map.csv') -AsOf '2026-10-20' 3>$null 6>$null)
     $got = @($r | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Function, $_.Cases, $_.Bugs, $_.Size, $_.Unit })
     # テーブル定義書・メッセージ一覧・コード定義書は機能にしない。SCR002 は対応表で「受注登録」「受注登録画面」と設計書をそろえる
-    # FP = 4 × EI + 5 × EO + 4 × EQ（SCR001: EQ 2 → 8、SCR002: EI 1・EQ 2 → 12、IF001: EO 1 → 5）
-    Assert-Equal @('SCR001|1|0|8|FP', 'SCR002|2|1|12|FP', 'SCR003 受注詳細|0|0|8|FP', 'IF001 出荷指示データ|0|0|5|FP') $got
+    # FP = 4 × EI + 5 × EO + 4 × EQ（SCR001: EQ 2 → 8、SCR002: EI 1・EQ 2 → 12、SCR003: EI 2・EQ 1 → 12、IF001: EO 1 → 5）
+    Assert-Equal @('SCR001|1|0|8|FP', 'SCR002|2|1|12|FP', 'SCR003 受注詳細|0|0|12|FP', 'IF001 出荷指示データ|0|0|5|FP') $got
     $r = @(& $TestQualityTool -Path (Join-Path $dir 'UT.xlsx') -DesignPath $design -DesignUnit '規模' -AsOf '2026-10-20' 3>$null 6>$null)
     Assert-Equal '17|規模' ('{0}|{1}' -f @($r | Where-Object Function -eq 'SCR001')[0].Size, @($r | Where-Object Function -eq 'SCR001')[0].Unit)
 }
