@@ -1,7 +1,12 @@
 ﻿#     Invoke-DesignReview.ps1 のテスト。設計書は docs\design-sample、観点表は同梱のものを使う
 
 $Review = Join-Path $script:ToolsDir 'Invoke-DesignReview.ps1'
-$designDir = Join-Path $script:RepoRoot 'docs/design-sample'
+# 回答の例と依頼の数・番号は、表示制御のシートを足す前の詳細設計サンプル（画面設計書は 表紙〜イベント定義 の 6 シート）で作っているので、
+# 画面設計書の表示制御のシートを非表示にした写しを使う（非表示のシートは AI に渡さない）。表示制御は、ツールの確認「表示制御」のテストで確かめる
+$designDir = Copy-Fixture (Join-Path $script:RepoRoot 'docs/design-sample')
+foreach ($f in @(Get-ChildItem -LiteralPath $designDir -Filter 'DD02_*.xlsx')) {
+    Edit-ZipText $f.FullName 'xl/workbook.xml' { param($t) $t -replace '(name="表示制御"[^>]*?)state="visible"', '$1state="hidden"' }
+}
 $brokenChecklist = Join-Path $script:Fixtures 'review/broken-checklist.xlsx'
 $consistencyDir = Join-Path $script:Fixtures 'consistency'
 
@@ -255,6 +260,20 @@ Test-Case 'Invoke-DesignReview: ツールの確認に（ ）で種類を付け�
         'ツール（一覧との違い）|X02|DD01_画面一覧.xlsx|画面一覧!C8',
         'ツール（一覧との違い）|X02|DD01_画面一覧.xlsx|画面一覧!C9',
         'ツール（参照先なし）|X01|DD02_画面設計書_SCR001_受注一覧.xlsx|画面項目定義!AK9') @(2..($f.Rows.Count) | ForEach-Object { $r = $f.Rows[$_]; '{0}|{1}|{2}|{3}' -f $r['C'], $r['E'], $r['H'], $r['I'] })
+}
+
+Test-Case 'Invoke-DesignReview: ツールの確認「表示制御」は、表示制御のシートの食い違い（Test-DesignConsistency）を入れる' {
+    $dir = Copy-Fixture 'consistency'
+    # 受注登録の行追加を、明細20行の状態でも表示にする（EV05 の「行追加ボタンを非活性にする」と食い違う）
+    Set-CellValues (Join-Path $dir 'DD02_画面設計書_SCR002_受注登録.xlsx') '表示制御' @{ W26 = '○' }
+    $csv = Join-Path (New-TestDir) '観点表.csv'
+    @('観点ID,分類,観点,判定基準,重要度,対象設計書,有効,確かめ方,ツールの確認',
+        'X01,画面項目,表示・非活性・非表示,,中,*画面設計書*,○,ツール,表示制御') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $out = Join-Path (New-TestDir) 'review'
+    $null = & $Review -Path $dir -Checklist $csv -OutDir $out -PromptOnly 6>$null 3>$null
+    $null = & $Review -Checklist $csv -OutDir $out -ImportOnly 6>$null 3>$null
+    $f = Read-XlsxSheet -Path (Join-Path $out 'レビュー結果.xlsx') -Index 1
+    Assert-Equal @('ツール（表示制御）|X01|DD02_画面設計書_SCR002_受注登録.xlsx|イベント定義!P10') @(2..($f.Rows.Count) | ForEach-Object { $r = $f.Rows[$_]; '{0}|{1}|{2}|{3}' -f $r['C'], $r['E'], $r['H'], $r['I'] })
 }
 
 Test-Case 'Invoke-DesignReview: 観点表の確かめ方・ツールの確認の誤りを知らせる（ツールだけの観点は判定基準を調べない）' {

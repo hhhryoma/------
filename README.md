@@ -34,7 +34,7 @@ Excel の設計書・成果物を扱う作業を効率化するツール集で�
 | [Replace-Excel.ps1](tools/README.md#replace-excelps1) | 複数の Excel の文字を一括置換（値・コメント・図形・ヘッダー／フッター・入力規則のリスト、数式も可）。置換リストでまとめて置換もできる。確認してから書き換え、部分ごとの書式は保つ | 不要 | － |
 | [New-GlossaryDraft.ps1](tools/README.md#new-glossarydraftps1) | 設計書からカタカナ語・略語・よく出る用語を数え、用語集の下書きと、表記ゆれの用語集（Test-ExcelTerms の `-Glossary`）を作る | 不要 ※1 | － |
 | [Test-ExcelTerms.ps1](tools/README.md#test-exceltermsps1) | 表記ゆれ（ユーザ／ユーザー、ＩＤ／ID など）を用語集と自動の検出で見つけ、置換リストを作る。Word の文書も調べられる | 不要 ※1 | 表記ゆれ |
-| [Test-DesignConsistency.ps1](tools/README.md#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、画面遷移の食い違い、桁数・必須の違い）。CRUD 図と影響調査（使っている場所の一覧）も作る | 不要 ※1 | 設計書の整合性チェック |
+| [Test-DesignConsistency.ps1](tools/README.md#test-designconsistencyps1) | 設計書どうしの参照の食い違い（定義されていないテーブル・カラム・メッセージ・コード・画面、重複した定義、画面一覧との過不足、画面遷移の食い違い、桁数・必須の違い）と、画面項目の表示・非活性・非表示の食い違い（表示制御のシートの空欄、画面項目定義・イベント定義との矛盾、元に戻す処理の抜け）。CRUD 図と影響調査（使っている場所の一覧）も作る | 不要 ※1 | 設計書の整合性チェック |
 | [Test-ScreenNumbers.ps1](tools/README.md#test-screennumbersps1) | 画面レイアウトのスクリーンショットに重ねた丸数字（①・No.5 など）を画面項目定義の No と突き合わせ、無い番号・重なった番号を見つける。前の版と比べて、項目を足して No がずれたのに直していない丸数字も見つける | 不要 ※1 | － |
 | [Test-Screenshots.ps1](tools/README.md#test-screenshotsps1) | 設計書に貼った画面のスクリーンショットが、元のワイヤーフレーム（Excel）より古くなっていないかを確かめる（貼り替えたあとに記録し、元の印刷範囲の中が変わると知らせる。設計書は変更しない） | 不要 | － |
 | [Export-DesignDiagram.ps1](tools/README.md#export-designdiagramps1) | イベント定義の遷移先から画面遷移図を、テーブル定義書の外部キーから ER 図を作る（Mermaid と Excel の図形） | 不要 ※1 | － |

@@ -114,8 +114,8 @@ def section(ws, row, title):
     return row + 1
 
 
-def table(ws, top, columns, rows, *, col_start=1):
-    """columns: [(見出し, マス数)]。見出し行と明細行を書き、次の行番号を返す"""
+def table(ws, top, columns, rows, *, col_start=1, center=()):
+    """columns: [(見出し, マス数)]。見出し行と明細行を書き、次の行番号を返す。center: 中央にそろえる列の番号（0 から）"""
     c = col_start
     for label, span in columns:
         put(ws, top, c, span, label, font=FONT_BOLD, fill=FILL_HEAD, align=CENTER)
@@ -126,9 +126,9 @@ def table(ws, top, columns, rows, *, col_start=1):
     for values in rows:
         c = col_start
         lines = 1
-        for (label, span), value in zip(columns, values):
+        for i, ((label, span), value) in enumerate(zip(columns, values)):
             fmt = "yyyy/mm/dd" if hasattr(value, "year") else None
-            align = CENTER if span <= 3 else LEFT
+            align = CENTER if span <= 3 or i in center else LEFT
             put(ws, r, c, span, value, align=align, fmt=fmt)
             lines = max(lines, needed_lines(value if not hasattr(value, "year") else "", span))
             c += span
@@ -451,6 +451,26 @@ def make_screen(s, index):
     table(ws, r, [("イベントID", 4), ("イベント名", 5), ("トリガー", 6), ("処理概要", 23), ("使用テーブル", 8),
                   ("メッセージ", 7), ("遷移先", 5)],
           [ev for ev in s["events"]])
+
+    # 表示制御（状態ごとの、画面項目の表示・非活性・非表示）
+    ws = new_sheet(wb, "表示制御")
+    r = doc_header(ws, title, "画面ID", s["id"], "画面名", s["name"])
+    r = section(ws, r, "状態（イベントは、その状態になるイベント）")
+    r = table(ws, r, [("No", 2), ("状態", 8), ("条件", 30), ("イベント", 10)],
+              [(i + 1, name, cond, events) for i, (name, cond, events) in enumerate(s["states"])])
+    r += 1
+    r = section(ws, r, "項目の表示制御（○:表示 △:非活性 ×:非表示 表示のみ:表示するが変更できない）")
+    states = [st[0] for st in s["states"]]
+    columns = [("No", 2), ("項目名", 7), ("項目ID", 8)] + [(name, 5) for name in states]
+    columns.append(("備考", GRID_COLS - sum(span for _, span in columns)))
+    rows = []
+    for it in s["items"]:
+        default = "×" if it[3] == "隠し項目" else "○"
+        values = s["display"].get(it[0], (default,) * len(states))
+        assert len(values) == len(states), (s["id"], it[0], values)
+        note = s["display_notes"].get(it[0], "隠し項目" if it[3] == "隠し項目" else "")
+        rows.append((it[0], it[1], it[2]) + tuple(values) + (note,))
+    table(ws, r, columns, rows, center=range(3, 3 + len(states)))
 
     save(wb, "DD02_画面設計書_{0}_{1}.xlsx".format(s["id"], s["name"]))
 

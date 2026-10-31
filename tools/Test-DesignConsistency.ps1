@@ -13,7 +13,11 @@ param(
 
     [string[]] $Where,
 
-    [string] $OutXlsx
+    [string] $OutXlsx,
+
+    [string] $DisplaySheet = '表示制御',
+
+    [string] $DisplayWords
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +26,8 @@ Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChe
 $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
 
 if (-not $Rules) { $Rules = Join-Path $PSScriptRoot 'consistency/参照のルール.csv' }
-foreach ($name in @('Rules', 'OutXlsx')) {
+if (-not $DisplayWords) { $DisplayWords = Join-Path $PSScriptRoot 'consistency/表示制御の書き方.csv' }
+foreach ($name in @('Rules', 'OutXlsx', 'DisplayWords')) {
     $v = Get-Variable -Name $name -ValueOnly
     if ($v) { Set-Variable -Name $name -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($v) }
 }
@@ -36,6 +41,8 @@ function New-RuleRegex {
 
 $excludeRx = $null
 if ($Exclude) { $excludeRx = New-RuleRegex $Exclude '-Exclude ' }
+if (-not $DisplaySheet.Trim()) { throw '-DisplaySheet が空です（表示制御のシートの名前の正規表現を指定してください）' }
+$displaySheetRx = New-RuleRegex $DisplaySheet '-DisplaySheet '
 
 Update-TypeData -TypeName 'DesignConsistency.Issue' -DefaultDisplayPropertySet File, Location, Level, Detail -Force -WhatIf:$false
 Update-TypeData -TypeName 'DesignConsistency.Usage' -DefaultDisplayPropertySet File, Location, Usage, Id, Text -Force -WhatIf:$false
@@ -711,6 +718,423 @@ foreach ($g in @($ruleList | Where-Object { $_.Section -eq '参照' -and $_.From
     }
 }
 
+# ---------------------------------------------------------------- 表示制御（画面項目の表示・非活性・非表示）
+
+
+# 表示制御の値の種類。「表示」は表示して操作できる（活性）
+$displayClasses = @('表示', '非活性', '表示のみ', '非表示')
+# 項目の表示制御の表で、状態ではない列の見出し
+$displayFixedHeaders = @('No', 'No.', '#', '項番', '番号', '項目名', '項目ID', '区分', '入出力', '型', '備考', '補足', '説明')
+# イベントの処理概要で、項目の名前と表示制御の言葉の間に書いてよい文字（「行追加ボタンを非活性にする」の「ボタンを」）と、
+# 項目の名前どうしをつなぐ文字（「更新・キャンセルボタンを非表示にする」の「・」）
+$displayGapRx = [regex]'^(?:ボタン|リンク|欄|項目|エリア|領域)?(?:を|は|が|も)?(?:すべて|全て|ともに|共に|いずれも)?$'
+$displayJoinRx = [regex]'^(?:ボタン|リンク|欄|項目)?(?:・|、|,|と|及び|および|や|/)$'
+# 条件や打ち消しの言い方（「非表示の場合は」「非活性にしない」）は、表示を変える処理として読まない
+$displayCondRx = [regex]'^(?:の場合|のとき|の時|なら|であれば|である場合|か(?:どうか|否か)|(?:に|と)は?(?:しない|せず))'
+# 画面を開いたときのイベント（戻す処理を確かめるとき、画面を開き直すことは「戻す」に数えない）
+$initialEventRx = [regex]'初期表示|画面表示|画面を開|画面起動|起動時'
+
+function Read-DisplayWords {
+    #     表示制御の書き方（CSV の「状態」「書き方」）
+    #     戻り値: @{ Map = 書き方（ConvertTo-Label 済み）→ 状態; Examples = 状態 → 最初の書き方; TextWords = 処理概要から探す言葉（長い順） }
+    param([string] $FilePath)
+    $map = @{}
+    $examples = [ordered]@{}
+    $line = 1
+    foreach ($r in (Read-CsvFile $FilePath @('状態', '書き方') '表示制御の書き方')) {
+        $line++
+        $class = ([string]$r.'状態').Trim()
+        $raw = ([string]$r.'書き方').Trim()
+        if (-not $class -and -not $raw) { continue }
+        $at = '表示制御の書き方の {0} 行目' -f $line
+        if ($displayClasses -notcontains $class) { throw ("{0}: 「状態」は {1} のどれかにしてください（{2}）" -f $at, ($displayClasses -join ' / '), $class) }
+        $word = ConvertTo-Label $raw
+        if (-not $word) { throw "${at}: 「書き方」が空です" }
+        if ($map.ContainsKey($word) -and $map[$word] -ne $class) { throw ("{0}: 「{1}」は「{2}」の書き方にもあります" -f $at, $raw, $map[$word]) }
+        $map[$word] = $class
+        if (-not $examples.Contains($class)) { $examples[$class] = $raw }
+    }
+    if ($map.Count -eq 0) { throw "表示制御の書き方が空です: $FilePath" }
+    # 状態の名前（表示・非活性・表示のみ・非表示）そのものは、CSV に無くても使える
+    foreach ($c in $displayClasses) { if (-not $map.ContainsKey($c)) { $map[$c] = $c } }
+    # 処理概要の文から探すのは、表示を制限する言葉（非表示・非活性など）のうち、記号でない 2 文字以上のもの
+    $textWords = @($map.Keys | Where-Object { $map[$_] -ne '表示' -and $_.Length -ge 2 -and $_ -match '\p{L}' } | Sort-Object @{ e = { $_.Length }; Descending = $true }, @{ e = { $_ } })
+    return [pscustomobject]@{ Map = $map; Examples = $examples; TextWords = $textWords }
+}
+
+function Get-DisplayClass {
+    #     表示制御のセルの値の種類（表示・非活性・表示のみ・非表示）。書き方に無ければ $null。
+    #     注記を付けた値（「△（20行のとき）」「○※1」）は、注記の前で読む
+    param([string] $Text, $Words)
+    $t = ConvertTo-Label $Text
+    if (-not $t) { return $null }
+    if ($Words.Map.ContainsKey($t)) { return $Words.Map[$t] }
+    $head = ($t -split '[(※*↵]', 2)[0]
+    if ($head -and $Words.Map.ContainsKey($head)) { return $Words.Map[$head] }
+    return $null
+}
+
+function Test-Restricted {
+    #     表示を制限する値（非活性・表示のみ・非表示）か
+    param([string] $Class)
+    return @('非活性', '表示のみ', '非表示') -contains $Class
+}
+
+function Test-SameRestriction {
+    #     処理概要に書いた制限（非表示か、操作できない（非活性・表示のみ））と、表示制御の値が合うか
+    param([string] $Said, [string] $Class)
+    if ($Said -eq '非表示') { return $Class -eq '非表示' }
+    return @('非活性', '表示のみ') -contains $Class
+}
+
+function Format-DisplayItem {
+    #     指摘に書く項目（No.7「希望納品日」）
+    param($Row)
+    if ($Row.No) { return 'No.{0}「{1}」' -f $Row.No, $Row.Name }
+    return '「{0}」' -f $Row.Name
+}
+
+function Find-WordPlaces {
+    #     文（ConvertTo-Label 済み）の中の語の場所。長い語を先に探し、それと重なる短い語は数えない
+    #     Words: @{ Text; Kind; Value } の一覧（Text の長い順）。戻り値: @{ Start; End; Word } の一覧（Start の順）
+    param([string] $Text, $Words)
+    $list = New-Object System.Collections.Generic.List[object]
+    if (-not $Text) { return @() }
+    $taken = New-Object bool[] $Text.Length
+    foreach ($w in $Words) {
+        $at = 0
+        while ($at -lt $Text.Length) {
+            $i = $Text.IndexOf($w.Text, $at, [System.StringComparison]::Ordinal)
+            if ($i -lt 0) { break }
+            $free = $true
+            for ($k = $i; $k -lt $i + $w.Text.Length; $k++) { if ($taken[$k]) { $free = $false; break } }
+            if ($free) {
+                for ($k = $i; $k -lt $i + $w.Text.Length; $k++) { $taken[$k] = $true }
+                $list.Add([pscustomobject]@{ Start = $i; End = $i + $w.Text.Length; Word = $w })
+            }
+            $at = $i + 1
+        }
+    }
+    return @($list | Sort-Object Start)
+}
+
+function Get-DisplayStatements {
+    #     イベントの処理概要から、項目の表示を制限する文（「受注一覧は非表示とする」「更新・キャンセルボタンを非表示にする」）を読む
+    #     ItemWords: 項目名（ConvertTo-Label 済み）→ 画面項目の一覧。戻り値: @{ Names（項目名の一覧）; Items（画面項目の一覧）; Class（制限の種類）} の一覧
+    param($Event, $ItemWords, $Words)
+    $found = New-Object System.Collections.Generic.List[object]
+    if (-not $Event.Summary) { return , $found }
+    $vocab = New-Object System.Collections.Generic.List[object]
+    foreach ($n in $ItemWords.Keys) { $vocab.Add([pscustomobject]@{ Text = $n; Kind = '項目'; Value = $ItemWords[$n] }) }
+    foreach ($w in $Words.TextWords) { $vocab.Add([pscustomobject]@{ Text = $w; Kind = '言葉'; Value = $Words.Map[$w] }) }
+    $vocab = @($vocab | Sort-Object @{ e = { $_.Text.Length }; Descending = $true }, @{ e = { $_.Text } })
+    foreach ($sentence in ($Event.Summary -split '[。↵\r\n]')) {
+        $t = ConvertTo-Label $sentence
+        $places = @(Find-WordPlaces $t $vocab)
+        for ($i = 0; $i -lt $places.Count; $i++) {
+            $p = $places[$i]
+            if ($p.Word.Kind -ne '言葉') { continue }
+            if ($displayCondRx.IsMatch($t.Substring($p.End))) { continue }
+            # 言葉のすぐ前に書いた項目と、それに「・」などでつないだ項目
+            $j = $i - 1
+            if ($j -lt 0 -or $places[$j].Word.Kind -ne '項目' -or -not $displayGapRx.IsMatch($t.Substring($places[$j].End, $p.Start - $places[$j].End))) { continue }
+            $names = New-Object System.Collections.Generic.List[string]
+            $items = New-Object System.Collections.Generic.List[object]
+            while ($true) {
+                $names.Insert(0, $places[$j].Word.Text)
+                foreach ($it in $places[$j].Word.Value) { $items.Add($it) }
+                if ($j -lt 1 -or $places[$j - 1].Word.Kind -ne '項目' -or -not $displayJoinRx.IsMatch($t.Substring($places[$j - 1].End, $places[$j].Start - $places[$j - 1].End))) { break }
+                $j--
+            }
+            $found.Add([pscustomobject]@{ Names = $names; Items = $items; Class = $p.Word.Value })
+        }
+    }
+    return , $found
+}
+
+function Read-DisplayTables {
+    #     表示制御のシートの「状態」の表と、項目の表示制御の表（項目名と、状態ごとの列）を読む
+    #     戻り値: @{ States = 状態（ConvertTo-Label 済み）→ @{ Name; Place; EventText; EventsPlace; Events }; HasEventColumn;
+    #              Columns = 状態（ConvertTo-Label 済み）→ @{ Name; Place }; Rows = @(@{ Name; Id; No; Place; Values = 状態 → @{ State; Text; Class; Place }; Item }) }
+    param($Book, [string[]] $SheetNames, $Words)
+    $states = [ordered]@{}
+    $columns = [ordered]@{}
+    $rows = New-Object System.Collections.Generic.List[object]
+    $hasEventColumn = $false
+    foreach ($s in $SheetNames) {
+        $grid = $Book.Sheets[$s]
+        foreach ($t in (Find-DesignTables $grid @('状態') '状態')) {
+            # 見出しに「状態」と書いた項目の表（2 段の見出しの上の段）は、状態の表ではない
+            if ($t.ColumnOf.ContainsKey('項目名')) { continue }
+            $evCol = $null
+            if ($t.ColumnOf.ContainsKey('イベント')) { $evCol = $t.ColumnOf['イベント']; $hasEventColumn = $true }
+            foreach ($dr in $t.Rows) {
+                $name = ([string]$dr.Cells[$t.ColumnOf['状態']]).Trim()
+                $place = New-Place $Book $s $dr.Row $t.ColumnOf['状態']
+                $key = ConvertTo-Label $name
+                if ($states.Contains($key)) { Add-Issue '警告' '表示制御の過不足' ('状態「{0}」が状態の表に 2 回書かれています' -f $name) $place '表示制御'; continue }
+                $evText = ''; $evPlace = $place
+                if ($evCol) {
+                    $evPlace = New-Place $Book $s $dr.Row $evCol
+                    if ($dr.Cells.ContainsKey($evCol)) { $evText = ([string]$dr.Cells[$evCol]).Trim() }
+                }
+                $states[$key] = [pscustomobject]@{ Name = $name; Place = $place; EventText = $evText; EventsPlace = $evPlace; Events = (New-Object System.Collections.Generic.List[object]) }
+            }
+        }
+        foreach ($t in (Find-DesignTables $grid @('項目名') '項目名')) {
+            $nameCol = $t.ColumnOf['項目名']
+            $idCol = $null
+            if ($t.ColumnOf.ContainsKey('項目ID')) { $idCol = $t.ColumnOf['項目ID'] }
+            $noCol = Find-NoColumn $t.ColumnOf
+            # 状態の列。見出しが 2 段（上の段に「状態」などをまとめて書き、下の段に状態の名前）なら下の段を読む
+            $headRow = $t.HeaderRow
+            $sub = $null
+            if ($grid.Cells.ContainsKey($t.HeaderRow + 1)) { $sub = $grid.Cells[$t.HeaderRow + 1] }
+            if ($sub -and -not ($sub.ContainsKey($nameCol) -and $sub[$nameCol].Trim())) { $headRow = $t.HeaderRow + 1 }
+            $stateCols = New-Object System.Collections.Generic.List[object]
+            foreach ($c in $grid.Cols[$headRow]) {
+                $label = $grid.Labels[$headRow][$c]
+                if (-not $label -or $displayFixedHeaders -contains $label) { continue }
+                # 2 段の見出しの下の段は、項目名より右の列だけを読む
+                if ($headRow -ne $t.HeaderRow -and $c -le $nameCol) { continue }
+                $stateCols.Add([pscustomobject]@{ Col = $c; Key = $label; Name = $grid.Cells[$headRow][$c].Trim(); Place = (New-Place $Book $s $headRow $c) })
+            }
+            # 状態の列が無い表（項目名だけの表）は、項目の表示制御の表ではない
+            if ($stateCols.Count -eq 0) { continue }
+            foreach ($sc in $stateCols) { if (-not $columns.Contains($sc.Key)) { $columns[$sc.Key] = $sc } }
+            foreach ($dr in $t.Rows) {
+                $values = [ordered]@{}
+                foreach ($sc in $stateCols) {
+                    $text = ''
+                    if ($dr.Cells.ContainsKey($sc.Col)) { $text = ([string]$dr.Cells[$sc.Col]).Trim() }
+                    $values[$sc.Key] = [pscustomobject]@{ State = $sc.Name; Text = $text; Class = (Get-DisplayClass $text $Words); Place = (New-Place $Book $s $dr.Row $sc.Col) }
+                }
+                $id = ''; $no = ''
+                if ($idCol -and $dr.Cells.ContainsKey($idCol)) { $id = ([string]$dr.Cells[$idCol]).Trim() }
+                if ($noCol -and $dr.Cells.ContainsKey($noCol)) { $no = ([string]$dr.Cells[$noCol]).Normalize($nfkc).Trim() }
+                $rows.Add([pscustomobject]@{ Name = ([string]$dr.Cells[$nameCol]).Trim(); Id = $id; No = $no; Place = (New-Place $Book $s $dr.Row $nameCol); Values = $values; Item = $null })
+            }
+        }
+    }
+    return [pscustomobject]@{ States = $states; HasEventColumn = $hasEventColumn; Columns = $columns; Rows = $rows }
+}
+
+function Test-DisplayControl {
+    #     1 つの画面設計書の表示制御を、画面項目定義・イベント定義と突き合わせる
+    param($Book, [string[]] $SheetNames, $Items, $Events, $Words)
+    $d = Read-DisplayTables $Book $SheetNames $Words
+    $examples = ($Words.Examples.Values | ForEach-Object { $_ }) -join '・'
+
+    # ---- 画面項目定義と表示制御の表の行を、項目ID・No・項目名の順で対応させる
+    $byId = @{}; $byNo = @{}; $byName = @{}
+    foreach ($it in $Items) {
+        if ($it.ItemId) { $k = ConvertTo-Key $it.ItemId; if (-not $byId.ContainsKey($k)) { $byId[$k] = $it } }
+        if ($it.No) { $k = ConvertTo-Key $it.No; if (-not $byNo.ContainsKey($k)) { $byNo[$k] = $it } }
+        $n = ConvertTo-Label $it.Item
+        if (-not $byName.ContainsKey($n)) { $byName[$n] = New-Object System.Collections.Generic.List[object] }
+        $byName[$n].Add($it)
+    }
+    $rowOf = @{}   # 画面項目（シート|行）→ 表示制御の表の行
+    foreach ($r in $d.Rows) {
+        $it = $null
+        if ($r.Id -and $byId.ContainsKey((ConvertTo-Key $r.Id))) { $it = $byId[(ConvertTo-Key $r.Id)] }
+        elseif ($r.No -and $byNo.ContainsKey((ConvertTo-Key $r.No))) { $it = $byNo[(ConvertTo-Key $r.No)] }
+        else {
+            $n = ConvertTo-Label $r.Name
+            if ($byName.ContainsKey($n) -and $byName[$n].Count -eq 1) { $it = $byName[$n][0] }
+        }
+        if (-not $it) {
+            $idText = ''
+            if ($r.Id) { $idText = '（項目ID「{0}」）' -f $r.Id }
+            Add-Issue '警告' '表示制御の過不足' ('{0}{1}は、画面項目定義にありません' -f (Format-DisplayItem $r), $idText) $r.Place '表示制御'
+            continue
+        }
+        $key = '{0}|{1}' -f $it.Sheet, $it.Row
+        if ($rowOf.ContainsKey($key)) {
+            Add-Issue '警告' '表示制御の過不足' ('{0}は、表示制御の表のほかの行にも書かれています（{1}!{2}）' -f (Format-DisplayItem $r), $rowOf[$key].Place.Sheet, $rowOf[$key].Place.Cell) $r.Place '表示制御'
+            continue
+        }
+        $r.Item = $it
+        $rowOf[$key] = $r
+        if ((ConvertTo-Label $r.Name) -ne (ConvertTo-Label $it.Item)) {
+            Add-Issue '警告' '表示制御の過不足' ('{0}の項目名が、画面項目定義（No.{1}「{2}」）と違います' -f (Format-DisplayItem $r), $it.No, $it.Item).Replace('No.「', '「') $r.Place '表示制御'
+        }
+    }
+    foreach ($it in $Items) {
+        # 隠し項目は画面に出ないので、表示制御の表に無くてもよい
+        if ($it.Kind -match '隠し' -or $rowOf.ContainsKey(('{0}|{1}' -f $it.Sheet, $it.Row))) { continue }
+        $label = '「{0}」' -f $it.Item
+        if ($it.No) { $label = 'No.{0}「{1}」' -f $it.No, $it.Item }
+        Add-Issue '警告' '表示制御の過不足' ('{0}が、表示制御の表にありません（どの状態で表示するかが決まっていません）' -f $label) (New-Place $Book $it.Sheet $it.Row $it.Columns['項目名']) '表示制御'
+    }
+
+    # ---- 状態の表と、項目の表示制御の表の列
+    if ($d.States.Count -gt 0) {
+        foreach ($k in $d.Columns.Keys) {
+            if (-not $d.States.Contains($k)) { Add-Issue '警告' '表示制御の過不足' ('列「{0}」が、状態の表にありません' -f $d.Columns[$k].Name) $d.Columns[$k].Place '表示制御' }
+        }
+        foreach ($k in $d.States.Keys) {
+            if (-not $d.Columns.Contains($k)) { Add-Issue '警告' '表示制御の過不足' ('状態「{0}」の列が、項目の表示制御の表にありません' -f $d.States[$k].Name) $d.States[$k].Place '表示制御' }
+        }
+    }
+    # 状態になるイベント（イベントID か イベント名。「EV01（初期表示）」のような書き方も読む）
+    $eventByKey = @{}; $eventByName = @{}
+    foreach ($ev in $Events) {
+        if ($ev.Id -and -not $eventByKey.ContainsKey((ConvertTo-Key $ev.Id))) { $eventByKey[(ConvertTo-Key $ev.Id)] = $ev }
+        if ($ev.Name -and -not $eventByName.ContainsKey((ConvertTo-Label $ev.Name))) { $eventByName[(ConvertTo-Label $ev.Name)] = $ev }
+    }
+    foreach ($st in $d.States.Values) {
+        if (-not $st.EventText) {
+            if ($d.HasEventColumn) { Add-Issue '警告' '表示制御の空欄' ('状態「{0}」になるイベントが空欄です' -f $st.Name) $st.EventsPlace '表示制御' }
+            continue
+        }
+        # 「－」「なし」は、その状態になるイベントが無い（空欄ではない）
+        if (Test-BlankValue $st.EventText) { continue }
+        foreach ($part in (Split-Ids $st.EventText)) {
+            $id = ($part -split '[(\s]', 2)[0]
+            $ev = $null
+            if ($eventByKey.ContainsKey((ConvertTo-Key $id))) { $ev = $eventByKey[(ConvertTo-Key $id)] }
+            elseif ($eventByName.ContainsKey((ConvertTo-Label $part))) { $ev = $eventByName[(ConvertTo-Label $part)] }
+            if ($ev) { if (-not $st.Events.Contains($ev)) { $st.Events.Add($ev) } }
+            elseif ($Events.Count -gt 0) { Add-Issue 'エラー' '参照先なし' ('イベント「{0}」が定義されていません（表示制御の状態「{1}」）' -f $id, $st.Name) $st.EventsPlace 'イベント' }
+        }
+    }
+
+    # ---- 空欄と、書き方に無い値
+    foreach ($r in $d.Rows) {
+        foreach ($v in $r.Values.Values) {
+            if (-not $v.Text) { Add-Issue '警告' '表示制御の空欄' ('{0}の状態「{1}」が空欄です' -f (Format-DisplayItem $r), $v.State) $v.Place '表示制御' }
+            elseif (-not $v.Class) { Add-Issue '警告' '表示制御の書き方' ('「{0}」は表示制御の書き方にありません（{1} などで書きます）' -f $v.Text, $examples) $v.Place '表示制御' }
+        }
+    }
+
+    # ---- 画面項目定義との矛盾（入力できない入力項目・押せないボタン・表示する隠し項目・一覧より先に表示する子の項目）
+    $parentOf = @{}
+    $list = $null
+    foreach ($it in $Items) {
+        if ($it.Kind -match '一覧|明細|グリッド|リスト') { $list = $it; continue }
+        if ($list -and $it.ItemId -match '\.') { $parentOf[('{0}|{1}' -f $it.Sheet, $it.Row)] = $list } else { $list = $null }
+    }
+    foreach ($r in $d.Rows) {
+        $it = $r.Item
+        if (-not $it) { continue }
+        $known = @($r.Values.Values | Where-Object { $_.Class })
+        if ($known.Count -eq 0) { continue }
+        if ($it.Kind -match '隠し') {
+            $shown = @($known | Where-Object { $_.Class -ne '非表示' } | ForEach-Object { $_.State })
+            if ($shown.Count -gt 0) { Add-Issue '警告' '項目定義との矛盾' ('{0}は隠し項目ですが、状態「{1}」で非表示になっていません' -f (Format-DisplayItem $r), ($shown -join '・')) $r.Place '表示制御' }
+            continue
+        }
+        if (@($known | Where-Object { $_.Class -eq '表示' }).Count -eq 0) {
+            if (([string]$it.Io).Normalize($nfkc) -match 'I|入') {
+                Add-Issue '警告' '項目定義との矛盾' ('{0}は入力項目（入出力「{1}」）ですが、どの状態でも表示（入力できる状態）になっていません' -f (Format-DisplayItem $r), $it.Io) $r.Place '表示制御'
+            }
+            elseif ($it.Kind -match 'ボタン|リンク') {
+                Add-Issue '警告' '項目定義との矛盾' ('{0}は{1}ですが、どの状態でも表示（押せる状態）になっていません' -f (Format-DisplayItem $r), $it.Kind) $r.Place '表示制御'
+            }
+        }
+        $pk = '{0}|{1}' -f $it.Sheet, $it.Row
+        if ($parentOf.ContainsKey($pk)) {
+            $parent = $parentOf[$pk]
+            $pr = $rowOf[('{0}|{1}' -f $parent.Sheet, $parent.Row)]
+            if ($pr) {
+                $bad = @($r.Values.Keys | Where-Object { $pr.Values.Contains($_) -and $pr.Values[$_].Class -eq '非表示' -and $r.Values[$_].Class -and $r.Values[$_].Class -ne '非表示' } | ForEach-Object { $r.Values[$_].State })
+                if ($bad.Count -gt 0) { Add-Issue '警告' '項目定義との矛盾' ('{0}は一覧「{1}」の項目ですが、一覧が非表示の状態「{2}」で非表示になっていません' -f (Format-DisplayItem $r), $parent.Item, ($bad -join '・')) $r.Place '表示制御' }
+            }
+        }
+    }
+
+    # ---- イベントとの食い違い（処理概要の「～を非表示にする」と、そのイベントの状態の表示制御）
+    $itemWords = @{}
+    foreach ($it in $Items) {
+        $n = ConvertTo-Label $it.Item
+        if ($n.Length -lt 2) { continue }
+        if (-not $itemWords.ContainsKey($n)) { $itemWords[$n] = New-Object System.Collections.Generic.List[object] }
+        $itemWords[$n].Add($it)
+    }
+    foreach ($ev in $Events) {
+        $said = Get-DisplayStatements $ev $itemWords $Words
+        if ($said.Count -eq 0) { continue }
+        $col = $ev.Columns['処理概要']
+        if (-not $col) { $col = $ev.Columns['イベントID'] }
+        $place = New-Place $Book $ev.Sheet $ev.Row $col
+        $evName = $ev.Id
+        if (-not $evName) { $evName = $ev.Name }
+        $evStates = @($d.States.Keys | Where-Object { $d.States[$_].Events.Contains($ev) })
+        if ($d.HasEventColumn -and $evStates.Count -eq 0) {
+            Add-Issue '警告' 'イベントとの食い違い' ('{0} で「{1}」を{2}にしていますが、{0} が表示制御の状態の表にありません（どの状態になるかが書かれていません）' -f $evName, ($said[0].Names -join '・'), $said[0].Class) $place '表示制御'
+            continue
+        }
+        $targets = $evStates
+        if ($targets.Count -eq 0) { $targets = @($d.Columns.Keys) }
+        $targets = @($targets | Where-Object { $d.Columns.Contains($_) })
+        if ($targets.Count -eq 0) { continue }
+        $where2 = '表示制御のどの状態でも'
+        if ($evStates.Count -gt 0) { $where2 = '表示制御の状態「{0}」のどれも' -f (($targets | ForEach-Object { $d.Columns[$_].Name }) -join '・') }
+        foreach ($s in $said) {
+            if ($s.Class -ne '非表示') { $want = '非活性・表示のみ' } else { $want = '非表示' }
+            for ($i = 0; $i -lt $s.Names.Count; $i++) {
+                $rs = @($itemWords[$s.Names[$i]] | ForEach-Object { $rowOf[('{0}|{1}' -f $_.Sheet, $_.Row)] } | Where-Object { $_ })
+                # 表示制御の表に無い項目は、表示制御の過不足として知らせている
+                if ($rs.Count -eq 0) { continue }
+                $ok = $false
+                foreach ($r in $rs) { foreach ($k in $targets) { if ($r.Values.Contains($k) -and (Test-SameRestriction $s.Class $r.Values[$k].Class)) { $ok = $true } } }
+                if (-not $ok) { Add-Issue '警告' 'イベントとの食い違い' ('{0} で「{1}」を{2}にしていますが、{3}{4}になっていません' -f $evName, $rs[0].Name, $s.Class, $where2, $want) $place '表示制御' }
+            }
+        }
+    }
+
+    # ---- 戻す処理なし（操作で制限した項目が、画面を開き直さないと元に戻らない）
+    if ($d.HasEventColumn) {
+        $opsOf = @{}
+        foreach ($k in $d.States.Keys) {
+            $opsOf[$k] = @($d.States[$k].Events | Where-Object { -not ($initialEventRx.IsMatch([string]$_.Name) -or $initialEventRx.IsMatch([string]$_.Trigger)) })
+        }
+        foreach ($r in $d.Rows) {
+            if (-not $r.Item -or $r.Item.Kind -match '隠し') { continue }
+            $open = @($r.Values.Keys | Where-Object { $r.Values[$_].Class -eq '表示' })
+            $closed = @($r.Values.Keys | Where-Object { Test-Restricted $r.Values[$_].Class })
+            if ($open.Count -eq 0 -or $closed.Count -eq 0) { continue }
+            if (@($open | Where-Object { $opsOf.ContainsKey($_) -and $opsOf[$_].Count -gt 0 }).Count -gt 0) { continue }
+            $byOp = @($closed | Where-Object { $opsOf.ContainsKey($_) -and $opsOf[$_].Count -gt 0 })
+            if ($byOp.Count -eq 0) { continue }
+            $k = $byOp[0]
+            $evIds = ($opsOf[$k] | ForEach-Object { if ($_.Id) { $_.Id } else { $_.Name } }) -join '・'
+            Add-Issue '警告' '戻す処理なし' ('{0}は状態「{1}」（{2}）で{3}になりますが、表示になる状態「{4}」には画面を開いたときしかなりません（元に戻すイベントがありません）' -f (Format-DisplayItem $r), $r.Values[$k].State, $evIds, $r.Values[$k].Class, (($open | ForEach-Object { $r.Values[$_].State }) -join '・')) $r.Place '表示制御'
+        }
+    }
+    return [pscustomobject]@{ States = [Math]::Max($d.States.Count, $d.Columns.Count); Rows = $d.Rows.Count }
+}
+
+# 表示制御のシートのある画面設計書を確かめる。どれにも無ければ確かめない（表示制御を別の書き方で書いているプロジェクト）
+$displayStats = $null
+$displayBooks = [ordered]@{}
+foreach ($bookPath in $bookPaths) {
+    $names = @($books[$bookPath].Sheets.Keys | Where-Object { $displaySheetRx.IsMatch($_) })
+    if ($names.Count -gt 0) { $displayBooks[$bookPath] = $names }
+}
+if ($displayBooks.Count -gt 0) {
+    $words = Read-DisplayWords $DisplayWords
+    $screens = Read-ScreenDesign $books
+    $displayStats = [pscustomobject]@{ Books = 0; States = 0; Rows = 0 }
+    foreach ($bookPath in $bookPaths) {
+        $items = @($screens.Items | Where-Object { $_.Path -eq $bookPath })
+        $events = @($screens.Events | Where-Object { $_.Path -eq $bookPath })
+        if (-not $displayBooks.Contains($bookPath)) {
+            # 画面項目定義のある画面設計書のうち、表示制御のシートが無いもの
+            if ($items.Count -gt 0) {
+                $it = $items[0]
+                Add-Issue '警告' '表示制御の過不足' ('表示制御のシートがありません（ほかの画面設計書にはあります。シートの名前: {0}）' -f $DisplaySheet) (New-Place $books[$bookPath] $it.Sheet $it.HeaderRow $it.Columns['項目名']) '表示制御'
+            }
+            continue
+        }
+        $r = Test-DisplayControl $books[$bookPath] $displayBooks[$bookPath] $items $events $words
+        $displayStats.Books++
+        $displayStats.States += $r.States
+        $displayStats.Rows += $r.Rows
+    }
+}
+
 # ---------------------------------------------------------------- 結果
 
 
@@ -789,6 +1213,7 @@ Write-Host ''
 $defText = @($stats | Where-Object { $_.Defined -gt 0 } | ForEach-Object { '{0} {1}' -f $_.Kind, $_.Defined }) -join '・'
 if (-not $defText) { $defText = 'なし' }
 Write-Host ('{0} ファイルを読みました（定義: {1} / 参照: {2} か所）' -f $books.Count, $defText, $refs.Count)
+if ($displayStats) { Write-Host ('表示制御: 画面 {0} 件（状態 {1}・項目 {2}）' -f $displayStats.Books, $displayStats.States, $displayStats.Rows) }
 Write-Host ('エラー {0} 件 / 警告 {1} 件 / 情報 {2} 件' -f @($script:Issues | Where-Object Level -eq 'エラー').Count, @($script:Issues | Where-Object Level -eq '警告').Count, @($script:Issues | Where-Object Level -eq '情報').Count)
 if ($OutXlsx) {
     Write-Host "結果を保存しました: $OutXlsx"
@@ -796,7 +1221,7 @@ if ($OutXlsx) {
 }
 
 # .SYNOPSIS
-#     設計書どうしの参照の食い違い（定義されていない ID、重複した定義、一覧との過不足など）を見つけます（Excel 不要。ファイルは変更しません）。
+#     設計書どうしの参照の食い違い（定義されていない ID、重複した定義、一覧との過不足など）と、画面項目の表示・非活性・非表示の食い違いを見つけます（Excel 不要。ファイルは変更しません）。
 #
 # .DESCRIPTION
 #     設計書のフォルダを読み、参照のルール（CSV）に沿って「定義」（テーブル・カラム・画面・メッセージ・コードなど）と
@@ -812,6 +1237,17 @@ if ($OutXlsx) {
 #       表記の違い       参照の ID の全角・半角、大文字・小文字が定義と違う（情報）
 #       未使用           どこからも参照されていないメッセージ・コード区分・テーブル（ルールの「未使用」が「確認」の種類。情報）
 #       未確認           定義が見つからない種類の参照（設計書がフォルダに無いなど。情報）
+#
+#     画面設計書に表示制御のシート（-DisplaySheet。状態の表と、項目 × 状態の表示・非活性・表示のみ・非表示の表）があれば、
+#     画面項目定義・イベント定義と突き合わせます（どの画面設計書にも無ければ確かめません。Kind は「表示制御」）。
+#
+#       表示制御の空欄       項目 × 状態の値、状態になるイベントが空欄（警告）
+#       表示制御の書き方     値が表示制御の書き方（-DisplayWords）に無い（警告）
+#       表示制御の過不足     画面項目定義と表の項目の過不足・項目名の違い、状態の表と表の列の過不足、表示制御のシートの無い画面設計書（警告）
+#       項目定義との矛盾     どの状態でも入力できない入力項目・押せないボタン、表示する隠し項目、一覧が非表示なのに表示する一覧の項目（警告）
+#       イベントとの食い違い 処理概要に「～を非表示にする」と書いたのに、そのイベントの状態で非表示になっていない（警告）
+#       戻す処理なし         操作で非活性・非表示にした項目が、画面を開いたときの状態でしか表示に戻らない（警告）
+#       参照先なし           状態の表のイベントが、イベント定義に無い（エラー。Kind は「イベント」）
 #
 #     結果は 1 指摘 1 行のオブジェクト（Kind は定義・参照の種類）で出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
 #     -OutXlsx には、イベント定義の使用テーブル（T_ORDER(R,U) など）と IF の設定元から作った CRUD 図も入れます。
@@ -844,6 +1280,13 @@ if ($OutXlsx) {
 # .PARAMETER OutXlsx
 #     結果を xlsx に保存します（指摘一覧、種類ごとの定義・参照の数、CRUD 図。場所をクリックすると該当セルが開きます）。
 #     -Where を付けたときは、影響範囲の一覧を保存します。
+#
+# .PARAMETER DisplaySheet
+#     画面設計書の表示制御のシートの名前（正規表現）。既定は「表示制御」を含む名前のシート。
+#
+# .PARAMETER DisplayWords
+#     表示制御の書き方の CSV（状態・書き方。○ は表示、△ は非活性 など）。
+#     既定は tools\consistency\表示制御の書き方.csv。社内の書き方に合わせて直して使えます。
 #
 # .EXAMPLE
 #     .\Test-DesignConsistency.ps1 D:\設計書

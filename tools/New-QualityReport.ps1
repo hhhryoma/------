@@ -504,7 +504,7 @@ try {
         $errors = @($issues | Where-Object Level -eq 'エラー').Count
         $warnings = @($issues | Where-Object Level -eq '警告').Count
         Add-Metric '設計書' '参照の食い違い（エラー）' ([double]$errors) '定義されていない参照・重複した定義など' $file
-        Add-Metric '設計書' '参照の食い違い（警告）' ([double]$warnings) '桁数・必須の違い、一覧との違いなど' $file
+        Add-Metric '設計書' '参照の食い違い（警告）' ([double]$warnings) '桁数・必須の違い、一覧との違い、表示制御の食い違いなど' $file
     }
 }
 finally {

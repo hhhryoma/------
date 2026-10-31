@@ -274,3 +274,114 @@ Test-Case 'Test-DesignConsistency: 版を上げたあとの古い版、雛形の
     Assert-Match $warnings '差分の印[\\/]DD03_テーブル定義書_v1\.1\.xlsx（Compare-Excel\.ps1 の差分の印を付けた写し）'
     Assert-Match $warnings '書き換える前のファイルを残したフォルダの 1 件は読みませんでした（置換前。'
 }
+
+Test-Case 'Test-DesignConsistency: 表示制御のシートの空欄・書き方・過不足と、画面項目定義・イベント定義との食い違い、戻す処理の抜けを見つける' {
+    # 詳細設計サンプルの表示制御は整合している（画面 3 件。状態 8・項目 57）
+    $all = @(& $ConsistencyTool -Path $sampleDir 6>&1 3>$null)
+    Assert-Match (($all | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } | ForEach-Object { "$_" }) -join "`n") '表示制御: 画面 3 件（状態 8・項目 57）'
+    Assert-Equal 0 @($all | Where-Object { $_.PSObject.TypeNames -contains 'DesignConsistency.Issue' }).Count
+
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    $scr1 = 'DD02_画面設計書_SCR001_受注一覧.xlsx'
+    $scr2 = 'DD02_画面設計書_SCR002_受注登録.xlsx'
+    $scr3 = 'DD02_画面設計書_SCR003_受注詳細.xlsx'
+    Set-CellValues (Join-Path $dir $scr1) '表示制御' @{
+        R12 = $null                                   # 空欄
+        W13 = '入力OK'                                # 書き方に無い
+        AB23 = '○'                                    # 一覧（受注一覧）が非表示の状態で、一覧の項目を表示する
+        R20 = '×'; W20 = '△'; AB20 = '×'             # どの状態でも押せないボタン
+        AO7 = 'EV02、EV09'                            # イベント定義に無いイベント
+    }
+    # 行追加を非活性にする状態（明細20行。EV05）から、表示に戻る状態（入力中）が初期表示（EV01）だけになる
+    Set-CellValues (Join-Path $dir $scr2) '表示制御' @{ AO6 = 'EV01' }
+    Set-CellValues (Join-Path $dir $scr3) '表示制御' @{
+        W29 = '○'; AB29 = '○'                         # EV01 で非表示にする更新ボタンを、どの状態でも表示する
+        R32 = '○'                                     # 隠し項目を表示する
+        R18 = '表示のみ'                              # どの状態でも入力できない入力項目
+        A33 = 22; C33 = '出荷日'; J33 = 'shipDate'; R33 = '○'; W33 = '○'; AB33 = '○'           # 画面項目定義に無い項目
+        A31 = $null; C31 = $null; J31 = $null; R31 = $null; W31 = $null; AB31 = $null      # 戻るボタンの行を消す
+        C17 = '支払い方法'                            # 項目名が違う
+        AO7 = $null                                   # 状態になるイベントが空欄
+    }
+    $issues = Invoke-Consistency @{ Path = $dir }
+    Assert-Equal (@(
+        "エラー|参照先なし|$scr1|表示制御!AO7",
+        "警告|表示制御の空欄|$scr1|表示制御!R12",
+        "警告|表示制御の書き方|$scr1|表示制御!W13",
+        "警告|項目定義との矛盾|$scr1|表示制御!C20",
+        "警告|項目定義との矛盾|$scr1|表示制御!C23",
+        "警告|戻す処理なし|$scr2|表示制御!C26",
+        "警告|表示制御の過不足|$scr3|画面項目定義!C25",
+        "警告|イベントとの食い違い|$scr3|イベント定義!P6",
+        "警告|表示制御の空欄|$scr3|表示制御!AO7",
+        "警告|表示制御の過不足|$scr3|表示制御!C17",
+        "警告|項目定義との矛盾|$scr3|表示制御!C18",
+        "警告|項目定義との矛盾|$scr3|表示制御!C32",
+        "警告|表示制御の過不足|$scr3|表示制御!C33") | Sort-Object) (Get-ConsistencyKeys $issues)
+
+    $details = @($issues | ForEach-Object { $_.Detail })
+    foreach ($expected in @(
+            'イベント「EV09」が定義されていません（表示制御の状態「検索後」）',
+            'No.1「受注番号」の状態「初期表示」が空欄です',
+            '「入力OK」は表示制御の書き方にありません（○・△・表示のみ・× などで書きます）',
+            'No.9「新規登録」はボタンですが、どの状態でも表示（押せる状態）になっていません',
+            'No.12「受注番号」は一覧「受注一覧」の項目ですが、一覧が非表示の状態「該当なし」で非表示になっていません',
+            'No.16「行追加」は状態「明細20行」（EV05）で非活性になりますが、表示になる状態「入力中」には画面を開いたときしかなりません（元に戻すイベントがありません）',
+            'No.20「戻る」が、表示制御の表にありません（どの状態で表示するかが決まっていません）',
+            'EV01 で「更新」を非表示にしていますが、表示制御の状態「受付・キャンセル」のどれも非表示になっていません',
+            '状態「出荷指示済」になるイベントが空欄です',
+            'No.6「支払い方法」の項目名が、画面項目定義（No.6「支払方法」）と違います',
+            'No.7「希望納品日」は入力項目（入出力「IO」）ですが、どの状態でも表示（入力できる状態）になっていません',
+            'No.21「バージョン番号」は隠し項目ですが、状態「受付」で非表示になっていません',
+            'No.22「出荷日」（項目ID「shipDate」）は、画面項目定義にありません')) {
+        Assert-True ($details -contains $expected) ("指摘がありません: {0}`n実際: {1}" -f $expected, ($details -join "`n"))
+    }
+    Assert-Equal 'イベント' @($issues | Where-Object Item -eq '参照先なし')[0].Kind
+    Assert-Equal 12 @($issues | Where-Object Kind -eq '表示制御').Count
+}
+
+Test-Case 'Test-DesignConsistency: 表示制御のシートの名前と書き方を変えられ、2 段の見出し・状態の表の無い表も読み、条件や打ち消しの文は表示を変える処理として読まない' {
+    $dir = New-TestDir
+    # New-SheetsBook は 1 行目の列の数だけ書くので、1 行目（画面ID の行）を表の幅まで空の文字で埋める
+    $items = { param($id, $rows) @(, @('画面ID', $id, '画面名', 'テスト', '', '')) + @(, @('No', '項目名', '項目ID', '区分', '入出力', '桁数')) + $rows }
+    $events = { param($id, $rows) @(, @('画面ID', $id, '', '')) + @(, @('イベントID', 'イベント名', 'トリガー', '処理概要')) + $rows }
+    New-SheetsBook (Join-Path $dir 'DD02_画面設計書_S01.xlsx') ([ordered]@{
+            '画面項目定義' = (& $items 'S01' @(@(1, '検索条件', 'cond', 'テキスト', 'I', '10'), @(2, '一覧', 'list', '一覧', 'O', ''), @(3, '名前', 'row.name', 'ラベル', 'O', '10'), @(4, '登録', 'btnRegist', 'ボタン', '－', '')))
+            'イベント定義' = (& $events 'S01' @(
+                    @('EV01', '初期表示', '画面表示時', '一覧は非表示とする。登録ボタンが非活性の場合は何もしない。'),
+                    @('EV02', '検索', '検索ボタン押下', '一覧を表示する。検索条件を非活性にしない。'),
+                    @('EV03', '登録', '登録ボタン押下', '登録したあと、登録ボタンをグレーアウトする。')))
+            # 状態の表（イベントの「なし」は、その状態になるイベントが無い）と、2 段の見出し（上の段は「表示制御」、下の段に状態の名前）の表
+            '画面状態'     = @(@('画面ID', 'S01', '', '', ''), @('■ 状態'), @('状態', 'イベント'), @('開いたとき', 'EV01'), @('検索後', 'EV02'), @('確認中', 'なし'), @('■ 項目'),
+                @('項目名', '項目ID', '表示制御'), @('', '', '開いたとき', '検索後', '確認中'),
+                @('検索条件', 'cond', '可', '可', '可'), @('一覧', 'list', '不可視', '可', '可'), @('名前', 'row.name', '可', '可', '可'), @('登録', 'btnRegist', '可', '可', '可'))
+        })
+    # 表示制御のシートの無い画面設計書
+    New-SheetsBook (Join-Path $dir 'DD02_画面設計書_S02.xlsx') ([ordered]@{ '画面項目定義' = (& $items 'S02' @(, @(1, '戻る', 'btnBack', 'ボタン', '－', ''))) })
+    # 状態の表の無い表示制御（イベントの文は、どれかの状態と合えばよい）
+    New-SheetsBook (Join-Path $dir 'DD02_画面設計書_S03.xlsx') ([ordered]@{
+            '画面項目定義' = (& $items 'S03' @(, @(1, '詳細', 'btnDetail', 'ボタン', '－', '')))
+            'イベント定義' = (& $events 'S03' @(, @('EV01', '初期表示', '画面表示時', '詳細ボタンを非表示にする。')))
+            '画面状態'     = @(@('画面ID', 'S03', '', ''), @('No', '項目名', '項目ID', '通常'), @(1, '詳細', 'btnDetail', '可'))
+        })
+    $words = Join-Path $dir 'words.csv'
+    @('状態,書き方', '表示,可', '非活性,グレーアウト', '非表示,不可視') | Set-Content -LiteralPath $words -Encoding UTF8
+    $issues = Invoke-Consistency @{ Path = $dir; DisplaySheet = '^画面状態$'; DisplayWords = $words }
+    $got = @($issues | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Item, $_.File, $_.Location, $_.Level, $_.Detail })
+    # S03 の「非表示」は書き方の CSV に無いが、状態の名前なので読む
+    Assert-Equal @(
+        'イベントとの食い違い|DD02_画面設計書_S01.xlsx|イベント定義!D5|警告|EV03 で「登録」を非活性にしていますが、EV03 が表示制御の状態の表にありません（どの状態になるかが書かれていません）',
+        '項目定義との矛盾|DD02_画面設計書_S01.xlsx|画面状態!A12|警告|「名前」は一覧「一覧」の項目ですが、一覧が非表示の状態「開いたとき」で非表示になっていません',
+        '表示制御の過不足|DD02_画面設計書_S02.xlsx|画面項目定義!B2|警告|表示制御のシートがありません（ほかの画面設計書にはあります。シートの名前: ^画面状態$）',
+        'イベントとの食い違い|DD02_画面設計書_S03.xlsx|イベント定義!D3|警告|EV01 で「詳細」を非表示にしていますが、表示制御のどの状態でも非表示になっていません') $got
+
+    # 表示制御のシートがどの画面設計書にも無ければ、表示制御は確かめない
+    Assert-Equal 0 (Invoke-Consistency @{ Path = $dir; DisplaySheet = '^無いシート$'; DisplayWords = $words }).Count
+
+    $bad = Join-Path $dir 'bad.csv'
+    @('状態,書き方', '見えない,○') | Set-Content -LiteralPath $bad -Encoding UTF8
+    Assert-Throws { & $ConsistencyTool -Path $dir -DisplaySheet '^画面状態$' -DisplayWords $bad 6>$null 3>$null } '表示 / 非活性 / 表示のみ / 非表示'
+    @('状態,書き方', '表示,○', '非表示,○') | Set-Content -LiteralPath $bad -Encoding UTF8
+    Assert-Throws { & $ConsistencyTool -Path $dir -DisplaySheet '^画面状態$' -DisplayWords $bad 6>$null 3>$null } '書き方にもあります'
+    Assert-Throws { & $ConsistencyTool -Path $dir -DisplaySheet ' ' 6>$null 3>$null } '-DisplaySheet'
+}
