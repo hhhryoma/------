@@ -368,3 +368,74 @@ Test-Case 'Test-DesignConsistency: 一覧ごとのファイル（BD01_・DD01_�
     Assert-Equal @('警告|基本設計との違い|02_詳細設計/DD02_画面設計書_SCR003_受注詳細.xlsx|画面概要!S2') @(Get-ConsistencyKeys $issues | ForEach-Object { $_.Replace('\', '/') })
     Assert-Match @($issues)[0].Detail '^画面「SCR003 受注詳細」が基本設計（01_基本設計[\\/]画面設計書_SCR001_受注一覧\.xlsx ほか 1 ファイル）にありません$'
 }
+
+Test-Case 'Test-DesignConsistency: 帳票設計書・バッチ設計書を定義として読み、基本設計書の帳票一覧・バッチ一覧・機能一覧の帳票ID・バッチID と比べる' {
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    New-SheetsBook (Join-Path $dir 'DD07_帳票設計書_RPT001_受注伝票.xlsx') ([ordered]@{ '帳票概要' = @(@('帳票ID', 'RPT001', '帳票名', '受注伝票'), @('出力', 'PDF')) })
+    New-SheetsBook (Join-Path $dir 'DD08_バッチ設計書_BAT001_日次集計.xlsx') ([ordered]@{ 'バッチ概要' = @(@('バッチID', 'BAT001', 'バッチ名', '日次集計'), @('起動', '毎日')) })
+    # 詳細設計書だけなら、帳票・バッチの設計書があっても指摘しない
+    $issues = Invoke-Consistency @{ Path = $dir }
+    Assert-Equal 0 $issues.Count ((Get-ConsistencyKeys $issues) -join ', ')
+
+    New-SheetsBook (Join-Path $dir '基本設計書.xlsx') ([ordered]@{
+            '機能一覧'   = @(@('機能ID', '機能名', '画面ID', '帳票ID', 'バッチID'), @('F001', '受注一覧', 'SCR001', '', ''), @('F002', '受注伝票', '', 'RPT001', ''), @('F003', '請求', '', 'RPT003', ''), @('F004', '日次集計', '', '', 'BAT001'))
+            '帳票一覧'   = @(@('帳票ID', '帳票名'), @('RPT001', '受注伝票'), @('RPT002', '請求書'))
+            'バッチ一覧' = @(@('バッチID', 'バッチ名'), @('BAT001', '日次受注集計'))
+        })
+    $issues = Invoke-Consistency @{ Path = $dir }
+    Assert-Equal (@(
+        'エラー|参照先なし|基本設計書.xlsx|機能一覧!D4',
+        '警告|基本設計との違い|基本設計書.xlsx|帳票一覧!A3',
+        '警告|基本設計との違い|基本設計書.xlsx|バッチ一覧!A2') | Sort-Object) (Get-ConsistencyKeys $issues)
+    $details = @($issues | ForEach-Object { $_.Detail })
+    foreach ($expected in @(
+            '帳票「RPT003」が定義されていません（帳票ID）',
+            '基本設計にある帳票「RPT002 請求書」が、詳細設計にありません（設計書が無いか、ID が違います）',
+            'バッチ「BAT001」の名前が違います（基本設計: 日次受注集計 / DD08_バッチ設計書_BAT001_日次集計.xlsx: 日次集計）')) {
+        Assert-True ($details -contains $expected) "指摘がありません: $expected"
+    }
+}
+
+Test-Case 'Test-DesignConsistency: 基本設計書の CRUD 図（行は画面 ID か機能 ID、列はテーブルの ID か名前）を、詳細設計の使用テーブルから作った CRUD 図と比べる' {
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    $crudSheet = @(@('画面ID', '画面名', '顧客マスタ', '商品マスタ', '受注', 'T_ORDER_DETAIL（受注明細）', '担当者マスタ'),
+        @('SCR001', '受注一覧', 'R', '', 'R', '○', ''),
+        @('SCR002', '受注登録', 'R', 'RU', 'CR', 'C', ''),
+        @('SCR003', '受注詳細', 'R', 'RU', 'RU', '', ''))
+    New-SheetsBook (Join-Path $dir '基本設計書.xlsx') ([ordered]@{
+            '機能一覧' = @(@('機能ID', '機能名', '画面ID'), @('F001', '受注一覧', 'SCR001'), @('F002', '受注登録', 'SCR002'), @('F003', '受注詳細', 'SCR003'))
+            '画面一覧' = @(@('画面ID', '画面名'), @('SCR001', '受注一覧'), @('SCR002', '受注登録'), @('SCR003', '受注詳細'))
+            'CRUD図'   = $crudSheet
+            '機能CRUD' = @(@('機能ID', '機能名', '顧客マスタ', '受注'), @('F002', '受注登録', 'R', 'C'))
+        })
+    $text = Get-HostText { $script:crudIssues = @(& $ConsistencyTool -Path $dir 3>$null) }
+    $issues = $script:crudIssues
+    $scr2 = 'DD02_画面設計書_SCR002_受注登録.xlsx'
+    Assert-Equal (@(
+        '情報|未確認|基本設計書.xlsx|CRUD図!G1',
+        '警告|CRUD の違い|基本設計書.xlsx|CRUD図!F2',
+        '警告|CRUD の違い|基本設計書.xlsx|CRUD図!E3',
+        '警告|CRUD の違い|基本設計書.xlsx|CRUD図!F4',
+        "警告|CRUD の違い|$scr2|イベント定義!AM8",
+        "警告|CRUD の違い|$scr2|イベント定義!AM11") | Sort-Object) (Get-ConsistencyKeys $issues)
+    $details = @($issues | ForEach-Object { $_.Detail })
+    foreach ($expected in @(
+            '基本設計の CRUD 図の列「担当者マスタ」は、テーブルの ID・名前と合わないため比べていません',
+            '基本設計の CRUD 図には SCR001 → T_ORDER_DETAIL（○）がありますが、詳細設計（使用テーブルなど）にはありません',
+            'SCR002 → T_ORDER の CRUD が違います（基本設計: CR / 詳細設計: C）',
+            '詳細設計には SCR003 → T_ORDER_DETAIL（R）がありますが、基本設計の CRUD 図（基本設計書.xlsx（CRUD図））は空欄です',
+            'M_PRODUCT は詳細設計で使っています（F002（SCR002）: RU）が、基本設計の CRUD 図（基本設計書.xlsx（機能CRUD））に列がありません',
+            'T_ORDER_DETAIL は詳細設計で使っています（F002（SCR002）: C）が、基本設計の CRUD 図（基本設計書.xlsx（機能CRUD））に列がありません')) {
+        Assert-True ($details -contains $expected) "指摘がありません: $expected"
+    }
+    Assert-Match $text '基本設計の CRUD 図（基本設計書\.xlsx（CRUD図）・基本設計書\.xlsx（機能CRUD））を、詳細設計の使用テーブルから作った CRUD 図と比べました'
+
+    # 詳細設計の画面の行が基本設計の CRUD 図に無ければ知らせる（IF の行の無い CRUD 図では、IF001 の行は比べない）
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    New-SheetsBook (Join-Path $dir '基本設計書.xlsx') ([ordered]@{ 'CRUD' = @($crudSheet[0], $crudSheet[1], $crudSheet[2]) })
+    $all = Invoke-Consistency @{ Path = $dir }
+    $issues = @($all | Where-Object { $_.Detail -like '*の行が*' })
+    Assert-Equal 1 $issues.Count
+    Assert-Equal 'SCR003 の行が、基本設計の CRUD 図（基本設計書.xlsx（CRUD））にありません（詳細設計: M_CUSTOMER: R・M_PRODUCT: RU・T_ORDER: RU・T_ORDER_DETAIL: R）' $issues[0].Detail
+    Assert-Equal 'DD02_画面設計書_SCR003_受注詳細.xlsx' $issues[0].File
+}
