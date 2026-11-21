@@ -274,3 +274,97 @@ Test-Case 'Test-DesignConsistency: 版を上げたあとの古い版、雛形の
     Assert-Match $warnings '差分の印[\\/]DD03_テーブル定義書_v1\.1\.xlsx（Compare-Excel\.ps1 の差分の印を付けた写し）'
     Assert-Match $warnings '書き換える前のファイルを残したフォルダの 1 件は読みませんでした（置換前。'
 }
+
+function New-BasicDesignBook {
+    #     1 つのブックにまとめた基本設計書（機能一覧・画面一覧・テーブル一覧・IF一覧・画面遷移のシート）
+    param([string] $Path)
+    New-SheetsBook $Path ([ordered]@{
+            '機能一覧'     = @(@('機能ID', '機能名', '画面ID'), @('F001', '受注一覧', 'SCR001'), @('F002', '受注登録', 'SCR002'), @('F003', '受注照会', 'SCR003'), @('F004', '受注取消', 'SCR004'), @('F005', '出荷状況', 'SCR009'))
+            '画面一覧'     = @(@('画面ID', '画面名'), @('SCR001', '受注一覧'), @('SCR002', '受注登録'), @('SCR003', '受注照会'), @('SCR004', '受注取消'))
+            'テーブル一覧' = @(@('テーブルID', 'テーブル名'), @('T_ORDER', '受注'), @('T_ORDER_DETAIL', '受注明細'), @('M_CUSTOMER', '顧客マスタ'), @('M_STAFF', '担当者マスタ'))
+            'IF一覧'       = @(@('IF ID', 'IF名'), @('IF001', '出荷指示データ'), @('IF002', '請求データ'))
+            '画面遷移'     = @(@('遷移元画面ID', '遷移先画面ID'), @('SCR001', 'SCR002'), @('SCR001', 'SCR003'), @('SCR002', 'SCR003'), @('SCR002', 'SCR001'), @('SCR003', 'SCR001'), @('SCR003', 'SCR004'))
+        })
+}
+
+Test-Case 'Test-DesignConsistency: 基本設計書の一覧は詳細設計書の一覧と別に比べ（重複定義にしない）、基本設計書と詳細設計書の過不足・名前・画面遷移の違いを見つける' {
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    New-BasicDesignBook (Join-Path $dir '基本設計書.xlsx')
+    $out = Join-Path $dir '整合性.xlsx'
+    $text = Get-HostText { $script:basicIssues = @(& $ConsistencyTool -Path $dir -OutXlsx $out 3>$null) }
+    $issues = $script:basicIssues
+    Assert-Equal (@(
+        'エラー|参照先なし|基本設計書.xlsx|機能一覧!C6',
+        '警告|基本設計との違い|基本設計書.xlsx|画面一覧!A4',
+        '警告|基本設計との違い|基本設計書.xlsx|画面一覧!A5',
+        '警告|基本設計との違い|基本設計書.xlsx|テーブル一覧!A5',
+        '警告|基本設計との違い|基本設計書.xlsx|IF一覧!A3',
+        '警告|基本設計との違い|DD03_テーブル定義書.xlsx|M_PRODUCT!S2',
+        '警告|組み合わせの違い|基本設計書.xlsx|画面遷移!B7',
+        '警告|組み合わせの違い|基本設計書.xlsx|画面遷移!B7',
+        '警告|組み合わせの違い|基本設計書.xlsx|画面遷移!B7') | Sort-Object) (Get-ConsistencyKeys $issues)
+    $details = @($issues | ForEach-Object { $_.Detail })
+    foreach ($expected in @(
+            '画面「SCR009」が定義されていません（画面ID）',
+            '画面「SCR003」の名前が違います（基本設計: 受注照会 / DD02_画面設計書_SCR003_受注詳細.xlsx: 受注詳細）',
+            '基本設計にある画面「SCR004 受注取消」が、詳細設計にありません（設計書が無いか、ID が違います）',
+            '基本設計にあるテーブル「M_STAFF 担当者マスタ」が、詳細設計にありません（設計書が無いか、ID が違います）',
+            '基本設計にあるIF「IF002 請求データ」が、詳細設計にありません（設計書が無いか、ID が違います）',
+            'テーブル「M_PRODUCT 商品マスタ」が基本設計（基本設計書.xlsx（テーブル一覧））にありません',
+            'SCR003 の遷移先画面ID「SCR004」が、DD01_画面一覧.xlsx（画面遷移）の遷移先画面IDにありません',
+            'SCR003 の遷移先画面ID「SCR004」が、DD02_画面設計書_SCR003_受注詳細.xlsx（イベント定義）の遷移先にありません')) {
+        Assert-True ($details -contains $expected) "指摘がありません: $expected"
+    }
+    Assert-Match $text 'うち基本設計書 1 ファイル（基本設計書\.xlsx）'
+    # CRUD 図は詳細設計書から作る（README の CRUD 図と同じ 4 行）
+    $crud = Read-XlsxSheet -Path $out -Index 3
+    Assert-Equal @('IF001', 'SCR001', 'SCR002', 'SCR003') @(2..$crud.Rows.Count | ForEach-Object { $crud.Rows[$_]['A'] })
+
+    # 基本設計書だけなら、これまでどおり基本設計書の中で比べる（詳細設計書が無いので、基本設計との違いは出さない）
+    $only = Join-Path (New-TestDir) '基本設計書.xlsx'
+    Copy-Item -LiteralPath (Join-Path $dir '基本設計書.xlsx') -Destination $only
+    $text = Get-HostText { $script:basicIssues = @(& $ConsistencyTool -Path $only 3>$null) }
+    Assert-Equal @('エラー|参照先なし|基本設計書.xlsx|機能一覧!C6') (Get-ConsistencyKeys $script:basicIssues)
+    Assert-True ($text -notmatch 'うち基本設計書') '詳細設計書が無ければ、別に比べたとは書かない'
+}
+
+Test-Case 'Test-DesignConsistency: 一覧ごとのファイル（BD01_・DD01_）、フォルダの名前、-BasicDesign で基本設計書を見分け、基本設計の画面設計書も基本設計として比べる' {
+    # BD01_画面一覧.xlsx（基本設計。SCR002 が無く、画面遷移も少ない）と DD01_画面一覧.xlsx（詳細設計）
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    New-SheetsBook (Join-Path $dir 'BD01_画面一覧.xlsx') ([ordered]@{
+            '画面一覧' = @(@('画面ID', '画面名'), @('SCR001', '受注一覧'), @('SCR003', '受注詳細'))
+            '画面遷移' = @(@('遷移元画面ID', '遷移先画面ID'), @('SCR001', 'SCR003'), @('SCR002', 'SCR003'), @('SCR002', 'SCR001'), @('SCR003', 'SCR001'))
+        })
+    $issues = Invoke-Consistency @{ Path = $dir }
+    Assert-Equal (@(
+        '警告|基本設計との違い|DD02_画面設計書_SCR002_受注登録.xlsx|画面概要!S2',
+        '警告|組み合わせの違い|DD01_画面一覧.xlsx|画面遷移!Z6') | Sort-Object) (Get-ConsistencyKeys $issues)
+    Assert-True (@($issues | ForEach-Object { $_.Detail }) -contains '画面「SCR002 受注登録」が基本設計（BD01_画面一覧.xlsx（画面一覧））にありません')
+
+    # 名前で見分けられないフォルダ（上流）: -BasicDesign が無ければ、これまでどおり 1 つの一覧として重複を知らせる（-BasicDesign を勧める）
+    $root = New-TestDir
+    $detail = Copy-Fixture (Join-Path $sampleDir '.')
+    $upstream = Join-Path $root '上流'
+    New-Item -ItemType Directory -Path $upstream | Out-Null
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD01_画面一覧.xlsx') -Destination (Join-Path $upstream '画面一覧.xlsx')
+    New-SheetsBook (Join-Path $upstream '一覧.xlsx') ([ordered]@{ 'テーブル一覧' = @(@('テーブルID', 'テーブル名'), @('T_ORDER', '受注'), @('T_ORDER_DETAIL', '受注明細'), @('M_CUSTOMER', '顧客'), @('M_PRODUCT', '商品マスタ')) })
+    $issues = Invoke-Consistency @{ Path = @($detail, $upstream) }
+    Assert-Equal @('重複定義') @($issues | ForEach-Object { $_.Item } | Select-Object -Unique)
+    Assert-Match @($issues)[0].Detail '一覧のほかの行にも書かれています.*-BasicDesign で基本設計書を指定してください'
+    # -BasicDesign: 名前に「基本設計」の無いファイル（一覧.xlsx）も、基本設計書の一覧のルールで読む
+    $issues = Invoke-Consistency @{ Path = $detail; BasicDesign = $upstream }
+    Assert-Equal @('警告|基本設計との違い|一覧.xlsx|テーブル一覧!A4') (Get-ConsistencyKeys $issues)
+    Assert-Equal 'テーブル「M_CUSTOMER」の名前が違います（基本設計: 顧客 / DD03_テーブル定義書.xlsx: 顧客マスタ）' @($issues)[0].Detail
+
+    # 基本設計の画面設計書（「基本設計」のフォルダ。詳細設計と同じ画面 ID）: 重複定義にせず、基本設計として比べる
+    $root = New-TestDir
+    $basic = Join-Path $root '01_基本設計'
+    $detailDir = Join-Path $root '02_詳細設計'
+    New-Item -ItemType Directory -Path $basic, $detailDir | Out-Null
+    Copy-Item -Path (Join-Path $sampleDir '*.xlsx') -Destination $detailDir
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD02_画面設計書_SCR001_受注一覧.xlsx') -Destination (Join-Path $basic '画面設計書_SCR001_受注一覧.xlsx')
+    Copy-Item -LiteralPath (Join-Path $sampleDir 'DD02_画面設計書_SCR002_受注登録.xlsx') -Destination (Join-Path $basic '画面設計書_SCR002_受注登録.xlsx')
+    $issues = Invoke-Consistency @{ Path = $root }
+    Assert-Equal @('警告|基本設計との違い|02_詳細設計/DD02_画面設計書_SCR003_受注詳細.xlsx|画面概要!S2') @(Get-ConsistencyKeys $issues | ForEach-Object { $_.Replace('\', '/') })
+    Assert-Match @($issues)[0].Detail '^画面「SCR003 受注詳細」が基本設計（01_基本設計[\\/]画面設計書_SCR001_受注一覧\.xlsx ほか 1 ファイル）にありません$'
+}

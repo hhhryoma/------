@@ -3,6 +3,8 @@ param(
     [Parameter(Position = 0)]
     [string[]] $Path = @('.'),
 
+    [string[]] $BasicDesign,
+
     [string] $Rules,
 
     [string] $Exclude,
@@ -94,7 +96,7 @@ foreach ($r in (Read-CsvFile $Rules @('区分', '種類', 'ファイル名', '�
         Headers = @(([string]$r.'見出し') -split '/' | ForEach-Object { ConvertTo-Label $_ } | Where-Object { $_ })
         Column = (ConvertTo-Field $r.'列'); Name = (ConvertTo-Field $r.'名前'); Parent = (ConvertTo-Field $r.'親'); From = (ConvertTo-Field $r.'元')
         Pattern = $null; AllowDuplicate = (([string]$r.'重複').Trim() -eq '可')
-        Found = $false; Global = $false; Place = $null; Coverage = @{}; Pairs = @{}
+        Found = $false
         # 2 段階目で足した列（無い CSV も読める）
         Attributes = (ConvertTo-Attributes ([string]$r.'属性') $ruleWhere)
         CheckUnused = (@('確認', '○', '〇', '1') -contains ([string]$r.'未使用').Trim()); Crud = ([string]$r.'CRUD').Trim().ToUpperInvariant()
@@ -127,13 +129,43 @@ if ($ruleList.Count -eq 0) { throw "参照のルールが空です: $Rules" }
 
 
 # 同じ文書の古い版・ツールの出力・書き換える前のファイルと、非表示のシート・雛形のシート（差し込み欄のまま）は読まない（知らせる）
-$designFiles = Select-DesignFiles -Path $Path -NoRecurse:$NoRecurse -Exclude @($OutXlsx)
+$designFiles = Select-DesignFiles -Path @(@($Path) + @($BasicDesign) | Where-Object { $_ }) -NoRecurse:$NoRecurse -Exclude @($OutXlsx)
 $searchArgs = @{ Pattern = '\S'; Path = $designFiles.Paths; Target = 'Value'; SkipHiddenSheets = $true }
 if ($NoExcel) { $searchArgs['NoExcel'] = $true }
 $hits = Select-DesignHits @(& $searchScript @searchArgs 6>$null) $designFiles
 $books = ConvertTo-DesignBooks $hits
 
+# 基本設計書: -BasicDesign で指定したファイル・フォルダの中のもの、または名前で見分けたもの。
+# 基本設計書の一覧・定義は、詳細設計書の定義と別に比べる（同じ画面・テーブルが両方にあっても重複にしない）
+$basicRoots = @(foreach ($p in @($BasicDesign | Where-Object { $_ })) { foreach ($item in @(Get-PathItem $p)) { $item.FullName.TrimEnd('\', '/') } })
+$basicNameRx = [regex]'基本設計|外部設計|概要設計|^BD(?=[0-9_\-\s]|$)'
+$detailNameRx = [regex]'詳細設計|内部設計|^DD(?=[0-9_\-\s]|$)'
+
+function Get-DesignSource {
+    #     設計書の出どころ: '基本設計' か ''（詳細設計など）。-BasicDesign の中のファイルは基本設計。それ以外は、ファイル名から上のフォルダへ順に、
+    #     名前に「基本設計・外部設計・概要設計」か先頭の「BD」（BD01_画面一覧.xlsx）があれば基本設計、「詳細設計・内部設計」か先頭の「DD」があれば詳細設計
+    param([string] $FilePath)
+    foreach ($root in $basicRoots) {
+        if ([string]::Equals($FilePath, $root, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $FilePath.StartsWith($root + '\', [System.StringComparison]::OrdinalIgnoreCase) -or $FilePath.StartsWith($root + '/', [System.StringComparison]::OrdinalIgnoreCase)) { return '基本設計' }
+    }
+    $segments = @($FilePath.Normalize($nfkc) -split '[\\/]' | Where-Object { $_ })
+    for ($i = $segments.Count - 1; $i -ge 0; $i--) {
+        $isBasic = $basicNameRx.IsMatch($segments[$i])
+        $isDetail = $detailNameRx.IsMatch($segments[$i])
+        if ($isBasic -and -not $isDetail) { return '基本設計' }
+        if ($isDetail -and -not $isBasic) { return '' }
+    }
+    return ''
+}
+
+$script:SourceOf = @{}
+foreach ($bookPath in @($books.Keys)) { $script:SourceOf[$bookPath] = Get-DesignSource $bookPath }
+# 詳細設計書があれば、CRUD 図は詳細設計書から作る（基本設計書の使用テーブルを混ぜない）
+$hasDetail = @($script:SourceOf.Values | Where-Object { -not $_ }).Count -gt 0
+
 $defs = New-Object System.Collections.Generic.List[object]   # 定義と一覧
+$defSeen = New-Object 'System.Collections.Generic.HashSet[string]'
 $refs = New-Object System.Collections.Generic.List[object]   # 参照
 $refSeen = New-Object 'System.Collections.Generic.HashSet[string]'
 
@@ -163,9 +195,11 @@ function Add-Definition {
     $key = $idKey
     $shown = $Id.Trim()
     if ($Rule.Parent) { $key = '{0}.{1}' -f $parentKey, $idKey; $shown = '{0}.{1}' -f ([string]$Parent).Trim(), $Id.Trim() }
+    # 同じセルを 2 つのルールで読んだとき（ファイル名が 2 つの一覧のルールに当たるときなど）は 1 つにする
+    if (-not $defSeen.Add(('{0}|{1}|{2}|{3}|{4}|{5}' -f $Rule.Section, $Rule.Kind, $key, $Place.Path, $Place.Sheet, $Place.Cell))) { return }
     $defs.Add([pscustomobject]@{
         Rule = $Rule; Section = $Rule.Section; Kind = $Rule.Kind; Id = $Id.Trim(); Shown = $shown; Name = ([string]$Name).Trim()
-        ParentKey = $parentKey; Key = $key; Place = $Place; Unit = $Unit; Values = $Values; Attrs = $Attrs
+        ParentKey = $parentKey; Key = $key; Place = $Place; Unit = $Unit; Values = $Values; Attrs = $Attrs; Source = [string]$script:SourceOf[$Place.Path]
     })
 }
 
@@ -262,6 +296,20 @@ function Add-Crud {
     }
 }
 
+# 組み合わせを比べる単位（参照のルール × 出どころ）。基本設計書と詳細設計書の画面遷移は、同じルールで読んでも別々に比べる
+#     Pairs: 元 > 参照先 → 場所、Coverage: 元（@画面ID）→ 読んだ場所、Global: 「元」が表の列（すべての組み合わせが書かれている）、Place: 表の場所
+$refGroups = [ordered]@{}
+
+function Get-RefGroup {
+    param($Rule, $Book)
+    $source = [string]$script:SourceOf[$Book.Path]
+    $k = '{0}|{1}' -f $Rule.Line, $source
+    if (-not $refGroups.Contains($k)) {
+        $refGroups[$k] = [pscustomobject]@{ Key = $k; Rule = $Rule; Kind = $Rule.Kind; Source = $source; Pairs = @{}; Coverage = @{}; Global = $false; Place = $null }
+    }
+    return $refGroups[$k]
+}
+
 function Add-Reference {
     #     From: 参照元（ルールの「元」）の ID の一覧。1 つのセルに複数の ID が書かれていれば、ID ごとに組み合わせ・CRUD 図に入れる
     param($Rule, [string] $Text, [string[]] $From, $Book, [string] $Sheet, [int] $Row, [int] $Col, $Attrs)
@@ -281,11 +329,13 @@ function Add-Reference {
         # CRUD 図: 「書き方」の (?<crud>...) か、ルールの「CRUD」。カラムの参照（T_ORDER.ORDER_NO）はテーブルへの操作として数える
         $letters = $Rule.Crud
         if ($m.Groups['crud'].Success) { $letters = $m.Groups['crud'].Value }
+        $group = Get-RefGroup $Rule $Book
+        if ($hasDetail -and $group.Source) { $letters = '' }
         foreach ($f in $From) {
             $fromKey = ConvertTo-Key $f
             if (-not $fromKey) { continue }
             $pairKey = '{0}>{1}' -f $fromKey, $key
-            if (-not $Rule.Pairs.ContainsKey($pairKey)) { $Rule.Pairs[$pairKey] = [pscustomobject]@{ FromKey = $fromKey; From = $f.Trim(); To = $shown; Place = $Place } }
+            if (-not $group.Pairs.ContainsKey($pairKey)) { $group.Pairs[$pairKey] = [pscustomobject]@{ FromKey = $fromKey; From = $f.Trim(); To = $shown; Place = $Place } }
             if (-not $letters) { continue }
             if ($parent) { Add-Crud $f $Rule.Kind $parent (ConvertTo-Key $parent) $letters } else { Add-Crud $f $Rule.Kind $id (ConvertTo-Key $id) $letters }
         }
@@ -298,7 +348,8 @@ function Add-Coverage {
     #     「元」が「@画面ID」の参照: この画面の参照を読んだことを記録する（組み合わせを比べる範囲）
     param($Rule, [string] $From, $Book, [string] $Sheet)
     $k = ConvertTo-Key $From
-    if ($k -and -not $Rule.Coverage.ContainsKey($k)) { $Rule.Coverage[$k] = '{0}（{1}）' -f $Book.File, $Sheet }
+    $coverage = (Get-RefGroup $Rule $Book).Coverage
+    if ($k -and -not $coverage.ContainsKey($k)) { $coverage[$k] = '{0}（{1}）' -f $Book.File, $Sheet }
 }
 
 function Split-Ids {
@@ -336,8 +387,9 @@ function Read-References {
                 if ($Rule.From.IsLabel) { Add-Coverage $Rule $fromLabel $Book $s }
                 else {
                     # 「元」が表の列（画面遷移の一覧など）: すべての画面の組み合わせが書かれている前提で比べる
-                    $Rule.Global = $true
-                    if (-not $Rule.Place) { $Rule.Place = '{0}（{1}）' -f $Book.File, $s }
+                    $group = Get-RefGroup $Rule $Book
+                    $group.Global = $true
+                    if (-not $group.Place) { $group.Place = '{0}（{1}）' -f $Book.File, $s }
                     if ($t.ColumnOf.ContainsKey($Rule.From.Label)) { $fromCol = $t.ColumnOf[$Rule.From.Label] }
                 }
             }
@@ -367,8 +419,12 @@ $bookPaths = [string[]]@($books.Keys)
 foreach ($bookPath in $bookPaths) {
     $book = $books[$bookPath]
     $fileName = [System.IO.Path]::GetFileName($book.Path)
+    # 基本設計書（-BasicDesign の中のファイル・フォルダ名で見分けたもの）は、名前に「基本設計」があるものとしてもルールに当てはめる
+    # （「基本設計」の一覧のルールで、名前に基本設計と書いていないファイル（上流\一覧.xlsx など）も読む）
+    $basicName = $null
+    if ($script:SourceOf[$bookPath]) { $basicName = '基本設計_' + $fileName }
     foreach ($rule in $ruleList) {
-        if ($rule.FileRx -and -not $rule.FileRx.IsMatch($fileName)) { continue }
+        if ($rule.FileRx -and -not $rule.FileRx.IsMatch($fileName) -and -not ($basicName -and $rule.FileRx.IsMatch($basicName))) { continue }
         $sheetNames = @($book.Sheets.Keys | Where-Object { -not $rule.SheetRx -or $rule.SheetRx.IsMatch($_) })
         if ($sheetNames.Count -eq 0) { continue }
         if ($rule.Section -eq '参照') { Read-References $rule $book $sheetNames; continue }
@@ -494,12 +550,12 @@ foreach ($d in $defs) {
 }
 $kinds = @($ruleList | ForEach-Object { $_.Kind } | Select-Object -Unique)
 
-# 重複定義: 同じ ID が 2 か所以上で定義されている（一覧は一覧の中で）
+# 重複定義: 同じ ID が 2 か所以上で定義されている（一覧は一覧の中で。基本設計書と詳細設計書は、それぞれの中で）
 foreach ($section in @('定義', '一覧')) {
     $groups = [ordered]@{}
     foreach ($d in $defs) {
         if ($d.Section -ne $section -or $d.Rule.AllowDuplicate) { continue }
-        $gk = '{0}|{1}' -f $d.Kind, $d.Key
+        $gk = '{0}|{1}|{2}' -f $d.Kind, $d.Key, $d.Source
         if (-not $groups.Contains($gk)) { $groups[$gk] = New-Object System.Collections.Generic.List[object] }
         $groups[$gk].Add($d)
     }
@@ -508,7 +564,10 @@ foreach ($section in @('定義', '一覧')) {
         # 2 つ目の場所に、ほかの場所を添えて知らせる
         $others = @($g | Where-Object { $_ -ne $g[1] } | ForEach-Object { $_.Place })
         if ($section -eq '定義') { $fmt = '{0}「{1}」は、ほかの場所でも定義されています（{2}）' } else { $fmt = '{0}「{1}」が、一覧のほかの行にも書かれています（{2}）' }
-        Add-Issue 'エラー' '重複定義' ($fmt -f $g[0].Kind, $g[0].Shown, (Format-Places $others $g[1].Place.Path)) $g[1].Place $g[0].Kind
+        $text = $fmt -f $g[0].Kind, $g[0].Shown, (Format-Places $others $g[1].Place.Path)
+        # 別々のファイルの一覧（基本設計書と詳細設計書の画面一覧など）なら、基本設計書を見分けられなかったかもしれない
+        if ($section -eq '一覧' -and @($g | ForEach-Object { $_.Place.Path } | Select-Object -Unique).Count -gt 1) { $text += '。基本設計書の一覧なら、-BasicDesign で基本設計書を指定してください' }
+        Add-Issue 'エラー' '重複定義' $text $g[1].Place $g[0].Kind
     }
 }
 
@@ -546,30 +605,54 @@ foreach ($d in $defs) {
     }
 }
 
-# 一覧との違い: 一覧（画面一覧・テーブル一覧）と、設計書の定義の過不足・名前
+# 一覧との違い: 一覧（画面一覧・テーブル一覧）と、設計書の定義の過不足・名前。基本設計書の一覧は、詳細設計書の一覧と別に比べる。
+# 基本設計との違い: 詳細設計書に定義がある種類は、基本設計書の一覧と定義（基本設計の画面設計書など）をまとめて基本設計の一覧として、
+# 詳細設計書の定義と過不足・名前を比べる（基本設計書だけを指定したときは、これまでどおり基本設計書の中で比べる）
+$basicAsList = @{}   # 基本設計書の定義を、基本設計の一覧として比べた種類
 foreach ($kind in $kinds) {
-    $main = [ordered]@{}; $list = [ordered]@{}
-    foreach ($d in $defs) {
-        if ($d.Kind -ne $kind) { continue }
-        if ($d.Section -eq '定義') { if (-not $main.Contains($d.Key)) { $main[$d.Key] = $d } }
-        elseif (-not $list.Contains($d.Key)) { $list[$d.Key] = $d }
+    $kindDefs = @($defs | Where-Object { $_.Kind -eq $kind })
+    $byBasic = @($kindDefs | Where-Object { $_.Section -eq '定義' -and -not $_.Source }).Count -gt 0 -and @($kindDefs | Where-Object { $_.Source }).Count -gt 0
+    if ($byBasic) { $basicAsList[$kind] = $true }
+    $main = [ordered]@{}
+    $lists = [ordered]@{}   # 出どころ → キー → 一覧の行
+    foreach ($d in $kindDefs) {
+        if ($d.Section -eq '定義' -and -not ($byBasic -and $d.Source)) { if (-not $main.Contains($d.Key)) { $main[$d.Key] = $d }; continue }
+        if (-not $lists.Contains($d.Source)) { $lists[$d.Source] = [ordered]@{} }
+        if (-not $lists[$d.Source].Contains($d.Key)) { $lists[$d.Source][$d.Key] = $d }
     }
-    if ($main.Count -eq 0 -or $list.Count -eq 0) { continue }
-    $first = @($list.Values)[0]
-    $listName = '{0}（{1}）' -f $first.Place.File, $first.Place.Sheet
-    foreach ($l in $list.Values) {
-        if (-not $main.Contains($l.Key)) {
-            Add-Issue '警告' '一覧との違い' ('一覧にある{0}「{1} {2}」の定義が見つかりません（設計書が無いか、ID が違います）' -f $kind, $l.Shown, $l.Name).Replace(' 」', '」') $l.Place $kind
-            continue
+    if ($main.Count -eq 0) { continue }
+    foreach ($source in $lists.Keys) {
+        $list = $lists[$source]
+        $files = @($list.Values | ForEach-Object { $_.Place.File } | Select-Object -Unique)
+        $first = @($list.Values)[0]
+        $listName = '{0}（{1}）' -f $first.Place.File, $first.Place.Sheet
+        if ($files.Count -gt 1) { $listName = '{0} ほか {1} ファイル' -f $first.Place.File, ($files.Count - 1) }
+        if ($byBasic -and $source) {
+            $item = '基本設計との違い'
+            $missingFmt = '基本設計にある{0}「{1} {2}」が、詳細設計にありません（設計書が無いか、ID が違います）'
+            $nameFmt = '{0}「{1}」の名前が違います（基本設計: {2} / {3}: {4}）'
+            $absentFmt = '{0}「{1} {2}」が基本設計（{3}）にありません'
         }
-        $m = $main[$l.Key]
-        if ($l.Name -and $m.Name -and (ConvertTo-Label $l.Name) -ne (ConvertTo-Label $m.Name)) {
-            Add-Issue '警告' '一覧との違い' ('{0}「{1}」の名前が違います（一覧: {2} / {3}: {4}）' -f $kind, $l.Shown, $l.Name, $m.Place.File, $m.Name) $l.Place $kind
+        else {
+            $item = '一覧との違い'
+            $missingFmt = '一覧にある{0}「{1} {2}」の定義が見つかりません（設計書が無いか、ID が違います）'
+            $nameFmt = '{0}「{1}」の名前が違います（一覧: {2} / {3}: {4}）'
+            $absentFmt = '{0}「{1} {2}」が一覧（{3}）にありません'
         }
-    }
-    foreach ($m in $main.Values) {
-        if (-not $list.Contains($m.Key)) {
-            Add-Issue '警告' '一覧との違い' ('{0}「{1} {2}」が一覧（{3}）にありません' -f $kind, $m.Shown, $m.Name, $listName).Replace(' 」', '」') $m.Place $kind
+        foreach ($l in $list.Values) {
+            if (-not $main.Contains($l.Key)) {
+                Add-Issue '警告' $item ($missingFmt -f $kind, $l.Shown, $l.Name).Replace(' 」', '」') $l.Place $kind
+                continue
+            }
+            $m = $main[$l.Key]
+            if ($l.Name -and $m.Name -and (ConvertTo-Label $l.Name) -ne (ConvertTo-Label $m.Name)) {
+                Add-Issue '警告' $item ($nameFmt -f $kind, $l.Shown, $l.Name, $m.Place.File, $m.Name) $l.Place $kind
+            }
+        }
+        foreach ($m in $main.Values) {
+            if (-not $list.Contains($m.Key)) {
+                Add-Issue '警告' $item ($absentFmt -f $kind, $m.Shown, $m.Name, $listName).Replace(' 」', '」') $m.Place $kind
+            }
         }
     }
 }
@@ -678,6 +761,8 @@ foreach ($r in $ruleList) {
 $reportedUnused = @{}
 foreach ($d in $defs) {
     if ($d.Section -ne '定義' -or -not $d.Rule.CheckUnused -or -not $searched.ContainsKey($d.Kind)) { continue }
+    # 詳細設計書と比べた基本設計書の定義は、一覧として比べたので確かめない
+    if ($d.Source -and $basicAsList.ContainsKey($d.Kind)) { continue }
     $uk = '{0}|{1}' -f $d.Kind, $d.Key
     if ($used.ContainsKey($uk) -or $reportedUnused.ContainsKey($uk)) { continue }
     $reportedUnused[$uk] = $true
@@ -687,8 +772,8 @@ foreach ($k in $unchecked.Keys) {
     Add-Issue '情報' '未確認' ('{0}の定義が見つからないため、{0}の参照（{1} か所）は確かめていません' -f $k, $unchecked[$k]) $null $k
 }
 
-# 組み合わせの違い: 「元」のある参照（画面の遷移先など）を、書かれている設計書どうしで比べる
-foreach ($g in @($ruleList | Where-Object { $_.Section -eq '参照' -and $_.From -and $_.Found } | Group-InOrder Kind)) {
+# 組み合わせの違い: 「元」のある参照（画面の遷移先など）を、書かれている設計書どうしで比べる（基本設計書と詳細設計書も）
+foreach ($g in @($refGroups.Values | Where-Object { $_.Rule.From } | Group-InOrder Kind)) {
     $rs = @($g.Group)
     if ($rs.Count -lt 2) { continue }
     $reported = @{}
@@ -696,15 +781,15 @@ foreach ($g in @($ruleList | Where-Object { $_.Section -eq '参照' -and $_.From
         foreach ($pk in @($r1.Pairs.Keys | Sort-Object)) {
             $p = $r1.Pairs[$pk]
             foreach ($r2 in $rs) {
-                if ($r2.Line -eq $r1.Line -or $r2.Pairs.ContainsKey($pk)) { continue }
+                if ($r2.Key -eq $r1.Key -or $r2.Pairs.ContainsKey($pk)) { continue }
                 if ($r2.Global) { $where2 = $r2.Place }
                 elseif ($r2.Coverage.ContainsKey($p.FromKey)) { $where2 = $r2.Coverage[$p.FromKey] }
                 else { continue }
-                $rk = '{0}|{1}' -f $pk, $r2.Line
+                $rk = '{0}|{1}' -f $pk, $r2.Key
                 if ($reported.ContainsKey($rk)) { continue }
                 $reported[$rk] = $true
-                $label1 = $r1.Kind; if ($r1.Column) { $label1 = $r1.Column.Text }
-                $label2 = $r2.Kind; if ($r2.Column) { $label2 = $r2.Column.Text }
+                $label1 = $r1.Kind; if ($r1.Rule.Column) { $label1 = $r1.Rule.Column.Text }
+                $label2 = $r2.Kind; if ($r2.Rule.Column) { $label2 = $r2.Rule.Column.Text }
                 Add-Issue '警告' '組み合わせの違い' ('{0} の{1}「{2}」が、{3}の{4}にありません' -f $p.From, $label1, $p.To, $where2, $label2) $p.Place $r1.Kind
             }
         }
@@ -789,6 +874,12 @@ Write-Host ''
 $defText = @($stats | Where-Object { $_.Defined -gt 0 } | ForEach-Object { '{0} {1}' -f $_.Kind, $_.Defined }) -join '・'
 if (-not $defText) { $defText = 'なし' }
 Write-Host ('{0} ファイルを読みました（定義: {1} / 参照: {2} か所）' -f $books.Count, $defText, $refs.Count)
+$basicBooks = @($books.Keys | Where-Object { $script:SourceOf[$_] })
+if ($basicBooks.Count -gt 0 -and $hasDetail) {
+    $basicNames = @($basicBooks | Sort-Object | Select-Object -First 3 | ForEach-Object { $books[$_].File }) -join '・'
+    if ($basicBooks.Count -gt 3) { $basicNames += ' ほか {0} ファイル' -f ($basicBooks.Count - 3) }
+    Write-Host ('うち基本設計書 {0} ファイル（{1}）。基本設計書の一覧・定義は、詳細設計書と別に比べました' -f $basicBooks.Count, $basicNames)
+}
 Write-Host ('エラー {0} 件 / 警告 {1} 件 / 情報 {2} 件' -f @($script:Issues | Where-Object Level -eq 'エラー').Count, @($script:Issues | Where-Object Level -eq '警告').Count, @($script:Issues | Where-Object Level -eq '情報').Count)
 if ($OutXlsx) {
     Write-Host "結果を保存しました: $OutXlsx"
@@ -805,6 +896,7 @@ if ($OutXlsx) {
 #       参照先なし       参照している ID が、どの設計書にも定義されていない（エラー）
 #       重複定義         同じ ID が 2 か所以上で定義されている（エラー）
 #       一覧との違い     画面一覧・テーブル一覧と設計書の過不足、名前の違い（警告）
+#       基本設計との違い 基本設計書の一覧（画面一覧・テーブル一覧・IF 一覧）・定義と、詳細設計書の定義の過不足、名前の違い（警告）
 #       ヘッダの違い     1 つのファイルの中でシートによって画面ID・画面名が違う、ファイル名・シート名の ID と違う（警告）
 #       組み合わせの違い 画面遷移の一覧とイベント定義の遷移先など、同じ組み合わせを書く場所どうしの過不足（警告）
 #       属性の違い       画面項目・IF の項目・外部キーと、参照先のカラムの桁数・型が違う。入力が任意なのにカラムが
@@ -817,10 +909,19 @@ if ($OutXlsx) {
 #     -OutXlsx には、イベント定義の使用テーブル（T_ORDER(R,U) など）と IF の設定元から作った CRUD 図も入れます。
 #     -Where を付けると、食い違いは確かめずに、指定した ID の定義と参照している場所（影響範囲）を一覧にします。
 #
+#     基本設計書も一緒に指定すると、基本設計書の一覧・定義を詳細設計書と別に比べます（同じ画面・テーブルが両方にあっても重複にしません）。
+#     基本設計書は、ファイル名から上のフォルダへ順に見て、名前に「基本設計・外部設計・概要設計」か先頭の「BD」（BD01_画面一覧.xlsx）が
+#     あるもの（「詳細設計・内部設計」か先頭の「DD」が先に見つかれば詳細設計）と、-BasicDesign で指定したものです。
+#     画面遷移も、基本設計書と詳細設計書（画面一覧の画面遷移・イベント定義の遷移先）で比べます。
+#
 # .PARAMETER Path
 #     設計書のフォルダまたはファイル（複数可・ワイルドカード可）。既定はカレントフォルダ。
 #     参照先の設計書（テーブル定義書・メッセージ一覧など）も含めて指定してください。
 #     同じ文書の古い版・ツールが書き出したファイル・書き換える前のファイル（-BackupDir）と、非表示のシート・雛形のシート（ID が {{テーブルID}} などのまま）は読みません（読まなかったものは警告で知らせます）。
+#
+# .PARAMETER BasicDesign
+#     基本設計書のフォルダまたはファイル（複数可）。名前で基本設計書と見分けられないとき（上流\一覧.xlsx など）に指定します。
+#     -Path と一緒に読み、中のファイルは名前に「基本設計」があるものとして参照のルールに当てはめます。
 #
 # .PARAMETER Rules
 #     参照のルールの CSV（区分・種類・ファイル名・シート名・見出し・列・名前・親・元・書き方・重複・属性・未使用・CRUD。
@@ -850,6 +951,10 @@ if ($OutXlsx) {
 #
 # .EXAMPLE
 #     .\Test-DesignConsistency.ps1 D:\設計書 -Exclude '^EXT_' -OutXlsx D:\整合性チェック.xlsx
+#
+# .EXAMPLE
+#     # 基本設計書と詳細設計書の過不足・名前の違い・画面遷移の違いも確かめる
+#     .\Test-DesignConsistency.ps1 D:\設計書\詳細設計 -BasicDesign D:\設計書\基本設計
 #
 # .EXAMPLE
 #     # カラムの桁数を変える前に、使っている画面・IF を調べる
