@@ -281,16 +281,19 @@ function Read-TableDefinitions {
     return $found
 }
 
-# CRUD 図: 元（画面ID など）のキー → @{ Shown; Targets = 参照先のキー → @{ Kind; Shown; Letters } }
+# CRUD 図: 元（画面ID など）のキー → @{ Shown; Targets = 参照先のキー → @{ Kind; Shown; Letters; Place }; Place }
 $script:Crud = [ordered]@{}
+# 機能一覧の機能ID → 画面・帳票などの ID の一覧（基本設計の CRUD 図の行が機能 ID のとき）
+$script:FunctionMap = @{}
 
 function Add-Crud {
-    param([string] $From, [string] $Kind, [string] $TargetShown, [string] $TargetKey, [string] $Letters)
+    #     Place: 使用テーブルなどを書いた場所（基本設計の CRUD 図と比べた結果を知らせる場所。最初の場所）
+    param([string] $From, [string] $Kind, [string] $TargetShown, [string] $TargetKey, [string] $Letters, $Place)
     $fk = ConvertTo-Key $From
     if (-not $fk -or -not $TargetKey) { return }
-    if (-not $script:Crud.Contains($fk)) { $script:Crud[$fk] = [pscustomobject]@{ Shown = $From.Trim(); Targets = @{} } }
+    if (-not $script:Crud.Contains($fk)) { $script:Crud[$fk] = [pscustomobject]@{ Shown = $From.Trim(); Targets = @{}; Place = $Place } }
     $targets = $script:Crud[$fk].Targets
-    if (-not $targets.ContainsKey($TargetKey)) { $targets[$TargetKey] = [pscustomobject]@{ Kind = $Kind; Shown = $TargetShown; Letters = '' } }
+    if (-not $targets.ContainsKey($TargetKey)) { $targets[$TargetKey] = [pscustomobject]@{ Kind = $Kind; Shown = $TargetShown; Letters = ''; Place = $Place } }
     foreach ($ch in ($Letters.ToUpperInvariant() -replace '[^CRUD]', '').ToCharArray()) {
         if ($targets[$TargetKey].Letters.IndexOf($ch) -lt 0) { $targets[$TargetKey].Letters += $ch }
     }
@@ -337,7 +340,7 @@ function Add-Reference {
             $pairKey = '{0}>{1}' -f $fromKey, $key
             if (-not $group.Pairs.ContainsKey($pairKey)) { $group.Pairs[$pairKey] = [pscustomobject]@{ FromKey = $fromKey; From = $f.Trim(); To = $shown; Place = $Place } }
             if (-not $letters) { continue }
-            if ($parent) { Add-Crud $f $Rule.Kind $parent (ConvertTo-Key $parent) $letters } else { Add-Crud $f $Rule.Kind $id (ConvertTo-Key $id) $letters }
+            if ($parent) { Add-Crud $f $Rule.Kind $parent (ConvertTo-Key $parent) $letters $Place } else { Add-Crud $f $Rule.Kind $id (ConvertTo-Key $id) $letters $Place }
         }
         if (-not $refSeen.Add(('{0}|{1}|{2}|{3}|{4}' -f $Rule.Kind, $key, $Place.Path, $Place.Sheet, $Place.Cell))) { continue }
         $refs.Add([pscustomobject]@{ Rule = $Rule; Kind = $Rule.Kind; Shown = $shown; Key = $key; Parent = $parent; ParentKey = (ConvertTo-Key $parent); Raw = $Text; Place = $Place; Attrs = $Attrs })
@@ -407,6 +410,17 @@ function Read-References {
                 if ($Rule.Attributes.Count -gt 0) { $attrs = Get-RowAttributes $Rule $t $dr }
                 foreach ($col in $cols) {
                     if ($dr.Cells.ContainsKey($col)) { Add-Reference $Rule ([string]$dr.Cells[$col]) $from $Book $s $dr.Row $col $attrs }
+                }
+                # 機能一覧（機能ID の列のある表）: 機能ID → その行の画面・帳票などの ID（基本設計の CRUD 図の行が機能 ID のとき、詳細設計の行に読み替える）
+                if ($Rule.Column -and $t.ColumnOf.ContainsKey('機能ID')) {
+                    $functionId = ConvertTo-Key ([string]$dr.Cells[$t.ColumnOf['機能ID']])
+                    if ($functionId) {
+                        if (-not $script:FunctionMap.ContainsKey($functionId)) { $script:FunctionMap[$functionId] = New-Object System.Collections.Generic.List[string] }
+                        foreach ($m in $Rule.Pattern.Matches(([string]$dr.Cells[$cols[0]]).Normalize($nfkc))) {
+                            $mk = ConvertTo-Key $m.Groups['id'].Value
+                            if ($mk -and -not $script:FunctionMap[$functionId].Contains($mk)) { $script:FunctionMap[$functionId].Add($mk) }
+                        }
+                    }
                 }
             }
         }
@@ -796,6 +810,141 @@ foreach ($g in @($refGroups.Values | Where-Object { $_.Rule.From } | Group-InOrd
     }
 }
 
+# CRUD の違い: 基本設計書の CRUD 図（名前に CRUD のあるシート。行は画面・IF などの ID か機能一覧の機能 ID、列はテーブルの ID か名前）と、
+# 詳細設計書の使用テーブル・設定元から作った CRUD 図（-OutXlsx の CRUD シート）を比べる
+$basicCrudSheets = New-Object System.Collections.Generic.List[string]
+if ($hasDetail -and $script:Crud.Count -gt 0) {
+    # テーブル（詳細設計の CRUD 図の列）の ID・名前 → キー
+    $tableKinds = @{}
+    foreach ($e in $script:Crud.Values) { foreach ($t in $e.Targets.Values) { $tableKinds[$t.Kind] = $true; if ($parentKindOf.ContainsKey($t.Kind)) { $tableKinds[$parentKindOf[$t.Kind]] = $true } } }
+    $tableById = @{}; $tableByName = @{}
+    foreach ($d in $defs) {
+        if (-not $tableKinds.ContainsKey($d.Kind) -or $d.ParentKey) { continue }
+        $tableById[$d.Key] = $d
+        $nl = ConvertTo-Label $d.Name
+        if (-not $nl) { continue }
+        if ($tableByName.ContainsKey($nl) -and $tableByName[$nl].Key -ne $d.Key) { $tableByName[$nl] = $null } elseif (-not $tableByName.ContainsKey($nl)) { $tableByName[$nl] = $d }
+    }
+    $resolveTable = {
+        #     列の見出し（T_ORDER・受注・T_ORDER（受注）・受注（T_ORDER）など）→ テーブルのキー（分からなければ $null）
+        param([string] $Text)
+        $parts = @([string]$Text) + @(([string]$Text).Normalize($nfkc) -split '[（）()\[\]【】↵\s/]' | Where-Object { $_ })
+        foreach ($p in $parts) { $k = ConvertTo-Key $p; if ($tableById.ContainsKey($k)) { return $k } }
+        foreach ($p in $parts) { $nl = ConvertTo-Label $p; if ($nl -and $tableByName.ContainsKey($nl) -and $tableByName[$nl]) { return $tableByName[$nl].Key } }
+        return $null
+    }
+    # 行の ID になる種類（詳細設計の CRUD 図の行の画面・IF などの種類）
+    $rowKinds = @{}
+    foreach ($d in $defs) { if ($script:Crud.Contains($d.Key)) { $rowKinds[$d.Kind] = $true } }
+    $rowKindOf = @{}
+    foreach ($d in $defs) { if ($rowKinds.ContainsKey($d.Kind) -and -not $rowKindOf.ContainsKey($d.Key)) { $rowKindOf[$d.Key] = $d.Kind } }
+    $detailDefined = @{}
+    foreach ($d in $defs) { if ($d.Section -eq '定義' -and -not $d.Source) { $detailDefined[$d.Key] = $true } }
+    $crudOrder = { param([string] $Letters) -join @('C', 'R', 'U', 'D' | Where-Object { $Letters.Contains($_) }) }
+
+    $covered = @{}          # 基本設計の CRUD 図にあった詳細設計の行
+    $basicRowKinds = @{}    # 基本設計の CRUD 図にあった行の種類
+    $missingColumns = [ordered]@{}   # 基本設計の CRUD 図に列の無いテーブル → 使っている行
+    foreach ($bookPath in $bookPaths) {
+        if (-not $script:SourceOf[$bookPath]) { continue }
+        $book = $books[$bookPath]
+        foreach ($s in $book.Sheets.Keys) {
+            if ($s -notmatch '(?i)CRUD') { continue }
+            $grid = $book.Sheets[$s]
+            # 見出しの行: テーブルと分かる見出しが 2 つ以上ある最初の行（列番号 → テーブルのキー。[ordered] は数のキーを位置とみなすので @{}）
+            $headerRow = $null; $tableCols = @{}
+            foreach ($row in $grid.Rows) {
+                $found = @{}
+                foreach ($col in $grid.Cols[$row]) { $k = & $resolveTable $grid.Cells[$row][$col]; if ($k) { $found[$col] = $k } }
+                if ($found.Count -ge 2) { $headerRow = $row; $tableCols = $found; break }
+            }
+            if (-not $headerRow) { continue }
+            $sheetName = '{0}（{1}）' -f $book.File, $s
+            $basicCrudSheets.Add($sheetName)
+            $tableColList = [int[]]@($tableCols.Keys)
+            [Array]::Sort($tableColList)
+            $firstCol = $tableColList[0]
+            foreach ($col in $grid.Cols[$headerRow]) {
+                if ($col -le $firstCol -or $tableCols.ContainsKey($col)) { continue }
+                $label = ([string]$grid.Cells[$headerRow][$col]).Trim()
+                if ($label -match '^(備考|名前|名称|No\.?|摘要)$') { continue }
+                Add-Issue '情報' '未確認' ('基本設計の CRUD 図の列「{0}」は、テーブルの ID・名前と合わないため比べていません' -f $label) (New-Place $book $s $headerRow $col) 'テーブル'
+            }
+            $sheetTables = @{}
+            foreach ($k in $tableCols.Values) { $sheetTables[$k] = $true }
+            foreach ($row in @($grid.Rows | Where-Object { $_ -gt $headerRow })) {
+                # 行の ID: 表の列より左のセルのうち、画面・IF などの ID か、機能一覧の機能 ID のもの
+                $rowText = $null; $rowCol = 0; $keys = @()
+                foreach ($col in $grid.Cols[$row]) {
+                    if ($col -ge $firstCol) { break }
+                    $k = ConvertTo-Key $grid.Cells[$row][$col]
+                    if ($rowKindOf.ContainsKey($k) -or $script:Crud.Contains($k)) { $rowText = $grid.Cells[$row][$col].Trim(); $rowCol = $col; $keys = @($k); break }
+                    if ($script:FunctionMap.ContainsKey($k) -and $script:FunctionMap[$k].Count -gt 0) {
+                        $rowText = '{0}（{1}）' -f $grid.Cells[$row][$col].Trim(), ($script:FunctionMap[$k] -join '・'); $rowCol = $col; $keys = @($script:FunctionMap[$k]); break
+                    }
+                }
+                if (-not $rowText) { continue }
+                # 詳細設計の定義も CRUD も無い行（基本設計にしか無い画面など）は、一覧の違いで知らせるので比べない
+                $keys = @($keys | Where-Object { $script:Crud.Contains($_) -or $detailDefined.ContainsKey($_) })
+                if ($keys.Count -eq 0) { continue }
+                foreach ($k in $keys) { $covered[$k] = $true; if ($rowKindOf.ContainsKey($k)) { $basicRowKinds[$rowKindOf[$k]] = $true } }
+                # 詳細設計の CRUD（行が機能なら、その機能の画面などをまとめたもの）
+                $detail = @{}
+                foreach ($k in $keys) {
+                    if (-not $script:Crud.Contains($k)) { continue }
+                    foreach ($tk in $script:Crud[$k].Targets.Keys) {
+                        $t = $script:Crud[$k].Targets[$tk]
+                        if (-not $detail.ContainsKey($tk)) { $detail[$tk] = [pscustomobject]@{ Letters = ''; Shown = $t.Shown; Place = $t.Place } }
+                        foreach ($ch in $t.Letters.ToCharArray()) { if ($detail[$tk].Letters.IndexOf($ch) -lt 0) { $detail[$tk].Letters += $ch } }
+                    }
+                }
+                foreach ($col in $tableColList) {
+                    $tk = $tableCols[$col]
+                    $text = ''
+                    if ($grid.Cells[$row].ContainsKey($col)) { $text = ([string]$grid.Cells[$row][$col]).Normalize($nfkc).Trim() }
+                    $b = & $crudOrder ($text.ToUpperInvariant() -replace '[^CRUD]', '')
+                    $d = ''
+                    if ($detail.ContainsKey($tk)) { $d = & $crudOrder $detail[$tk].Letters }
+                    $tableShown = $tableById[$tk].Shown
+                    if (-not $text -and -not $d) { continue }
+                    $place = New-Place $book $s $row $col
+                    if ($text -and -not $d) {
+                        $what = $b; if (-not $b) { $what = $text }
+                        Add-Issue '警告' 'CRUD の違い' ('基本設計の CRUD 図には {0} → {1}（{2}）がありますが、詳細設計（使用テーブルなど）にはありません' -f $rowText, $tableShown, $what) $place 'テーブル'
+                    }
+                    elseif (-not $text -and $d) {
+                        Add-Issue '警告' 'CRUD の違い' ('詳細設計には {0} → {1}（{2}）がありますが、基本設計の CRUD 図（{3}）は空欄です' -f $rowText, $tableShown, $d, $sheetName) $place 'テーブル'
+                    }
+                    elseif ($b -and $b -ne $d) {
+                        Add-Issue '警告' 'CRUD の違い' ('{0} → {1} の CRUD が違います（基本設計: {2} / 詳細設計: {3}）' -f $rowText, $tableShown, $b, $d) $place 'テーブル'
+                    }
+                }
+                # 基本設計の CRUD 図に列の無いテーブルを、詳細設計で使っている
+                foreach ($tk in $detail.Keys) {
+                    if ($sheetTables.ContainsKey($tk)) { continue }
+                    $mk = '{0}|{1}' -f $sheetName, $tk
+                    if (-not $missingColumns.Contains($mk)) { $missingColumns[$mk] = [pscustomobject]@{ Table = $detail[$tk].Shown; Sheet = $sheetName; Rows = (New-Object System.Collections.Generic.List[string]); Place = $detail[$tk].Place } }
+                    $missingColumns[$mk].Rows.Add(('{0}: {1}' -f $rowText, (& $crudOrder $detail[$tk].Letters)))
+                }
+            }
+        }
+    }
+    foreach ($m in $missingColumns.Values) {
+        $rows = @($m.Rows | Select-Object -First 3) -join '・'
+        if ($m.Rows.Count -gt 3) { $rows += ' ほか {0} 件' -f ($m.Rows.Count - 3) }
+        Add-Issue '警告' 'CRUD の違い' ('{0} は詳細設計で使っています（{1}）が、基本設計の CRUD 図（{2}）に列がありません' -f $m.Table, $rows, $m.Sheet) $m.Place 'テーブル'
+    }
+    # 詳細設計の CRUD 図の行（画面・IF など）のうち、基本設計の CRUD 図に無いもの（基本設計の CRUD 図に同じ種類の行があるときだけ）
+    if ($basicCrudSheets.Count -gt 0) {
+        foreach ($k in $script:Crud.Keys) {
+            if ($covered.ContainsKey($k) -or -not $rowKindOf.ContainsKey($k) -or -not $basicRowKinds.ContainsKey($rowKindOf[$k])) { continue }
+            $e = $script:Crud[$k]
+            $uses = @($e.Targets.Keys | Sort-Object | ForEach-Object { '{0}: {1}' -f $e.Targets[$_].Shown, (& $crudOrder $e.Targets[$_].Letters) }) -join '・'
+            Add-Issue '警告' 'CRUD の違い' ('{0} の行が、基本設計の CRUD 図（{1}）にありません（詳細設計: {2}）' -f $e.Shown, ($basicCrudSheets -join '・'), $uses) $e.Place 'テーブル'
+        }
+    }
+}
+
 # ---------------------------------------------------------------- 結果
 
 
@@ -879,6 +1028,7 @@ if ($basicBooks.Count -gt 0 -and $hasDetail) {
     $basicNames = @($basicBooks | Sort-Object | Select-Object -First 3 | ForEach-Object { $books[$_].File }) -join '・'
     if ($basicBooks.Count -gt 3) { $basicNames += ' ほか {0} ファイル' -f ($basicBooks.Count - 3) }
     Write-Host ('うち基本設計書 {0} ファイル（{1}）。基本設計書の一覧・定義は、詳細設計書と別に比べました' -f $basicBooks.Count, $basicNames)
+    if ($basicCrudSheets.Count -gt 0) { Write-Host ('基本設計の CRUD 図（{0}）を、詳細設計の使用テーブルから作った CRUD 図と比べました' -f ($basicCrudSheets -join '・')) }
 }
 Write-Host ('エラー {0} 件 / 警告 {1} 件 / 情報 {2} 件' -f @($script:Issues | Where-Object Level -eq 'エラー').Count, @($script:Issues | Where-Object Level -eq '警告').Count, @($script:Issues | Where-Object Level -eq '情報').Count)
 if ($OutXlsx) {
@@ -896,7 +1046,8 @@ if ($OutXlsx) {
 #       参照先なし       参照している ID が、どの設計書にも定義されていない（エラー）
 #       重複定義         同じ ID が 2 か所以上で定義されている（エラー）
 #       一覧との違い     画面一覧・テーブル一覧と設計書の過不足、名前の違い（警告）
-#       基本設計との違い 基本設計書の一覧（画面一覧・テーブル一覧・IF 一覧）・定義と、詳細設計書の定義の過不足、名前の違い（警告）
+#       基本設計との違い 基本設計書の一覧（画面一覧・テーブル一覧・IF 一覧・帳票一覧・バッチ一覧）・定義と、詳細設計書の定義の過不足、名前の違い（警告）
+#       CRUD の違い      基本設計書の CRUD 図（名前に CRUD のあるシート）と、詳細設計書の使用テーブル・設定元から作った CRUD 図の違い（警告）
 #       ヘッダの違い     1 つのファイルの中でシートによって画面ID・画面名が違う、ファイル名・シート名の ID と違う（警告）
 #       組み合わせの違い 画面遷移の一覧とイベント定義の遷移先など、同じ組み合わせを書く場所どうしの過不足（警告）
 #       属性の違い       画面項目・IF の項目・外部キーと、参照先のカラムの桁数・型が違う。入力が任意なのにカラムが
@@ -913,6 +1064,8 @@ if ($OutXlsx) {
 #     基本設計書は、ファイル名から上のフォルダへ順に見て、名前に「基本設計・外部設計・概要設計」か先頭の「BD」（BD01_画面一覧.xlsx）が
 #     あるもの（「詳細設計・内部設計」か先頭の「DD」が先に見つかれば詳細設計）と、-BasicDesign で指定したものです。
 #     画面遷移も、基本設計書と詳細設計書（画面一覧の画面遷移・イベント定義の遷移先）で比べます。
+#     基本設計書の CRUD 図（行は画面・IF などの ID か機能一覧の機能 ID、列はテーブルの ID か名前）は、詳細設計書の使用テーブルから作った
+#     CRUD 図と、行 × テーブルごとに C・R・U・D を比べます（○ など C・R・U・D でない印は「使う」として、使っているかだけを比べます）。
 #
 # .PARAMETER Path
 #     設計書のフォルダまたはファイル（複数可・ワイルドカード可）。既定はカレントフォルダ。
