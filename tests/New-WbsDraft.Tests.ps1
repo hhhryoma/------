@@ -79,3 +79,24 @@ Test-Case 'New-WbsDraft: Get-Help でヘルプが表示される' {
     Assert-Match $h.Synopsis 'WBS'
     Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
+
+Test-Case 'New-WbsDraft: -Gantt で WBS のシートをガントチャート形式の進捗管理票にし、休日のシートを足す（Measure-Progress.ps1 がそのまま読める）' {
+    $dir = New-TestDir
+    $holidays = Join-Path $dir 'holidays.csv'
+    @('2026/11/03,文化の日') | Set-Content -LiteralPath $holidays -Encoding UTF8
+    $out = Join-Path $dir 'WBS.xlsx'
+    $rows = @(& $WbsTool $designDir -Start '2026-11-02' -Members '山田', '佐藤' -Holidays $holidays -OutXlsx $out -Gantt 6>$null 3>$null)
+    $book = Read-XlsxSheet -Path $out -Index 1
+    Assert-Equal @('WBS', '担当者別', '規模', '休日') $book.Sheets
+    # 3 行目が見出し（見積もりの根拠は規模のシート。実績工数は空でも置く）。日付の列は 11/02 の月曜から
+    Assert-Equal @('WBS番号', 'タスク名', '担当者', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '進捗率', '実績工数', '状態') @('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K' | ForEach-Object { $book.Rows[3][$_] })
+    Assert-Equal '46328' $book.Rows[3]['L']
+    Assert-Equal '46329' (Read-XlsxSheet -Path $out -Index 4).Rows[2]['A'] '休日のシートの 11/03'
+    $tasks = @(& (Join-Path $script:ToolsDir 'Measure-Progress.ps1') -Path $out -AsOf '2026-11-02' -Holidays $holidays 6>$null 3>$null)
+    Assert-Equal 32 $tasks.Count
+    Assert-Equal @($rows | Where-Object { -not $_.IsParent } | ForEach-Object { '{0}|{1}' -f $_.Wbs, $_.Task }) @($tasks | ForEach-Object { '{0}|{1}' -f $_.WbsNo, $_.Task })
+
+    $failed = $false
+    try { $null = & $WbsTool $designDir -Gantt 6>$null 3>$null } catch { $failed = $true; Assert-Match $_.Exception.Message '-OutXlsx' }
+    Assert-True $failed '-Gantt は -OutXlsx と一緒に'
+}

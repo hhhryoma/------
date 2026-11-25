@@ -22,6 +22,11 @@ param(
 
     [string] $OutXlsx,
 
+    [switch] $Gantt,
+
+    [ValidateSet('Auto', 'Day', 'Week')]
+    [string] $GanttUnit = 'Auto',
+
     [string] $OutCsv,
 
     [switch] $NoRecurse,
@@ -40,6 +45,7 @@ foreach ($name in @('Phases', 'Holidays', 'Coefficients', 'Rules', 'OutXlsx', 'O
 }
 if ($OutXlsx -and [System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw "-OutXlsx の拡張子は .xlsx にしてください: $OutXlsx" }
 if ($Holidays -and -not (Test-Path -LiteralPath $Holidays)) { throw "休日の CSV が見つかりません: $Holidays" }
+if ($Gantt -and -not $OutXlsx) { throw '-Gantt は、-OutXlsx（保存先）と一緒に指定してください' }
 
 # 表示では日付を yyyy/MM/dd にする（Start・End は日付のまま）
 Update-TypeData -TypeName 'WbsDraft.Task' -MemberType ScriptProperty -MemberName StartDate -Value { $this.Start.ToString('yyyy/MM/dd', [System.Globalization.CultureInfo]::InvariantCulture) } -Force -WhatIf:$false
@@ -243,11 +249,18 @@ if ($OutXlsx) {
     $sizeRows = New-Object System.Collections.Generic.List[object]
     foreach ($f in $functions) { $sizeRows.Add(@{ Values = @($f.Kind, $f.Name, $f.Basis, [double]$f.Days, $f.Member) }) }
     try {
-        Export-Workbook -FilePath $OutXlsx -Sheets @(
-            @{ Name = 'WBS'; Columns = @(@{ Header = $header[0]; Width = 8 }, @{ Header = $header[1]; Width = 44 }, @{ Header = $header[2]; Width = 10 }, @{ Header = $header[3]; Width = 11 }, @{ Header = $header[4]; Width = 11 }, @{ Header = $header[5]; Width = 9 }, @{ Header = $header[6]; Width = 11 }, @{ Header = $header[7]; Width = 11 }, @{ Header = $header[8]; Width = 8 }, @{ Header = $header[9]; Width = 9 }, @{ Header = $header[10]; Width = 50 }); Rows = $wbsRows },
+        $wbsSheet = @{ Name = 'WBS'; Columns = @(@{ Header = $header[0]; Width = 8 }, @{ Header = $header[1]; Width = 44 }, @{ Header = $header[2]; Width = 10 }, @{ Header = $header[3]; Width = 11 }, @{ Header = $header[4]; Width = 11 }, @{ Header = $header[5]; Width = 9 }, @{ Header = $header[6]; Width = 11 }, @{ Header = $header[7]; Width = 11 }, @{ Header = $header[8]; Width = 8 }, @{ Header = $header[9]; Width = 9 }, @{ Header = $header[10]; Width = 50 }); Rows = $wbsRows }
+        $sheets = @($wbsSheet,
             # 担当者別・規模のシートの見出しは、WBS の見出し（タスク・開始・終了など）にしない（Measure-Progress.ps1 が WBS の表として読まないように）
             @{ Name = '担当者別'; Columns = @(@{ Header = '担当者'; Width = 12 }, @{ Header = 'タスクの数'; Width = 10 }, @{ Header = '工数の合計（人日）'; Width = 12 }, @{ Header = '最初の日'; Width = 11 }, @{ Header = '最後の日'; Width = 11 }, @{ Header = '営業日'; Width = 8 }); Rows = $loadRows },
             @{ Name = '規模'; Columns = @(@{ Header = '種類'; Width = 10 }, @{ Header = '機能'; Width = 36 }, @{ Header = '見積もりの根拠'; Width = 50 }, @{ Header = '工数（人日）'; Width = 11 }, @{ Header = '担当者'; Width = 12 }); Rows = $sizeRows })
+        if ($Gantt) {
+            # ガントチャート形式の進捗管理票: WBS のシートを、右に日付の列を並べたガントチャートにする（見積もりの根拠は規模のシートにある）。休日のシートも足す
+            $ganttTasks = @(foreach ($r in $rows) { [pscustomobject]@{ Wbs = $r.Wbs; Task = $r.Task; Owner = $r.Member; PlanStart = $r.Start; PlanEnd = $r.End; Effort = [double]$r.Days; Summary = $r.IsParent } })
+            $ganttSheets = New-GanttSheets $ganttTasks (Get-Date).Date @($holidaySet) $GanttUnit 'WBS' '進捗管理票' @('ActualEffort')
+            $sheets = @($ganttSheets.Sheets[0]) + @($sheets | Select-Object -Skip 1) + @($ganttSheets.Sheets[1])
+        }
+        Export-Workbook -FilePath $OutXlsx -Sheets $sheets
     }
     catch {
         Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
@@ -324,6 +337,14 @@ if ($OutCsv) { Write-Host "CSV を保存しました: $OutCsv" }
 #
 # .PARAMETER OutXlsx
 #     WBS を xlsx に保存します（WBS・担当者別・規模のシート）。
+#
+# .PARAMETER Gantt
+#     -OutXlsx の WBS のシートを、ガントチャート形式の進捗管理票にします（右に日付の列を並べ、予定・実績・遅延のバー、今日の線、
+#     土日・休日の色を条件付き書式で描く。Excel で実績を記入するとバーと状態が変わる。Measure-Progress.ps1 -OutGantt と同じ形）。
+#     休日のシートも足します（-Holidays の休日。足すと曜日の「祝」と状態が変わります）。
+#
+# .PARAMETER GanttUnit
+#     -Gantt の日付の列の単位: Auto（既定。期間が 92 日までは 1 日 1 列、それより長ければ 1 週 1 列）・Day・Week。
 #
 # .PARAMETER OutCsv
 #     WBS を CSV（UTF-8・BOM 付き）に保存します。

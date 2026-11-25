@@ -916,6 +916,302 @@ function ConvertTo-ShapeAnchorXml {
         (& $anchor $c $r ($c + $w) ($r + $h)), $Shape.Id, $name, $xfrm, $fill, $lineColor, $dash, $text)
 }
 
+# ---------------------------------------------------------------- ガントチャート形式の進捗管理票（Export-Workbook の Gantt のシート）
+
+
+function Get-GanttDates {
+    #     ガントチャートの日付の列（各列の最初の日）。Unit: Day（1 日 1 列）・Week（月曜始まりの 1 週 1 列）・Auto（期間が 92 日までは Day）。
+    #     期間はタスクの最初の日から最後の日まで（あとで延びてもよいように、日ごとは 2 週、週ごとは 4 週を足す）。
+    #     戻り値: @{ Unit = 'Day' か 'Week'; Dates = 日付の配列 }
+    param([datetime] $From, [datetime] $To, [string] $Unit = 'Auto')
+    $From = $From.Date; $To = $To.Date
+    if ($To -lt $From) { $t = $From; $From = $To; $To = $t }
+    if ($Unit -eq 'Auto') { if (($To - $From).TotalDays + 1 -le 92) { $Unit = 'Day' } else { $Unit = 'Week' } }
+    # 月曜から始める
+    $first = $From.AddDays(-(([int]$From.DayOfWeek + 6) % 7))
+    $dates = New-Object System.Collections.Generic.List[datetime]
+    if ($Unit -eq 'Day') {
+        $last = $To.AddDays(14)
+        $last = $last.AddDays((7 - [int]$last.DayOfWeek) % 7)   # 日曜まで
+        for ($d = $first; $d -le $last; $d = $d.AddDays(1)) { $dates.Add($d) }
+    }
+    else {
+        $last = $To.AddDays(28)
+        for ($d = $first; $d -le $last; $d = $d.AddDays(7)) { $dates.Add($d) }
+    }
+    return [pscustomobject]@{ Unit = $Unit; Dates = $dates.ToArray() }
+}
+
+function Get-GanttStatus {
+    #     進捗管理票の「状態」の数式と同じ判定（完了・遅延・未着手・予定どおり。予定の日付が無ければ ''）。Measure-Progress.ps1 と同じく、
+    #     営業日（土日と Holidays を除く）で数えた遅れが 1 日以上なら遅延: 見込終了（基準日以降）があれば予定終了との差、予定終了を過ぎていれば
+    #     過ぎた営業日と残りの作業の日数、それ以外は予定の進捗との差（Measure-Progress.ps1 の四捨五入（偶数への丸め）で 1 以上 = 0.5 より大きい）
+    param($PlanStart, $PlanEnd, $ActualEnd, $Progress, [datetime] $AsOf, $Holidays, $Forecast)
+    $rate = 0.0
+    if ($Progress -is [double] -or $Progress -is [int]) { $rate = [double]$Progress }
+    if ($rate -ge 1 -or $ActualEnd -is [datetime]) { return '完了' }
+    if ($PlanStart -isnot [datetime] -or $PlanEnd -isnot [datetime]) { return '' }
+    $count = {
+        #     A から B までの営業日の数（両端を含む。B が前なら 0 以下。Excel の NETWORKDAYS と同じ）
+        param([datetime] $A, [datetime] $B)
+        $sign = 1
+        if ($B -lt $A) { $t = $A; $A = $B; $B = $t; $sign = -1 }
+        $n = 0
+        for ($d = $A.Date; $d -le $B.Date; $d = $d.AddDays(1)) {
+            if ($d.DayOfWeek -ne [DayOfWeek]::Saturday -and $d.DayOfWeek -ne [DayOfWeek]::Sunday -and -not ($Holidays -and $Holidays.Contains($d))) { $n++ }
+        }
+        $sign * $n
+    }
+    $planDays = [math]::Max(1, (& $count $PlanStart $PlanEnd))
+    if ($Forecast -is [datetime] -and $Forecast -ge $AsOf) { $late = (& $count $PlanEnd.AddDays(1) $Forecast) -gt 0 }
+    elseif ($AsOf -gt $PlanEnd) { $late = (& $count $PlanEnd.AddDays(1) $AsOf) -gt 0 -or (1 - $rate) * $planDays -gt 0.5 }
+    elseif ($AsOf -ge $PlanStart) {
+        $planned = 1.0
+        if ($AsOf -lt $PlanEnd) { $planned = (& $count $PlanStart $AsOf) / $planDays }
+        $late = ($planned - $rate) * $planDays -gt 0.5
+    }
+    else { $late = $false }
+    if ($late) { return '遅延' }
+    if ($AsOf -lt $PlanStart) { return '未着手' }
+    return '予定どおり'
+}
+
+function ConvertTo-GanttSheetXml {
+    #     ガントチャート形式の進捗管理票のシートの XML（Export-Workbook から呼ぶ）。左に WBS の列（Columns・Rows）、右に日付の列を並べ、
+    #     バー（予定・遅延・実績・親のタスク）・今日の線・土日と休日の色を条件付き書式で描く（Excel で実績を入力すると変わる）。
+    #       1 行目: タイトルと基準日（=TODAY()。書き換えられる）・月、2 行目: 曜日（日ごと。休日の名前の範囲にある日は「祝」）、3 行目: 見出しと日付、4 行目から: タスク
+    #     Gantt: @{ Dates; Unit（Day・Week）; Fields = @{ PlanStart; PlanEnd; ActualStart; ActualEnd; Progress; Status; Forecast（無ければ $null）}（Values の位置。0 始まり）;
+    #             AsOf; Holidays（HashSet[datetime]）; HolidayName（休日の名前の範囲）; Title }
+    #     Rows の Summary が真の行は親のタスク（太字・灰色のバー。状態の数式は書かない）
+    #     戻り値: @{ Xml; FilterRef（オートフィルターの範囲） }
+    param($Sheet, [bool] $Selected)
+    $g = $Sheet.Gantt
+    $leftCount = @($Sheet.Columns).Count
+    $dates = @($g.Dates)
+    $isDay = $g.Unit -eq 'Day'
+    $firstRow = 4
+    $lastRow = $firstRow + $Sheet.Rows.Count - 1
+    if ($lastRow -lt $firstRow) { $lastRow = $firstRow }
+    $firstDateCol = $leftCount + 1
+    $lastDateCol = $leftCount + $dates.Count
+    $colOf = { param([int] $Index) ConvertTo-ColumnName ($Index + 1) }   # Values の位置 → 列名
+    $dc = ConvertTo-ColumnName $firstDateCol
+    $asOfRef = '${0}$1' -f (ConvertTo-ColumnName $leftCount)
+    $f = $g.Fields
+    $ps = & $colOf $f.PlanStart; $pe = & $colOf $f.PlanEnd; $as = & $colOf $f.ActualStart; $ae = & $colOf $f.ActualEnd; $pr = & $colOf $f.Progress
+    $stCol = $null
+    if ($null -ne $f.Status) { $stCol = & $colOf $f.Status }
+    $fcCol = $null
+    if ($null -ne $f.Forecast) { $fcCol = & $colOf $f.Forecast }
+    $hol = $g.HolidayName
+    $asOfSerial = (ConvertTo-ExcelDate $g.AsOf).ToString('R', $invariant)
+
+    $xml = New-Object System.Text.StringBuilder
+    [void]$xml.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">')
+    # 印刷は横 1 ページに収める
+    [void]$xml.Append('<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>')
+    [void]$xml.Append(('<dimension ref="A1:{0}{1}"/>' -f (ConvertTo-ColumnName $lastDateCol), $lastRow))
+    $tab = ''
+    if ($Selected) { $tab = ' tabSelected="1"' }
+    $topLeft = '{0}{1}' -f $dc, $firstRow
+    [void]$xml.Append(('<sheetViews><sheetView{0} workbookViewId="0"><pane xSplit="{1}" ySplit="3" topLeftCell="{2}" activePane="bottomRight" state="frozen"/><selection pane="topRight"/><selection pane="bottomLeft"/><selection pane="bottomRight" activeCell="{2}" sqref="{2}"/></sheetView></sheetViews>' -f $tab, $leftCount, $topLeft))
+    [void]$xml.Append('<sheetFormatPr defaultRowHeight="18"/><cols>')
+    for ($i = 0; $i -lt $leftCount; $i++) { [void]$xml.Append(('<col min="{0}" max="{0}" width="{1}" customWidth="1"/>' -f ($i + 1), $Sheet.Columns[$i].Width)) }
+    $dateWidth = '3.6'
+    if (-not $isDay) { $dateWidth = '5.6' }
+    [void]$xml.Append(('<col min="{0}" max="{1}" width="{2}" customWidth="1"/></cols><sheetData>' -f $firstDateCol, $lastDateCol, $dateWidth))
+
+    # 1 行目: タイトル・基準日・月
+    [void]$xml.Append('<row r="1">')
+    if ($g.Title) { [void]$xml.Append(('<c r="A1" s="15" t="inlineStr"><is><t>{0}</t></is></c>' -f (ConvertTo-XmlText $g.Title))) }
+    if ($leftCount -ge 2) { [void]$xml.Append(('<c r="{0}1" s="16" t="inlineStr"><is><t>基準日</t></is></c>' -f (ConvertTo-ColumnName ($leftCount - 1)))) }
+    [void]$xml.Append(('<c r="{0}1" s="17"><f>TODAY()</f><v>{1}</v></c>' -f (ConvertTo-ColumnName $leftCount), $asOfSerial))
+    for ($i = 0; $i -lt $dates.Count; $i++) {
+        # 月の見出し: 最初の列（すぐ次の月になるときは書かない）と、月の変わる列（日付の列は狭いので、右のセルにはみ出して見える文字にする）
+        $newMonth = $i -gt 0 -and $dates[$i].Month -ne $dates[$i - 1].Month
+        $firstMonth = $i -eq 0 -and @($dates | Select-Object -First 4 | Where-Object { $_.Month -ne $dates[0].Month }).Count -eq 0
+        if ($newMonth -or $firstMonth) {
+            [void]$xml.Append(('<c r="{0}1" s="8" t="inlineStr"><is><t>{1}年{2}月</t></is></c>' -f (ConvertTo-ColumnName ($firstDateCol + $i)), $dates[$i].Year, $dates[$i].Month))
+        }
+    }
+    [void]$xml.Append('</row>')
+    # 2 行目: 曜日（日ごと）。休日の名前の範囲にある日は「祝」（休日のシートに足すと変わる）
+    [void]$xml.Append('<row r="2">')
+    if ($isDay) {
+        $names = '日月火水木金土'
+        for ($i = 0; $i -lt $dates.Count; $i++) {
+            $col = ConvertTo-ColumnName ($firstDateCol + $i)
+            $label = $names.Substring([int]$dates[$i].DayOfWeek, 1)
+            if ($g.Holidays -and $g.Holidays.Contains($dates[$i])) { $label = '祝' }
+            $formula = 'IF(COUNTIF({0},{1}$3)>0,"祝",MID("日月火水木金土",WEEKDAY({1}$3),1))' -f $hol, $col
+            [void]$xml.Append(('<c r="{0}2" s="7" t="str"><f>{1}</f><v>{2}</v></c>' -f $col, (ConvertTo-XmlText $formula), $label))
+        }
+    }
+    [void]$xml.Append('</row>')
+    # 3 行目: 見出しと日付
+    [void]$xml.Append('<row r="3">')
+    for ($i = 0; $i -lt $leftCount; $i++) {
+        [void]$xml.Append(('<c r="{0}3" s="1" t="inlineStr"><is><t>{1}</t></is></c>' -f (ConvertTo-ColumnName ($i + 1)), (ConvertTo-XmlText $Sheet.Columns[$i].Header)))
+    }
+    $headerStyle = 5
+    if (-not $isDay) { $headerStyle = 6 }
+    for ($i = 0; $i -lt $dates.Count; $i++) {
+        [void]$xml.Append(('<c r="{0}3" s="{1}"><v>{2}</v></c>' -f (ConvertTo-ColumnName ($firstDateCol + $i)), $headerStyle, (ConvertTo-ExcelDate $dates[$i]).ToString('R', $invariant)))
+    }
+    [void]$xml.Append('</row>')
+
+    # タスクの行
+    $r = $firstRow - 1
+    foreach ($row in $Sheet.Rows) {
+        $r++
+        $summary = [bool]$row.Summary
+        [void]$xml.Append(('<row r="{0}">' -f $r))
+        for ($i = 0; $i -lt $leftCount; $i++) {
+            $col = ConvertTo-ColumnName ($i + 1)
+            if ($null -ne $f.Status -and $i -eq $f.Status) {
+                if ($summary) { [void]$xml.Append(('<c r="{0}{1}" s="11"/>' -f $col, $r)); continue }
+                # 状態: 完了（進捗率 100% か実績終了あり）・遅延（営業日の遅れが 1 日以上。Get-GanttStatus と同じ）・未着手・予定どおり
+                $P = 'MAX(1,NETWORKDAYS({0}{2},{1}{2},{3}))' -f $ps, $pe, $r, $hol
+                $late = 'IF({0}>{1}{2},OR(NETWORKDAYS({1}{2}+1,{0},{3})>0,(1-N({4}{2}))*{5}>0.5),IF({0}>={6}{2},(IF({0}>={1}{2},1,NETWORKDAYS({6}{2},{0},{3})/{5})-N({4}{2}))*{5}>0.5,FALSE))' -f $asOfRef, $pe, $r, $hol, $pr, $P, $ps
+                if ($fcCol) { $late = 'IF(AND({0}{1}<>"",{0}{1}>={2}),NETWORKDAYS({3}{1}+1,{0}{1},{4})>0,{5})' -f $fcCol, $r, $asOfRef, $pe, $hol, $late }
+                $formula = 'IF(OR(N({0}{1})>=1,{2}{1}<>""),"完了",IF(OR({3}{1}="",{4}{1}=""),"",IF({5},"遅延",IF({6}<{3}{1},"未着手","予定どおり"))))' -f $pr, $r, $ae, $ps, $pe, $late, $asOfRef
+                $forecast = $null
+                if ($null -ne $f.Forecast) { $forecast = $row.Values[$f.Forecast] }
+                $cached = Get-GanttStatus $row.Values[$f.PlanStart] $row.Values[$f.PlanEnd] $row.Values[$f.ActualEnd] $row.Values[$f.Progress] $g.AsOf $g.Holidays $forecast
+                [void]$xml.Append(('<c r="{0}{1}" s="2" t="str"><f>{2}</f><v>{3}</v></c>' -f $col, $r, (ConvertTo-XmlText $formula), (ConvertTo-XmlText $cached)))
+                continue
+            }
+            $raw = $row.Values[$i]
+            if ($raw -is [datetime]) {
+                $s = 4; if ($summary) { $s = 12 }
+                [void]$xml.Append(('<c r="{0}{1}" s="{2}"><v>{3}</v></c>' -f $col, $r, $s, (ConvertTo-ExcelDate $raw).ToString('R', $invariant)))
+                continue
+            }
+            $isRate = $i -eq $f.Progress
+            if ($raw -is [int] -or $raw -is [long] -or $raw -is [double]) {
+                $s = 2
+                if ($isRate) { $s = 10; if ($summary) { $s = 14 } } elseif ($summary) { $s = 13 }
+                [void]$xml.Append(('<c r="{0}{1}" s="{2}"><v>{3}</v></c>' -f $col, $r, $s, ([double]$raw).ToString('R', $invariant)))
+                continue
+            }
+            $s = 2
+            if ($isRate) { $s = 10 }
+            if ($summary) { $s = 11; if ($isRate) { $s = 14 } }
+            $content = ConvertTo-InlineStringXml $raw
+            if ($content) { [void]$xml.Append(('<c r="{0}{1}" s="{2}" t="inlineStr">{3}</c>' -f $col, $r, $s, $content)) }
+            else { [void]$xml.Append(('<c r="{0}{1}" s="{2}"/>' -f $col, $r, $s)) }
+        }
+        # 日付の列は、枠線だけのセル（バーは条件付き書式）
+        [void]$xml.Append(('<c r="{0}{1}" s="9"/>' -f $dc, $r))
+        if ($lastDateCol -gt $firstDateCol) {
+            for ($c = $firstDateCol + 1; $c -le $lastDateCol; $c++) { [void]$xml.Append(('<c r="{0}{1}" s="9"/>' -f (ConvertTo-ColumnName $c), $r)) }
+        }
+        [void]$xml.Append('</row>')
+    }
+    [void]$xml.Append('</sheetData>')
+    $filterRef = 'A3:{0}{1}' -f (ConvertTo-ColumnName $leftCount), $lastRow
+    [void]$xml.Append(('<autoFilter ref="{0}"/>' -f $filterRef))
+
+    # 条件付き書式（前のものほど優先。数式は範囲の左上のセルを基準にした相対参照）
+    $lastCol = ConvertTo-ColumnName $lastDateCol
+    $grid = '{0}{1}:{2}{3}' -f $dc, $firstRow, $lastCol, $lastRow
+    $gridWithHeader = '{0}2:{1}{2}' -f $dc, $lastCol, $lastRow
+    $d = '{0}$3' -f $dc        # その列の日付
+    $inPlan = {
+        param([int] $Row)
+        if ($isDay) { 'AND({0}>=${1}{2},{0}<=${3}{2})' -f $d, $ps, $Row, $pe }
+        else { 'AND(${1}{2}<>"",${1}{2}<={0}+6,${3}{2}>={0})' -f $d, $ps, $Row, $pe }   # 週ごと: その週（月曜から 7 日）と期間が重なる
+    }
+    if ($isDay) {
+        $work = 'AND({0}$2<>"土",{0}$2<>"日",{0}$2<>"祝")' -f $dc
+        $inActual = 'AND(${1}{2}<>"",{0}>=${1}{2},{0}<=IF(${3}{2}<>"",${3}{2},{4}))' -f $d, $as, $firstRow, $ae, $asOfRef
+        $today = '{0}={1}' -f $d, $asOfRef
+    }
+    else {
+        $work = 'TRUE'
+        $inActual = 'AND(${1}{2}<>"",${1}{2}<={0}+6,IF(${3}{2}<>"",${3}{2},{4})>={0})' -f $d, $as, $firstRow, $ae, $asOfRef
+        $today = 'AND({1}>={0},{1}<={0}+6)' -f $d, $asOfRef
+    }
+    $rule = {
+        param([int] $Priority, [int] $Dxf, [string] $Formula, [bool] $Stop)
+        $stopAttr = ''
+        if ($Stop) { $stopAttr = ' stopIfTrue="1"' }
+        '<cfRule type="expression" dxfId="{0}" priority="{1}"{2}><formula>{3}</formula></cfRule>' -f $Dxf, $Priority, $stopAttr, (ConvertTo-XmlText $Formula)
+    }
+    # 親のタスク（次の行の WBS 番号が「この行の番号.」で始まる。行を足しても数式で決まる）
+    $wb = & $colOf 0
+    $isParent = 'AND(${0}{1}<>"",LEFT(SUBSTITUTE(${0}{2},"-","."),LEN(SUBSTITUTE(${0}{1},"-","."))+1)=SUBSTITUTE(${0}{1},"-",".")&".")' -f $wb, $firstRow, ($firstRow + 1)
+    # タスクの行: 実績（濃い青）・遅延のタスクの予定（橙）・親のタスクの予定（灰）・予定（薄い青）・土日と休日（灰色の列）。
+    # 1 つの範囲にまとめる（Excel は priority の順、LibreOffice は書いた順に最初に当てはまるものを使う）。今日の線は Excel ではいちばん先に
+    # 重ねて描くが、LibreOffice ではバーを消さないよう後の範囲に書く
+    $plan = & $inPlan $firstRow
+    $fills = New-Object System.Text.StringBuilder
+    [void]$fills.Append((& $rule 2 0 ('AND({0},{1})' -f $inActual, $work) $true))
+    if ($stCol) { [void]$fills.Append((& $rule 3 1 ('AND({0},{1},${2}{3}="遅延")' -f $plan, $work, $stCol, $firstRow) $true)) }
+    [void]$fills.Append((& $rule 4 2 ('AND({0},{1},{2})' -f $plan, $work, $isParent) $true))
+    [void]$fills.Append((& $rule 5 3 ('AND({0},{1})' -f $plan, $work) $true))
+    if ($isDay) { [void]$fills.Append((& $rule 6 4 ('NOT({0})' -f $work) $false)) }
+    [void]$xml.Append(('<conditionalFormatting sqref="{0}">{1}</conditionalFormatting>' -f $grid, $fills.ToString()))
+    # 曜日・日付の見出しの土日・休日
+    if ($isDay) { [void]$xml.Append(('<conditionalFormatting sqref="{0}2:{1}3">{2}</conditionalFormatting>' -f $dc, $lastCol, (& $rule 7 4 ('NOT({0})' -f $work) $false))) }
+    # 今日の線（赤い縦線。ほかの色と重ねる）
+    [void]$xml.Append(('<conditionalFormatting sqref="{0}">{1}</conditionalFormatting>' -f $gridWithHeader, (& $rule 1 5 $today $false)))
+    # 進捗率のデータバー
+    [void]$xml.Append(('<conditionalFormatting sqref="{0}{1}:{0}{2}"><cfRule type="dataBar" priority="8"><dataBar><cfvo type="num" val="0"/><cfvo type="num" val="1"/><color rgb="FF63BE7B"/></dataBar></cfRule></conditionalFormatting>' -f $pr, $firstRow, $lastRow))
+    [void]$xml.Append('<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="landscape" fitToWidth="1" fitToHeight="0"/></worksheet>')
+    return [pscustomobject]@{ Xml = $xml.ToString(); FilterRef = $filterRef }
+}
+
+function New-GanttSheets {
+    #     ガントチャート形式の進捗管理票のシート（Export-Workbook の Sheets）。Tasks の各要素: @{ Wbs; Task; Owner; PlanStart; PlanEnd; Effort;
+    #     ActualStart; ActualEnd; Forecast; Progress（0〜1）; ActualEffort; Summary（親のタスク）}（日付は datetime か $null、数は double か $null）。
+    #     Forecast（見込終了）・ActualEffort（実績工数）の列は、値のあるタスクがあるときか、Include に名前があるときだけ置く。
+    #     休日のシート（日付・名前）と、その範囲の名前「休日」も作る（曜日の「祝」と状態の営業日に使う。休日を足すと変わる）。
+    #     戻り値: @{ Sheets = @(ガントチャートのシート, 休日のシート); Unit; Dates }
+    param($Tasks, [datetime] $AsOf, $Holidays, [string] $Unit = 'Auto', [string] $Name = 'ガントチャート', [string] $Title = '進捗管理票', [string[]] $Include)
+    $holidaySet = New-Object 'System.Collections.Generic.HashSet[datetime]'
+    foreach ($h in @($Holidays)) { if ($h -is [datetime]) { [void]$holidaySet.Add($h.Date) } }
+    $all = @(foreach ($t in $Tasks) { foreach ($d in @($t.PlanStart, $t.PlanEnd, $t.ActualStart, $t.ActualEnd, $t.Forecast)) { if ($d -is [datetime]) { $d } } })
+    if ($all.Count -eq 0) { throw 'ガントチャートにするタスクに、予定開始・予定終了の日付がありません' }
+    $span = Get-GanttDates (@($all | Sort-Object)[0]) (@($all | Sort-Object)[-1]) $Unit
+    $hasForecast = @($Tasks | Where-Object { $_.Forecast -is [datetime] }).Count -gt 0 -or @($Include) -contains 'Forecast'
+    $hasActualEffort = @($Tasks | Where-Object { $null -ne $_.ActualEffort -and '' -ne $_.ActualEffort }).Count -gt 0 -or @($Include) -contains 'ActualEffort'
+    $columns = New-Object System.Collections.Generic.List[object]
+    $add = { param($h, $w) $columns.Add(@{ Header = $h; Width = $w }); return $columns.Count - 1 }
+    $fields = @{}
+    $null = & $add 'WBS番号' 7
+    $null = & $add 'タスク名' 30
+    $null = & $add '担当者' 9
+    $fields.PlanStart = & $add '予定開始' 10.5
+    $fields.PlanEnd = & $add '予定終了' 10.5
+    $iEffort = & $add '予定工数' 6.5
+    $fields.ActualStart = & $add '実績開始' 10.5
+    $fields.ActualEnd = & $add '実績終了' 10.5
+    $iForecast = $null; if ($hasForecast) { $iForecast = & $add '見込終了' 10.5; $fields.Forecast = $iForecast }
+    $fields.Progress = & $add '進捗率' 6.5
+    $iActualEffort = $null; if ($hasActualEffort) { $iActualEffort = & $add '実績工数' 6.5 }
+    $fields.Status = & $add '状態' 10.5
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($t in $Tasks) {
+        $v = New-Object object[] $columns.Count
+        for ($i = 0; $i -lt $v.Count; $i++) { $v[$i] = '' }
+        $v[0] = [string]$t.Wbs; $v[1] = [string]$t.Task; $v[2] = [string]$t.Owner
+        foreach ($pair in @(@($fields.PlanStart, $t.PlanStart), @($fields.PlanEnd, $t.PlanEnd), @($fields.ActualStart, $t.ActualStart), @($fields.ActualEnd, $t.ActualEnd), @($iForecast, $t.Forecast))) {
+            if ($null -ne $pair[0] -and $pair[1] -is [datetime]) { $v[$pair[0]] = $pair[1].Date }
+        }
+        foreach ($pair in @(@($iEffort, $t.Effort), @($fields.Progress, $t.Progress), @($iActualEffort, $t.ActualEffort))) {
+            if ($null -ne $pair[0] -and ($pair[1] -is [double] -or $pair[1] -is [int])) { $v[$pair[0]] = [double]$pair[1] }
+        }
+        $rows.Add(@{ Values = $v; Summary = [bool]$t.Summary })
+    }
+    $gantt = @{ Dates = $span.Dates; Unit = $span.Unit; Fields = $fields; AsOf = $AsOf.Date; Holidays = $holidaySet; HolidayName = '休日'; Title = $Title }
+    $holidayRows = New-Object System.Collections.Generic.List[object]
+    foreach ($h in @($holidaySet | Sort-Object)) { $holidayRows.Add(@{ Values = @($h, '') }) }
+    # 休日の範囲（あとから休日を足せるように 300 行まで）
+    $holidaySheet = @{ Name = '休日'; Columns = @(@{ Header = '日付'; Width = 12 }, @{ Header = '名前'; Width = 20 }); Rows = $holidayRows; Names = @{ '休日' = '$A$2:$A$300' } }
+    return [pscustomobject]@{ Sheets = @(@{ Name = $Name; Columns = $columns.ToArray(); Rows = $rows; Gantt = $gantt }, $holidaySheet); Unit = $span.Unit; Dates = $span.Dates }
+}
+
 function Export-Workbook {
     #     複数シートの表を xlsx に書き出す（Excel 不要）。各シートは見出し行の固定とオートフィルター付き。
     #     Sheets: @(@{ Name; Columns = @(@{ Header; Width }); Rows = @(@{ Values = @(...); Link = @{ Column; Path; Location; Tooltip } }) })
@@ -925,6 +1221,8 @@ function Export-Workbook {
     #       Charts: そのシートの表から作るグラフ（ConvertTo-ChartXml）。表の右に縦に並べて置く
     #       Shapes: 図形（四角・文字・矢印。ConvertTo-ShapeAnchorXml）。Grid: @{ ColumnWidth; RowHeight } で、列と行を同じ大きさのます目にし、
     #       枠線を消す（図のシート）。Columns が空のシートは表を書かず、Title があれば A1 に書く
+    #       Gantt: ガントチャート形式の進捗管理票のシートにする（ConvertTo-GanttSheetXml。New-GanttSheets で作る）
+    #       Names: ブックの名前の範囲（名前 → '$A$2:$A$300' のようなそのシートの範囲）
     param($Sheets, [string] $FilePath)
 
     $font = '<sz val="10"/><name val="游ゴシック"/><family val="3"/><charset val="128"/>'
@@ -934,8 +1232,16 @@ function Export-Workbook {
     $chartCount = 0; $drawingCount = 0
 
     $index = 0
+    $hasFormulas = $false
     foreach ($s in $Sheets) {
         $index++
+        if ($s.Gantt) {
+            $gx = ConvertTo-GanttSheetXml $s ($index -eq 1)
+            $sheetEntries.Add([pscustomobject]@{ Name = $s.Name; Xml = $gx.Xml; Rels = ''; HasLinks = $false })
+            [void]$definedNames.Append(('<definedName name="_xlnm._FilterDatabase" localSheetId="{0}" hidden="1">''{1}''!{2}</definedName>' -f ($index - 1), (ConvertTo-XmlText $s.Name.Replace("'", "''")), ($gx.FilterRef -replace '([A-Z]+)(\d+)', '$$$1$$$2')))
+            $hasFormulas = $true
+            continue
+        }
         $colCount = @($s.Columns | Where-Object { $_ }).Count
         $hasTable = $colCount -gt 0
         $lastCol  = 'A'
@@ -1062,6 +1368,11 @@ function Export-Workbook {
         if ($hasTable) { [void]$definedNames.Append(('<definedName name="_xlnm._FilterDatabase" localSheetId="{0}" hidden="1">''{1}''!$A$1:${2}${3}</definedName>' -f ($index - 1), (ConvertTo-XmlText $s.Name.Replace("'", "''")), $lastCol, $rowCount)) }
     }
 
+    foreach ($s in $Sheets) {
+        if (-not $s.Names) { continue }
+        foreach ($n in $s.Names.Keys) { [void]$definedNames.Append(('<definedName name="{0}">''{1}''!{2}</definedName>' -f (ConvertTo-XmlText $n), (ConvertTo-XmlText $s.Name.Replace("'", "''")), $s.Names[$n])) }
+    }
+
     $ct = New-Object System.Text.StringBuilder
     [void]$ct.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>')
     $wbSheets = New-Object System.Text.StringBuilder
@@ -1087,13 +1398,51 @@ function Export-Workbook {
     [void]$ct.Append('</Types>')
     [void]$wbRels.Append(('<Relationship Id="rId{0}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>' -f ($sheetEntries.Count + 1)))
 
+    # スタイル 0:標準 1:見出し 2:折り返し・上詰め 3:リンク 4:日付
+    $stylesXml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="176" formatCode="yyyy/mm/dd"/></numFmts><fonts count="3"><font>{0}</font><font><b/>{0}</font><font><u/><sz val="10"/><color rgb="FF0563C1"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFBFBFBF"/></left><right style="thin"><color rgb="FFBFBFBF"/></right><top style="thin"><color rgb="FFBFBFBF"/></top><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="176" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf></cellXfs><cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles></styleSheet>' -f $font)
+    if ($hasFormulas) {
+        # ガントチャートのシートがあるブックのスタイル（標準のスタイル 0〜4 の後ろに足す）。0:標準 1:見出し 2:折り返し・上詰め 3:リンク 4:日付
+        # 5〜17: ガントチャート（ConvertTo-GanttSheetXml）5:日の見出し 6:週の見出し 7:曜日 8:月 9:日付のます目 10:進捗率 11〜14:親のタスク（文字・日付・数・進捗率）
+        #        15:タイトル 16:基準日の見出し 17:基準日。条件付き書式 0:実績 1:遅延 2:親のタスクの予定 3:予定 4:土日・休日 5:今日
+        $ganttStyles = (('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+            '<numFmts count="4"><numFmt numFmtId="176" formatCode="yyyy/mm/dd"/><numFmt numFmtId="177" formatCode="d"/><numFmt numFmtId="178" formatCode="m/d"/><numFmt numFmtId="179" formatCode="yyyy&quot;年&quot;m&quot;月&quot;"/></numFmts>' +
+            '<fonts count="5"><font>{0}</font><font><b/>{0}</font><font><u/><sz val="10"/><color rgb="FF0563C1"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font>' +
+            '<font><b/><sz val="12"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font><font><sz val="9"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font></fonts>' +
+            '<fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/><bgColor indexed="64"/></patternFill></fill>' +
+            '<fill><patternFill patternType="solid"><fgColor rgb="FFF2F2F2"/><bgColor indexed="64"/></patternFill></fill></fills>' +
+            '<borders count="3"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFBFBFBF"/></left><right style="thin"><color rgb="FFBFBFBF"/></right><top style="thin"><color rgb="FFBFBFBF"/></top><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border>' +
+            '<border><left style="thin"><color rgb="FFE0E0E0"/></left><right style="thin"><color rgb="FFE0E0E0"/></right><top style="thin"><color rgb="FFE0E0E0"/></top><bottom style="thin"><color rgb="FFE0E0E0"/></bottom><diagonal/></border></borders>' +
+            '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="18"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="176" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
+            '<xf numFmtId="177" fontId="4" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
+            '<xf numFmtId="178" fontId="4" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
+            '<xf numFmtId="0" fontId="4" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
+            '<xf numFmtId="179" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/>' +
+            '<xf numFmtId="0" fontId="0" fillId="0" borderId="2" xfId="0" applyBorder="1"/>' +
+            '<xf numFmtId="9" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
+            '<xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
+            '<xf numFmtId="176" fontId="1" fillId="3" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
+            '<xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
+            '<xf numFmtId="9" fontId="1" fillId="3" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
+            '<xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>' +
+            '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="right"/></xf>' +
+            '<xf numFmtId="176" fontId="1" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/></cellXfs>' +
+            '<cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles>' +
+            '<dxfs count="6"><dxf><fill><patternFill patternType="solid"><fgColor rgb="FF2F5597"/><bgColor rgb="FF2F5597"/></patternFill></fill></dxf>' +
+            '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FFF4B183"/><bgColor rgb="FFF4B183"/></patternFill></fill></dxf>' +
+            '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FF808080"/><bgColor rgb="FF808080"/></patternFill></fill></dxf>' +
+            '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FF9DC3E6"/><bgColor rgb="FF9DC3E6"/></patternFill></fill></dxf>' +
+            '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FFE7E6E6"/><bgColor rgb="FFE7E6E6"/></patternFill></fill></dxf>' +
+            '<dxf><border><left style="thin"><color rgb="FFFF0000"/></left><right style="thin"><color rgb="FFFF0000"/></right></border></dxf></dxfs>' +
+            '</styleSheet>') -f $font)
+        $stylesXml = $ganttStyles
+    }
+
     $parts = [ordered]@{
         '[Content_Types].xml' = $ct.ToString()
         '_rels/.rels' = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + $rootRels + '</Relationships>'
-        'xl/workbook.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets>{0}</sheets>{1}</workbook>' -f $wbSheets.ToString(), $(if ($definedNames.Length -gt 0) { '<definedNames>' + $definedNames.ToString() + '</definedNames>' } else { '' }))
+        'xl/workbook.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets>{0}</sheets>{1}{2}</workbook>' -f $wbSheets.ToString(), $(if ($definedNames.Length -gt 0) { '<definedNames>' + $definedNames.ToString() + '</definedNames>' } else { '' }), $(if ($hasFormulas) { '<calcPr calcId="191029" fullCalcOnLoad="1"/>' } else { '' }))
         'xl/_rels/workbook.xml.rels' = $wbRels.ToString()
-        # スタイル 0:標準 1:見出し 2:折り返し・上詰め 3:リンク
-        'xl/styles.xml' = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="176" formatCode="yyyy/mm/dd"/></numFmts><fonts count="3"><font>{0}</font><font><b/>{0}</font><font><u/><sz val="10"/><color rgb="FF0563C1"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFBFBFBF"/></left><right style="thin"><color rgb="FFBFBFBF"/></right><top style="thin"><color rgb="FFBFBFBF"/></top><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="176" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf></cellXfs><cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles></styleSheet>' -f $font)
+        'xl/styles.xml' = $stylesXml
     }
     for ($i = 1; $i -le $sheetEntries.Count; $i++) {
         $parts["xl/worksheets/sheet$i.xml"] = $sheetEntries[$i - 1].Xml

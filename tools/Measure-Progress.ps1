@@ -17,6 +17,11 @@ param(
 
     [string] $OutXlsx,
 
+    [string] $OutGantt,
+
+    [ValidateSet('Auto', 'Day', 'Week')]
+    [string] $GanttUnit = 'Auto',
+
     [string[]] $Exclude,
 
     [switch] $NoExcel
@@ -28,11 +33,16 @@ Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChe
 $searchScript = Join-Path $PSScriptRoot 'Search-Excel.ps1'
 
 if (-not $Headers) { $Headers = Join-Path $PSScriptRoot 'progress/WBSの見出し.csv' }
-foreach ($name in @('Headers', 'Holidays', 'FillTemplate', 'OutFile', 'OutXlsx')) {
+foreach ($name in @('Headers', 'Holidays', 'FillTemplate', 'OutFile', 'OutXlsx', 'OutGantt')) {
     $v = Get-Variable -Name $name -ValueOnly
     if ($v) { Set-Variable -Name $name -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($v) }
 }
 if ($OutXlsx -and [System.IO.Path]::GetExtension($OutXlsx) -ne '.xlsx') { throw "-OutXlsx の拡張子は .xlsx にしてください: $OutXlsx" }
+if ($OutGantt) {
+    if ([System.IO.Path]::GetExtension($OutGantt) -ne '.xlsx') { throw "-OutGantt の拡張子は .xlsx にしてください: $OutGantt" }
+    # 進捗管理票には実績を記入していくので、上書きしない
+    if (Test-Path -LiteralPath $OutGantt) { throw "-OutGantt のファイルがすでにあります（記入した実績を消さないよう、上書きしません）: $OutGantt" }
+}
 # 読まないファイル（週次報告の前の週の報告など。フォルダならその中のすべて）
 $excludeSet = Get-FilePathSet $Exclude
 if ($FillTemplate) {
@@ -461,7 +471,7 @@ if ($files.Count -gt 0) {
     $searchArgs = @{ Pattern = '\S'; Path = $files.ToArray(); Target = 'Value'; NoRecurse = $true }
     if ($SheetNamePattern) { $searchArgs['SheetNamePattern'] = $SheetNamePattern }
     if ($NoExcel) { $searchArgs['NoExcel'] = $true }
-    $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($excludeSet.Contains([string]$_.Path) -or ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) -or ($OutFile -and [string]::Equals($_.Path, $OutFile, [System.StringComparison]::OrdinalIgnoreCase)) -or ($FillTemplate -and [string]::Equals($_.Path, $FillTemplate, [System.StringComparison]::OrdinalIgnoreCase))) })
+    $hits = @(& $searchScript @searchArgs 6>$null | Where-Object { -not ($excludeSet.Contains([string]$_.Path) -or ($OutGantt -and [string]::Equals($_.Path, $OutGantt, [System.StringComparison]::OrdinalIgnoreCase)) -or ($OutXlsx -and [string]::Equals($_.Path, $OutXlsx, [System.StringComparison]::OrdinalIgnoreCase)) -or ($OutFile -and [string]::Equals($_.Path, $OutFile, [System.StringComparison]::OrdinalIgnoreCase)) -or ($FillTemplate -and [string]::Equals($_.Path, $FillTemplate, [System.StringComparison]::OrdinalIgnoreCase))) })
     $books = ConvertTo-DesignBooks $hits
     foreach ($book in $books.Values) {
         if (Test-OutputBook $book) { $outputBooks.Add($book.File); continue }
@@ -555,6 +565,18 @@ foreach ($r in $rows) {
     $r | Add-Member -NotePropertyName Wbs -NotePropertyValue $n
     $i = $n.LastIndexOf('.')
     while ($i -gt 0) { $parents['{0}|{1}|{2}' -f $r.Place.Path, $r.Place.Sheet, $n.Substring(0, $i)] = $true; $i = $n.LastIndexOf('.', $i - 1) }
+}
+
+# 同じタスク（WBS 番号とタスク名）が 2 つ以上のファイルにある: 元の WBS と、そこから作った進捗管理票（-OutGantt）を同じフォルダに置いたときなど
+$taskFiles = @{}
+foreach ($r in $rows) {
+    $k = '{0}|{1}' -f $r.Wbs, (ConvertTo-Label $r.Values['タスク'])
+    if (-not $taskFiles.ContainsKey($k)) { $taskFiles[$k] = New-Object System.Collections.Generic.List[string] }
+    if (-not $taskFiles[$k].Contains($r.Place.File)) { $taskFiles[$k].Add($r.Place.File) }
+}
+$duplicated = @($taskFiles.Values | Where-Object { $_.Count -gt 1 })
+if ($duplicated.Count -gt 0) {
+    Write-Warning ('同じタスク（WBS 番号とタスク名）が、いくつものファイルにあります（{0} 件。{1}）。元の WBS と進捗管理票を同じフォルダに置いていませんか（両方を数えます）' -f $duplicated.Count, (@($duplicated[0]) -join '・'))
 }
 
 $tasks = New-Object System.Collections.Generic.List[object]
@@ -748,6 +770,30 @@ if ($FillTemplate) {
     Save-ZipPackage -FilePath $FillTemplate -Changes $changes -OutPath $OutFile
 }
 
+if ($OutGantt) {
+    # ガントチャート形式の進捗管理票: 読んだ WBS の行（親のタスクも。合計の行は除く）を、記入されたままの値で書く（基準日による読み替えはしない）
+    $ganttTasks = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) {
+        $v = $r.Values
+        if (Test-TotalRow $v) { continue }
+        $isParent = [bool]($r.Wbs -and $parents.ContainsKey(('{0}|{1}|{2}' -f $r.Place.Path, $r.Place.Sheet, $r.Wbs)))
+        $ganttTasks.Add([pscustomobject]@{
+            Wbs = ([string]$v['WBS番号']).Trim(); Task = ([string]$v['タスク']).Trim(); Owner = ([string]$v['担当']).Trim()
+            PlanStart = (ConvertTo-Date $v['予定開始']); PlanEnd = (ConvertTo-Date $v['予定終了']); Effort = (ConvertTo-Number $v['予定工数'])
+            ActualStart = (ConvertTo-Date $v['実績開始']); ActualEnd = (ConvertTo-Date $v['実績終了']); Forecast = (ConvertTo-Date $v['見込終了'])
+            Progress = (ConvertTo-Rate $v['進捗率']); ActualEffort = (ConvertTo-Number $v['実績工数']); Summary = $isParent
+        })
+    }
+    try {
+        $gantt = New-GanttSheets $ganttTasks $AsOf @($holidaySet) $GanttUnit
+        Export-Workbook -FilePath $OutGantt -Sheets $gantt.Sheets
+    }
+    catch {
+        Write-Warning ("進捗管理票を保存できませんでした: {0} : {1}" -f $OutGantt, $_.Exception.Message)
+        $OutGantt = $null
+    }
+}
+
 if ($OutXlsx) {
     # 日付は日付のセルにする（Excel で並べ替え・計算ができる）
     $taskRows = New-Object System.Collections.Generic.List[object]
@@ -790,6 +836,12 @@ foreach ($l in $ganttLog) { Write-Host $l }
 if ($outputBooks.Count -gt 0) { Write-Host ('読まなかったブック（進捗・週次報告の結果とリカバリ計画のテンプレート）: {0}' -f ($outputBooks -join '・')) }
 if ($FillTemplate) { Write-Host ('テンプレートに書き込みました: {0}（02_遅延状況 {1} 件・08_週次モニタリング {2} 週）' -f $OutFile, $written['02_遅延状況'], $written['08_週次モニタリング']) }
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
+if ($OutGantt) {
+    $unitText = '1 日 1 列'
+    if ($gantt.Unit -eq 'Week') { $unitText = '1 週 1 列' }
+    Write-Host ('ガントチャートの進捗管理票を保存しました: {0}（{1}・{2}〜{3}）' -f $OutGantt, $unitText, $gantt.Dates[0].ToString('yyyy/MM/dd', $invariant), $gantt.Dates[-1].ToString('yyyy/MM/dd', $invariant))
+    Write-Host '  これからは進捗管理票に実績開始・実績終了・進捗率を記入してください。元の WBS は、同じフォルダに置いたままにしないでください（進捗・週次報告が両方を読みます）'
+}
 
 # .SYNOPSIS
 #     WBS（Excel・CSV）から進捗を集計し、遅延タスク・PV／EV／SPI・週ごとの完了数を出します（Excel 不要）。
@@ -841,6 +893,15 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .PARAMETER OutXlsx
 #     結果を xlsx に保存します（タスク・担当者別・週次。タスクから WBS の該当行へのリンク付き）。
 #
+# .PARAMETER OutGantt
+#     ガントチャート形式の進捗管理票（xlsx）を作ります。左に WBS の列（WBS番号・タスク名・担当者・予定開始・予定終了・予定工数・
+#     実績開始・実績終了・進捗率・状態。見込終了・実績工数は WBS にあるときだけ）、右に日付の列を並べ、予定・実績・遅延のバー、
+#     基準日（今日）の線、土日・休日の色を条件付き書式で描きます。Excel で実績開始・実績終了・進捗率を記入すると、バーと状態が変わります。
+#     このツール・週次報告は、進捗管理票をそのまま WBS として読みます。記入した実績を消さないよう、すでにあるファイルには書きません。
+#
+# .PARAMETER GanttUnit
+#     進捗管理票の日付の列の単位: Auto（既定。期間が 92 日までは 1 日 1 列、それより長ければ 1 週 1 列）・Day・Week。
+#
 # .PARAMETER Exclude
 #     読まないファイルまたはフォルダ（複数可。WBS のフォルダに置いたほかの表など）。
 #
@@ -849,6 +910,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #
 # .EXAMPLE
 #     .\Measure-Progress.ps1 D:\PJ\WBS.xlsx -Holidays .\syukujitsu.csv
+#
+# .EXAMPLE
+#     # 今の WBS から、ガントチャート形式の進捗管理票を作る（これからは進捗管理票に実績を記入する）
+#     .\Measure-Progress.ps1 D:\PJ\WBS.xlsx -Holidays .\syukujitsu.csv -OutGantt D:\PJ\進捗管理票.xlsx
 #
 # .EXAMPLE
 #     # 遅延タスクと週ごとの完了数を、スケジュール遅延リカバリ計画のテンプレートに書き込む
