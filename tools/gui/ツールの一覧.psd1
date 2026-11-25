@@ -289,6 +289,14 @@
             Required = @('Path'); Output = @('OutXlsx'); OutputName = '進捗'; Keywords = 'WBS 遅延 EVM SPI ガントチャート'
         }
         @{
+            Id = 'Gantt'; Label = 'ガントチャートの進捗管理票を作る'; Group = '見積もり・進捗'; Tool = 'Measure-Progress.ps1'
+            Summary = 'WBS から、ガントチャート形式の進捗管理票（Excel）を作ります。Excel で実績開始・実績終了・進捗率を入力すると、バー（予定・実績・遅延）と状態がその場で変わります。進捗・週次報告は、進捗管理票をそのまま WBS として読みます。'
+            Main = @('Path', 'Holidays', 'GanttUnit', 'OutGantt')
+            Labels = @{ Path = 'WBS のファイル'; Holidays = '休日の CSV（無くてもよい）'; GanttUnit = '日付の列の単位（Auto: 期間で決める）'; OutGantt = '進捗管理票の保存先' }
+            Hide = @('OutXlsx', 'FillTemplate', 'OutFile')
+            Required = @('Path'); Output = @('OutGantt'); OutputName = '進捗管理票'; Keywords = 'ガントチャート 進捗管理票 WBS バー 線表 スケジュール'
+        }
+        @{
             Id = 'Effort'; Label = '工数の実績を集計する'; Group = '見積もり・進捗'; Tool = 'Measure-Effort.ps1'
             Summary = '日報・工数実績表の工数をタスク・担当者・週ごとに集計し、WBS の予定工数と比べて予定超過のタスクと CPI を出します。'
             Main = @('Path', 'Wbs', 'AsOf', 'OutXlsx')
