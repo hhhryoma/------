@@ -38,6 +38,7 @@ Test-Case 'New-WbsDraft: 規模の見積もりの工数を工程に配分し、�
     Assert-True ($keys -contains '2.1|SCR001 受注一覧（詳細設計レビュー）|佐藤|11/06|11/06|0.25')
     Assert-True ($keys -contains '3.1|SCR001 受注一覧（製造）|山田|11/06|11/10|2')
     Test-WbsOrder $rows
+    Assert-Equal '|1.1|2.1|3.1|' ((@('1.1', '2.1', '3.1', '4.1', '1') | ForEach-Object { $w = $_; @($rows | Where-Object { $_.Wbs -eq $w })[0].Predecessors }) -join '|') '先行は同じ機能の前の工程の WBS 番号（工程の行は空）'
     Assert-Equal @('4|単体テスト||11/12|11/17|5.1', '4.1|SCR001 受注一覧（単体テスト）|山田|11/12|11/16|1.5') @($keys | Where-Object { $_ -match '^4(\.1)?\|' })
     $tables = @($rows | Where-Object { $_.Task -like 'M_CUSTOMER*' })
     Assert-Equal '0.36|0.07|0.57' ((@($tables | ForEach-Object { $_.Days })) -join '|') '0.5 人日のテーブル 2 つを 1 人日のタスクにまとめ、配分を丸めた残りは最後の工程に入れる'
@@ -67,6 +68,7 @@ Test-Case 'New-WbsDraft: 稼働率（佐藤:50%）・待ち合わせの工程・
     $firstIt = @($tasks | Where-Object { $_.Task -match '結合テスト' } | Sort-Object Start)[0].Start
     Assert-Equal ([datetime]'2026-11-17') $lastBefore
     Assert-True ($firstIt -ge $lastBefore) '待ち合わせの結合テストは、前の工程がすべて終わってから'
+    Assert-Equal '1,2,3' @($rows | Where-Object { $_.Wbs -eq '4.1' })[0].Predecessors '待ち合わせの工程の先行は、前の工程の番号すべて'
     Assert-Equal '' $rows[1].Deliverable '成果物の列が無ければ空'
 
     $text = Get-HostText { & $WbsTool $designDir -Start '2026-11-02' -Members '山田, 佐藤：50%' -Phases $phases -BundleBelow 0 | Out-Null }
@@ -106,8 +108,8 @@ Test-Case 'New-WbsDraft: -OutXlsx の WBS は Measure-Progress.ps1 がそのま�
     $null = & $WbsTool $designDir -Start '2026-11-02' -Members '山田', '佐藤' -OutXlsx $out -OutCsv $csv 6>$null
     $book = Read-XlsxSheet -Path $out -Index 1
     Assert-Equal @('WBS', '担当者別', '規模') $book.Sheets
-    Assert-Equal 'WBS番号|タスク名|成果物|担当者|予定開始|予定終了|予定工数|実績開始|実績終了|進捗率|実績工数|見積もりの根拠' ((@('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L') | ForEach-Object { $book.Rows[1][$_] }) -join '|')
-    Assert-Equal ([string](([datetime]'2026-11-02') - [datetime]'1899-12-30').TotalDays) ([string]$book.Rows[3]['E']) '予定開始は日付のセル'
+    Assert-Equal 'WBS番号|タスク名|成果物|担当者|先行|予定開始|予定終了|予定工数|実績開始|実績終了|進捗率|実績工数|見積もりの根拠' ((@('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M') | ForEach-Object { $book.Rows[1][$_] }) -join '|')
+    Assert-Equal ([string](([datetime]'2026-11-02') - [datetime]'1899-12-30').TotalDays) ([string]$book.Rows[3]['F']) '予定開始は日付のセル'
     $load = Read-XlsxSheet -Path $out -Index 2
     Assert-Equal '担当者|稼働率|タスクの数|工数の合計（人日）|うちレビューなど（人日）' ((@('A', 'B', 'C', 'D', 'E') | ForEach-Object { $load.Rows[1][$_] }) -join '|')
     Assert-Equal '100%' $load.Rows[2]['B']
@@ -124,7 +126,8 @@ Test-Case 'New-WbsDraft: -OutXlsx の WBS は Measure-Progress.ps1 がそのま�
     $bytes = [System.IO.File]::ReadAllBytes($csv)
     Assert-Equal '239|187|191' (@($bytes[0..2]) -join '|') 'CSV は BOM 付き'
     $lines = [System.IO.File]::ReadAllLines($csv)
-    Assert-Equal '"1.1","SCR001 受注一覧（詳細設計）","詳細設計書","山田","2026/11/02","2026/11/03","1.25","","","","","画面 普通（項目数 17・イベント数 6）"' $lines[2]
+    Assert-Equal '"1.1","SCR001 受注一覧（詳細設計）","詳細設計書","山田","","2026/11/02","2026/11/03","1.25","","","","","画面 普通（項目数 17・イベント数 6）"' $lines[2]
+    Assert-Match ($lines -join "`n") '"2\.1","SCR001 受注一覧（詳細設計レビュー）","レビュー記録票","佐藤","1\.1",' '先行は同じ機能の前の工程'
 }
 
 Test-Case 'New-WbsDraft: Get-Help でヘルプが表示される' {
@@ -142,8 +145,8 @@ Test-Case 'New-WbsDraft: -Gantt で WBS のシートをガントチャート形�
     $book = Read-XlsxSheet -Path $out -Index 1
     Assert-Equal @('WBS', '担当者別', '規模', '休日') $book.Sheets
     # 3 行目が見出し（見積もりの根拠は規模のシート。実績工数は空でも置く）。日付の列は 11/02 の月曜から
-    Assert-Equal @('WBS番号', 'タスク名', '担当者', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '進捗率', '実績工数', '状態') @('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K' | ForEach-Object { $book.Rows[3][$_] })
-    Assert-Equal '46328' $book.Rows[3]['L']
+    Assert-Equal @('WBS番号', 'タスク名', '担当者', '先行', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '進捗率', '実績工数', '状態') @('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L' | ForEach-Object { $book.Rows[3][$_] })
+    Assert-Equal '46328' $book.Rows[3]['M']
     Assert-Equal '46329' (Read-XlsxSheet -Path $out -Index 4).Rows[2]['A'] '休日のシートの 11/03'
     $tasks = @(& (Join-Path $script:ToolsDir 'Measure-Progress.ps1') -Path $out -AsOf '2026-11-02' -Holidays $holidays 6>$null 3>$null)
     Assert-Equal 26 $tasks.Count
