@@ -564,12 +564,14 @@ foreach ($d in $defs) {
 }
 $kinds = @($ruleList | ForEach-Object { $_.Kind } | Select-Object -Unique)
 
-# 重複定義: 同じ ID が 2 か所以上で定義されている（一覧は一覧の中で。基本設計書と詳細設計書は、それぞれの中で）
+# 重複定義: 同じ ID が 2 か所以上で定義されている（一覧は一覧の中で。基本設計書と詳細設計書は、それぞれの中で）。
+# 親のある種類（カラム・画面項目）は、同じファイルの中だけで見る（別のファイルで同じ親の ID を使ったときは、親の重複として 1 回だけ知らせる）
 foreach ($section in @('定義', '一覧')) {
     $groups = [ordered]@{}
     foreach ($d in $defs) {
         if ($d.Section -ne $section -or $d.Rule.AllowDuplicate) { continue }
         $gk = '{0}|{1}|{2}' -f $d.Kind, $d.Key, $d.Source
+        if ($d.Rule.Parent) { $gk += '|' + $d.Place.Path }
         if (-not $groups.Contains($gk)) { $groups[$gk] = New-Object System.Collections.Generic.List[object] }
         $groups[$gk].Add($d)
     }
@@ -621,7 +623,54 @@ foreach ($d in $defs) {
 
 # 一覧との違い: 一覧（画面一覧・テーブル一覧）と、設計書の定義の過不足・名前。基本設計書の一覧は、詳細設計書の一覧と別に比べる。
 # 基本設計との違い: 詳細設計書に定義がある種類は、基本設計書の一覧と定義（基本設計の画面設計書など）をまとめて基本設計の一覧として、
-# 詳細設計書の定義と過不足・名前を比べる（基本設計書だけを指定したときは、これまでどおり基本設計書の中で比べる）
+# 詳細設計書の定義と過不足・名前・属性（桁数・必須・入出力）を比べる（基本設計書だけを指定したときは、これまでどおり基本設計書の中で比べる）
+#   ID で見つからなければ、同じ親（画面項目なら画面）の中で名前が同じものと比べる（ID が違うと知らせる）。ID の列が名前の列のルール
+#   （ID の無い基本設計の画面項目一覧）は、名前で比べる。親のある種類は、両方に親（画面）があるものだけを比べる（親の過不足は親の種類で知らせる）
+function Get-Digits {
+    #     桁数の数（「12」「11,2」「10桁」など。無ければ $null）
+    param([string] $Text)
+    $m = [regex]::Match(([string]$Text).Normalize($nfkc), '^\s*(\d+)')
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+    return $null
+}
+
+function Test-NameOnlyRule {
+    #     ID の列が名前の列のルール（ID の無い基本設計の画面項目一覧など）。名前で比べる
+    param($Rule)
+    return [bool]($Rule.Name -and -not $Rule.Name.IsLabel -and $Rule.Column.Label -eq $Rule.Name.Label)
+}
+
+function ConvertTo-IoKey {
+    #     入出力の書き方（I・入力・O・出力・表示・IO・入出力）をそろえる
+    param([string] $Text)
+    $t = ([string]$Text).Normalize($nfkc).Trim().ToUpperInvariant()
+    if (-not $t) { return '' }
+    $in = $t -match 'I|入'; $out = $t -match 'O|出|表示'
+    if ($in -and $out) { return 'IO' }
+    if ($in) { return 'I' }
+    if ($out) { return 'O' }
+    return $t
+}
+
+function Compare-DefinitionAttributes {
+    #     一覧（基本設計）と定義の属性（桁数・必須・入出力）の違い。両方に列のある属性だけを比べる（型は書き方がまちまちなので比べない）
+    param($List, $Main)
+    $la = $List.Attrs; $ma = $Main.Attrs
+    if (-not $la -or -not $ma) { return @() }
+    $diffs = New-Object System.Collections.Generic.List[object]
+    if ($la.ContainsKey('桁数') -and $ma.ContainsKey('桁数')) {
+        $a = Get-Digits $la['桁数']; $b = Get-Digits $ma['桁数']
+        if ($null -ne $a -and $null -ne $b -and $a -ne $b) { $diffs.Add([pscustomobject]@{ Name = '桁数'; List = $la['桁数']; Main = $ma['桁数'] }) }
+    }
+    if ($la.ContainsKey('必須') -and $ma.ContainsKey('必須') -and (Test-MarkedValue $la['必須']) -ne (Test-MarkedValue $ma['必須'])) {
+        $diffs.Add([pscustomobject]@{ Name = '必須'; List = $(if ($la['必須']) { $la['必須'] } else { '（空）' }); Main = $(if ($ma['必須']) { $ma['必須'] } else { '（空）' }) })
+    }
+    if ($la['入出力'] -and $ma['入出力'] -and (ConvertTo-IoKey $la['入出力']) -ne (ConvertTo-IoKey $ma['入出力'])) {
+        $diffs.Add([pscustomobject]@{ Name = '入出力'; List = $la['入出力']; Main = $ma['入出力'] })
+    }
+    return $diffs.ToArray()
+}
+
 $basicAsList = @{}   # 基本設計書の定義を、基本設計の一覧として比べた種類
 foreach ($kind in $kinds) {
     $kindDefs = @($defs | Where-Object { $_.Kind -eq $kind })
@@ -632,9 +681,22 @@ foreach ($kind in $kinds) {
     foreach ($d in $kindDefs) {
         if ($d.Section -eq '定義' -and -not ($byBasic -and $d.Source)) { if (-not $main.Contains($d.Key)) { $main[$d.Key] = $d }; continue }
         if (-not $lists.Contains($d.Source)) { $lists[$d.Source] = [ordered]@{} }
-        if (-not $lists[$d.Source].Contains($d.Key)) { $lists[$d.Source][$d.Key] = $d }
+        # 名前で比べる一覧（ID の無い画面項目一覧）は、同じ名前の行（検索条件と一覧の「受注番号」など）も別々に比べる
+        $lk = $d.Key
+        if (Test-NameOnlyRule $d.Rule) { $lk = '{0}|{1}|{2}' -f $d.Key, $d.Place.Path, $d.Place.Cell }
+        if (-not $lists[$d.Source].Contains($lk)) { $lists[$d.Source][$lk] = $d }
     }
     if ($main.Count -eq 0) { continue }
+    # 名前（同じ親の中）→ 定義（設計書の順）
+    $byName = @{}
+    $mainParents = @{}
+    foreach ($m in $main.Values) {
+        if ($m.ParentKey) { $mainParents[$m.ParentKey] = $true }
+        if (-not $m.Name) { continue }
+        $nk = '{0}|{1}' -f $m.ParentKey, (ConvertTo-Label $m.Name).ToUpperInvariant()
+        if (-not $byName.ContainsKey($nk)) { $byName[$nk] = New-Object System.Collections.Generic.List[object] }
+        $byName[$nk].Add($m)
+    }
     foreach ($source in $lists.Keys) {
         $list = $lists[$source]
         $files = @($list.Values | ForEach-Object { $_.Place.File } | Select-Object -Unique)
@@ -643,40 +705,74 @@ foreach ($kind in $kinds) {
         if ($files.Count -gt 1) { $listName = '{0} ほか {1} ファイル' -f $first.Place.File, ($files.Count - 1) }
         if ($byBasic -and $source) {
             $item = '基本設計との違い'
+            $listLabel = '基本設計'
             $missingFmt = '基本設計にある{0}「{1} {2}」が、詳細設計にありません（設計書が無いか、ID が違います）'
-            $nameFmt = '{0}「{1}」の名前が違います（基本設計: {2} / {3}: {4}）'
             $absentFmt = '{0}「{1} {2}」が基本設計（{3}）にありません'
         }
         else {
             $item = '一覧との違い'
+            $listLabel = '一覧'
             $missingFmt = '一覧にある{0}「{1} {2}」の定義が見つかりません（設計書が無いか、ID が違います）'
-            $nameFmt = '{0}「{1}」の名前が違います（一覧: {2} / {3}: {4}）'
             $absentFmt = '{0}「{1} {2}」が一覧（{3}）にありません'
         }
+        $listParents = @{}
+        foreach ($l in $list.Values) { if ($l.ParentKey) { $listParents[$l.ParentKey] = $true } }
+        $matched = @{}   # 一覧の行と比べた定義のキー
         foreach ($l in $list.Values) {
-            if (-not $main.Contains($l.Key)) {
-                Add-Issue '警告' $item ($missingFmt -f $kind, $l.Shown, $l.Name).Replace(' 」', '」') $l.Place $kind
+            $byNameOnly = Test-NameOnlyRule $l.Rule
+            $m = $null
+            if (-not $byNameOnly -and $main.Contains($l.Key)) { $m = $main[$l.Key] }
+            if (-not $m -and $l.Name) {
+                $candidates = $byName[('{0}|{1}' -f $l.ParentKey, (ConvertTo-Label $l.Name).ToUpperInvariant())]
+                if ($byNameOnly) {
+                    # 同じ名前が 2 つ以上あれば、まだ比べていないものを設計書の順に
+                    if ($candidates) { $m = @($candidates | Where-Object { -not $matched.ContainsKey($_.Key) })[0] }
+                }
+                elseif ($candidates -and $candidates.Count -eq 1 -and -not $matched.ContainsKey($candidates[0].Key) -and -not $list.Contains($candidates[0].Key)) {
+                    # ID で見つからず、同じ名前の定義が 1 つだけ（ほかの行の ID でもない）なら、ID の違い
+                    $m = $candidates[0]
+                    Add-Issue '警告' $item ('{0}「{1}」の ID が違います（{2}: {3} / {4}: {5}）' -f $kind, $l.Name, $listLabel, $l.Shown, $m.Place.File, $m.Shown) $l.Place $kind
+                }
+            }
+            if (-not $m) {
+                # 親（画面）の設計書が無いものは、親の過不足として知らせる
+                if ($l.Rule.Parent -and $l.ParentKey -and -not $mainParents.ContainsKey($l.ParentKey)) { continue }
+                if ($byNameOnly) { $text = '{0}にある{1}「{2}」が、{3}にありません（名前が違うか、無くした項目です）' -f $listLabel, $kind, $l.Shown, $(if ($listLabel -eq '基本設計') { '詳細設計' } else { '設計書' }) }
+                else { $text = ($missingFmt -f $kind, $l.Shown, $l.Name).Replace(' 」', '」') }
+                Add-Issue '警告' $item $text $l.Place $kind
                 continue
             }
-            $m = $main[$l.Key]
-            if ($l.Name -and $m.Name -and (ConvertTo-Label $l.Name) -ne (ConvertTo-Label $m.Name)) {
-                Add-Issue '警告' $item ($nameFmt -f $kind, $l.Shown, $l.Name, $m.Place.File, $m.Name) $l.Place $kind
+            $matched[$m.Key] = $true
+            if (-not $byNameOnly -and $l.Name -and $m.Name -and (ConvertTo-Label $l.Name) -ne (ConvertTo-Label $m.Name)) {
+                Add-Issue '警告' $item ('{0}「{1}」の名前が違います（{2}: {3} / {4}: {5}）' -f $kind, $l.Shown, $listLabel, $l.Name, $m.Place.File, $m.Name) $l.Place $kind
+            }
+            $diffs = @(Compare-DefinitionAttributes $l $m)
+            if ($diffs.Count -gt 0) {
+                Add-Issue '警告' $item ('{0}「{1}」の{2}が違います（{3}: {4} / {5}: {6}）' -f $kind, $m.Shown, (@($diffs | ForEach-Object { $_.Name }) -join '・'),
+                    $listLabel, (@($diffs | ForEach-Object { '{0} {1}' -f $_.Name, $_.List }) -join '・'), $m.Place.File, (@($diffs | ForEach-Object { '{0} {1}' -f $_.Name, $_.Main }) -join '・')) $l.Place $kind
             }
         }
+        # 親のある種類（画面項目・カラム）は、一覧に親（画面）があるものだけを、親ごとにまとめて情報にする
+        # （基本設計で画面項目を書いた画面だけ。詳細設計で足した項目（ボタンなど）はよくあるため）
+        $absentByParent = [ordered]@{}
         foreach ($m in $main.Values) {
-            if (-not $list.Contains($m.Key)) {
-                Add-Issue '警告' $item ($absentFmt -f $kind, $m.Shown, $m.Name, $listName).Replace(' 」', '」') $m.Place $kind
+            if ($matched.ContainsKey($m.Key)) { continue }
+            if ($m.Rule.Parent -and $m.ParentKey) {
+                if (-not $listParents.ContainsKey($m.ParentKey)) { continue }
+                if (-not $absentByParent.Contains($m.ParentKey)) { $absentByParent[$m.ParentKey] = New-Object System.Collections.Generic.List[object] }
+                $absentByParent[$m.ParentKey].Add($m)
+                continue
             }
+            Add-Issue '警告' $item ($absentFmt -f $kind, $m.Shown, $m.Name, $listName).Replace(' 」', '」') $m.Place $kind
+        }
+        foreach ($group in $absentByParent.Values) {
+            $names = @($group | ForEach-Object { if ($_.Name) { $_.Name } else { $_.Id } })
+            $shownNames = @($names | Select-Object -First 10) -join '・'
+            if ($names.Count -gt 10) { $shownNames += ' ほか {0} 件' -f ($names.Count - 10) }
+            $parentShown = ($group[0].Shown -split '\.')[0]
+            Add-Issue '情報' $item ('{0}（{1}）に無い{2}が {3} 件あります（{4}: {5}）' -f $listLabel, $listName, $kind, $group.Count, $parentShown, $shownNames) $group[0].Place $kind
         }
     }
-}
-
-function Get-Digits {
-    #     桁数の数（「12」「11,2」「10桁」など。無ければ $null）
-    param([string] $Text)
-    $m = [regex]::Match(([string]$Text).Normalize($nfkc), '^\s*(\d+)')
-    if ($m.Success) { return [int]$m.Groups[1].Value }
-    return $null
 }
 
 function Test-Attributes {
@@ -1046,7 +1142,8 @@ if ($OutXlsx) {
 #       参照先なし       参照している ID が、どの設計書にも定義されていない（エラー）
 #       重複定義         同じ ID が 2 か所以上で定義されている（エラー）
 #       一覧との違い     画面一覧・テーブル一覧と設計書の過不足、名前の違い（警告）
-#       基本設計との違い 基本設計書の一覧（画面一覧・テーブル一覧・IF 一覧・帳票一覧・バッチ一覧）・定義と、詳細設計書の定義の過不足、名前の違い（警告）
+#       基本設計との違い 基本設計書の一覧（画面一覧・テーブル一覧・IF 一覧・帳票一覧・バッチ一覧・画面項目一覧）・定義と、詳細設計書の定義の過不足、
+#                        名前・ID の違い、画面項目の桁数・必須・入出力の違い（警告。基本設計に無い詳細設計の画面項目は、画面ごとにまとめて情報）
 #       CRUD の違い      基本設計書の CRUD 図（名前に CRUD のあるシート）と、詳細設計書の使用テーブル・設定元から作った CRUD 図の違い（警告）
 #       ヘッダの違い     1 つのファイルの中でシートによって画面ID・画面名が違う、ファイル名・シート名の ID と違う（警告）
 #       組み合わせの違い 画面遷移の一覧とイベント定義の遷移先など、同じ組み合わせを書く場所どうしの過不足（警告）
@@ -1064,6 +1161,8 @@ if ($OutXlsx) {
 #     基本設計書は、ファイル名から上のフォルダへ順に見て、名前に「基本設計・外部設計・概要設計」か先頭の「BD」（BD01_画面一覧.xlsx）が
 #     あるもの（「詳細設計・内部設計」か先頭の「DD」が先に見つかれば詳細設計）と、-BasicDesign で指定したものです。
 #     画面遷移も、基本設計書と詳細設計書（画面一覧の画面遷移・イベント定義の遷移先）で比べます。
+#     基本設計書の画面項目一覧（名前に「画面項目」のあるシートの、画面ID・項目名の表）は、詳細設計書の画面項目定義と、画面ごとに
+#     項目名で組にして（同じ名前は上から順に）、過不足と桁数・必須・入出力の違いを比べます。
 #     基本設計書の CRUD 図（行は画面・IF などの ID か機能一覧の機能 ID、列はテーブルの ID か名前）は、詳細設計書の使用テーブルから作った
 #     CRUD 図と、行 × テーブルごとに C・R・U・D を比べます（○ など C・R・U・D でない印は「使う」として、使っているかだけを比べます）。
 #

@@ -328,6 +328,34 @@ Test-Case 'Test-DesignConsistency: 基本設計書の一覧は詳細設計書の
     Assert-True ($text -notmatch 'うち基本設計書') '詳細設計書が無ければ、別に比べたとは書かない'
 }
 
+Test-Case 'Test-DesignConsistency: 基本設計の画面項目一覧（ID の無い表）と詳細設計の画面項目を、画面ごとに名前で比べ、過不足と桁数・入出力の違いを見つける。ID だけ違う画面も見つける' {
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    New-SheetsBook (Join-Path $dir '基本設計書.xlsx') ([ordered]@{
+            '画面一覧' = @(@('画面ID', '画面名'), @('SCR001', '受注一覧'), @('SCR02', '受注登録'))
+            '画面項目' = @(@('画面ID', '画面名', '項目名', '入出力', '桁数', '必須'),
+                @('SCR001', '受注一覧', '受注番号', 'I', '10', ''),
+                @('', '', '受注日(From)', '入力', '10', ''),
+                @('', '', '受注日（To）', 'O', '10', ''),
+                @('', '', '担当者', 'I', '10', ''),
+                @('', '', '受注番号', 'O', '12', ''),
+                @('SCR009', '出荷状況', '出荷番号', 'I', '5', '○'))
+        })
+    $issues = Invoke-Consistency @{ Path = $dir }
+    $items = @($issues | Where-Object { $_.Kind -eq '画面項目' })
+    Assert-Equal @(
+        '情報|基本設計との違い|DD02_画面設計書_SCR001_受注一覧.xlsx|画面項目定義!I9',
+        '警告|基本設計との違い|基本設計書.xlsx|画面項目!C2',
+        '警告|基本設計との違い|基本設計書.xlsx|画面項目!C4',
+        '警告|基本設計との違い|基本設計書.xlsx|画面項目!C5') (Get-ConsistencyKeys $items) '同じ名前の「受注番号」は、検索条件と一覧の順に比べる（重複にしない）。詳細設計の無い SCR009 の項目は比べない'
+    $details = @($items | ForEach-Object { $_.Detail })
+    Assert-True ($details -contains '画面項目「SCR001.orderNo」の桁数が違います（基本設計: 桁数 10 / DD02_画面設計書_SCR001_受注一覧.xlsx: 桁数 12）') '桁数'
+    Assert-True ($details -contains '画面項目「SCR001.orderDateTo」の入出力が違います（基本設計: 入出力 O / DD02_画面設計書_SCR001_受注一覧.xlsx: 入出力 I）') '入出力（「入力」と I は同じ）'
+    Assert-True ($details -contains '基本設計にある画面項目「SCR001.担当者」が、詳細設計にありません（名前が違うか、無くした項目です）')
+    Assert-Match ($details -join "`n") '基本設計（基本設計書\.xlsx（画面項目））に無い画面項目が 13 件あります（SCR001: 顧客コード・顧客名・受注ステータス・検索・'
+    Assert-True (@($issues | Where-Object { $_.Detail -eq '画面「受注登録」の ID が違います（基本設計: SCR02 / DD02_画面設計書_SCR002_受注登録.xlsx: SCR002）' }).Count -eq 1) 'ID で見つからず、名前が同じ画面は ID の違い'
+    Assert-True (@($issues | Where-Object { $_.Detail -match 'SCR02.*詳細設計にありません|SCR002.*基本設計.*にありません' }).Count -eq 0) 'ID の違いは過不足にしない'
+}
+
 Test-Case 'Test-DesignConsistency: 一覧ごとのファイル（BD01_・DD01_）、フォルダの名前、-BasicDesign で基本設計書を見分け、基本設計の画面設計書も基本設計として比べる' {
     # BD01_画面一覧.xlsx（基本設計。SCR002 が無く、画面遷移も少ない）と DD01_画面一覧.xlsx（詳細設計）
     $dir = Copy-Fixture (Join-Path $sampleDir '.')
