@@ -276,9 +276,9 @@
         }
         @{
             Id = 'WbsDraft'; Label = 'WBS の下書きを作る'; Group = '見積もり・進捗'; Tool = 'New-WbsDraft.ps1'
-            Summary = '設計書の規模の見積もりの工数を工程（詳細設計・レビュー・製造・単体テスト）に配分し、担当者と予定日（土日・休日を除く）を決めた WBS の下書きを作ります。進捗・工数・週次報告のツールがそのまま読めます。'
+            Summary = '設計書の規模の見積もりの工数を工程（詳細設計・レビュー・製造・単体テスト）に配分し、担当者と予定日（土日・休日を除く）を決めた WBS の下書きを作ります。レビューは作った人以外に割り当て、製造はレビューが終わってから始めます。進捗・工数・週次報告のツールがそのまま読めます。'
             Main = @('Path', 'Start', 'Members', 'Holidays', 'OutXlsx')
-            Labels = @{ Path = '設計書のフォルダ'; Start = '開始日'; Members = '担当者（カンマ区切り。空欄なら担当者を決めない）'; Holidays = '休日の CSV（無くてもよい）'; OutXlsx = 'WBS の保存先' }
+            Labels = @{ Path = '設計書のフォルダ'; Start = '開始日'; Members = '担当者（カンマ区切り。兼務の人は 佐藤:50% のように稼働率を付ける。空欄なら担当者を決めない）'; Holidays = '休日の CSV（無くてもよい）'; OutXlsx = 'WBS の保存先' }
             Required = @('Path'); Output = @('OutXlsx'); OutputName = 'WBS'; Keywords = 'WBS 計画 スケジュール 日程 工数 見積もり 担当'
         }
         @{

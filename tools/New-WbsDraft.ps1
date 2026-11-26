@@ -16,6 +16,9 @@ param(
 
     [string] $Holidays,
 
+    [ValidateRange(0, 1000)]
+    [double] $BundleBelow = 1,
+
     [string] $Coefficients,
 
     [string] $Rules,
@@ -53,15 +56,34 @@ Update-TypeData -TypeName 'WbsDraft.Task' -MemberType ScriptProperty -MemberName
 Update-TypeData -TypeName 'WbsDraft.Task' -DefaultDisplayPropertySet Wbs, Task, Member, StartDate, EndDate, Days -Force -WhatIf:$false
 $invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
-# 担当者（カンマ区切りでも書ける。無ければ担当者の決まっていない 1 人）
-$memberList = @($Members | ForEach-Object { ([string]$_) -split '[,、]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
-if ($memberList.Count -eq 0) { $memberList = @('') }
+# 担当者（カンマ区切りでも書ける。「佐藤:50%」で稼働率。無ければ担当者の決まっていない 1 人）
+$memberList = New-Object System.Collections.Generic.List[string]
+$memberRate = @{}
+foreach ($entry in @($Members | ForEach-Object { ([string]$_) -split '[,、]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    $name = $entry
+    $rate = 1.0
+    $m = [regex]::Match($entry, '^(.+?)\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)\s*([%％])?$')
+    if ($m.Success) {
+        $name = $m.Groups[1].Value.Trim()
+        $rate = [double]::Parse($m.Groups[2].Value, $invariant)
+        if ($m.Groups[3].Success -or $rate -gt 1) { $rate = $rate / 100 }
+        if ($rate -le 0 -or $rate -gt 1) { throw ("担当者の稼働率は、0 より大きく 100% 以下にしてください: {0}" -f $entry) }
+    }
+    if ($memberList.Contains($name)) { continue }
+    $memberList.Add($name)
+    $memberRate[$name] = $rate
+}
+$namedMembers = $memberList.Count
+if ($memberList.Count -eq 0) { $memberList.Add(''); $memberRate[''] = 1.0 }
 
 # ---------------------------------------------------------------- 工程の配分
 
 
 $phaseList = New-Object System.Collections.Generic.List[object]
-foreach ($r in (Read-CsvFile $Phases @('工程', '配分', '種類') '工程の配分')) {
+$phaseRows = Read-CsvFile $Phases @('工程', '配分', '種類') '工程の配分'
+# 担当の列: 「別の人」なら、その機能を作った人とは別の担当者に割り当てる（レビュー）。担当の列の無い CSV は、名前にレビューのある工程を別の人にする
+$hasOwnerColumn = $phaseRows.Count -gt 0 -and $null -ne $phaseRows[0].PSObject.Properties['担当']
+foreach ($r in $phaseRows) {
     $name = ([string]$r.'工程').Trim()
     if (-not $name) { continue }
     $ratio = 0.0
@@ -69,7 +91,13 @@ foreach ($r in (Read-CsvFile $Phases @('工程', '配分', '種類') '工程の�
         throw ("工程の配分の「配分」は 0 より大きい数にしてください: {0}（{1}）" -f $r.'配分', $name)
     }
     $kinds = @(([string]$r.'種類') -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    $phaseList.Add([pscustomobject]@{ Name = $name; Ratio = $ratio; Kinds = $kinds; Index = $phaseList.Count })
+    $optional = @{}
+    foreach ($column in @('担当', '待ち合わせ', '成果物')) { $optional[$column] = ''; if ($r.PSObject.Properties[$column]) { $optional[$column] = ([string]$r.$column).Trim() } }
+    if ($hasOwnerColumn) { $byOther = $optional['担当'] -match '別' } else { $byOther = $name -match 'レビュー' }
+    $phaseList.Add([pscustomobject]@{
+        Name = $name; Ratio = $ratio; Kinds = $kinds; Index = $phaseList.Count; ByOther = [bool]$byOther
+        Wait = ($optional['待ち合わせ'] -match '^(する|あり|○|〇|◯|yes|true|1)$'); Deliverable = $optional['成果物']
+    })
 }
 if ($phaseList.Count -eq 0) { throw "工程の配分に工程がありません: $Phases" }
 
@@ -124,65 +152,189 @@ foreach ($s in $sizes) {
     # 一覧の行を数えるもの（メッセージ一覧など）の名前「ファイル名（シート名）」は、拡張子の無いファイル名にする
     $name = $s.Name
     if ($s.File -and $name -eq ('{0}（{1}）' -f $s.File, $s.Sheet)) { $name = [System.IO.Path]::GetFileNameWithoutExtension($s.File) }
-    $functions.Add([pscustomobject]@{ Kind = $s.Kind; Name = $name; Days = [double]$days; Basis = $basis; Seq = $functions.Count; Member = $null; Tasks = (New-Object System.Collections.Generic.List[object]) })
+    $functions.Add([pscustomobject]@{ Kind = $s.Kind; Name = $name; Days = [double]$days; Basis = $basis; Seq = $functions.Count; Unit = $null })
 }
 if ($noCoefficient.Count -gt 0) {
     Write-Warning ('係数表に無い種類の工数は 0 にしました（係数表に足してください）: {0}' -f (@($noCoefficient | Group-InOrder { $_ } | ForEach-Object { '{0} {1} 件' -f $_.Name, $_.Count }) -join '・'))
 }
 if ($functions.Count -eq 0) { Write-Warning ('WBS にする機能がありません（設計書の規模を数えられませんでした）: {0}' -f ($Path -join ', ')) }
 
+# ---------------------------------------------------------------- 小さい機能をまとめる
+
+
+# 工数が -BundleBelow 人日に満たない機能は、同じ種類のものを順にまとめて 1 つのタスクにする（まとめた工数が -BundleBelow 以上になるまで。
+# 最後に 1 つだけ残ったものは、その前のまとまりに入れる）。テーブルを 1 つずつ 0.04 人日のレビューにしないため
+$eps = 0.000001
+$bundleOf = @{}   # 機能の Seq → まとめた機能（2 つ以上）
+$bundleNotes = New-Object System.Collections.Generic.List[string]
+if ($BundleBelow -gt 0) {
+    foreach ($g in @($functions | Where-Object { $_.Days -gt $eps -and $_.Days -lt $BundleBelow - $eps } | Group-InOrder Kind)) {
+        $bundles = New-Object System.Collections.Generic.List[object]
+        $current = New-Object System.Collections.Generic.List[object]
+        $sum = 0.0
+        foreach ($fn in $g.Group) {
+            $current.Add($fn)
+            $sum += $fn.Days
+            if ($sum -ge $BundleBelow - $eps) { $bundles.Add($current); $current = New-Object System.Collections.Generic.List[object]; $sum = 0.0 }
+        }
+        if ($current.Count -eq 1 -and $bundles.Count -gt 0) { $bundles[$bundles.Count - 1].Add($current[0]) }
+        elseif ($current.Count -gt 0) { $bundles.Add($current) }
+        $merged = @($bundles | Where-Object { $_.Count -ge 2 })
+        foreach ($bundle in $merged) { foreach ($fn in $bundle) { $bundleOf[$fn.Seq] = $bundle.ToArray() } }
+        if ($merged.Count -gt 0) { $bundleNotes.Add(('{0} {1} 件 → {2} つ' -f $g.Name, ($merged | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum, $merged.Count)) }
+    }
+}
+
+# WBS で割り当てる単位（機能、またはまとめた機能）
+$units = New-Object System.Collections.Generic.List[object]
+foreach ($fn in $functions) {
+    if ($fn.Unit) { continue }
+    $group = @($fn)
+    if ($bundleOf.ContainsKey($fn.Seq)) { $group = @($bundleOf[$fn.Seq]) }
+    $name = $fn.Name
+    $basis = $fn.Basis
+    # まとめたタスクの名前は「最初の機能 ほか N 件」（WBS の列に収まるように。まとめた機能は見積もりの根拠と規模のシートにある）
+    if ($group.Count -gt 1) {
+        $name = '{0} ほか {1} 件' -f $group[0].Name, ($group.Count - 1)
+        $basis = @($group | ForEach-Object { '{0}: {1}' -f $_.Name, $_.Basis }) -join ' / '
+    }
+    $unit = [pscustomobject]@{
+        Kind = $fn.Kind; Name = $name; Days = [math]::Round((@($group | ForEach-Object { $_.Days }) | Measure-Object -Sum).Sum, 2); Basis = $basis
+        Seq = $units.Count; Functions = $group; Member = $null; Tasks = (New-Object System.Collections.Generic.List[object])
+    }
+    foreach ($x in $group) { $x.Unit = $unit }
+    $units.Add($unit)
+}
+
 # ---------------------------------------------------------------- タスクを作る
 
 
 # 機能ごとに、その種類に当てはまる工程へ工数を配分する（当てはまる工程の配分の合計で割り、機能の工数の合計は変えない）
 $noPhaseKinds = New-Object System.Collections.Generic.List[string]
-foreach ($f in $functions) {
-    $applicable = @($phaseList | Where-Object { $_.Kinds.Count -eq 0 -or $_.Kinds -contains $f.Kind })
-    if ($applicable.Count -eq 0) { if (-not $noPhaseKinds.Contains($f.Kind)) { $noPhaseKinds.Add($f.Kind) }; continue }
+foreach ($u in $units) {
+    $applicable = @($phaseList | Where-Object { $_.Kinds.Count -eq 0 -or $_.Kinds -contains $u.Kind })
+    if ($applicable.Count -eq 0) { if (-not $noPhaseKinds.Contains($u.Kind)) { $noPhaseKinds.Add($u.Kind) }; continue }
     $ratioSum = ($applicable | Measure-Object Ratio -Sum).Sum
-    $rest = [math]::Round($f.Days, 2)
+    $rest = [math]::Round($u.Days, 2)
+    $previous = $null
     for ($i = 0; $i -lt $applicable.Count; $i++) {
         $p = $applicable[$i]
         # 丸めで合計がずれないよう、最後の工程に残りを入れる
-        if ($i -eq $applicable.Count - 1) { $d = [math]::Round($rest, 2) } else { $d = [math]::Round($f.Days * $p.Ratio / $ratioSum, 2) }
+        if ($i -eq $applicable.Count - 1) { $d = [math]::Round($rest, 2) } else { $d = [math]::Round($u.Days * $p.Ratio / $ratioSum, 2) }
         $rest -= $d
-        $f.Tasks.Add([pscustomobject]@{ Function = $f; Phase = $p; Name = ('{0}（{1}）' -f $f.Name, $p.Name); Days = [math]::Max(0.0, $d); Member = ''; StartAt = 0.0; EndAt = 0.0; Start = $null; End = $null })
+        $task = [pscustomobject]@{
+            Unit = $u; Phase = $p; Name = ('{0}（{1}）' -f $u.Name, $p.Name); Days = [math]::Max(0.0, $d); Member = ''
+            Previous = $previous; Next = $null; Order = 0; ReadyAt = 0.0; StartAt = 0.0; EndAt = 0.0; Start = $null; End = $null
+        }
+        if ($previous) { $previous.Next = $task }
+        $previous = $task
+        $u.Tasks.Add($task)
     }
 }
 if ($noPhaseKinds.Count -gt 0) { Write-Warning ('工程の配分に、次の種類の工程がありません（種類の列に足してください）: {0}' -f ($noPhaseKinds -join '・')) }
-$functions = @($functions | Where-Object { $_.Tasks.Count -gt 0 })
+$units = @($units | Where-Object { $_.Tasks.Count -gt 0 })
+$functions = @($functions | Where-Object { $_.Unit.Tasks.Count -gt 0 })
 
-# 担当者: 工数の大きい機能から、その時点で工数の合計がいちばん少ない担当者に割り当てる（機能の工程はすべて同じ担当者）
+# 担当者: 工数の大きい機能から、その時点でいちばん早く手の空く担当者（工数の合計 ÷ 稼働率）に割り当てる（機能の工程は同じ担当者）。
+# 担当が「別の人」の工程（レビュー）は、作った人以外で、いちばん早く手の空く担当者にする
 $load = @{}
 foreach ($m in $memberList) { $load[$m] = 0.0 }
+function Select-Member {
+    param([double] $Days, [string] $Except)
+    $best = $null
+    $bestValue = 0.0
+    foreach ($m in $memberList) {
+        if ($memberList.Count -gt 1 -and $m -eq $Except) { continue }
+        $value = ($load[$m] + $Days) / $memberRate[$m]
+        if ($null -eq $best -or $value -lt $bestValue - $eps) { $best = $m; $bestValue = $value }
+    }
+    return $best
+}
 $byDays = New-Object System.Collections.Generic.List[object]
-foreach ($f in $functions) { $byDays.Add($f) }
+foreach ($u in $units) { $byDays.Add($u) }
 $byDays.Sort([System.Comparison[object]] { param($a, $b) if ($a.Days -ne $b.Days) { return $b.Days.CompareTo($a.Days) }; return $a.Seq.CompareTo($b.Seq) })
-foreach ($f in $byDays) {
-    $best = $memberList[0]
-    foreach ($m in $memberList) { if ($load[$m] -lt $load[$best]) { $best = $m } }
-    $f.Member = $best
-    $load[$best] += $f.Days
-    foreach ($t in $f.Tasks) { $t.Member = $best }
+foreach ($u in $byDays) {
+    $ownDays = (@($u.Tasks | Where-Object { -not $_.Phase.ByOther } | ForEach-Object { $_.Days }) | Measure-Object -Sum).Sum
+    $author = Select-Member ([double]$ownDays) ''
+    $u.Member = $author
+    $load[$author] += [double]$ownDays
+    foreach ($t in $u.Tasks) {
+        if ($t.Phase.ByOther) { $t.Member = Select-Member $t.Days $author; $load[$t.Member] += $t.Days }
+        else { $t.Member = $author }
+    }
+}
+if ($namedMembers -eq 1 -and @($units | ForEach-Object { $_.Tasks } | Where-Object { $_.Phase.ByOther }).Count -gt 0) {
+    Write-Warning '担当が「別の人」の工程（レビューなど）がありますが、担当者が 1 人なので、作った人に割り当てました（-Members に 2 人以上を指定してください）'
 }
 
-# 担当者ごとに順に並べて日程を決める（工程ごとの WBS は工程の順、機能ごとの WBS は機能の順。1 人日 = 1 営業日）
-$allTasks = New-Object System.Collections.Generic.List[object]
-foreach ($f in $functions) { foreach ($t in $f.Tasks) { $allTasks.Add($t) } }
+# 並べる順（工程ごとの WBS は工程の順、機能ごとの WBS は機能の順）。担当者は、この順で、始められるタスクから手を付ける
 $ordered = New-Object System.Collections.Generic.List[object]
-foreach ($t in $allTasks) { $ordered.Add($t) }
-if ($GroupBy -eq 'Phase') { $ordered.Sort([System.Comparison[object]] { param($a, $b) if ($a.Phase.Index -ne $b.Phase.Index) { return $a.Phase.Index.CompareTo($b.Phase.Index) }; return $a.Function.Seq.CompareTo($b.Function.Seq) }) }
-else { $ordered.Sort([System.Comparison[object]] { param($a, $b) if ($a.Function.Seq -ne $b.Function.Seq) { return $a.Function.Seq.CompareTo($b.Function.Seq) }; return $a.Phase.Index.CompareTo($b.Phase.Index) }) }
+foreach ($u in $units) { foreach ($t in $u.Tasks) { $ordered.Add($t) } }
+if ($GroupBy -eq 'Phase') { $ordered.Sort([System.Comparison[object]] { param($a, $b) if ($a.Phase.Index -ne $b.Phase.Index) { return $a.Phase.Index.CompareTo($b.Phase.Index) }; return $a.Unit.Seq.CompareTo($b.Unit.Seq) }) }
+else { $ordered.Sort([System.Comparison[object]] { param($a, $b) if ($a.Unit.Seq -ne $b.Unit.Seq) { return $a.Unit.Seq.CompareTo($b.Unit.Seq) }; return $a.Phase.Index.CompareTo($b.Phase.Index) }) }
+for ($i = 0; $i -lt $ordered.Count; $i++) { $ordered[$i].Order = $i }
+
+# 日程: 同じ機能の工程は順に（レビューが終わってから製造）、待ち合わせの工程は前の工程のタスクがすべて終わってから始める。
+# 担当者ごとに、始められるタスクのうちいちばん早く始められるもの（同じなら並べる順の早いもの）から入れていく。
+# 1 人日 = 1 営業日（稼働率 50% なら 2 営業日）。時刻は開始日からの営業日（小数）で数える
 $cursor = @{}
-foreach ($m in $memberList) { $cursor[$m] = 0.0 }
-$eps = 0.000001
+$ready = @{}
+foreach ($m in $memberList) { $cursor[$m] = 0.0; $ready[$m] = New-Object System.Collections.Generic.List[object] }
+function Add-ReadyTask {
+    param($Task, [double] $At)
+    $Task.ReadyAt = $At
+    $list = $ready[$Task.Member]
+    $i = $list.Count
+    while ($i -gt 0 -and $list[$i - 1].Order -gt $Task.Order) { $i-- }
+    $list.Insert($i, $Task)
+}
+$remaining = @{}   # 工程 → まだ日程の決まっていないタスクの数
+$phaseEnd = @{}    # 工程 → 決まったタスクのいちばん遅い終わり
+foreach ($p in $phaseList) { $remaining[$p.Index] = 0; $phaseEnd[$p.Index] = 0.0 }
+foreach ($t in $ordered) { $remaining[$t.Phase.Index]++ }
+$waiting = New-Object System.Collections.Generic.List[object]
+function Open-WaitingTasks {
+    #     待ち合わせの工程のタスクのうち、前の工程のタスクがすべて決まったものを始められるようにする
+    for ($i = 0; $i -lt $waiting.Count; $i++) {
+        $t = $waiting[$i]
+        $before = @($phaseList | Where-Object { $_.Index -lt $t.Phase.Index })
+        if (@($before | Where-Object { $remaining[$_.Index] -gt 0 }).Count -gt 0) { continue }
+        $at = 0.0
+        foreach ($p in $before) { if ($phaseEnd[$p.Index] -gt $at) { $at = $phaseEnd[$p.Index] } }
+        Add-ReadyTask $t $at
+        $waiting.RemoveAt($i)
+        $i--
+    }
+}
 foreach ($t in $ordered) {
-    $t.StartAt = $cursor[$t.Member]
-    $t.EndAt = $t.StartAt + $t.Days
+    if ($t.Phase.Wait) { $waiting.Add($t) }
+    elseif (-not $t.Previous) { Add-ReadyTask $t 0.0 }
+}
+Open-WaitingTasks
+for ($n = 0; $n -lt $ordered.Count; $n++) {
+    $best = $null; $bestAt = 0.0; $bestIndex = 0
+    foreach ($m in $memberList) {
+        $list = $ready[$m]
+        for ($i = 0; $i -lt $list.Count; $i++) {
+            $at = [math]::Max($cursor[$m], $list[$i].ReadyAt)
+            if ($null -eq $best -or $at -lt $bestAt - $eps -or ([math]::Abs($at - $bestAt) -le $eps -and $list[$i].Order -lt $best.Order)) { $best = $list[$i]; $bestAt = $at; $bestIndex = $i }
+            # この担当者は、手の空く時刻より早くは始められない（並べる順で最初のものに決まる）
+            if ($at -le $cursor[$m] + $eps) { break }
+        }
+    }
+    if ($null -eq $best) { throw '日程を決められないタスクがあります（工程の配分の待ち合わせを確かめてください）' }
+    $t = $best
+    $ready[$t.Member].RemoveAt($bestIndex)
+    $t.StartAt = $bestAt
+    $t.EndAt = $bestAt + $t.Days / $memberRate[$t.Member]
     $cursor[$t.Member] = $t.EndAt
+    $remaining[$t.Phase.Index]--
+    if ($t.EndAt -gt $phaseEnd[$t.Phase.Index]) { $phaseEnd[$t.Phase.Index] = $t.EndAt }
+    if ($t.Next -and -not $t.Next.Phase.Wait) { Add-ReadyTask $t.Next $t.EndAt }
+    if ($remaining[$t.Phase.Index] -eq 0 -and $waiting.Count -gt 0) { Open-WaitingTasks }
     $first = [int][math]::Floor($t.StartAt + $eps)
     $last = $first
-    if ($t.Days -gt $eps) { $last = [math]::Max($first, [int][math]::Ceiling($t.EndAt - $eps) - 1) }
+    if ($t.EndAt - $t.StartAt -gt $eps) { $last = [math]::Max($first, [int][math]::Ceiling($t.EndAt - $eps) - 1) }
     $t.Start = Get-BusinessDay $first
     $t.End = Get-BusinessDay $last
 }
@@ -192,7 +344,7 @@ foreach ($t in $ordered) {
 
 $rows = New-Object System.Collections.Generic.List[object]
 function Add-WbsRow {
-    param([string] $Wbs, [string] $Task, $Children, [string] $Basis, [bool] $IsParent)
+    param([string] $Wbs, [string] $Task, $Children, [string] $Basis, [bool] $IsParent, [string] $Deliverable)
     $members = @($Children | ForEach-Object { $_.Member } | Select-Object -Unique)
     $member = ''
     if ($members.Count -eq 1) { $member = $members[0] }
@@ -200,7 +352,7 @@ function Add-WbsRow {
     $r = [pscustomobject]@{
         Wbs = $Wbs; Task = $Task; Member = $member
         Start = (@($Children | Sort-Object Start)[0]).Start; End = (@($Children | Sort-Object End -Descending)[0]).End
-        Days = $days; Basis = $Basis; IsParent = $IsParent
+        Days = $days; Basis = $Basis; IsParent = $IsParent; Deliverable = $Deliverable
     }
     $r.PSObject.TypeNames.Insert(0, 'WbsDraft.Task')
     $rows.Add($r)
@@ -208,21 +360,21 @@ function Add-WbsRow {
 if ($GroupBy -eq 'Phase') {
     $n = 0
     foreach ($p in $phaseList) {
-        $tasks = @($ordered | Where-Object { $_.Phase -eq $p } | Sort-Object { $_.Function.Seq })
+        $tasks = @($ordered | Where-Object { $_.Phase -eq $p } | Sort-Object { $_.Unit.Seq })
         if ($tasks.Count -eq 0) { continue }
         $n++
-        Add-WbsRow ([string]$n) $p.Name $tasks '' $true
+        Add-WbsRow ([string]$n) $p.Name $tasks '' $true $p.Deliverable
         $c = 0
-        foreach ($t in $tasks) { $c++; Add-WbsRow ('{0}.{1}' -f $n, $c) $t.Name @($t) $t.Function.Basis $false }
+        foreach ($t in $tasks) { $c++; Add-WbsRow ('{0}.{1}' -f $n, $c) $t.Name @($t) $t.Unit.Basis $false $p.Deliverable }
     }
 }
 else {
     $n = 0
-    foreach ($f in $functions) {
+    foreach ($u in $units) {
         $n++
-        Add-WbsRow ([string]$n) $f.Name $f.Tasks.ToArray() $f.Basis $true
+        Add-WbsRow ([string]$n) $u.Name $u.Tasks.ToArray() $u.Basis $true ''
         $c = 0
-        foreach ($t in @($f.Tasks | Sort-Object { $_.Phase.Index })) { $c++; Add-WbsRow ('{0}.{1}' -f $n, $c) $t.Name @($t) '' $false }
+        foreach ($t in @($u.Tasks | Sort-Object { $_.Phase.Index })) { $c++; Add-WbsRow ('{0}.{1}' -f $n, $c) $t.Name @($t) '' $false $t.Phase.Deliverable }
     }
 }
 
@@ -237,23 +389,32 @@ foreach ($m in $memberList) {
     if ($mine.Count -eq 0) { continue }
     $from = (@($mine | Sort-Object Start)[0]).Start
     $to = (@($mine | Sort-Object End -Descending)[0]).End
-    $memberRows.Add([pscustomobject]@{ Member = $m; Tasks = $mine.Count; Days = [math]::Round(($mine | Measure-Object Days -Sum).Sum, 2); Start = $from; End = $to; BusinessDays = ($businessDays.IndexOf($to) - $businessDays.IndexOf($from) + 1) })
+    $memberRows.Add([pscustomobject]@{
+        Member = $m; Tasks = $mine.Count; Days = [math]::Round(($mine | Measure-Object Days -Sum).Sum, 2); Start = $from; End = $to; BusinessDays = ($businessDays.IndexOf($to) - $businessDays.IndexOf($from) + 1)
+        OtherDays = [math]::Round((@($mine | Where-Object { $_.Phase.ByOther } | ForEach-Object { $_.Days }) | Measure-Object -Sum).Sum, 2); Rate = $memberRate[$m]
+    })
 }
 
-$header = @('WBS番号', 'タスク名', '担当者', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '進捗率', '実績工数', '見積もりの根拠')
+$header = @('WBS番号', 'タスク名', '成果物', '担当者', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '進捗率', '実績工数', '見積もりの根拠')
+$widths = @(8, 44, 16, 10, 11, 11, 9, 11, 11, 8, 9, 50)
 if ($OutXlsx) {
     $wbsRows = New-Object System.Collections.Generic.List[object]
-    foreach ($r in $rows) { $wbsRows.Add(@{ Values = @($r.Wbs, $r.Task, $r.Member, $r.Start, $r.End, [double]$r.Days, '', '', '', '', $r.Basis) }) }
+    foreach ($r in $rows) { $wbsRows.Add(@{ Values = @($r.Wbs, $r.Task, $r.Deliverable, $r.Member, $r.Start, $r.End, [double]$r.Days, '', '', '', '', $r.Basis) }) }
     $loadRows = New-Object System.Collections.Generic.List[object]
-    foreach ($m in $memberRows) { $loadRows.Add(@{ Values = @($m.Member, [double]$m.Tasks, [double]$m.Days, $m.Start, $m.End, [double]$m.BusinessDays) }) }
+    foreach ($m in $memberRows) { $loadRows.Add(@{ Values = @($m.Member, ('{0}%' -f [math]::Round($m.Rate * 100, 1).ToString($invariant)), [double]$m.Tasks, [double]$m.Days, [double]$m.OtherDays, $m.Start, $m.End, [double]$m.BusinessDays) }) }
     $sizeRows = New-Object System.Collections.Generic.List[object]
-    foreach ($f in $functions) { $sizeRows.Add(@{ Values = @($f.Kind, $f.Name, $f.Basis, [double]$f.Days, $f.Member) }) }
+    foreach ($fn in $functions) {
+        $bundle = ''
+        if ($fn.Unit.Functions.Count -gt 1) { $bundle = $fn.Unit.Name }
+        $sizeRows.Add(@{ Values = @($fn.Kind, $fn.Name, $fn.Basis, [double]$fn.Days, $fn.Unit.Member, $bundle) })
+    }
     try {
-        $wbsSheet = @{ Name = 'WBS'; Columns = @(@{ Header = $header[0]; Width = 8 }, @{ Header = $header[1]; Width = 44 }, @{ Header = $header[2]; Width = 10 }, @{ Header = $header[3]; Width = 11 }, @{ Header = $header[4]; Width = 11 }, @{ Header = $header[5]; Width = 9 }, @{ Header = $header[6]; Width = 11 }, @{ Header = $header[7]; Width = 11 }, @{ Header = $header[8]; Width = 8 }, @{ Header = $header[9]; Width = 9 }, @{ Header = $header[10]; Width = 50 }); Rows = $wbsRows }
+        $wbsColumns = @(for ($i = 0; $i -lt $header.Count; $i++) { @{ Header = $header[$i]; Width = $widths[$i] } })
+        $wbsSheet = @{ Name = 'WBS'; Columns = $wbsColumns; Rows = $wbsRows }
         $sheets = @($wbsSheet,
             # 担当者別・規模のシートの見出しは、WBS の見出し（タスク・開始・終了など）にしない（Measure-Progress.ps1 が WBS の表として読まないように）
-            @{ Name = '担当者別'; Columns = @(@{ Header = '担当者'; Width = 12 }, @{ Header = 'タスクの数'; Width = 10 }, @{ Header = '工数の合計（人日）'; Width = 12 }, @{ Header = '最初の日'; Width = 11 }, @{ Header = '最後の日'; Width = 11 }, @{ Header = '営業日'; Width = 8 }); Rows = $loadRows },
-            @{ Name = '規模'; Columns = @(@{ Header = '種類'; Width = 10 }, @{ Header = '機能'; Width = 36 }, @{ Header = '見積もりの根拠'; Width = 50 }, @{ Header = '工数（人日）'; Width = 11 }, @{ Header = '担当者'; Width = 12 }); Rows = $sizeRows })
+            @{ Name = '担当者別'; Columns = @(@{ Header = '担当者'; Width = 12 }, @{ Header = '稼働率'; Width = 8 }, @{ Header = 'タスクの数'; Width = 10 }, @{ Header = '工数の合計（人日）'; Width = 12 }, @{ Header = 'うちレビューなど（人日）'; Width = 14 }, @{ Header = '最初の日'; Width = 11 }, @{ Header = '最後の日'; Width = 11 }, @{ Header = '営業日'; Width = 8 }); Rows = $loadRows },
+            @{ Name = '規模'; Columns = @(@{ Header = '種類'; Width = 10 }, @{ Header = '機能'; Width = 36 }, @{ Header = '見積もりの根拠'; Width = 50 }, @{ Header = '工数（人日）'; Width = 11 }, @{ Header = '担当者'; Width = 12 }, @{ Header = 'まとめた先'; Width = 36 }); Rows = $sizeRows })
         if ($Gantt) {
             # ガントチャート形式の進捗管理票: WBS のシートを、右に日付の列を並べたガントチャートにする（見積もりの根拠は規模のシートにある）。休日のシートも足す
             $ganttTasks = @(foreach ($r in $rows) { [pscustomobject]@{ Wbs = $r.Wbs; Task = $r.Task; Owner = $r.Member; PlanStart = $r.Start; PlanEnd = $r.End; Effort = [double]$r.Days; Summary = $r.IsParent } })
@@ -272,7 +433,7 @@ if ($OutCsv) {
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
     $csvRows = foreach ($r in $rows) {
         $o = [ordered]@{}
-        $values = @($r.Wbs, $r.Task, $r.Member, $r.Start.ToString('yyyy/MM/dd', $invariant), $r.End.ToString('yyyy/MM/dd', $invariant), $r.Days.ToString($invariant), '', '', '', '', $r.Basis)
+        $values = @($r.Wbs, $r.Task, $r.Deliverable, $r.Member, $r.Start.ToString('yyyy/MM/dd', $invariant), $r.End.ToString('yyyy/MM/dd', $invariant), $r.Days.ToString($invariant), '', '', '', '', $r.Basis)
         for ($i = 0; $i -lt $header.Count; $i++) { $o[$header[$i]] = $values[$i] }
         [pscustomobject]$o
     }
@@ -283,14 +444,20 @@ if ($OutCsv) {
 Write-Host ''
 $total = [math]::Round(($ordered | Measure-Object Days -Sum).Sum, 2)
 Write-Host ('機能 {0}・工程 {1}・タスク {2}。予定工数 合計 {3} 人日' -f $functions.Count, @($ordered | ForEach-Object { $_.Phase.Name } | Select-Object -Unique).Count, $ordered.Count, $total)
+if ($bundleNotes.Count -gt 0) { Write-Host ('{0} 人日に満たない機能は、同じ種類をまとめて 1 つのタスクにしました: {1}（-BundleBelow 0 でまとめません）' -f $BundleBelow.ToString($invariant), ($bundleNotes -join '・')) }
 if ($memberRows.Count -gt 0) {
     $named = @($memberRows | Where-Object { $_.Member })
     if ($named.Count -gt 0) {
-        Write-Host ('担当者 {0} 人: {1}' -f $named.Count, (@($named | ForEach-Object { '{0} {1} 人日（{2}〜{3}）' -f $_.Member, $_.Days, $_.Start.ToString('yyyy/MM/dd', $invariant), $_.End.ToString('yyyy/MM/dd', $invariant) }) -join '・'))
+        Write-Host ('担当者 {0} 人: {1}' -f $named.Count, (@($named | ForEach-Object {
+            $rateText = ''
+            if ($_.Rate -lt 1) { $rateText = '・稼働率 {0}%' -f [math]::Round($_.Rate * 100, 1).ToString($invariant) }
+            '{0} {1} 人日{2}（{3}〜{4}）' -f $_.Member, $_.Days, $rateText, $_.Start.ToString('yyyy/MM/dd', $invariant), $_.End.ToString('yyyy/MM/dd', $invariant)
+        }) -join '・'))
     }
     $end = (@($memberRows | Sort-Object End -Descending)[0]).End
     Write-Host ('完了予定: {0}（{1} から {2} 営業日）' -f $end.ToString('yyyy/MM/dd', $invariant), (Get-BusinessDay 0).ToString('yyyy/MM/dd', $invariant), ($businessDays.IndexOf($end) + 1))
 }
+if (-not $Holidays) { Write-Host '休日の CSV（-Holidays）を指定していないので、土日だけを休みにしました（祝日・年末年始も営業日です）' }
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 if ($OutCsv) { Write-Host "CSV を保存しました: $OutCsv" }
 
@@ -301,12 +468,15 @@ if ($OutCsv) { Write-Host "CSV を保存しました: $OutCsv" }
 #     設計書の規模を Measure-DesignSize.ps1 で数え、機能（画面・テーブル・IF など）ごとの工数を、工程の配分の CSV の工程
 #     （詳細設計・レビュー・製造・単体テストなど）に配分してタスクにします。
 #
-#       担当者: 工数の大きい機能から、工数の合計がいちばん少ない担当者に割り当てます（機能の工程はすべて同じ担当者）
-#       予定日: 担当者ごとにタスクを順に並べ、1 人日を 1 営業日として、開始日から土日と休日を除いて決めます
+#       まとめる: 工数が -BundleBelow 人日（既定 1）に満たない機能（テーブルなど）は、同じ種類のものをまとめて 1 つのタスクにします
+#       担当者: 工数の大きい機能から、いちばん早く手の空く担当者（工数の合計 ÷ 稼働率）に割り当てます（機能の工程は同じ担当者）。
+#               工程の配分の担当が「別の人」の工程（レビュー）は、作った人以外の担当者に割り当てます
+#       予定日: 同じ機能の工程は順に（レビューが終わってから製造）、待ち合わせの工程は前の工程がすべて終わってから始めます。
+#               担当者ごとに、始められるタスクから順に、1 人日を 1 営業日（稼働率 50% なら 2 営業日）として、土日と休日を除いて決めます
 #       WBS 番号: 工程ごと（-GroupBy Phase。工程 → 機能）か、機能ごと（-GroupBy Function。機能 → 工程）
 #
 #     出力の WBS は、Measure-Progress.ps1・Measure-Effort.ps1・New-WeeklyReport.ps1 がそのまま読める見出し
-#     （WBS番号・タスク名・担当者・予定開始・予定終了・予定工数・実績開始・実績終了・進捗率・実績工数）です。
+#     （WBS番号・タスク名・担当者・予定開始・予定終了・予定工数・実績開始・実績終了・進捗率・実績工数）です。工程の成果物の列も付けます。
 #
 # .PARAMETER Path
 #     設計書のフォルダまたはファイル（規模を数える。複数可）。
@@ -315,7 +485,8 @@ if ($OutCsv) { Write-Host "CSV を保存しました: $OutCsv" }
 #     開始日（既定は今日。土日・休日なら次の営業日から）。
 #
 # .PARAMETER Members
-#     担当者の名前（複数可。カンマ区切りでも書ける）。省略すると担当者の決まっていない 1 人で日程を決めます。
+#     担当者の名前（複数可。カンマ区切りでも書ける）。「佐藤:50%」のように書くと稼働率（兼務）にし、その人のタスクの日数を延ばします。
+#     省略すると担当者の決まっていない 1 人で日程を決めます。
 #
 # .PARAMETER GroupBy
 #     WBS の上の階層（Phase: 工程ごと（既定）/ Function: 機能ごと）。
@@ -324,10 +495,15 @@ if ($OutCsv) { Write-Host "CSV を保存しました: $OutCsv" }
 #     前の版の設計書のフォルダ。新規と変更の機能だけを、変更の工数（Measure-DesignSize.ps1 の -Baseline）で WBS にします（改修）。
 #
 # .PARAMETER Phases
-#     工程の配分の CSV（工程・配分・種類）。既定は tools\wbs\工程の配分.csv。
+#     工程の配分の CSV（工程・配分・種類。省けるもの: 担当・待ち合わせ・成果物）。既定は tools\wbs\工程の配分.csv。
+#     担当が「別の人」の工程は作った人以外に割り当て（担当の列が無ければ、名前にレビューのある工程）、待ち合わせが「する」の工程は
+#     前の工程のタスクがすべて終わってから始めます（結合テストなど）。成果物は WBS の成果物の列に書きます。
 #
 # .PARAMETER Holidays
 #     休日の CSV（1 列目が日付）。内閣府の「国民の祝日」の CSV（syukujitsu.csv）をそのまま使えます（Measure-Progress.ps1 と同じ）。
+#
+# .PARAMETER BundleBelow
+#     工数がこの人日に満たない機能は、同じ種類のものを順に、合わせてこの人日以上になるまでまとめて 1 つのタスクにします（既定 1。0 でまとめない）。
 #
 # .PARAMETER Coefficients
 #     係数表の CSV（Measure-DesignSize.ps1 の -Coefficients）。
@@ -359,9 +535,12 @@ if ($OutCsv) { Write-Host "CSV を保存しました: $OutCsv" }
 #     .\New-WbsDraft.ps1 D:\設計書 -Start 2026-11-02 -Members 山田, 佐藤 -Holidays .\syukujitsu.csv -OutXlsx D:\WBS.xlsx
 #
 # .EXAMPLE
+#     .\New-WbsDraft.ps1 D:\設計書 -Start 2026-11-02 -Members 山田, 佐藤, 鈴木:50% -Holidays .\syukujitsu.csv -OutXlsx D:\WBS.xlsx -Gantt
+#
+# .EXAMPLE
 #     .\New-WbsDraft.ps1 D:\設計書_v1.1 -Baseline D:\設計書_v1.0 -Start 2026-12-01 -GroupBy Function -OutXlsx D:\改修のWBS.xlsx
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに ExcelTools.psm1・Search-Excel.ps1・Measure-DesignSize.ps1 が必要です。
-#     下書きです。タスクの依存関係・レビューの日程・担当者の得意な機能などは、作ったあとに直してください。
+#     下書きです。機能をまたいだ依存関係（テーブルの後に画面など）・担当者の得意な機能・会議などの共通のタスクは、作ったあとに直してください。
 #     機能が 10 以上あると、WBS 番号は 1.10・2.10 にもなります。Excel は標準の書式のセルに入れた 1.10 を 1.1 にするので、日報の WBS 番号の列は文字列の書式にしてください。
