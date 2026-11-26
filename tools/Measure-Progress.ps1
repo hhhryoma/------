@@ -67,7 +67,7 @@ foreach ($r in (Read-CsvFile $Headers @('項目', '見出し') 'WBS の見出し
     $field = ([string]$r.'項目').Trim()
     if ($field) { $candidates[$field] = @(([string]$r.'見出し') -split '\|' | ForEach-Object { ConvertTo-Label $_ } | Where-Object { $_ }) }
 }
-$fields = @('WBS番号', 'タスク', '担当', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '見込終了', '進捗率', '実績工数')
+$fields = @('WBS番号', 'タスク', '担当', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '見込終了', '進捗率', '実績工数', '先行')
 foreach ($f in $fields) { if (-not $candidates.ContainsKey($f)) { $candidates[$f] = @() } }
 foreach ($f in @('タスク', '予定開始', '予定終了')) { if ($candidates[$f].Count -eq 0) { throw "WBS の見出しに「$f」の行がありません: $Headers" } }
 
@@ -155,6 +155,14 @@ function Add-BusinessDays {
     param([datetime] $Day, [int] $Count)
     $d = $Day.Date
     while ($Count -gt 0) { $d = $d.AddDays(1); if (Test-BusinessDay $d) { $Count-- } }
+    return $d
+}
+
+function Get-BusinessDayOnOrAfter {
+    #     その日か、その後の最初の営業日
+    param([datetime] $Day)
+    $d = $Day.Date
+    for ($i = 0; $i -lt 366 -and -not (Test-BusinessDay $d); $i++) { $d = $d.AddDays(1) }
     return $d
 }
 
@@ -580,6 +588,7 @@ if ($duplicated.Count -gt 0) {
 }
 
 $tasks = New-Object System.Collections.Generic.List[object]
+$plans = New-Object System.Collections.Generic.List[object]   # 見込みの計算（タスクと同じ順）
 $skipped = 0
 foreach ($r in $rows) {
     if ($r.Wbs -and $parents.ContainsKey(('{0}|{1}|{2}' -f $r.Place.Path, $r.Place.Sheet, $r.Wbs))) { continue }
@@ -645,12 +654,156 @@ foreach ($r in $rows) {
         ActualStart = $actualStartShown; ExpectedEnd = $expectedEnd; Progress = [math]::Round($rate, 3); PlannedProgress = [math]::Round($planned, 3)
         Delay = $delay; Status = $status; PV = ($weight * $planned); EV = ($weight * $rate); AC = (ConvertTo-Number $v['実績工数']); BAC = $weight; Effort = $effort
         Done = $done; DoneOn = $actualEnd; Place = $r.Place
+        Predecessors = ([string]$v['先行']).Trim(); ForecastStart = $null; ForecastEnd = $null; ForecastDelay = $null
     }
     $task.PSObject.TypeNames.Insert(0, 'Progress.Task')
     $tasks.Add($task)
+    $plans.Add([pscustomobject]@{
+        Task = $task; Index = $plans.Count; Days = $planDays; Rate = $rate; Entered = $forecastEnd; Owner = (Get-OwnerKey $task.Owner)
+        Started = ((-not $done) -and ($rate -gt 0 -or ($actualStart -and $actualStart -le $AsOf))); Before = (New-Object System.Collections.Generic.List[object]); Groups = (New-Object System.Collections.Generic.List[string])
+        Start = $null; End = $null; Driver = $null; Fixed = $false
+    })
 }
 if ($skipped -gt 0) { Write-Warning ('予定開始日・予定終了日が読めないタスク {0} 件は数えていません' -f $skipped) }
 if ($tasks.Count -eq 0) { foreach ($l in $ganttLog) { Write-Host $l }; Write-Warning 'WBS に、予定開始日・予定終了日の読めるタスクがありませんでした'; return }
+
+# ---------------------------------------------------------------- 見込み（遅れを後のタスクに送る）
+
+
+# まだ終わっていないタスクの見込開始・見込終了を、先行タスクと担当者の順から決め、完了見込みを出す（営業日で数える）
+#   作業中（進捗率 > 0 か、基準日までに実績開始）: 見込終了（基準日以降の記入）か、基準日 + 残りの日数（（1 − 進捗率）× 予定の営業日。遅れの計算と同じ）
+#   未着手: 予定開始日・基準日の次の営業日・先行タスクの見込終了のいちばん遅い日から、予定の営業日の日数。先行タスクの終わった日に始めるのは、
+#           予定でも先行タスクの終了日に始めるタスクだけ（予定で後の日に始めるタスクは、翌営業日から）。見込終了の記入があればその日
+#   完了: 実績終了日（無ければ予定終了日。基準日より後なら基準日）
+#   先行タスク: 先行の列の WBS 番号（同じシート。親の番号はその下のすべてのタスク。3FS+2 のような書き方の FS+2 は読まない）と、
+#               同じ担当者のタスクのうち、予定でそのタスクの開始日までに終わるもの（予定で重なっているタスクは並行して進める）
+$byWbs = @{}
+foreach ($x in $plans) { if ($x.Task.WbsNo) { $byWbs['{0}|{1}|{2}' -f $x.Task.Place.Path, $x.Task.Place.Sheet, $x.Task.WbsNo] = $x } }
+$unknownPredecessors = New-Object System.Collections.Generic.List[string]
+$childrenOf = @{}   # 親のタスク（ファイル|シート|WBS 番号）→ その下のタスク（先行の列に親の番号を書いたとき。親ごとに 1 回だけ探す）
+foreach ($x in $plans) {
+    $text = $x.Task.Predecessors.Normalize($nfkc)
+    if (-not $text) { continue }
+    $sheetKey = '{0}|{1}|' -f $x.Task.Place.Path, $x.Task.Place.Sheet
+    foreach ($m in [regex]::Matches($text, '(?<![0-9.])([0-9]+(?:[.\-_][0-9]+)*)(?:\s*(?:FS|SS|FF|SF)\s*(?:[+\-]\s*[0-9.]+\s*(?:営業日|日|days?|d)?)?)?', 'IgnoreCase')) {
+        $no = ($m.Groups[1].Value -replace '[\-_]', '.').TrimEnd('.')
+        if ($byWbs.ContainsKey($sheetKey + $no)) { $p = $byWbs[$sheetKey + $no]; if ($p -ne $x -and -not $x.Before.Contains($p)) { $x.Before.Add($p) } }
+        elseif ($parents.ContainsKey($sheetKey + $no)) {
+            # 親の番号は、その下のタスクのまとまりとして持つ（見込終了のいちばん遅いものを、くり返しの 1 回ごとに 1 度だけ探す）
+            $key = $sheetKey + $no
+            if (-not $childrenOf.ContainsKey($key)) { $childrenOf[$key] = @($plans | Where-Object { $_.Task.Place.Path -eq $x.Task.Place.Path -and $_.Task.Place.Sheet -eq $x.Task.Place.Sheet -and $_.Task.WbsNo.StartsWith($no + '.') }) }
+            if (-not $x.Groups.Contains($key)) { $x.Groups.Add($key) }
+        }
+        else { $unknownPredecessors.Add(('{0} の {1}' -f $x.Task.WbsNo, $no)) }
+    }
+}
+if ($unknownPredecessors.Count -gt 0) { Write-Warning ('先行の列の WBS 番号が見つかりません（見込みでは使いません）: {0}' -f (@($unknownPredecessors | Select-Object -First 10) -join '・')) }
+
+# 予定の順（予定開始日・予定終了日・行の順）。同じ担当者のタスクは、この順で前に並び、予定でそのタスクの開始日までに終わるものを先行タスクにする
+$order = @($plans | Sort-Object { $_.Task.PlanStart }, { $_.Task.PlanEnd }, Index)
+
+$nextDay = Add-BusinessDays $AsOf 1
+foreach ($x in $plans) {
+    $t = $x.Task
+    if ($t.Done) {
+        $x.Start = $t.ActualStart
+        if ($t.DoneOn) { $x.End = $t.DoneOn } elseif ($t.PlanEnd -le $AsOf) { $x.End = $t.PlanEnd } else { $x.End = $AsOf }
+        $x.Fixed = $true
+    }
+    elseif ($x.Started) {
+        $x.Start = $t.ActualStart
+        if ($x.Entered) { $x.End = $x.Entered } else { $x.End = Add-BusinessDays $AsOf ([int][math]::Round((1 - $x.Rate) * $x.Days)) }
+        $x.Fixed = $true
+    }
+}
+function Select-LaterEnd {
+    #     見込終了の遅いほう（$null は無いもの）
+    param($A, $B)
+    if ($null -eq $A) { return $B }
+    if ($null -eq $B -or $A.End -ge $B.End) { return $A }
+    return $B
+}
+# 未着手のタスクは、先行タスクの見込みが決まってから決める。先の行のタスクを先行にしたもののため、変わらなくなるまでくり返す
+$cycle = $true
+for ($pass = 0; $pass -lt 50 -and $cycle; $pass++) {
+    $cycle = $false
+    # 担当者ごとに、予定の順に見てきたタスクを、予定終了日で分けておく
+    #   Earlier: 予定終了日が今のタスクの予定開始日より前のもののうち、見込終了のいちばん遅いもの（今のタスクは翌営業日から）
+    #   Same: 予定終了日が今のタスクの予定開始日と同じもの（同じ日から始めてよい）。Later: まだ予定終了日の来ないもの
+    $sweep = @{}
+    $groupLast = @{}   # 親の番号 → その下のタスクのうち見込終了のいちばん遅いもの（同じなら予定終了日の早いもの）
+    foreach ($x in $order) {
+        $t = $x.Task
+        $s = $null
+        if ($x.Owner) {
+            if (-not $sweep.ContainsKey($x.Owner)) { $sweep[$x.Owner] = @{ Day = $null; Earlier = $null; Same = (New-Object System.Collections.Generic.List[object]); Later = (New-Object System.Collections.Generic.List[object]) } }
+            $s = $sweep[$x.Owner]
+            if ($s.Day -ne $t.PlanStart) {
+                foreach ($p in $s.Same) { $s.Earlier = Select-LaterEnd $s.Earlier $p }
+                $s.Same.Clear()
+                $s.Day = $t.PlanStart
+                for ($i = $s.Later.Count - 1; $i -ge 0; $i--) {
+                    $p = $s.Later[$i]
+                    if ($p.Task.PlanEnd -lt $t.PlanStart) { $s.Earlier = Select-LaterEnd $s.Earlier $p; $s.Later.RemoveAt($i) }
+                    elseif ($p.Task.PlanEnd -eq $t.PlanStart) { $s.Same.Add($p); $s.Later.RemoveAt($i) }
+                }
+            }
+        }
+        if (-not $x.Fixed) {
+            $start = Get-BusinessDayOnOrAfter $t.PlanStart
+            if ($nextDay -gt $start) { $start = $nextDay }
+            $driver = $null
+            # 先行タスクの見込終了のいちばん遅いもの（同じ日に始めてよいものと、翌営業日からのもの）
+            $sameDay = $null; $nextOf = $null
+            if ($s) {
+                $nextOf = $s.Earlier
+                foreach ($p in $s.Same) { $sameDay = Select-LaterEnd $sameDay $p }
+            }
+            $before = $x.Before.ToArray()
+            foreach ($key in $x.Groups) {
+                if (-not $groupLast.ContainsKey($key)) {
+                    $latest = $null
+                    foreach ($p in $childrenOf[$key]) {
+                        if ($null -eq $p.End) { continue }
+                        if ($null -eq $latest -or $p.End -gt $latest.End -or ($p.End -eq $latest.End -and $p.Task.PlanEnd -lt $latest.Task.PlanEnd)) { $latest = $p }
+                    }
+                    $groupLast[$key] = $latest
+                }
+                if ($groupLast[$key]) { $before += $groupLast[$key] }
+            }
+            foreach ($p in $before) {
+                if ($null -eq $p.End) { continue }
+                if ($t.PlanStart -gt $p.Task.PlanEnd) { $nextOf = Select-LaterEnd $nextOf $p } else { $sameDay = Select-LaterEnd $sameDay $p }
+            }
+            if ($sameDay) { $bound = Get-BusinessDayOnOrAfter $sameDay.End; if ($bound -gt $start) { $start = $bound; $driver = $sameDay } }
+            if ($nextOf) { $bound = Add-BusinessDays $nextOf.End 1; if ($bound -gt $start) { $start = $bound; $driver = $nextOf } }
+            $end = Add-BusinessDays $start ([math]::Max(1, $x.Days) - 1)
+            if ($x.Entered -and $x.Entered -ge $start) { $end = $x.Entered }
+            if ($x.Start -ne $start -or $x.End -ne $end) { $x.Start = $start; $x.End = $end; $x.Driver = $driver; $cycle = $true }
+        }
+        if ($s) { if ($t.PlanEnd -le $t.PlanStart) { $s.Same.Add($x) } else { $s.Later.Add($x) } }
+    }
+}
+if ($cycle) { Write-Warning '先行タスクが輪になっています（先行の列を確かめてください）。見込みは途中までの計算です' }
+# 見込の遅れ（営業日）は、日ごとの営業日の累計の差で数える（タスクごとに日を数えると、タスクが多いと遅いため）
+$dayFrom = @($plans | ForEach-Object { $_.Task.PlanEnd; $_.End } | Sort-Object)[0].AddDays(-1)
+$dayTo = @($plans | ForEach-Object { $_.Task.PlanEnd; $_.End } | Sort-Object)[-1]
+$businessCount = @{}
+$n = 0
+for ($d = $dayFrom; $d -le $dayTo; $d = $d.AddDays(1)) { if (Test-BusinessDay $d) { $n++ }; $businessCount[$d] = $n }
+foreach ($x in $plans) {
+    $x.Task.ForecastStart = $x.Start
+    $x.Task.ForecastEnd = $x.End
+    $x.Task.ForecastDelay = $businessCount[$x.End.Date] - $businessCount[$x.Task.PlanEnd.Date]
+}
+$plannedFinish = @($plans | Sort-Object { $_.Task.PlanEnd } -Descending)[0].Task.PlanEnd
+$finishTask = @($plans | Sort-Object @{ e = { $_.End }; Descending = $true }, Index)[0]
+$forecastFinish = $finishTask.End
+$finishDelay = $businessCount[$forecastFinish.Date] - $businessCount[$plannedFinish.Date]
+# 完了見込みを決めている流れ（最後に終わるタスクから、見込開始を決めた先行タスクをたどる）
+$chain = New-Object System.Collections.Generic.List[object]
+for ($x = $finishTask; $x -and $chain.Count -lt 50 -and -not $chain.Contains($x); $x = $x.Driver) { $chain.Insert(0, $x) }
+
 $tasks
 
 # ---------------------------------------------------------------- 集計
@@ -778,7 +931,7 @@ if ($OutGantt) {
         if (Test-TotalRow $v) { continue }
         $isParent = [bool]($r.Wbs -and $parents.ContainsKey(('{0}|{1}|{2}' -f $r.Place.Path, $r.Place.Sheet, $r.Wbs)))
         $ganttTasks.Add([pscustomobject]@{
-            Wbs = ([string]$v['WBS番号']).Trim(); Task = ([string]$v['タスク']).Trim(); Owner = ([string]$v['担当']).Trim()
+            Wbs = ([string]$v['WBS番号']).Trim(); Task = ([string]$v['タスク']).Trim(); Owner = ([string]$v['担当']).Trim(); Predecessors = ([string]$v['先行']).Trim()
             PlanStart = (ConvertTo-Date $v['予定開始']); PlanEnd = (ConvertTo-Date $v['予定終了']); Effort = (ConvertTo-Number $v['予定工数'])
             ActualStart = (ConvertTo-Date $v['実績開始']); ActualEnd = (ConvertTo-Date $v['実績終了']); Forecast = (ConvertTo-Date $v['見込終了'])
             Progress = (ConvertTo-Rate $v['進捗率']); ActualEffort = (ConvertTo-Number $v['実績工数']); Summary = $isParent
@@ -800,8 +953,8 @@ if ($OutXlsx) {
     foreach ($t in $tasks) {
         $exp = ''
         if ($t.ExpectedEnd) { $exp = $t.ExpectedEnd.Date }
-        $row = @{ Values = @($t.WbsNo, $t.Task, $t.Owner, $t.PlanStart.Date, $t.PlanEnd.Date, $exp, [double]$t.Progress, [double]$t.PlannedProgress, [double]$t.Delay, $t.Status, [double][math]::Round($t.PV, 2), [double][math]::Round($t.EV, 2), ('{0} {1}' -f $t.Place.File, $t.Place.Cell)) }
-        if ($t.Place.Sheet) { $row.Link = @{ Column = 12; Path = $t.Place.Path; Location = ("'{0}'!{1}" -f $t.Place.Sheet.Replace("'", "''"), $t.Place.Cell) } }
+        $row = @{ Values = @($t.WbsNo, $t.Task, $t.Owner, $t.PlanStart.Date, $t.PlanEnd.Date, $exp, [double]$t.Progress, [double]$t.PlannedProgress, [double]$t.Delay, $t.Status, $t.ForecastStart.Date, $t.ForecastEnd.Date, [double]$t.ForecastDelay, [double][math]::Round($t.PV, 2), [double][math]::Round($t.EV, 2), ('{0} {1}' -f $t.Place.File, $t.Place.Cell)) }
+        if ($t.Place.Sheet) { $row.Link = @{ Column = 15; Path = $t.Place.Path; Location = ("'{0}'!{1}" -f $t.Place.Sheet.Replace("'", "''"), $t.Place.Cell) } }
         $taskRows.Add($row)
     }
     $ownerRows = New-Object System.Collections.Generic.List[object]
@@ -814,7 +967,7 @@ if ($OutXlsx) {
     foreach ($wk in $weeks) { $weekRows.Add(@{ Values = @($wk.No, $wk.Monday.Date, [double]$wk.Planned, [double]$wk.Done, [double]$wk.TotalPlanned, [double]$wk.TotalDone) }) }
     try {
         Export-Workbook -FilePath $OutXlsx -Sheets @(
-            @{ Name = 'タスク'; Columns = @(@{ Header = 'WBS'; Width = 8 }, @{ Header = 'タスク'; Width = 30 }, @{ Header = '担当'; Width = 10 }, @{ Header = '予定開始'; Width = 11 }, @{ Header = '予定終了'; Width = 11 }, @{ Header = '実績／見込終了'; Width = 13 }, @{ Header = '進捗率'; Width = 7 }, @{ Header = '予定の進捗率'; Width = 10 }, @{ Header = '遅れ（営業日）'; Width = 12 }, @{ Header = '状態'; Width = 10 }, @{ Header = 'PV'; Width = 8 }, @{ Header = 'EV'; Width = 8 }, @{ Header = 'WBS の場所'; Width = 30 }); Rows = $taskRows },
+            @{ Name = 'タスク'; Columns = @(@{ Header = 'WBS'; Width = 8 }, @{ Header = 'タスク'; Width = 30 }, @{ Header = '担当'; Width = 10 }, @{ Header = '予定開始'; Width = 11 }, @{ Header = '予定終了'; Width = 11 }, @{ Header = '実績／見込終了'; Width = 13 }, @{ Header = '進捗率'; Width = 7 }, @{ Header = '予定の進捗率'; Width = 10 }, @{ Header = '遅れ（営業日）'; Width = 12 }, @{ Header = '状態'; Width = 10 }, @{ Header = '見込開始'; Width = 11 }, @{ Header = '見込終了'; Width = 11 }, @{ Header = '見込の遅れ（営業日）'; Width = 12 }, @{ Header = 'PV'; Width = 8 }, @{ Header = 'EV'; Width = 8 }, @{ Header = 'WBS の場所'; Width = 30 }); Rows = $taskRows },
             @{ Name = '担当者別'; Columns = @(@{ Header = '担当'; Width = 12 }, @{ Header = 'タスク'; Width = 7 }, @{ Header = 'PV'; Width = 9 }, @{ Header = 'EV'; Width = 9 }, @{ Header = 'SPI'; Width = 7 }, @{ Header = '遅延タスク'; Width = 9 }); Rows = $ownerRows },
             @{ Name = '週次'; Columns = @(@{ Header = '週'; Width = 6 }, @{ Header = '対象週（月曜）'; Width = 13 }, @{ Header = '計画完了'; Width = 9 }, @{ Header = '実績完了'; Width = 9 }, @{ Header = '計画完了の累計'; Width = 13 }, @{ Header = '実績完了の累計'; Width = 13 }); Rows = $weekRows })
     }
@@ -832,6 +985,30 @@ if ($null -ne $spi) { $line += ' / SPI {0:0.00}' -f $spi }
 if ($null -ne $sumAC) { $line += ' / AC {0:0.##} / CPI {1:0.00}' -f $sumAC, $cpi }
 Write-Host $line
 if ($delayed.Count -gt 0) { Write-Host ('遅延 {0} 件（最大 {1} 営業日: {2}）' -f $delayed.Count, $delayed[0].Delay, $delayed[0].Task) }
+$finishText = '予定どおり'
+if ($finishDelay -gt 0) { $finishText = '予定の {0} より {1} 営業日遅れ' -f $plannedFinish.ToString('yyyy/MM/dd', $invariant), $finishDelay }
+elseif ($finishDelay -lt 0) { $finishText = '予定の {0} より {1} 営業日早い' -f $plannedFinish.ToString('yyyy/MM/dd', $invariant), (-$finishDelay) }
+if (@($tasks | Where-Object { -not $_.Done }).Count -eq 0) { Write-Host ('すべて完了: {0}（{1}）' -f $forecastFinish.ToString('yyyy/MM/dd', $invariant), $finishText) }
+else {
+    Write-Host ('完了見込み: {0}（{1}）' -f $forecastFinish.ToString('yyyy/MM/dd', $invariant), $finishText)
+    $late = @($tasks | Where-Object { -not $_.Done -and $_.ForecastDelay -gt 0 })
+    if ($late.Count -gt 0) {
+        $pushed = @($late | Where-Object { $_.Status -ne '遅延' }).Count
+        $line = '  予定終了より遅れる見込みのタスク {0} 件' -f $late.Count
+        if ($pushed -gt 0) { $line += '（うち {0} 件は、まだ遅れていないが、先行タスク・同じ担当者の前のタスクの遅れで後ろにずれるもの）' -f $pushed }
+        Write-Host $line
+    }
+    if ($finishDelay -gt 0) {
+        $names = @($chain | ForEach-Object {
+            $who = ''
+            if ($_.Task.Owner) { $who = '（{0}）' -f $_.Task.Owner }
+            '{0} {1}{2}' -f $_.Task.WbsNo, $_.Task.Task, $who
+        })
+        # 長ければ、もとの遅れ（最初のタスク）と最後の 4 つ
+        if ($names.Count -gt 5) { $names = @($names[0], '…') + @($names | Select-Object -Last 4) }
+        Write-Host ('  完了見込みを決めている流れ: {0}' -f ($names -join ' → '))
+    }
+}
 foreach ($l in $ganttLog) { Write-Host $l }
 if ($outputBooks.Count -gt 0) { Write-Host ('読まなかったブック（進捗・週次報告の結果とリカバリ計画のテンプレート）: {0}' -f ($outputBooks -join '・')) }
 if ($FillTemplate) { Write-Host ('テンプレートに書き込みました: {0}（02_遅延状況 {1} 件・08_週次モニタリング {2} 週）' -f $OutFile, $written['02_遅延状況'], $written['08_週次モニタリング']) }
@@ -861,6 +1038,10 @@ if ($OutGantt) {
 #                   基準日より後に始めたタスクは、基準日には進捗率 0 とします。基準日のあとも続いているタスクの進捗率は、記入された値のままです
 #       PV / EV     予定工数（無ければ予定の営業日数）× 予定の進捗率 / 進捗率。SPI = EV / PV
 #       AC / CPI    実績工数の列があれば、CPI = EV / AC
+#       完了見込み  遅れを後のタスクに送った見込開始・見込終了と、全体の完了見込み・それを決めているタスクの流れ。
+#                   作業中のタスクは基準日 + 残りの日数（見込終了の記入があればその日）、未着手のタスクは予定開始日・基準日の次の営業日・
+#                   先行タスクの見込終了のいちばん遅い日から予定の営業日の日数。先行タスクは、先行の列の WBS 番号（親の番号はその下のすべて）と、
+#                   同じ担当者のタスクのうち予定でそのタスクの開始日までに終わるもの
 #
 #     -FillTemplate にスケジュール遅延リカバリ計画のテンプレートを渡すと、遅延タスクを「02_遅延状況」に、
 #     週ごとの計画完了・実績完了の数を「08_週次モニタリング」に書き込んで、-OutFile に保存します。テンプレートの遅延日数は
@@ -891,7 +1072,7 @@ if ($OutGantt) {
 #     -FillTemplate で書き込んだテンプレートの保存先（.xlsx）。
 #
 # .PARAMETER OutXlsx
-#     結果を xlsx に保存します（タスク・担当者別・週次。タスクから WBS の該当行へのリンク付き）。
+#     結果を xlsx に保存します（タスク（見込開始・見込終了・見込の遅れも）・担当者別・週次。タスクから WBS の該当行へのリンク付き）。
 #
 # .PARAMETER OutGantt
 #     ガントチャート形式の進捗管理票（xlsx）を作ります。左に WBS の列（WBS番号・タスク名・担当者・予定開始・予定終了・予定工数・

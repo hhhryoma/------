@@ -1165,7 +1165,7 @@ function ConvertTo-GanttSheetXml {
 function New-GanttSheets {
     #     ガントチャート形式の進捗管理票のシート（Export-Workbook の Sheets）。Tasks の各要素: @{ Wbs; Task; Owner; PlanStart; PlanEnd; Effort;
     #     ActualStart; ActualEnd; Forecast; Progress（0〜1）; ActualEffort; Summary（親のタスク）}（日付は datetime か $null、数は double か $null）。
-    #     Forecast（見込終了）・ActualEffort（実績工数）の列は、値のあるタスクがあるときか、Include に名前があるときだけ置く。
+    #     Predecessors（先行。WBS 番号）・Forecast（見込終了）・ActualEffort（実績工数）の列は、値のあるタスクがあるときか、Include に名前があるときだけ置く。
     #     休日のシート（日付・名前）と、その範囲の名前「休日」も作る（曜日の「祝」と状態の営業日に使う。休日を足すと変わる）。
     #     戻り値: @{ Sheets = @(ガントチャートのシート, 休日のシート); Unit; Dates }
     param($Tasks, [datetime] $AsOf, $Holidays, [string] $Unit = 'Auto', [string] $Name = 'ガントチャート', [string] $Title = '進捗管理票', [string[]] $Include)
@@ -1176,12 +1176,14 @@ function New-GanttSheets {
     $span = Get-GanttDates (@($all | Sort-Object)[0]) (@($all | Sort-Object)[-1]) $Unit
     $hasForecast = @($Tasks | Where-Object { $_.Forecast -is [datetime] }).Count -gt 0 -or @($Include) -contains 'Forecast'
     $hasActualEffort = @($Tasks | Where-Object { $null -ne $_.ActualEffort -and '' -ne $_.ActualEffort }).Count -gt 0 -or @($Include) -contains 'ActualEffort'
+    $hasPredecessors = @($Tasks | Where-Object { $_.PSObject.Properties['Predecessors'] -and [string]$_.Predecessors }).Count -gt 0 -or @($Include) -contains 'Predecessors'
     $columns = New-Object System.Collections.Generic.List[object]
     $add = { param($h, $w) $columns.Add(@{ Header = $h; Width = $w }); return $columns.Count - 1 }
     $fields = @{}
     $null = & $add 'WBS番号' 7
     $null = & $add 'タスク名' 30
     $null = & $add '担当者' 9
+    $iPredecessors = $null; if ($hasPredecessors) { $iPredecessors = & $add '先行' 7 }
     $fields.PlanStart = & $add '予定開始' 10.5
     $fields.PlanEnd = & $add '予定終了' 10.5
     $iEffort = & $add '予定工数' 6.5
@@ -1196,6 +1198,7 @@ function New-GanttSheets {
         $v = New-Object object[] $columns.Count
         for ($i = 0; $i -lt $v.Count; $i++) { $v[$i] = '' }
         $v[0] = [string]$t.Wbs; $v[1] = [string]$t.Task; $v[2] = [string]$t.Owner
+        if ($null -ne $iPredecessors -and $t.PSObject.Properties['Predecessors']) { $v[$iPredecessors] = [string]$t.Predecessors }
         foreach ($pair in @(@($fields.PlanStart, $t.PlanStart), @($fields.PlanEnd, $t.PlanEnd), @($fields.ActualStart, $t.ActualStart), @($fields.ActualEnd, $t.ActualEnd), @($iForecast, $t.Forecast))) {
             if ($null -ne $pair[0] -and $pair[1] -is [datetime]) { $v[$pair[0]] = $pair[1].Date }
         }
