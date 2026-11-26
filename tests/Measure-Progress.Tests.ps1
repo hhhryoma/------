@@ -89,6 +89,13 @@ Test-Case 'Measure-Progress: 先行の列（親の番号・3FS+2 の書き方・
     Assert-Match ($warnings -join "`n") '先行タスクが輪になっています'
 }
 
+Test-Case 'Measure-Progress: 日付の書式の無いセルの日付（Excel のシリアル値。値だけ貼り付けたもの）も日付として読む' {
+    $csv = Join-Path (New-TestDir) 'wbs.csv'
+    @('タスク名,担当者,予定開始,予定終了,実績開始,実績終了,進捗率', '画面設計,山田,46300,46304,46300,46307,100%', 'テーブル設計,佐藤,2026/10/05,46304.0,,,50%') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $r = @(& $ProgressTool -Path $csv -AsOf '2026-10-14' 6>$null)
+    Assert-Equal @('画面設計|10/05|10/09|10/12|1|完了', 'テーブル設計|10/05|10/09||5|遅延') @($r | ForEach-Object { '{0}|{1:MM/dd}|{2:MM/dd}|{3:MM/dd}|{4}|{5}' -f $_.Task, $_.PlanStart, $_.PlanEnd, $_.DoneOn, $_.Delay, $_.Status })
+}
+
 Test-Case 'Measure-Progress: CSV の WBS（WBS 番号なし）と見込終了日を読む' {
     $dir = New-TestDir
     $csv = Join-Path $dir 'wbs.csv'
@@ -530,6 +537,8 @@ Test-Case 'Measure-Progress: -OutGantt で、WBS からガントチャート形�
     Assert-Equal ('IF(OR(N(I6)>=1,H6<>""),"完了",IF(OR(D6="",E6=""),"",IF(IF($K$1>E6,OR(NETWORKDAYS(E6+1,$K$1,休日)>0,(1-N(I6))*MAX(1,NETWORKDAYS(D6,E6,休日))>0.5),' +
         'IF($K$1>=D6,(IF($K$1>=E6,1,NETWORKDAYS(D6,$K$1,休日)/MAX(1,NETWORKDAYS(D6,E6,休日)))-N(I6))*MAX(1,NETWORKDAYS(D6,E6,休日))>0.5,FALSE)),"遅延",IF($K$1<D6,"未着手","予定どおり"))))') $g.Cells['K6'].Formula
     Assert-Equal @('11', '12', '14') @($g.Cells['B4'].Style, $g.Cells['D4'].Style, $g.Cells['I4'].Style)
+    # WBS 番号は文字列の書式（あとから 2.10 と入力しても数の 2.1 にしない）。空の実績開始・実績終了も日付の書式
+    Assert-Equal @('19', '18', '4', '4', '12') @($g.Cells['A4'].Style, $g.Cells['A5'].Style, $g.Cells['H6'].Style, $g.Cells['G7'].Style, $g.Cells['H8'].Style)
     Assert-Equal @('0.6', '10') @($g.Cells['I6'].Value, $g.Cells['I6'].Style)
     # 条件付き書式: 実績・遅延・親のタスク・予定・土日休日（タスクの行）、見出しの土日休日、今日の線、進捗率のデータバー
     $rules = $g.Rules

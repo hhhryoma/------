@@ -980,7 +980,7 @@ function ConvertTo-GanttSheetXml {
     #     ガントチャート形式の進捗管理票のシートの XML（Export-Workbook から呼ぶ）。左に WBS の列（Columns・Rows）、右に日付の列を並べ、
     #     バー（予定・遅延・実績・親のタスク）・今日の線・土日と休日の色を条件付き書式で描く（Excel で実績を入力すると変わる）。
     #       1 行目: タイトルと基準日（=TODAY()。書き換えられる）・月、2 行目: 曜日（日ごと。休日の名前の範囲にある日は「祝」）、3 行目: 見出しと日付、4 行目から: タスク
-    #     Gantt: @{ Dates; Unit（Day・Week）; Fields = @{ PlanStart; PlanEnd; ActualStart; ActualEnd; Progress; Status; Forecast（無ければ $null）}（Values の位置。0 始まり）;
+    #     Gantt: @{ Dates; Unit（Day・Week）; Fields = @{ Wbs; Predecessors; PlanStart; PlanEnd; ActualStart; ActualEnd; Progress; Status; Forecast（無ければ $null）}（Values の位置。0 始まり）;
     #             AsOf; Holidays（HashSet[datetime]）; HolidayName（休日の名前の範囲）; Title }
     #     Rows の Summary が真の行は親のタスク（太字・灰色のバー。状態の数式は書かない）
     #     戻り値: @{ Xml; FilterRef（オートフィルターの範囲） }
@@ -1003,6 +1003,8 @@ function ConvertTo-GanttSheetXml {
     if ($null -ne $f.Status) { $stCol = & $colOf $f.Status }
     $fcCol = $null
     if ($null -ne $f.Forecast) { $fcCol = & $colOf $f.Forecast }
+    $dateFields = @(@($f.PlanStart, $f.PlanEnd, $f.ActualStart, $f.ActualEnd, $f.Forecast) | Where-Object { $null -ne $_ })
+    $textFields = @(@($f.Wbs, $f.Predecessors) | Where-Object { $null -ne $_ })
     $hol = $g.HolidayName
     $asOfSerial = (ConvertTo-ExcelDate $g.AsOf).ToString('R', $invariant)
 
@@ -1097,6 +1099,10 @@ function ConvertTo-GanttSheetXml {
             $s = 2
             if ($isRate) { $s = 10 }
             if ($summary) { $s = 11; if ($isRate) { $s = 14 } }
+            # 空の日付の列（実績開始・実績終了など）は日付の書式にしておく（値だけ貼り付けた日付も yyyy/mm/dd で見え、日付として読める）
+            if ($dateFields -contains $i -and -not ([string]$raw)) { $s = 4; if ($summary) { $s = 12 } }
+            # WBS 番号・先行は文字列の書式（あとから入力した 2.10 を Excel が数の 2.1 にしないように）
+            if ($textFields -contains $i) { $s = 18; if ($summary) { $s = 19 } }
             $content = ConvertTo-InlineStringXml $raw
             if ($content) { [void]$xml.Append(('<c r="{0}{1}" s="{2}" t="inlineStr">{3}</c>' -f $col, $r, $s, $content)) }
             else { [void]$xml.Append(('<c r="{0}{1}" s="{2}"/>' -f $col, $r, $s)) }
@@ -1180,10 +1186,10 @@ function New-GanttSheets {
     $columns = New-Object System.Collections.Generic.List[object]
     $add = { param($h, $w) $columns.Add(@{ Header = $h; Width = $w }); return $columns.Count - 1 }
     $fields = @{}
-    $null = & $add 'WBS番号' 7
+    $fields.Wbs = & $add 'WBS番号' 7
     $null = & $add 'タスク名' 30
     $null = & $add '担当者' 9
-    $iPredecessors = $null; if ($hasPredecessors) { $iPredecessors = & $add '先行' 7 }
+    $iPredecessors = $null; if ($hasPredecessors) { $iPredecessors = & $add '先行' 7; $fields.Predecessors = $iPredecessors }
     $fields.PlanStart = & $add '予定開始' 10.5
     $fields.PlanEnd = & $add '予定終了' 10.5
     $iEffort = & $add '予定工数' 6.5
@@ -1415,7 +1421,7 @@ function Export-Workbook {
             '<fill><patternFill patternType="solid"><fgColor rgb="FFF2F2F2"/><bgColor indexed="64"/></patternFill></fill></fills>' +
             '<borders count="3"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFBFBFBF"/></left><right style="thin"><color rgb="FFBFBFBF"/></right><top style="thin"><color rgb="FFBFBFBF"/></top><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border>' +
             '<border><left style="thin"><color rgb="FFE0E0E0"/></left><right style="thin"><color rgb="FFE0E0E0"/></right><top style="thin"><color rgb="FFE0E0E0"/></top><bottom style="thin"><color rgb="FFE0E0E0"/></bottom><diagonal/></border></borders>' +
-            '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="18"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="176" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
+            '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="20"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="176" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
             '<xf numFmtId="177" fontId="4" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
             '<xf numFmtId="178" fontId="4" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
             '<xf numFmtId="0" fontId="4" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
@@ -1428,7 +1434,10 @@ function Export-Workbook {
             '<xf numFmtId="9" fontId="1" fillId="3" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
             '<xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>' +
             '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="right"/></xf>' +
-            '<xf numFmtId="176" fontId="1" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/></cellXfs>' +
+            '<xf numFmtId="176" fontId="1" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>' +
+            # 18・19: 文字列の書式（WBS 番号・先行。Excel で 2.10 と入力しても数の 2.1 にしない）。19 は親のタスク
+            '<xf numFmtId="49" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>' +
+            '<xf numFmtId="49" fontId="1" fillId="3" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf></cellXfs>' +
             '<cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles>' +
             '<dxfs count="6"><dxf><fill><patternFill patternType="solid"><fgColor rgb="FF2F5597"/><bgColor rgb="FF2F5597"/></patternFill></fill></dxf>' +
             '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FFF4B183"/><bgColor rgb="FFF4B183"/></patternFill></fill></dxf>' +
