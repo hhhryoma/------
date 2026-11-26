@@ -1061,15 +1061,22 @@ foreach ($kind in $kinds) {
 }
 
 function Get-CrudSheet {
-    #     CRUD 図のシート（行: 画面・IF、列: テーブル。C 登録・R 参照・U 更新・D 削除）
+    #     CRUD 図のシート（行: 画面・IF・帳票・バッチ、列: テーブル。C 登録・R 参照・U 更新・D 削除）
     $names = @{}
-    foreach ($d in $defs) { if ($d.Section -eq '定義' -and -not $names.ContainsKey($d.Key)) { $names[$d.Key] = $d.Name } }
+    $kindOf = @{}
+    foreach ($d in $defs) { if ($d.Section -eq '定義' -and -not $names.ContainsKey($d.Key)) { $names[$d.Key] = $d.Name; $kindOf[$d.Key] = $d.Kind } }
+    # 1 列目の見出しは、行の種類（画面・IF・帳票・バッチなど。定義の無い行だけなら「画面・IF」）
+    $rowKindNames = @($script:Crud.Keys | Where-Object { $kindOf.ContainsKey($_) } | ForEach-Object { $kindOf[$_] } | Select-Object -Unique)
+    $order = @('画面', 'IF', '帳票', 'バッチ')
+    $rowKindNames = @(@($order | Where-Object { $rowKindNames -contains $_ }) + @($rowKindNames | Where-Object { $order -notcontains $_ }))
+    $firstHeader = '画面・IF'
+    if ($rowKindNames.Count -gt 0) { $firstHeader = $rowKindNames -join '・' }
     $targets = [ordered]@{}
     foreach ($k in @($script:Crud.Values | ForEach-Object { $_.Targets.Keys } | Sort-Object -Unique)) {
         $t = @($script:Crud.Values | Where-Object { $_.Targets.ContainsKey($k) })[0].Targets[$k]
         $targets[$k] = $t.Shown
     }
-    $columns = @(@{ Header = '画面・IF'; Width = 12 }, @{ Header = '名前'; Width = 20 })
+    $columns = @(@{ Header = $firstHeader; Width = 12 }, @{ Header = '名前'; Width = 20 })
     foreach ($k in $targets.Keys) {
         $header = $targets[$k]
         if ($names[$k]) { $header = '{0}（{1}）' -f $targets[$k], $names[$k] }
@@ -1154,7 +1161,7 @@ if ($OutXlsx) {
 #       未確認           定義が見つからない種類の参照（設計書がフォルダに無いなど。情報）
 #
 #     結果は 1 指摘 1 行のオブジェクト（Kind は定義・参照の種類）で出力し、-OutXlsx で該当セルへのリンク付きの一覧に保存できます。
-#     -OutXlsx には、イベント定義の使用テーブル（T_ORDER(R,U) など）と IF の設定元から作った CRUD 図も入れます。
+#     -OutXlsx には、イベント定義の使用テーブル（T_ORDER(R,U) など）・IF の設定元・帳票設計書とバッチ設計書の使用テーブルから作った CRUD 図も入れます。
 #     -Where を付けると、食い違いは確かめずに、指定した ID の定義と参照している場所（影響範囲）を一覧にします。
 #
 #     基本設計書も一緒に指定すると、基本設計書の一覧・定義を詳細設計書と別に比べます（同じ画面・テーブルが両方にあっても重複にしません）。

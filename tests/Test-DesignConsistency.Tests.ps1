@@ -424,6 +424,33 @@ Test-Case 'Test-DesignConsistency: 帳票設計書・バッチ設計書を定義
     }
 }
 
+Test-Case 'Test-DesignConsistency: 帳票設計書・バッチ設計書の使用テーブル（T_ORDER・T_ORDER(R,U)）も CRUD 図に入れ、基本設計の CRUD 図と比べる' {
+    $dir = Copy-Fixture (Join-Path $sampleDir '.')
+    New-SheetsBook (Join-Path $dir 'DD07_帳票設計書_RPT001_受注伝票.xlsx') ([ordered]@{
+            '帳票概要' = @(@('帳票ID', 'RPT001', '帳票名', '受注伝票'), @('', '', '', ''), @('No', '使用テーブル', '用途', ''), @('1', 'T_ORDER', '見出し', ''), @('2', 'T_ORDER_DETAIL', '明細', ''), @('3', 'M_CUSTOMER（顧客名）', '', ''))
+        })
+    New-SheetsBook (Join-Path $dir 'DD08_バッチ設計書_BAT001_出荷指示作成.xlsx') ([ordered]@{
+            '処理概要' = @(@('バッチID', 'BAT001', 'バッチ名', '出荷指示作成'), @('', '', '', ''), @('No', '処理', '使用テーブル', ''), @('1', '受注を読む', 'T_ORDER(R,U)', ''), @('2', '出荷を書く', 'T_SHIPMENT(C)', ''))
+        })
+    $out = Join-Path $dir '整合性.xlsx'
+    $issues = Invoke-Consistency @{ Path = $dir; OutXlsx = $out }
+    Assert-True (@($issues | Where-Object { $_.Detail -eq 'テーブル「T_SHIPMENT」が定義されていません（使用テーブル）' -and $_.Location -eq '処理概要!C5' }).Count -eq 1) '使用テーブルの参照先なし'
+    $crud = Read-XlsxSheet -Path $out -Index 3
+    Assert-Equal '画面・IF・帳票・バッチ|名前|M_CUSTOMER（顧客マスタ）|M_PRODUCT（商品マスタ）|T_ORDER（受注）|T_ORDER_DETAIL（受注明細）|T_SHIPMENT' (@('A', 'B', 'C', 'D', 'E', 'F', 'G' | ForEach-Object { $crud.Rows[1][$_] }) -join '|') '1 列目の見出しは行の種類'
+    $rowOf = @{}
+    foreach ($r in 2..$crud.Rows.Count) { $rowOf[$crud.Rows[$r]['A']] = (@('B', 'C', 'D', 'E', 'F', 'G' | ForEach-Object { $crud.Rows[$r][$_] }) -join '|') }
+    Assert-Equal '受注伝票|R||R|R|' $rowOf['RPT001'] '帳票: 操作の無い使用テーブル（M_CUSTOMER（顧客名）も）は参照（R）'
+    Assert-Equal '出荷指示作成|||RU||C' $rowOf['BAT001'] 'バッチ: T_ORDER(R,U) の操作'
+
+    # 基本設計の CRUD 図の帳票・バッチの行とも比べる
+    New-SheetsBook (Join-Path $dir '基本設計書.xlsx') ([ordered]@{
+            'CRUD図' = @(@('ID', '名前', 'T_ORDER', 'T_ORDER_DETAIL', 'M_CUSTOMER'), @('RPT001', '受注伝票', 'R', 'R', 'R'), @('BAT001', '出荷指示作成', 'R', '', ''))
+        })
+    $crudIssues = @((Invoke-Consistency @{ Path = $dir }) | Where-Object { $_.Item -eq 'CRUD の違い' })
+    Assert-True (@($crudIssues | Where-Object { $_.Detail -match 'BAT001' -and $_.Detail -match 'T_ORDER' -and $_.Detail -match 'U' }).Count -ge 1) ('バッチの U が基本設計に無い: ' + (@($crudIssues | ForEach-Object { $_.Detail }) -join ' / '))
+    Assert-True (@($crudIssues | Where-Object { $_.Detail -match 'RPT001' }).Count -eq 0) ('帳票は同じ: ' + (@($crudIssues | ForEach-Object { $_.Detail }) -join ' / '))
+}
+
 Test-Case 'Test-DesignConsistency: 基本設計書の CRUD 図（行は画面 ID か機能 ID、列はテーブルの ID か名前）を、詳細設計の使用テーブルから作った CRUD 図と比べる' {
     $dir = Copy-Fixture (Join-Path $sampleDir '.')
     $crudSheet = @(@('画面ID', '画面名', '顧客マスタ', '商品マスタ', '受注', 'T_ORDER_DETAIL（受注明細）', '担当者マスタ'),
