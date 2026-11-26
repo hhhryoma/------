@@ -432,13 +432,20 @@ if ($OutXlsx) {
             # 担当者別・規模のシートの見出しは、WBS の見出し（タスク・開始・終了など）にしない（Measure-Progress.ps1 が WBS の表として読まないように）
             @{ Name = '担当者別'; Columns = @(@{ Header = '担当者'; Width = 12 }, @{ Header = '稼働率'; Width = 8 }, @{ Header = 'タスクの数'; Width = 10 }, @{ Header = '工数の合計（人日）'; Width = 12 }, @{ Header = 'うちレビューなど（人日）'; Width = 14 }, @{ Header = '最初の日'; Width = 11 }, @{ Header = '最後の日'; Width = 11 }, @{ Header = '営業日'; Width = 8 }); Rows = $loadRows },
             @{ Name = '規模'; Columns = @(@{ Header = '種類'; Width = 10 }, @{ Header = '機能'; Width = 36 }, @{ Header = '見積もりの根拠'; Width = 50 }, @{ Header = '工数（人日）'; Width = 11 }, @{ Header = '担当者'; Width = 12 }, @{ Header = 'まとめた先'; Width = 36 }); Rows = $sizeRows })
+        # 説明のシート（使い方・列の意味。-Gantt ならバーの色の凡例も）
+        $guideExtra = @(
+            @('使い方', '下書き', 'WBS の下書きです。機能をまたいだ順番（テーブルの後に画面など）・会議などの共通のタスク・担当者の得意な機能は、直してから使ってください', ''),
+            @('シート', '担当者別', '担当者ごとの稼働率・タスクの数・工数の合計・うちレビューなどの工数・最初の日・最後の日', ''),
+            @('シート', '規模', '機能ごとの種類・見積もりの根拠・工数・担当者・まとめた先（小さい機能をまとめたタスク）', ''))
+        $guideSheet = New-WbsGuideSheet $header $false $guideExtra
         if ($Gantt) {
             # ガントチャート形式の進捗管理票: WBS のシートを、右に日付の列を並べたガントチャートにする（見積もりの根拠は規模のシートにある）。休日のシートも足す
             $ganttTasks = @(foreach ($r in $rows) { [pscustomobject]@{ Wbs = $r.Wbs; Task = $r.Task; Owner = $r.Member; Predecessors = $r.Predecessors; PlanStart = $r.Start; PlanEnd = $r.End; Effort = [double]$r.Days; Summary = $r.IsParent } })
             $ganttSheets = New-GanttSheets $ganttTasks (Get-Date).Date @($holidaySet) $GanttUnit 'WBS' '進捗管理票' @('ActualEffort', 'Forecast')
             $sheets = @($ganttSheets.Sheets[0]) + @($sheets | Select-Object -Skip 1) + @($ganttSheets.Sheets[1])
+            $guideSheet = New-WbsGuideSheet @($ganttSheets.Sheets[0].Columns | ForEach-Object { $_.Header }) $true $guideExtra
         }
-        Export-Workbook -FilePath $OutXlsx -Sheets $sheets
+        Export-Workbook -FilePath $OutXlsx -Sheets (@($sheets) + @($guideSheet))
     }
     catch {
         Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
