@@ -144,6 +144,24 @@ if ($tasks.Count -gt 0) {
     $pv = ($tasks | Measure-Object PV -Sum).Sum
     if ($pv -gt 0) { $spi = [math]::Round(($tasks | Measure-Object EV -Sum).Sum / $pv, 2) }
 }
+# 完了見込み（Measure-Progress.ps1 の見込終了のいちばん遅い日）と、予定の完了（予定終了のいちばん遅い日）との差（土日と -Holidays の休日を除く営業日）
+$forecastFinish = $null; $plannedFinish = $null; $finishDelay = $null
+$withForecast = @($tasks | Where-Object { $_.PSObject.Properties['ForecastEnd'] -and $_.ForecastEnd -is [datetime] })
+if ($withForecast.Count -gt 0) {
+    $forecastFinish = @($withForecast | Sort-Object ForecastEnd -Descending)[0].ForecastEnd
+    $plannedFinish = @($tasks | Sort-Object PlanEnd -Descending)[0].PlanEnd
+    $holidaySet = New-Object 'System.Collections.Generic.HashSet[datetime]'
+    if ($Holidays) {
+        foreach ($line in ((Read-TextFile $Holidays) -split "\r?\n")) { $d = ConvertTo-DateValue (($line -split ',')[0].Trim('"')); if ($d) { [void]$holidaySet.Add($d.Date) } }
+    }
+    $from = $plannedFinish; $to = $forecastFinish; $sign = 1
+    if ($to -lt $from) { $from = $forecastFinish; $to = $plannedFinish; $sign = -1 }
+    $count = 0
+    for ($d = $from.Date.AddDays(1); $d -le $to.Date; $d = $d.AddDays(1)) {
+        if ($d.DayOfWeek -ne [DayOfWeek]::Saturday -and $d.DayOfWeek -ne [DayOfWeek]::Sunday -and -not $holidaySet.Contains($d)) { $count++ }
+    }
+    $finishDelay = $sign * $count
+}
 
 function Get-NextLabel {
     #     来週の予定のタスクの区分（終了・開始）
@@ -420,6 +438,7 @@ if ($Wbs) {
     Add-Metric '進捗' 'タスク' ([double]$tasks.Count)
     foreach ($s in @('完了', '遅延', '予定どおり', '未着手')) { Add-Metric '進捗' $s ([double]@($tasks | Where-Object { $_.Status -eq $s }).Count) }
     Add-Metric '進捗' 'SPI' $(if ($null -ne $spi) { [double]$spi } else { $null })
+    Add-Metric '進捗' '完了見込みの遅れ（営業日）' $(if ($null -ne $finishDelay) { [double]$finishDelay } else { $null })
     Add-Metric '進捗' '今週の完了' ([double]$doneInPeriod.Count)
     Add-Metric '進捗' '今週に終わる予定' ([double]$plannedInPeriod.Count)
     Add-Metric '進捗' '来週の予定' ([double]$nextTasks.Count)
@@ -511,6 +530,13 @@ if ($Wbs) {
             if ($null -ne $spiMetric.Previous) { $line += '（前回 {0:0.00}）' -f $spiMetric.Previous }
         }
         $lines.Add($line)
+        if ($null -ne $forecastFinish) {
+            $finishMetric = Get-Metric '進捗' '完了見込みの遅れ（営業日）'
+            $describe = { param($n) if ($n -gt 0) { '{0} 営業日遅れ' -f $n } elseif ($n -lt 0) { '{0} 営業日早い' -f (-$n) } else { '予定どおり' } }
+            $line = '・完了見込み: {0}（予定 {1}・{2}' -f (Format-Day $forecastFinish), (Format-Day $plannedFinish), (& $describe $finishDelay)
+            if ($null -ne $finishMetric.Previous) { $line += '。前回 ' + (& $describe ([int]$finishMetric.Previous)) }
+            $lines.Add($line + '）')
+        }
         $notDone = @($plannedInPeriod | Where-Object { -not $_.Done }).Count
         $lines.Add(('・今週の完了: {0} 件 / 今週に終わる予定: {1} 件（うち未完了 {2} 件）' -f $doneInPeriod.Count, $plannedInPeriod.Count, $notDone))
         Add-List $doneInPeriod { param($t) '{0} {1}{2}' -f $t.WbsNo, $t.Task, (Format-Owner $t.Owner) }
@@ -758,7 +784,7 @@ if ($HistoryCsv) {
 # .DESCRIPTION
 #     毎週の進捗報告のために、表を見て数え、文章にまとめる作業を機械でします。
 #
-#       進捗      WBS を Measure-Progress.ps1 で集計し、タスクの状態・SPI、今週の完了、遅延（遅れの大きい順）、来週に終わる・始まるタスク
+#       進捗      WBS を Measure-Progress.ps1 で集計し、タスクの状態・SPI、完了見込み（予定の完了との差）、今週の完了、遅延（遅れの大きい順）、来週に終わる・始まるタスク
 #       指摘      今週の起票・完了、未完了（重要度の内訳）・期限切れ
 #       障害      今週の起票・完了、未完了（重要度の内訳）・期限切れ
 #       課題・QA  今週の起票・完了、未完了（重要度の内訳）・期限切れ

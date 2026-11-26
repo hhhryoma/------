@@ -224,7 +224,7 @@ foreach ($u in $units) {
         $rest -= $d
         $task = [pscustomobject]@{
             Unit = $u; Phase = $p; Name = ('{0}（{1}）' -f $u.Name, $p.Name); Days = [math]::Max(0.0, $d); Member = ''
-            Previous = $previous; Next = $null; Order = 0; ReadyAt = 0.0; StartAt = 0.0; EndAt = 0.0; Start = $null; End = $null
+            Previous = $previous; Next = $null; Order = 0; ReadyAt = 0.0; StartAt = 0.0; EndAt = 0.0; Start = $null; End = $null; Wbs = ''
         }
         if ($previous) { $previous.Next = $task }
         $previous = $task
@@ -352,11 +352,14 @@ function Add-WbsRow {
     $r = [pscustomobject]@{
         Wbs = $Wbs; Task = $Task; Member = $member
         Start = (@($Children | Sort-Object Start)[0]).Start; End = (@($Children | Sort-Object End -Descending)[0]).End
-        Days = $days; Basis = $Basis; IsParent = $IsParent; Deliverable = $Deliverable
+        Days = $days; Basis = $Basis; IsParent = $IsParent; Deliverable = $Deliverable; Predecessors = ''
     }
     $r.PSObject.TypeNames.Insert(0, 'WbsDraft.Task')
+    if (-not $IsParent) { $Children[0].Wbs = $Wbs; $taskRows.Add(@{ Row = $r; Task = $Children[0] }) }
     $rows.Add($r)
 }
+$taskRows = New-Object System.Collections.Generic.List[object]
+$phaseWbs = @{}   # 工程 → 工程の行の WBS 番号（工程ごとの WBS）
 if ($GroupBy -eq 'Phase') {
     $n = 0
     foreach ($p in $phaseList) {
@@ -364,6 +367,7 @@ if ($GroupBy -eq 'Phase') {
         if ($tasks.Count -eq 0) { continue }
         $n++
         Add-WbsRow ([string]$n) $p.Name $tasks '' $true $p.Deliverable
+        $phaseWbs[$p.Index] = [string]$n
         $c = 0
         foreach ($t in $tasks) { $c++; Add-WbsRow ('{0}.{1}' -f $n, $c) $t.Name @($t) $t.Unit.Basis $false $p.Deliverable }
     }
@@ -376,6 +380,19 @@ else {
         $c = 0
         foreach ($t in @($u.Tasks | Sort-Object { $_.Phase.Index })) { $c++; Add-WbsRow ('{0}.{1}' -f $n, $c) $t.Name @($t) '' $false $t.Phase.Deliverable }
     }
+}
+
+# 先行タスク（WBS 番号）: 同じ機能の前の工程。待ち合わせの工程は、前の工程のすべて（工程ごとの WBS は工程の番号、機能ごとの WBS はタスクの番号）。
+# Measure-Progress.ps1 は、この列から遅れを後のタスクに送って完了見込みを出す
+foreach ($item in $taskRows) {
+    $t = $item.Task
+    $before = New-Object System.Collections.Generic.List[string]
+    if ($t.Phase.Wait) {
+        if ($GroupBy -eq 'Phase') { foreach ($p in $phaseList) { if ($p.Index -lt $t.Phase.Index -and $phaseWbs.ContainsKey($p.Index)) { $before.Add($phaseWbs[$p.Index]) } } }
+        else { foreach ($o in $ordered) { if ($o.Phase.Index -lt $t.Phase.Index) { $before.Add($o.Wbs) } } }
+    }
+    elseif ($t.Previous) { $before.Add($t.Previous.Wbs) }
+    $item.Row.Predecessors = $before -join ','
 }
 
 # ---------------------------------------------------------------- 結果
@@ -395,11 +412,11 @@ foreach ($m in $memberList) {
     })
 }
 
-$header = @('WBS番号', 'タスク名', '成果物', '担当者', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '進捗率', '実績工数', '見積もりの根拠')
-$widths = @(8, 44, 16, 10, 11, 11, 9, 11, 11, 8, 9, 50)
+$header = @('WBS番号', 'タスク名', '成果物', '担当者', '先行', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '進捗率', '実績工数', '見積もりの根拠')
+$widths = @(8, 44, 16, 10, 8, 11, 11, 9, 11, 11, 8, 9, 50)
 if ($OutXlsx) {
     $wbsRows = New-Object System.Collections.Generic.List[object]
-    foreach ($r in $rows) { $wbsRows.Add(@{ Values = @($r.Wbs, $r.Task, $r.Deliverable, $r.Member, $r.Start, $r.End, [double]$r.Days, '', '', '', '', $r.Basis) }) }
+    foreach ($r in $rows) { $wbsRows.Add(@{ Values = @($r.Wbs, $r.Task, $r.Deliverable, $r.Member, $r.Predecessors, $r.Start, $r.End, [double]$r.Days, '', '', '', '', $r.Basis) }) }
     $loadRows = New-Object System.Collections.Generic.List[object]
     foreach ($m in $memberRows) { $loadRows.Add(@{ Values = @($m.Member, ('{0}%' -f [math]::Round($m.Rate * 100, 1).ToString($invariant)), [double]$m.Tasks, [double]$m.Days, [double]$m.OtherDays, $m.Start, $m.End, [double]$m.BusinessDays) }) }
     $sizeRows = New-Object System.Collections.Generic.List[object]
@@ -417,7 +434,7 @@ if ($OutXlsx) {
             @{ Name = '規模'; Columns = @(@{ Header = '種類'; Width = 10 }, @{ Header = '機能'; Width = 36 }, @{ Header = '見積もりの根拠'; Width = 50 }, @{ Header = '工数（人日）'; Width = 11 }, @{ Header = '担当者'; Width = 12 }, @{ Header = 'まとめた先'; Width = 36 }); Rows = $sizeRows })
         if ($Gantt) {
             # ガントチャート形式の進捗管理票: WBS のシートを、右に日付の列を並べたガントチャートにする（見積もりの根拠は規模のシートにある）。休日のシートも足す
-            $ganttTasks = @(foreach ($r in $rows) { [pscustomobject]@{ Wbs = $r.Wbs; Task = $r.Task; Owner = $r.Member; PlanStart = $r.Start; PlanEnd = $r.End; Effort = [double]$r.Days; Summary = $r.IsParent } })
+            $ganttTasks = @(foreach ($r in $rows) { [pscustomobject]@{ Wbs = $r.Wbs; Task = $r.Task; Owner = $r.Member; Predecessors = $r.Predecessors; PlanStart = $r.Start; PlanEnd = $r.End; Effort = [double]$r.Days; Summary = $r.IsParent } })
             $ganttSheets = New-GanttSheets $ganttTasks (Get-Date).Date @($holidaySet) $GanttUnit 'WBS' '進捗管理票' @('ActualEffort')
             $sheets = @($ganttSheets.Sheets[0]) + @($sheets | Select-Object -Skip 1) + @($ganttSheets.Sheets[1])
         }
@@ -433,7 +450,7 @@ if ($OutCsv) {
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
     $csvRows = foreach ($r in $rows) {
         $o = [ordered]@{}
-        $values = @($r.Wbs, $r.Task, $r.Deliverable, $r.Member, $r.Start.ToString('yyyy/MM/dd', $invariant), $r.End.ToString('yyyy/MM/dd', $invariant), $r.Days.ToString($invariant), '', '', '', '', $r.Basis)
+        $values = @($r.Wbs, $r.Task, $r.Deliverable, $r.Member, $r.Predecessors, $r.Start.ToString('yyyy/MM/dd', $invariant), $r.End.ToString('yyyy/MM/dd', $invariant), $r.Days.ToString($invariant), '', '', '', '', $r.Basis)
         for ($i = 0; $i -lt $header.Count; $i++) { $o[$header[$i]] = $values[$i] }
         [pscustomobject]$o
     }
@@ -476,7 +493,8 @@ if ($OutCsv) { Write-Host "CSV を保存しました: $OutCsv" }
 #       WBS 番号: 工程ごと（-GroupBy Phase。工程 → 機能）か、機能ごと（-GroupBy Function。機能 → 工程）
 #
 #     出力の WBS は、Measure-Progress.ps1・Measure-Effort.ps1・New-WeeklyReport.ps1 がそのまま読める見出し
-#     （WBS番号・タスク名・担当者・予定開始・予定終了・予定工数・実績開始・実績終了・進捗率・実績工数）です。工程の成果物の列も付けます。
+#     （WBS番号・タスク名・担当者・予定開始・予定終了・予定工数・実績開始・実績終了・進捗率・実績工数）です。工程の成果物と、
+#     先行（同じ機能の前の工程の WBS 番号。Measure-Progress.ps1 が遅れを後のタスクに送って完了見込みを出すのに使う）の列も付けます。
 #
 # .PARAMETER Path
 #     設計書のフォルダまたはファイル（規模を数える。複数可）。

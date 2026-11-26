@@ -38,6 +38,57 @@ Test-Case 'Measure-Progress: 2 行の見出しの WBS から、子のタスク�
     Assert-Match $text '遅延 2 件（最大 4 営業日: テーブル設計）'
 }
 
+Test-Case 'Measure-Progress: 完了見込み（遅れを、同じ担当者の後のタスクに送る）と -OutXlsx の見込の列' {
+    $dir = New-TestDir
+    $f = New-Wbs $dir
+    $out = Join-Path $dir '進捗.xlsx'
+    $r = @(& $ProgressTool -Path $f.Wbs -AsOf '2026-10-14' -Holidays $f.Holidays -OutXlsx $out 6>$null)
+    Assert-Equal @('1.1|10/01|10/09|2', '1.2|10/05|10/16|4', '1.3|10/19|10/22|4', '2.1|10/19|10/30|0') @($r | ForEach-Object { '{0}|{1:MM/dd}|{2:MM/dd}|{3}' -f $_.WbsNo, $_.ForecastStart, $_.ForecastEnd, $_.ForecastDelay }) '1.3 は佐藤さんの 1.2（10/16 まで）の翌営業日から 4 営業日。2.1 は予定どおり'
+    $text = Get-HostText { & $ProgressTool -Path $f.Wbs -AsOf '2026-10-14' -Holidays $f.Holidays | Out-Null }
+    Assert-Match $text '完了見込み: 2026/10/30（予定どおり）'
+    Assert-Match $text '予定終了より遅れる見込みのタスク 2 件(?!（)'
+    $book = Read-XlsxSheet -Path $out -Index 1
+    Assert-Equal '見込開始|見込終了|見込の遅れ（営業日）' ((@('K', 'L', 'M') | ForEach-Object { $book.Rows[1][$_] }) -join '|')
+    Assert-Equal ([string](([datetime]'2026-10-22') - [datetime]'1899-12-30').TotalDays) $book.Rows[4]['L']
+    Assert-True (@($book.Links | Where-Object { $_.Ref -like 'P*' }).Count -eq 4) 'WBS の場所へのリンクは P 列'
+}
+
+Test-Case 'Measure-Progress: 先行の列（親の番号・3FS+2 の書き方・別の担当者）から遅れを後のタスクに送り、完了見込みを決めている流れを出す' {
+    $dir = New-TestDir
+    $csv = Join-Path $dir 'wbs.csv'
+    @('WBS番号,タスク名,担当者,先行タスク,予定開始,予定終了,進捗率',
+        '1,設計,,,2026/10/05,2026/10/12,',
+        '1.1,画面設計,山田,,2026/10/05,2026/10/09,40%',
+        '1.2,テーブル設計,佐藤,,2026/10/05,2026/10/07,100%',
+        '1.3,画面レビュー,佐藤,1.1,2026/10/12,2026/10/12,',
+        '2,製造,,,2026/10/13,2026/10/16,',
+        '2.1,画面製造,山田,1FS+2日,2026/10/13,2026/10/16,',
+        '2.2,テーブル製造,佐藤,9.9,2026/10/13,2026/10/14,') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $all = @(& $ProgressTool -Path $csv -AsOf '2026-10-09' 6>$null 3>&1)
+    $r = @($all | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] })
+    Assert-Equal @('1.1|10/05|10/14|3', '1.2|10/05|10/07|0', '1.3|10/15|10/15|3', '2.1|10/16|10/21|3', '2.2|10/16|10/19|3') @($r | ForEach-Object { '{0}|{1:MM/dd}|{2:MM/dd}|{3}' -f $_.WbsNo, $_.ForecastStart, $_.ForecastEnd, $_.ForecastDelay }) '1.1 は基準日 + 残り 3 営業日。1.3 は 1.1 の翌営業日（予定で後の日）。2.1 は親の 1 のすべて（1.3）の後。2.2 は佐藤さんの 1.3 の後'
+    Assert-Match (@($all | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }) -join "`n") '先行の列の WBS 番号が見つかりません.*2\.2 の 9\.9'
+    $text = Get-HostText { & $ProgressTool -Path $csv -AsOf '2026-10-09' 3>$null | Out-Null }
+    Assert-Match $text '完了見込み: 2026/10/21（予定の 2026/10/16 より 3 営業日遅れ）'
+    Assert-Match $text '予定終了より遅れる見込みのタスク 4 件（うち 3 件は、まだ遅れていないが'
+    Assert-Match $text '完了見込みを決めている流れ: 1\.1 画面設計（山田） → 1\.3 画面レビュー（佐藤） → 2\.1 画面製造（山田）'
+
+    # 親の番号を先行にしたタスクがたくさんある WBS（工程の待ち合わせ。くり返しが多くても計算できる）
+    $lines = @('WBS番号,タスク名,担当者,先行,予定開始,予定終了,進捗率', '1,設計,,,2026/10/05,2026/10/16,', '2,テスト,,,2026/10/19,2026/10/30,')
+    for ($i = 1; $i -le 30; $i++) { $lines += '1.{0},設計{0},担当{1},,2026/10/{2:00},2026/10/{2:00},' -f $i, ($i % 3), (5 + ($i % 5)) }
+    for ($i = 1; $i -le 30; $i++) { $lines += '2.{0},テスト{0},担当{1},1,2026/10/19,2026/10/20,' -f $i, ($i % 3) }
+    $lines[3] = '1.1,設計1,担当1,,2026/10/06,2026/10/06,0%'
+    $lines | Set-Content -LiteralPath $csv -Encoding UTF8
+    $r = @(& $ProgressTool -Path $csv -AsOf '2026-10-14' 6>$null 3>$null)
+    $lastDesign = @($r | Where-Object { $_.WbsNo -like '1.*' } | Sort-Object ForecastEnd -Descending)[0].ForecastEnd
+    Assert-True ($lastDesign -ge [datetime]'2026-10-15') '遅れた設計がある'
+    Assert-True (@($r | Where-Object { $_.WbsNo -like '2.*' -and $_.ForecastStart -le $lastDesign }).Count -eq 0) '親の 1 を先行にしたテストは、設計がすべて終わった翌営業日から'
+
+    @('WBS番号,タスク名,担当者,先行,予定開始,予定終了', '1,A,,2,2026/10/05,2026/10/06', '2,B,,1,2026/10/07,2026/10/08') | Set-Content -LiteralPath $csv -Encoding UTF8
+    $warnings = @(& $ProgressTool -Path $csv -AsOf '2026-10-01' 6>$null 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+    Assert-Match ($warnings -join "`n") '先行タスクが輪になっています'
+}
+
 Test-Case 'Measure-Progress: CSV の WBS（WBS 番号なし）と見込終了日を読む' {
     $dir = New-TestDir
     $csv = Join-Path $dir 'wbs.csv'
