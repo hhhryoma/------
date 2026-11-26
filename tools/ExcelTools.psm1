@@ -1027,7 +1027,9 @@ function ConvertTo-GanttSheetXml {
     [void]$xml.Append('<row r="1">')
     if ($g.Title) { [void]$xml.Append(('<c r="A1" s="15" t="inlineStr"><is><t>{0}</t></is></c>' -f (ConvertTo-XmlText $g.Title))) }
     if ($leftCount -ge 2) { [void]$xml.Append(('<c r="{0}1" s="16" t="inlineStr"><is><t>基準日</t></is></c>' -f (ConvertTo-ColumnName ($leftCount - 1)))) }
-    [void]$xml.Append(('<c r="{0}1" s="17"><f>TODAY()</f><v>{1}</v></c>' -f (ConvertTo-ColumnName $leftCount), $asOfSerial))
+    # 基準日は、進捗管理票では =TODAY()（開くたびに今日）、結果の報告（FixedAsOf）では -AsOf の日付のまま
+    if ($g.FixedAsOf) { [void]$xml.Append(('<c r="{0}1" s="17"><v>{1}</v></c>' -f (ConvertTo-ColumnName $leftCount), $asOfSerial)) }
+    else { [void]$xml.Append(('<c r="{0}1" s="17"><f>TODAY()</f><v>{1}</v></c>' -f (ConvertTo-ColumnName $leftCount), $asOfSerial)) }
     for ($i = 0; $i -lt $dates.Count; $i++) {
         # 月の見出し: 最初の列（すぐ次の月になるときは書かない）と、月の変わる列（日付の列は狭いので、右のセルにはみ出して見える文字にする）
         $newMonth = $i -gt 0 -and $dates[$i].Month -ne $dates[$i - 1].Month
@@ -1152,18 +1154,26 @@ function ConvertTo-GanttSheetXml {
     # 重ねて描くが、LibreOffice ではバーを消さないよう後の範囲に書く
     $plan = & $inPlan $firstRow
     $fills = New-Object System.Text.StringBuilder
-    [void]$fills.Append((& $rule 2 0 ('AND({0},{1})' -f $inActual, $work) $true))
-    if ($stCol) { [void]$fills.Append((& $rule 3 1 ('AND({0},{1},${2}{3}="遅延")' -f $plan, $work, $stCol, $firstRow) $true)) }
-    [void]$fills.Append((& $rule 4 2 ('AND({0},{1},{2})' -f $plan, $work, $isParent) $true))
-    [void]$fills.Append((& $rule 5 3 ('AND({0},{1})' -f $plan, $work) $true))
-    if ($isDay) { [void]$fills.Append((& $rule 6 4 ('NOT({0})' -f $work) $false)) }
+    $priority = 1
+    [void]$fills.Append((& $rule (++$priority) 0 ('AND({0},{1})' -f $inActual, $work) $true))
+    if ($stCol) { [void]$fills.Append((& $rule (++$priority) 1 ('AND({0},{1},${2}{3}="遅延")' -f $plan, $work, $stCol, $firstRow) $true)) }
+    if ($fcCol) {
+        # 見込みの延び（赤）: 終わっていないタスクの、予定終了の後ろから見込終了まで（週ごとは、その週が予定終了より後にかかる列）
+        $pastPlan = '{0}>${1}{2}' -f $d, $pe, $firstRow
+        if (-not $isDay) { $pastPlan = '{0}+6>${1}{2}' -f $d, $pe, $firstRow }
+        $beyond = 'AND(${0}{1}<>"",${2}{1}<>"",N(${3}{1})<1,${4}{1}="",{5},{6}<=${0}{1})' -f $fcCol, $firstRow, $pe, $pr, $ae, $pastPlan, $d
+        [void]$fills.Append((& $rule (++$priority) 6 ('AND({0},{1})' -f $beyond, $work) $true))
+    }
+    [void]$fills.Append((& $rule (++$priority) 2 ('AND({0},{1},{2})' -f $plan, $work, $isParent) $true))
+    [void]$fills.Append((& $rule (++$priority) 3 ('AND({0},{1})' -f $plan, $work) $true))
+    if ($isDay) { [void]$fills.Append((& $rule (++$priority) 4 ('NOT({0})' -f $work) $false)) }
     [void]$xml.Append(('<conditionalFormatting sqref="{0}">{1}</conditionalFormatting>' -f $grid, $fills.ToString()))
     # 曜日・日付の見出しの土日・休日
-    if ($isDay) { [void]$xml.Append(('<conditionalFormatting sqref="{0}2:{1}3">{2}</conditionalFormatting>' -f $dc, $lastCol, (& $rule 7 4 ('NOT({0})' -f $work) $false))) }
+    if ($isDay) { [void]$xml.Append(('<conditionalFormatting sqref="{0}2:{1}3">{2}</conditionalFormatting>' -f $dc, $lastCol, (& $rule (++$priority) 4 ('NOT({0})' -f $work) $false))) }
     # 今日の線（赤い縦線。ほかの色と重ねる）
     [void]$xml.Append(('<conditionalFormatting sqref="{0}">{1}</conditionalFormatting>' -f $gridWithHeader, (& $rule 1 5 $today $false)))
     # 進捗率のデータバー
-    [void]$xml.Append(('<conditionalFormatting sqref="{0}{1}:{0}{2}"><cfRule type="dataBar" priority="8"><dataBar><cfvo type="num" val="0"/><cfvo type="num" val="1"/><color rgb="FF63BE7B"/></dataBar></cfRule></conditionalFormatting>' -f $pr, $firstRow, $lastRow))
+    [void]$xml.Append(('<conditionalFormatting sqref="{0}{1}:{0}{2}"><cfRule type="dataBar" priority="{3}"><dataBar><cfvo type="num" val="0"/><cfvo type="num" val="1"/><color rgb="FF63BE7B"/></dataBar></cfRule></conditionalFormatting>' -f $pr, $firstRow, $lastRow, (++$priority)))
     [void]$xml.Append('<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="landscape" fitToWidth="1" fitToHeight="0"/></worksheet>')
     return [pscustomobject]@{ Xml = $xml.ToString(); FilterRef = $filterRef }
 }
@@ -1172,9 +1182,11 @@ function New-GanttSheets {
     #     ガントチャート形式の進捗管理票のシート（Export-Workbook の Sheets）。Tasks の各要素: @{ Wbs; Task; Owner; PlanStart; PlanEnd; Effort;
     #     ActualStart; ActualEnd; Forecast; Progress（0〜1）; ActualEffort; Summary（親のタスク）}（日付は datetime か $null、数は double か $null）。
     #     Predecessors（先行。WBS 番号）・Forecast（見込終了）・ActualEffort（実績工数）の列は、値のあるタスクがあるときか、Include に名前があるときだけ置く。
+    #     見込終了の列があれば、終わっていないタスクの予定終了の後ろから見込終了までを、見込みの延び（赤）として描く。
+    #     FixedAsOf: 基準日を =TODAY() にせず、AsOf の日付のままにする（結果の報告に入れるとき）
     #     休日のシート（日付・名前）と、その範囲の名前「休日」も作る（曜日の「祝」と状態の営業日に使う。休日を足すと変わる）。
     #     戻り値: @{ Sheets = @(ガントチャートのシート, 休日のシート); Unit; Dates }
-    param($Tasks, [datetime] $AsOf, $Holidays, [string] $Unit = 'Auto', [string] $Name = 'ガントチャート', [string] $Title = '進捗管理票', [string[]] $Include)
+    param($Tasks, [datetime] $AsOf, $Holidays, [string] $Unit = 'Auto', [string] $Name = 'ガントチャート', [string] $Title = '進捗管理票', [string[]] $Include, [bool] $FixedAsOf)
     $holidaySet = New-Object 'System.Collections.Generic.HashSet[datetime]'
     foreach ($h in @($Holidays)) { if ($h -is [datetime]) { [void]$holidaySet.Add($h.Date) } }
     $all = @(foreach ($t in $Tasks) { foreach ($d in @($t.PlanStart, $t.PlanEnd, $t.ActualStart, $t.ActualEnd, $t.Forecast)) { if ($d -is [datetime]) { $d } } })
@@ -1213,7 +1225,7 @@ function New-GanttSheets {
         }
         $rows.Add(@{ Values = $v; Summary = [bool]$t.Summary })
     }
-    $gantt = @{ Dates = $span.Dates; Unit = $span.Unit; Fields = $fields; AsOf = $AsOf.Date; Holidays = $holidaySet; HolidayName = '休日'; Title = $Title }
+    $gantt = @{ Dates = $span.Dates; Unit = $span.Unit; Fields = $fields; AsOf = $AsOf.Date; Holidays = $holidaySet; HolidayName = '休日'; Title = $Title; FixedAsOf = $FixedAsOf }
     $holidayRows = New-Object System.Collections.Generic.List[object]
     foreach ($h in @($holidaySet | Sort-Object)) { $holidayRows.Add(@{ Values = @($h, '') }) }
     # 休日の範囲（あとから休日を足せるように 300 行まで）
@@ -1439,12 +1451,14 @@ function Export-Workbook {
             '<xf numFmtId="49" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>' +
             '<xf numFmtId="49" fontId="1" fillId="3" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf></cellXfs>' +
             '<cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles>' +
-            '<dxfs count="6"><dxf><fill><patternFill patternType="solid"><fgColor rgb="FF2F5597"/><bgColor rgb="FF2F5597"/></patternFill></fill></dxf>' +
+            '<dxfs count="7"><dxf><fill><patternFill patternType="solid"><fgColor rgb="FF2F5597"/><bgColor rgb="FF2F5597"/></patternFill></fill></dxf>' +
             '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FFF4B183"/><bgColor rgb="FFF4B183"/></patternFill></fill></dxf>' +
             '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FF808080"/><bgColor rgb="FF808080"/></patternFill></fill></dxf>' +
             '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FF9DC3E6"/><bgColor rgb="FF9DC3E6"/></patternFill></fill></dxf>' +
             '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FFE7E6E6"/><bgColor rgb="FFE7E6E6"/></patternFill></fill></dxf>' +
-            '<dxf><border><left style="thin"><color rgb="FFFF0000"/></left><right style="thin"><color rgb="FFFF0000"/></right></border></dxf></dxfs>' +
+            '<dxf><border><left style="thin"><color rgb="FFFF0000"/></left><right style="thin"><color rgb="FFFF0000"/></right></border></dxf>' +
+            # 6: 見込みの延び（予定終了の後ろから見込終了まで。赤）
+            '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FFFF7C80"/><bgColor rgb="FFFF7C80"/></patternFill></fill></dxf></dxfs>' +
             '</styleSheet>') -f $font)
         $stylesXml = $ganttStyles
     }

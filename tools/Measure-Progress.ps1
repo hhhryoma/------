@@ -928,22 +928,34 @@ if ($FillTemplate) {
     Save-ZipPackage -FilePath $FillTemplate -Changes $changes -OutPath $OutFile
 }
 
-if ($OutGantt) {
-    # ガントチャート形式の進捗管理票: 読んだ WBS の行（親のタスクも。合計の行は除く）を、記入されたままの値で書く（基準日による読み替えはしない）
-    $ganttTasks = New-Object System.Collections.Generic.List[object]
+function Get-GanttTasks {
+    #     ガントチャートの行: 読んだ WBS の行（親のタスクも。合計の行は除く）を、記入されたままの値で（基準日による読み替えはしない）。
+    #     WithForecast: 終わっていないタスクの見込終了を、完了見込み（遅れを後のタスクに送ったもの）にする（結果の報告）
+    param([bool] $WithForecast)
+    $forecastOf = @{}
+    if ($WithForecast) { foreach ($t in $tasks) { if (-not $t.Done -and $t.ForecastEnd) { $forecastOf['{0}|{1}|{2}' -f $t.Place.Path, $t.Place.Sheet, $t.Place.Cell] = $t.ForecastEnd } } }
+    $list = New-Object System.Collections.Generic.List[object]
     foreach ($r in $rows) {
         $v = $r.Values
         if (Test-TotalRow $v) { continue }
         $isParent = [bool]($r.Wbs -and $parents.ContainsKey(('{0}|{1}|{2}' -f $r.Place.Path, $r.Place.Sheet, $r.Wbs)))
-        $ganttTasks.Add([pscustomobject]@{
+        $forecast = ConvertTo-Date $v['見込終了']
+        $placeKey = '{0}|{1}|{2}' -f $r.Place.Path, $r.Place.Sheet, $r.Place.Cell
+        if ($forecastOf.ContainsKey($placeKey)) { $forecast = $forecastOf[$placeKey] }
+        $list.Add([pscustomobject]@{
             Wbs = ([string]$v['WBS番号']).Trim(); Task = ([string]$v['タスク']).Trim(); Owner = ([string]$v['担当']).Trim(); Predecessors = ([string]$v['先行']).Trim()
             PlanStart = (ConvertTo-Date $v['予定開始']); PlanEnd = (ConvertTo-Date $v['予定終了']); Effort = (ConvertTo-Number $v['予定工数'])
-            ActualStart = (ConvertTo-Date $v['実績開始']); ActualEnd = (ConvertTo-Date $v['実績終了']); Forecast = (ConvertTo-Date $v['見込終了'])
+            ActualStart = (ConvertTo-Date $v['実績開始']); ActualEnd = (ConvertTo-Date $v['実績終了']); Forecast = $forecast
             Progress = (ConvertTo-Rate $v['進捗率']); ActualEffort = (ConvertTo-Number $v['実績工数']); Summary = $isParent
         })
     }
+    return , $list
+}
+
+if ($OutGantt) {
+    # ガントチャート形式の進捗管理票: 見込終了の列は、値が無くても置く（見込みを記入すると、予定終了の後ろに見込みの延びが描かれる）
     try {
-        $gantt = New-GanttSheets $ganttTasks $AsOf @($holidaySet) $GanttUnit
+        $gantt = New-GanttSheets (Get-GanttTasks $false) $AsOf @($holidaySet) $GanttUnit 'ガントチャート' '進捗管理票' @('Forecast')
         Export-Workbook -FilePath $OutGantt -Sheets $gantt.Sheets
     }
     catch {
@@ -970,11 +982,15 @@ if ($OutXlsx) {
     }
     $weekRows = New-Object System.Collections.Generic.List[object]
     foreach ($wk in $weeks) { $weekRows.Add(@{ Values = @($wk.No, $wk.Monday.Date, [double]$wk.Planned, [double]$wk.Done, [double]$wk.TotalPlanned, [double]$wk.TotalDone) }) }
+    # 予定・実績と完了見込みを並べたガントチャート（基準日は -AsOf のまま。見込終了は、先行タスクの遅れも入れた完了見込み）
+    $report = $null
+    try { $report = New-GanttSheets (Get-GanttTasks $true) $AsOf @($holidaySet) $GanttUnit 'ガントチャート' ('進捗（{0} 時点の見込み）' -f $AsOf.ToString('yyyy/MM/dd', $invariant)) @('Forecast') $true }
+    catch { Write-Warning ('結果のガントチャートを作れませんでした: {0}' -f $_.Exception.Message) }
     try {
-        Export-Workbook -FilePath $OutXlsx -Sheets @(
+        Export-Workbook -FilePath $OutXlsx -Sheets (@(
             @{ Name = 'タスク'; Columns = @(@{ Header = 'WBS'; Width = 8 }, @{ Header = 'タスク'; Width = 30 }, @{ Header = '担当'; Width = 10 }, @{ Header = '予定開始'; Width = 11 }, @{ Header = '予定終了'; Width = 11 }, @{ Header = '実績／見込終了'; Width = 13 }, @{ Header = '進捗率'; Width = 7 }, @{ Header = '予定の進捗率'; Width = 10 }, @{ Header = '遅れ（営業日）'; Width = 12 }, @{ Header = '状態'; Width = 10 }, @{ Header = '見込開始'; Width = 11 }, @{ Header = '見込終了'; Width = 11 }, @{ Header = '見込の遅れ（営業日）'; Width = 12 }, @{ Header = 'PV'; Width = 8 }, @{ Header = 'EV'; Width = 8 }, @{ Header = 'WBS の場所'; Width = 30 }); Rows = $taskRows },
             @{ Name = '担当者別'; Columns = @(@{ Header = '担当'; Width = 12 }, @{ Header = 'タスク'; Width = 7 }, @{ Header = 'PV'; Width = 9 }, @{ Header = 'EV'; Width = 9 }, @{ Header = 'SPI'; Width = 7 }, @{ Header = '遅延タスク'; Width = 9 }); Rows = $ownerRows },
-            @{ Name = '週次'; Columns = @(@{ Header = '週'; Width = 6 }, @{ Header = '対象週（月曜）'; Width = 13 }, @{ Header = '計画完了'; Width = 9 }, @{ Header = '実績完了'; Width = 9 }, @{ Header = '計画完了の累計'; Width = 13 }, @{ Header = '実績完了の累計'; Width = 13 }); Rows = $weekRows })
+            @{ Name = '週次'; Columns = @(@{ Header = '週'; Width = 6 }, @{ Header = '対象週（月曜）'; Width = 13 }, @{ Header = '計画完了'; Width = 9 }, @{ Header = '実績完了'; Width = 9 }, @{ Header = '計画完了の累計'; Width = 13 }, @{ Header = '実績完了の累計'; Width = 13 }); Rows = $weekRows }) + @(if ($report) { $report.Sheets }))
     }
     catch {
         Write-Warning ("結果を保存できませんでした（同名のファイルを Excel で開いていませんか）: {0} : {1}" -f $OutXlsx, $_.Exception.Message)
@@ -1078,11 +1094,13 @@ if ($OutGantt) {
 #
 # .PARAMETER OutXlsx
 #     結果を xlsx に保存します（タスク（見込開始・見込終了・見込の遅れも）・担当者別・週次。タスクから WBS の該当行へのリンク付き）。
+#     予定・実績と完了見込みを並べたガントチャートのシートも入れます（進捗管理票と同じ形。基準日は -AsOf、見込終了は完了見込み）。
 #
 # .PARAMETER OutGantt
 #     ガントチャート形式の進捗管理票（xlsx）を作ります。左に WBS の列（WBS番号・タスク名・担当者・予定開始・予定終了・予定工数・
-#     実績開始・実績終了・進捗率・状態。見込終了・実績工数は WBS にあるときだけ）、右に日付の列を並べ、予定・実績・遅延のバー、
-#     基準日（今日）の線、土日・休日の色を条件付き書式で描きます。Excel で実績開始・実績終了・進捗率を記入すると、バーと状態が変わります。
+#     実績開始・実績終了・見込終了・進捗率・状態。先行・実績工数は WBS にあるときだけ）、右に日付の列を並べ、予定・実績・遅延のバー、
+#     見込みの延び（予定終了の後ろから見込終了まで。赤）、基準日（今日）の線、土日・休日の色を条件付き書式で描きます。
+#     Excel で実績開始・実績終了・進捗率・見込終了を記入すると、バーと状態が変わります。
 #     このツール・週次報告は、進捗管理票をそのまま WBS として読みます。記入した実績を消さないよう、すでにあるファイルには書きません。
 #
 # .PARAMETER GanttUnit

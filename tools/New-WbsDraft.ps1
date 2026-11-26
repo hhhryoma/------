@@ -435,7 +435,7 @@ if ($OutXlsx) {
         if ($Gantt) {
             # ガントチャート形式の進捗管理票: WBS のシートを、右に日付の列を並べたガントチャートにする（見積もりの根拠は規模のシートにある）。休日のシートも足す
             $ganttTasks = @(foreach ($r in $rows) { [pscustomobject]@{ Wbs = $r.Wbs; Task = $r.Task; Owner = $r.Member; Predecessors = $r.Predecessors; PlanStart = $r.Start; PlanEnd = $r.End; Effort = [double]$r.Days; Summary = $r.IsParent } })
-            $ganttSheets = New-GanttSheets $ganttTasks (Get-Date).Date @($holidaySet) $GanttUnit 'WBS' '進捗管理票' @('ActualEffort')
+            $ganttSheets = New-GanttSheets $ganttTasks (Get-Date).Date @($holidaySet) $GanttUnit 'WBS' '進捗管理票' @('ActualEffort', 'Forecast')
             $sheets = @($ganttSheets.Sheets[0]) + @($sheets | Select-Object -Skip 1) + @($ganttSheets.Sheets[1])
         }
         Export-Workbook -FilePath $OutXlsx -Sheets $sheets
@@ -533,8 +533,9 @@ if ($OutCsv) { Write-Host "CSV を保存しました: $OutCsv" }
 #     WBS を xlsx に保存します（WBS・担当者別・規模のシート）。
 #
 # .PARAMETER Gantt
-#     -OutXlsx の WBS のシートを、ガントチャート形式の進捗管理票にします（右に日付の列を並べ、予定・実績・遅延のバー、今日の線、
-#     土日・休日の色を条件付き書式で描く。Excel で実績を記入するとバーと状態が変わる。Measure-Progress.ps1 -OutGantt と同じ形）。
+#     -OutXlsx の WBS のシートを、ガントチャート形式の進捗管理票にします（右に日付の列を並べ、予定・実績・遅延のバー、見込終了までの
+#     見込みの延び（赤）、今日の線、土日・休日の色を条件付き書式で描く。Excel で実績・見込終了を記入するとバーと状態が変わる。
+#     Measure-Progress.ps1 -OutGantt と同じ形）。
 #     休日のシートも足します（-Holidays の休日。足すと曜日の「祝」と状態が変わります）。
 #
 # .PARAMETER GanttUnit
