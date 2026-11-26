@@ -107,7 +107,11 @@ Test-Case 'New-WbsDraft: -OutXlsx の WBS は Measure-Progress.ps1 がそのま�
     $csv = Join-Path $dir 'WBS.csv'
     $null = & $WbsTool $designDir -Start '2026-11-02' -Members '山田', '佐藤' -OutXlsx $out -OutCsv $csv 6>$null
     $book = Read-XlsxSheet -Path $out -Index 1
-    Assert-Equal @('WBS', '担当者別', '規模') $book.Sheets
+    Assert-Equal @('WBS', '担当者別', '規模', '説明') $book.Sheets
+    $guide = Read-XlsxSheet -Path $out -Index 4
+    Assert-Equal '区分|列・色|説明|記入' ((@('A', 'B', 'C', 'D') | ForEach-Object { $guide.Rows[1][$_] }) -join '|')
+    Assert-True (@($guide.Rows.Values | Where-Object { $_['A'] -eq 'シート' -and $_['B'] -eq '規模' }).Count -eq 1) 'ほかのシートの説明'
+    Assert-True (@($guide.Rows.Values | Where-Object { $_['A'] -eq '色' }).Count -eq 0) 'ガントチャートでなければ色の凡例は無い'
     Assert-Equal 'WBS番号|タスク名|成果物|担当者|先行|予定開始|予定終了|予定工数|実績開始|実績終了|進捗率|実績工数|見積もりの根拠' ((@('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M') | ForEach-Object { $book.Rows[1][$_] }) -join '|')
     Assert-Equal ([string](([datetime]'2026-11-02') - [datetime]'1899-12-30').TotalDays) ([string]$book.Rows[3]['F']) '予定開始は日付のセル'
     $load = Read-XlsxSheet -Path $out -Index 2
@@ -143,7 +147,7 @@ Test-Case 'New-WbsDraft: -Gantt で WBS のシートをガントチャート形�
     $out = Join-Path $dir 'WBS.xlsx'
     $rows = @(& $WbsTool $designDir -Start '2026-11-02' -Members '山田', '佐藤' -Holidays $holidays -OutXlsx $out -Gantt 6>$null 3>$null)
     $book = Read-XlsxSheet -Path $out -Index 1
-    Assert-Equal @('WBS', '担当者別', '規模', '休日') $book.Sheets
+    Assert-Equal @('WBS', '担当者別', '規模', '休日', '説明') $book.Sheets
     # 3 行目が見出し（見積もりの根拠は規模のシート。見込終了・実績工数は空でも置く）。日付の列は 11/02 の月曜から
     Assert-Equal @('WBS番号', 'タスク名', '担当者', '先行', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '見込終了', '進捗率', '実績工数', '状態') @('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M' | ForEach-Object { $book.Rows[3][$_] })
     Assert-Equal '46328' $book.Rows[3]['N']

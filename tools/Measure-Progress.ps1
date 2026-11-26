@@ -956,7 +956,9 @@ if ($OutGantt) {
     # ガントチャート形式の進捗管理票: 見込終了の列は、値が無くても置く（見込みを記入すると、予定終了の後ろに見込みの延びが描かれる）
     try {
         $gantt = New-GanttSheets (Get-GanttTasks $false) $AsOf @($holidaySet) $GanttUnit 'ガントチャート' '進捗管理票' @('Forecast')
-        Export-Workbook -FilePath $OutGantt -Sheets $gantt.Sheets
+        # 説明のシート（使い方・列の意味・バーの色の凡例）も足す
+        $guide = New-WbsGuideSheet @($gantt.Sheets[0].Columns | ForEach-Object { $_.Header }) $true
+        Export-Workbook -FilePath $OutGantt -Sheets (@($gantt.Sheets) + @($guide))
     }
     catch {
         Write-Warning ("進捗管理票を保存できませんでした: {0} : {1}" -f $OutGantt, $_.Exception.Message)

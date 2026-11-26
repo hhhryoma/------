@@ -527,7 +527,14 @@ Test-Case 'Measure-Progress: -OutGantt で、WBS からガントチャート形�
     $text = Get-HostText { $script:before = @(& $ProgressTool -Path $w.Wbs -AsOf '2026-10-14' -Holidays $w.Holidays -OutGantt $out 3>$null) }
     Assert-Match $text 'ガントチャートの進捗管理票を保存しました: .*（1 日 1 列・2026/09/28〜2026/11/15）'
     $g = Read-GanttCells $out
-    Assert-Equal @('ガントチャート', '休日') $g.Sheets
+    Assert-Equal @('ガントチャート', '休日', '説明') $g.Sheets
+    # 説明のシート: 使い方・列の意味（進捗管理票にある列だけ）・バーの色の凡例（バーと同じ色のセル）
+    $guide = Read-GanttCells $out 3
+    Assert-Equal '区分|列・色|説明|記入' ((@('A', 'B', 'C', 'D') | ForEach-Object { $guide.Cells["${_}1"].Value }) -join '|')
+    $guideRows = @($guide.Cells.Keys | Where-Object { $_ -match '^A\d+$' } | ForEach-Object { [int]($_ -replace 'A') } | Sort-Object)
+    Assert-True (@($guideRows | Where-Object { $guide.Cells["A$_"].Value -eq '列' -and $guide.Cells["B$_"].Value -eq '見込終了' }).Count -eq 1) '見込終了の列の説明'
+    Assert-True (@($guideRows | Where-Object { $guide.Cells["A$_"].Value -eq '列' -and $guide.Cells["B$_"].Value -eq '先行' }).Count -eq 0) '進捗管理票に無い列（先行）は説明しない'
+    Assert-Equal @('20', '23', '21', '25', '22', '24', '26') @($guideRows | Where-Object { $guide.Cells["A$_"].Value -eq '色' -and $guide.Cells["B$_"].Style } | ForEach-Object { $guide.Cells["B$_"].Style } | Where-Object { [int]$_ -ge 20 }) '色の凡例のセル（実績・予定・遅延・見込みの延び・親・土日休日・基準日の線）'
     Assert-Equal @("休日='休日'!`$A`$2:`$A`$300") $g.Names
     # 左の列（見込終了は WBS に無くても置く。実績工数はある）と、日付の列（9/28 の月曜から、最後の予定 10/30 の 2 週あとの日曜まで）
     Assert-Equal @('WBS番号', 'タスク名', '担当者', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '見込終了', '進捗率', '実績工数', '状態') @('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L' | ForEach-Object { $g.Cells["${_}3"].Value })

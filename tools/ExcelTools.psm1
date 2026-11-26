@@ -1178,6 +1178,63 @@ function ConvertTo-GanttSheetXml {
     return [pscustomobject]@{ Xml = $xml.ToString(); FilterRef = $filterRef }
 }
 
+function New-WbsGuideSheet {
+    #     WBS・進捗管理票に入れる「説明」のシート（使い方・列の意味と記入する時・バーの色の凡例）。Export-Workbook の Sheets の 1 つ。
+    #     Headers: WBS のシートの列の見出し（その順に、ある列だけを説明する）。Gantt: 進捗管理票（ガントチャート。色の凡例を入れる。
+    #     色のセルは、ガントチャートのあるブックのスタイルを使う）。Extra: ツールごとの説明の行（@(区分, 列・色, 説明, 記入) の並び）
+    #     見出しは、進捗・週次報告が WBS の表として読まない言葉にする（タスク・項目・開始・終了などを使わない）
+    param([string[]] $Headers, [bool] $Gantt, $Extra)
+    $rows = New-Object System.Collections.Generic.List[object]
+    $add = { param($a, $b, $c, $d) $rows.Add(@{ Values = @($a, $b, $c, $d) }) }
+    if ($Gantt) {
+        & $add '使い方' '毎日（遅くとも週に 1 回）' '実績開始・実績終了・進捗率を記入します。終わったら実績終了を記入します（進捗率 100% でも完了になります）' ''
+        & $add '使い方' '遅れそうなとき' '見込終了に、終わりそうな日を記入します。予定終了の後ろに見込みの延び（赤）が描かれ、状態が「遅延」になります' ''
+        & $add '使い方' '状態・バー' '状態・バー・基準日の線は、数式と条件付き書式で自動で変わります。基準日（右上）は開いた日（=TODAY()）です。報告日などの日付に書き換えても使えます' ''
+        & $add '使い方' '集計' 'Measure-Progress.ps1（遅れ・SPI・完了見込み）と New-WeeklyReport.ps1（週次報告）が、このファイルをそのまま WBS として読みます' ''
+        & $add '使い方' '行を足す' '行を挿入し、上の行の「状態」の数式をコピーします（条件付き書式は広がります）。WBS 番号・先行は文字のまま入ります（2.10 が 2.1 になりません）' ''
+        & $add '使い方' '休日' '「休日」シートに日付を足すと、曜日の「祝」・バー・状態の営業日に入ります' ''
+        & $add '使い方' '置き場所' '元の WBS と同じフォルダに置かないでください（進捗・週次報告が両方を読みます）' ''
+    }
+    else {
+        & $add '使い方' '記入' '作業が進んだら、実績開始・実績終了・進捗率・実績工数を記入します（実績終了か進捗率 100% で完了）' ''
+        & $add '使い方' '集計' 'Measure-Progress.ps1（遅れ・SPI・完了見込み）・New-WeeklyReport.ps1（週次報告）・Measure-Effort.ps1（工数）が、このファイルをそのまま WBS として読みます' ''
+        & $add '使い方' 'ガントチャート' 'Measure-Progress.ps1 -OutGantt で、Excel で記入するとバーと状態が変わる進捗管理票（ガントチャート）にできます' ''
+    }
+    foreach ($e in @($Extra)) { if ($e) { & $add $e[0] $e[1] $e[2] $e[3] } }
+    $about = [ordered]@{
+        'WBS番号'        = @('タスクの番号（1・1.1 など）。下に 1.1 などのタスクがある番号は親のタスクで、進捗の集計では数えません', '計画のとき')
+        'タスク名'       = @('作業の名前', '計画のとき')
+        '成果物'         = @('その作業で作るもの', '計画のとき')
+        '担当者'         = @('担当する人', '計画のとき')
+        '先行'           = @('先に終わっていないといけないタスクの WBS 番号（「1.1, 2.3」のように複数可。親の番号はその下のすべて）。完了見込みの計算に使います', '計画のとき')
+        '予定開始'       = @('予定の最初の日（土日・休日を除いた営業日で数えます）', '計画のとき')
+        '予定終了'       = @('予定の最後の日', '計画のとき')
+        '予定工数'       = @('予定の工数（人日）。PV・EV の重みです', '計画のとき')
+        '実績開始'       = @('作業を始めた日', '始めたとき')
+        '実績終了'       = @('作業が終わった日（記入すると完了）', '終わったとき')
+        '見込終了'       = @('遅れそうなタスクの、終わりそうな日', '遅れそうなとき')
+        '進捗率'         = @('0〜100%（100% で完了）', '毎日・毎週')
+        '実績工数'       = @('かかった工数（人日）。CPI に使います', '毎日・毎週')
+        '状態'           = @('完了・遅延（営業日で 1 日以上の遅れ）・未着手・予定どおり。数式で決まります', '（記入しない）')
+        '見積もりの根拠' = @('規模の見積もり（種類・難易度・規模）', '')
+    }
+    foreach ($h in @($Headers)) { if ($about.Contains([string]$h)) { & $add '列' $h $about[[string]$h][0] $about[[string]$h][1] } }
+    if ($Gantt) {
+        foreach ($c in @(
+                @(20, '実績（濃い青）: 実績開始から実績終了まで（終わっていなければ基準日まで）'),
+                @(23, '予定（薄い青）: 予定開始から予定終了まで'),
+                @(21, '遅延のタスクの予定（橙）'),
+                @(25, '見込みの延び（赤）: 終わっていないタスクの、予定終了の翌日から見込終了まで'),
+                @(22, '親のタスクの予定（灰）'),
+                @(24, '土日・休日の列（薄い灰色。バーは描きません）'),
+                @(26, '基準日の列（赤い縦線）'))) {
+            & $add '色' @{ Text = ''; StyleId = $c[0] } $c[1] ''
+        }
+        & $add '色' '進捗率の緑のバー' '進捗率（0〜100%）' ''
+    }
+    return @{ Name = '説明'; Columns = @(@{ Header = '区分'; Width = 8 }, @{ Header = '列・色'; Width = 22 }, @{ Header = '説明'; Width = 90 }, @{ Header = '記入'; Width = 14 }); Rows = $rows }
+}
+
 function New-GanttSheets {
     #     ガントチャート形式の進捗管理票のシート（Export-Workbook の Sheets）。Tasks の各要素: @{ Wbs; Task; Owner; PlanStart; PlanEnd; Effort;
     #     ActualStart; ActualEnd; Forecast; Progress（0〜1）; ActualEffort; Summary（親のタスク）}（日付は datetime か $null、数は double か $null）。
@@ -1318,6 +1375,13 @@ function Export-Workbook {
                     [void]$xml.Append(('<c r="{0}{1}" s="4"><v>{2}</v></c>' -f (ConvertTo-ColumnName ($i + 1)), $r, (ConvertTo-ExcelDate $raw).ToString('R', $invariant)))
                     continue
                 }
+                if ($raw -is [System.Collections.IDictionary] -and $raw.Contains('StyleId')) {
+                    # 書式を決めたセル（説明のシートの色の凡例など。ガントチャートのあるブックのスタイルの番号）
+                    $content = ConvertTo-InlineStringXml $raw.Text
+                    if ($content) { [void]$xml.Append(('<c r="{0}{1}" s="{2}" t="inlineStr">{3}</c>' -f (ConvertTo-ColumnName ($i + 1)), $r, [int]$raw.StyleId, $content)) }
+                    else { [void]$xml.Append(('<c r="{0}{1}" s="{2}"/>' -f (ConvertTo-ColumnName ($i + 1)), $r, [int]$raw.StyleId)) }
+                    continue
+                }
                 $content = ConvertTo-InlineStringXml $raw
                 if (-not $content) { continue }
                 $style = 2
@@ -1429,11 +1493,16 @@ function Export-Workbook {
             '<numFmts count="4"><numFmt numFmtId="176" formatCode="yyyy/mm/dd"/><numFmt numFmtId="177" formatCode="d"/><numFmt numFmtId="178" formatCode="m/d"/><numFmt numFmtId="179" formatCode="yyyy&quot;年&quot;m&quot;月&quot;"/></numFmts>' +
             '<fonts count="5"><font>{0}</font><font><b/>{0}</font><font><u/><sz val="10"/><color rgb="FF0563C1"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font>' +
             '<font><b/><sz val="12"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font><font><sz val="9"/><name val="游ゴシック"/><family val="3"/><charset val="128"/></font></fonts>' +
-            '<fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/><bgColor indexed="64"/></patternFill></fill>' +
-            '<fill><patternFill patternType="solid"><fgColor rgb="FFF2F2F2"/><bgColor indexed="64"/></patternFill></fill></fills>' +
-            '<borders count="3"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFBFBFBF"/></left><right style="thin"><color rgb="FFBFBFBF"/></right><top style="thin"><color rgb="FFBFBFBF"/></top><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border>' +
-            '<border><left style="thin"><color rgb="FFE0E0E0"/></left><right style="thin"><color rgb="FFE0E0E0"/></right><top style="thin"><color rgb="FFE0E0E0"/></top><bottom style="thin"><color rgb="FFE0E0E0"/></bottom><diagonal/></border></borders>' +
-            '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="20"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="176" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
+            '<fills count="10"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/><bgColor indexed="64"/></patternFill></fill>' +
+            '<fill><patternFill patternType="solid"><fgColor rgb="FFF2F2F2"/><bgColor indexed="64"/></patternFill></fill>' +
+            # 4〜9: 説明のシートの色の凡例（実績・遅延・親のタスク・予定・土日休日・見込みの延び。条件付き書式のバーと同じ色）
+            ((@('2F5597', 'F4B183', '808080', '9DC3E6', 'E7E6E6', 'FF7C80') | ForEach-Object { '<fill><patternFill patternType="solid"><fgColor rgb="FF{0}"/><bgColor indexed="64"/></patternFill></fill>' -f $_ }) -join '') +
+            '</fills>' +
+            '<borders count="4"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFBFBFBF"/></left><right style="thin"><color rgb="FFBFBFBF"/></right><top style="thin"><color rgb="FFBFBFBF"/></top><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border>' +
+            '<border><left style="thin"><color rgb="FFE0E0E0"/></left><right style="thin"><color rgb="FFE0E0E0"/></right><top style="thin"><color rgb="FFE0E0E0"/></top><bottom style="thin"><color rgb="FFE0E0E0"/></bottom><diagonal/></border>' +
+            # 3: 説明のシートの基準日の線の凡例（赤い縦線）
+            '<border><left style="thin"><color rgb="FFFF0000"/></left><right style="thin"><color rgb="FFFF0000"/></right><top style="thin"><color rgb="FFBFBFBF"/></top><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border></borders>' +
+            '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="27"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="176" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
             '<xf numFmtId="177" fontId="4" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
             '<xf numFmtId="178" fontId="4" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
             '<xf numFmtId="0" fontId="4" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>' +
@@ -1449,7 +1518,10 @@ function Export-Workbook {
             '<xf numFmtId="176" fontId="1" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>' +
             # 18・19: 文字列の書式（WBS 番号・先行。Excel で 2.10 と入力しても数の 2.1 にしない）。19 は親のタスク
             '<xf numFmtId="49" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>' +
-            '<xf numFmtId="49" fontId="1" fillId="3" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf></cellXfs>' +
+            '<xf numFmtId="49" fontId="1" fillId="3" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
+            # 20〜26: 説明のシートの色の凡例（20 実績・21 遅延・22 親のタスク・23 予定・24 土日休日・25 見込みの延び・26 基準日の線）
+            ((4..9 | ForEach-Object { '<xf numFmtId="0" fontId="0" fillId="{0}" borderId="1" xfId="0" applyFill="1" applyBorder="1"/>' -f $_ }) -join '') +
+            '<xf numFmtId="0" fontId="0" fillId="0" borderId="3" xfId="0" applyBorder="1"/></cellXfs>' +
             '<cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles>' +
             '<dxfs count="7"><dxf><fill><patternFill patternType="solid"><fgColor rgb="FF2F5597"/><bgColor rgb="FF2F5597"/></patternFill></fill></dxf>' +
             '<dxf><fill><patternFill patternType="solid"><fgColor rgb="FFF4B183"/><bgColor rgb="FFF4B183"/></patternFill></fill></dxf>' +
