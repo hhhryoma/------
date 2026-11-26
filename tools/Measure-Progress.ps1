@@ -77,6 +77,11 @@ function ConvertTo-Date {
     param([string] $Text)
     $t = ([string]$Text).Normalize($nfkc).Trim()
     if (-not $t) { return $null }
+    # 日付の書式の無いセルの日付（値だけ貼り付けた日付など）は、Excel のシリアル値（46331 など。1970〜2099 年）として読む
+    $serial = 0.0
+    if ($t -match '^\d{5}(\.\d+)?$' -and [double]::TryParse($t, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$serial) -and $serial -ge 25569 -and $serial -lt 73051) {
+        return ([datetime]'1899-12-30').AddDays([math]::Floor($serial))
+    }
     try {
         $m = [regex]::Match($t, '(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})')
         if ($m.Success) { return New-Object DateTime ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value), ([int]$m.Groups[3].Value) }
