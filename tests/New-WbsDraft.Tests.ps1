@@ -144,9 +144,9 @@ Test-Case 'New-WbsDraft: -Gantt で WBS のシートをガントチャート形�
     $rows = @(& $WbsTool $designDir -Start '2026-11-02' -Members '山田', '佐藤' -Holidays $holidays -OutXlsx $out -Gantt 6>$null 3>$null)
     $book = Read-XlsxSheet -Path $out -Index 1
     Assert-Equal @('WBS', '担当者別', '規模', '休日') $book.Sheets
-    # 3 行目が見出し（見積もりの根拠は規模のシート。実績工数は空でも置く）。日付の列は 11/02 の月曜から
-    Assert-Equal @('WBS番号', 'タスク名', '担当者', '先行', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '進捗率', '実績工数', '状態') @('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L' | ForEach-Object { $book.Rows[3][$_] })
-    Assert-Equal '46328' $book.Rows[3]['M']
+    # 3 行目が見出し（見積もりの根拠は規模のシート。見込終了・実績工数は空でも置く）。日付の列は 11/02 の月曜から
+    Assert-Equal @('WBS番号', 'タスク名', '担当者', '先行', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '見込終了', '進捗率', '実績工数', '状態') @('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M' | ForEach-Object { $book.Rows[3][$_] })
+    Assert-Equal '46328' $book.Rows[3]['N']
     Assert-Equal '46329' (Read-XlsxSheet -Path $out -Index 4).Rows[2]['A'] '休日のシートの 11/03'
     $tasks = @(& (Join-Path $script:ToolsDir 'Measure-Progress.ps1') -Path $out -AsOf '2026-11-02' -Holidays $holidays 6>$null 3>$null)
     Assert-Equal 26 $tasks.Count

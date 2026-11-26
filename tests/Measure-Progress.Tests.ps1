@@ -23,6 +23,34 @@ function New-Wbs {
     return [pscustomobject]@{ Wbs = $wbs; Holidays = $holidays }
 }
 
+function Read-GanttCells {
+    #     ブックの Index 番目のシートのセル（セル番地 → @{ Style; Formula; Value（数式のセルは計算済みの値）}）と、条件付き書式の数式・シート名
+    param([string] $Path, [int] $Index = 1)
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Read)
+        $load = { param($n) $sr = New-Object System.IO.StreamReader($zip.GetEntry($n).Open()); try { $x = New-Object System.Xml.XmlDocument; $x.LoadXml($sr.ReadToEnd()); $x } finally { $sr.Dispose() } }
+        $doc = & $load "xl/worksheets/sheet$Index.xml"
+        $wb = & $load 'xl/workbook.xml'
+    }
+    finally { $fs.Dispose() }
+    $cells = @{}
+    foreach ($c in $doc.GetElementsByTagName('c')) {
+        $f = @($c.GetElementsByTagName('f'))[0]; $v = @($c.GetElementsByTagName('v'))[0]
+        $value = ''
+        if ($c.GetAttribute('t') -eq 'inlineStr') { $value = $c.InnerText } elseif ($v) { $value = $v.InnerText }
+        $formula = ''; if ($f) { $formula = $f.InnerText }
+        $cells[$c.GetAttribute('r')] = [pscustomobject]@{ Style = $c.GetAttribute('s'); Formula = $formula; Value = $value }
+    }
+    return [pscustomobject]@{
+        Cells = $cells
+        Rules = @($doc.GetElementsByTagName('cfRule') | ForEach-Object { '{0}|{1}|{2}' -f $_.ParentNode.GetAttribute('sqref'), $_.GetAttribute('dxfId'), $_.InnerText })
+        Sheets = @($wb.GetElementsByTagName('sheet') | ForEach-Object { $_.GetAttribute('name') })
+        Names = @($wb.GetElementsByTagName('definedName') | Where-Object { -not $_.GetAttribute('localSheetId') } | ForEach-Object { '{0}={1}' -f $_.GetAttribute('name'), $_.InnerText })
+        Frozen = @($doc.GetElementsByTagName('pane') | ForEach-Object { '{0}|{1}|{2}' -f $_.GetAttribute('xSplit'), $_.GetAttribute('ySplit'), $_.GetAttribute('topLeftCell') })[0]
+    }
+}
+
 Test-Case 'Measure-Progress: 2 行の見出しの WBS から、子のタスクごとの予定の進捗・遅れ（営業日）・状態と PV／EV／SPI／CPI を出す' {
     $f = New-Wbs (New-TestDir)
     $r = @(& $ProgressTool -Path $f.Wbs -AsOf '2026-10-14' -Holidays $f.Holidays 6>$null)
@@ -51,6 +79,13 @@ Test-Case 'Measure-Progress: 完了見込み（遅れを、同じ担当者の後
     Assert-Equal '見込開始|見込終了|見込の遅れ（営業日）' ((@('K', 'L', 'M') | ForEach-Object { $book.Rows[1][$_] }) -join '|')
     Assert-Equal ([string](([datetime]'2026-10-22') - [datetime]'1899-12-30').TotalDays) $book.Rows[4]['L']
     Assert-True (@($book.Links | Where-Object { $_.Ref -like 'P*' }).Count -eq 4) 'WBS の場所へのリンクは P 列'
+    # 予定・実績と完了見込みを並べたガントチャート（基準日は -AsOf のまま）。見込終了は、終わっていないタスクの完了見込み
+    $g = Read-GanttCells $out 4
+    Assert-Equal @('タスク', '担当者別', '週次', 'ガントチャート', '休日') $g.Sheets
+    Assert-Equal @('進捗（2026/10/14 時点の見込み）', '', '46309') @($g.Cells['A1'].Value, $g.Cells['L1'].Formula, $g.Cells['L1'].Value)
+    Assert-Equal '見込終了' $g.Cells['I3'].Value
+    Assert-Equal @('', '46311', '46317', '46325') @(5, 6, 7, 9 | ForEach-Object { $g.Cells["I$_"].Value }) '1.1 は完了。1.2 は 10/16、1.3 は佐藤さんの 1.2 の後の 10/22、2.1 は予定どおり 10/30'
+    Assert-Equal '遅延' $g.Cells['L7'].Value
 }
 
 Test-Case 'Measure-Progress: 先行の列（親の番号・3FS+2 の書き方・別の担当者）から遅れを後のタスクに送り、完了見込みを決めている流れを出す' {
@@ -132,7 +167,7 @@ Test-Case 'Measure-Progress: -FillTemplate で遅延タスクと週ごとの完�
     Assert-Match $wbXml 'fullCalcOnLoad="1"'
     Assert-Throws { & $ProgressTool -Path $f.Wbs -FillTemplate $recoveryTemplate -OutFile $out 6>$null } 'すでにあります'
     $sheet = Read-XlsxSheet -Path $outXlsx -Index 1
-    Assert-Equal @('タスク', '担当者別', '週次') $sheet.Sheets
+    Assert-Equal @('タスク', '担当者別', '週次', 'ガントチャート', '休日') $sheet.Sheets
     Assert-Equal 5 $sheet.Rows.Count '見出しと 4 件'
 }
 
@@ -485,34 +520,6 @@ Test-Case 'Measure-Progress: Get-Help でヘルプが表示される' {
     Assert-True (@($h.parameters.parameter | Where-Object { -not $_.description }).Count -eq 0) '説明のないパラメーター'
 }
 
-function Read-GanttCells {
-    #     ブックの Index 番目のシートのセル（セル番地 → @{ Style; Formula; Value（数式のセルは計算済みの値）}）と、条件付き書式の数式・シート名
-    param([string] $Path, [int] $Index = 1)
-    $fs = [System.IO.File]::OpenRead($Path)
-    try {
-        $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Read)
-        $load = { param($n) $sr = New-Object System.IO.StreamReader($zip.GetEntry($n).Open()); try { $x = New-Object System.Xml.XmlDocument; $x.LoadXml($sr.ReadToEnd()); $x } finally { $sr.Dispose() } }
-        $doc = & $load "xl/worksheets/sheet$Index.xml"
-        $wb = & $load 'xl/workbook.xml'
-    }
-    finally { $fs.Dispose() }
-    $cells = @{}
-    foreach ($c in $doc.GetElementsByTagName('c')) {
-        $f = @($c.GetElementsByTagName('f'))[0]; $v = @($c.GetElementsByTagName('v'))[0]
-        $value = ''
-        if ($c.GetAttribute('t') -eq 'inlineStr') { $value = $c.InnerText } elseif ($v) { $value = $v.InnerText }
-        $formula = ''; if ($f) { $formula = $f.InnerText }
-        $cells[$c.GetAttribute('r')] = [pscustomobject]@{ Style = $c.GetAttribute('s'); Formula = $formula; Value = $value }
-    }
-    return [pscustomobject]@{
-        Cells = $cells
-        Rules = @($doc.GetElementsByTagName('cfRule') | ForEach-Object { '{0}|{1}|{2}' -f $_.ParentNode.GetAttribute('sqref'), $_.GetAttribute('dxfId'), $_.InnerText })
-        Sheets = @($wb.GetElementsByTagName('sheet') | ForEach-Object { $_.GetAttribute('name') })
-        Names = @($wb.GetElementsByTagName('definedName') | Where-Object { -not $_.GetAttribute('localSheetId') } | ForEach-Object { '{0}={1}' -f $_.GetAttribute('name'), $_.InnerText })
-        Frozen = @($doc.GetElementsByTagName('pane') | ForEach-Object { '{0}|{1}|{2}' -f $_.GetAttribute('xSplit'), $_.GetAttribute('ySplit'), $_.GetAttribute('topLeftCell') })[0]
-    }
-}
-
 Test-Case 'Measure-Progress: -OutGantt で、WBS からガントチャート形式の進捗管理票（条件付き書式のバー・状態の数式・休日のシート）を作り、そのまま WBS として読める' {
     $dir = New-TestDir
     $w = New-Wbs $dir
@@ -522,33 +529,34 @@ Test-Case 'Measure-Progress: -OutGantt で、WBS からガントチャート形�
     $g = Read-GanttCells $out
     Assert-Equal @('ガントチャート', '休日') $g.Sheets
     Assert-Equal @("休日='休日'!`$A`$2:`$A`$300") $g.Names
-    # 左の列（見込終了は WBS に無いので置かない。実績工数はある）と、日付の列（9/28 の月曜から、最後の予定 10/30 の 2 週あとの日曜まで）
-    Assert-Equal @('WBS番号', 'タスク名', '担当者', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '進捗率', '実績工数', '状態') @('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K' | ForEach-Object { $g.Cells["${_}3"].Value })
-    Assert-Equal '11|3|L4' $g.Frozen
-    Assert-Equal @('進捗管理票', '基準日', 'TODAY()', '46309') @($g.Cells['A1'].Value, $g.Cells['J1'].Value, $g.Cells['K1'].Formula, $g.Cells['K1'].Value)
-    Assert-Equal @('46293', '5', '月', '2026年10月') @($g.Cells['L3'].Value, $g.Cells['L3'].Style, $g.Cells['L2'].Value, $g.Cells['O1'].Value)
-    Assert-True (-not $g.Cells.ContainsKey('L1')) '月の最初の列が次の月の 3 日前（9/28）なら、そこには月を書かない'
+    # 左の列（見込終了は WBS に無くても置く。実績工数はある）と、日付の列（9/28 の月曜から、最後の予定 10/30 の 2 週あとの日曜まで）
+    Assert-Equal @('WBS番号', 'タスク名', '担当者', '予定開始', '予定終了', '予定工数', '実績開始', '実績終了', '見込終了', '進捗率', '実績工数', '状態') @('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L' | ForEach-Object { $g.Cells["${_}3"].Value })
+    Assert-Equal '12|3|M4' $g.Frozen
+    Assert-Equal @('進捗管理票', '基準日', 'TODAY()', '46309') @($g.Cells['A1'].Value, $g.Cells['K1'].Value, $g.Cells['L1'].Formula, $g.Cells['L1'].Value)
+    Assert-Equal @('46293', '5', '月', '2026年10月') @($g.Cells['M3'].Value, $g.Cells['M3'].Style, $g.Cells['M2'].Value, $g.Cells['P1'].Value)
+    Assert-True (-not $g.Cells.ContainsKey('M1')) '月の最初の列が次の月の 3 日前（9/28）なら、そこには月を書かない'
     # 10/12（スポーツの日）は「祝」。曜日は休日の名前の範囲から数式で決める
-    Assert-Equal @('祝', '日') @($g.Cells['Z2'].Value, $g.Cells['AF2'].Value)
-    Assert-Equal 'IF(COUNTIF(休日,Z$3)>0,"祝",MID("日月火水木金土",WEEKDAY(Z$3),1))' $g.Cells['Z2'].Formula
+    Assert-Equal @('祝', '日') @($g.Cells['AA2'].Value, $g.Cells['AG2'].Value)
+    Assert-Equal 'IF(COUNTIF(休日,AA$3)>0,"祝",MID("日月火水木金土",WEEKDAY(AA$3),1))' $g.Cells['AA2'].Formula
     Assert-Equal 49 @($g.Cells.Keys | Where-Object { $_ -match '^[A-Z]+3$' -and $g.Cells[$_].Style -eq '5' }).Count
     # 状態（基準日 10/14）: 完了・遅延（予定終了を過ぎた）・遅延（予定の 2 営業日に進捗 0%）・未着手。親のタスクは太字で、状態の数式なし
-    Assert-Equal @('|11', '完了|2', '遅延|2', '遅延|2', '|11', '未着手|2') @(4..9 | ForEach-Object { '{0}|{1}' -f $g.Cells["K$_"].Value, $g.Cells["K$_"].Style })
-    Assert-Equal ('IF(OR(N(I6)>=1,H6<>""),"完了",IF(OR(D6="",E6=""),"",IF(IF($K$1>E6,OR(NETWORKDAYS(E6+1,$K$1,休日)>0,(1-N(I6))*MAX(1,NETWORKDAYS(D6,E6,休日))>0.5),' +
-        'IF($K$1>=D6,(IF($K$1>=E6,1,NETWORKDAYS(D6,$K$1,休日)/MAX(1,NETWORKDAYS(D6,E6,休日)))-N(I6))*MAX(1,NETWORKDAYS(D6,E6,休日))>0.5,FALSE)),"遅延",IF($K$1<D6,"未着手","予定どおり"))))') $g.Cells['K6'].Formula
-    Assert-Equal @('11', '12', '14') @($g.Cells['B4'].Style, $g.Cells['D4'].Style, $g.Cells['I4'].Style)
-    # WBS 番号は文字列の書式（あとから 2.10 と入力しても数の 2.1 にしない）。空の実績開始・実績終了も日付の書式
-    Assert-Equal @('19', '18', '4', '4', '12') @($g.Cells['A4'].Style, $g.Cells['A5'].Style, $g.Cells['H6'].Style, $g.Cells['G7'].Style, $g.Cells['H8'].Style)
-    Assert-Equal @('0.6', '10') @($g.Cells['I6'].Value, $g.Cells['I6'].Style)
-    # 条件付き書式: 実績・遅延・親のタスク・予定・土日休日（タスクの行）、見出しの土日休日、今日の線、進捗率のデータバー
+    Assert-Equal @('|11', '完了|2', '遅延|2', '遅延|2', '|11', '未着手|2') @(4..9 | ForEach-Object { '{0}|{1}' -f $g.Cells["L$_"].Value, $g.Cells["L$_"].Style })
+    Assert-Equal ('IF(OR(N(J6)>=1,H6<>""),"完了",IF(OR(D6="",E6=""),"",IF(IF(AND(I6<>"",I6>=$L$1),NETWORKDAYS(E6+1,I6,休日)>0,IF($L$1>E6,OR(NETWORKDAYS(E6+1,$L$1,休日)>0,(1-N(J6))*MAX(1,NETWORKDAYS(D6,E6,休日))>0.5),' +
+        'IF($L$1>=D6,(IF($L$1>=E6,1,NETWORKDAYS(D6,$L$1,休日)/MAX(1,NETWORKDAYS(D6,E6,休日)))-N(J6))*MAX(1,NETWORKDAYS(D6,E6,休日))>0.5,FALSE))),"遅延",IF($L$1<D6,"未着手","予定どおり"))))') $g.Cells['L6'].Formula
+    Assert-Equal @('11', '12', '14') @($g.Cells['B4'].Style, $g.Cells['D4'].Style, $g.Cells['J4'].Style)
+    Assert-Equal @('0.6', '10') @($g.Cells['J6'].Value, $g.Cells['J6'].Style)
+    # WBS 番号は文字列の書式（あとから 2.10 と入力しても数の 2.1 にしない）。空の実績開始・実績終了・見込終了も日付の書式
+    Assert-Equal @('19', '18', '4', '4', '12', '4') @($g.Cells['A4'].Style, $g.Cells['A5'].Style, $g.Cells['H6'].Style, $g.Cells['G7'].Style, $g.Cells['H8'].Style, $g.Cells['I7'].Style)
+    # 条件付き書式: 実績・遅延・見込みの延び・親のタスク・予定・土日休日（タスクの行）、見出しの土日休日、今日の線、進捗率のデータバー
     $rules = $g.Rules
-    Assert-Equal 8 $rules.Count
-    Assert-Equal 'L4:BH9|0|AND(AND($G4<>"",L$3>=$G4,L$3<=IF($H4<>"",$H4,$K$1)),AND(L$2<>"土",L$2<>"日",L$2<>"祝"))' $rules[0]
-    Assert-Equal 'L4:BH9|1|AND(AND(L$3>=$D4,L$3<=$E4),AND(L$2<>"土",L$2<>"日",L$2<>"祝"),$K4="遅延")' $rules[1]
-    Assert-Match $rules[2] '^L4:BH9\|2\|AND\(AND\(L\$3>=\$D4,L\$3<=\$E4\),.*LEFT\(SUBSTITUTE\(\$A5,"-","\."\),LEN\(SUBSTITUTE\(\$A4,"-","\."\)\)\+1\)=SUBSTITUTE\(\$A4,"-","\."\)&"\."\)\)$'
-    Assert-Equal @('L4:BH9|3', 'L4:BH9|4', 'L2:BH3|4', 'L2:BH9|5') @($rules[3..6] | ForEach-Object { ($_ -split '\|')[0..1] -join '|' })
-    Assert-Equal 'L2:BH9|5|L$3=$K$1' $rules[6]
-    Assert-Match $rules[7] '^I4:I9\|'
+    Assert-Equal 9 $rules.Count
+    Assert-Equal 'M4:BI9|0|AND(AND($G4<>"",M$3>=$G4,M$3<=IF($H4<>"",$H4,$L$1)),AND(M$2<>"土",M$2<>"日",M$2<>"祝"))' $rules[0]
+    Assert-Equal 'M4:BI9|1|AND(AND(M$3>=$D4,M$3<=$E4),AND(M$2<>"土",M$2<>"日",M$2<>"祝"),$L4="遅延")' $rules[1]
+    Assert-Equal 'M4:BI9|6|AND(AND($I4<>"",$E4<>"",N($J4)<1,$H4="",M$3>$E4,M$3<=$I4),AND(M$2<>"土",M$2<>"日",M$2<>"祝"))' $rules[2] '見込みの延び: 終わっていないタスクの予定終了の翌日から見込終了まで'
+    Assert-Match $rules[3] '^M4:BI9\|2\|AND\(AND\(M\$3>=\$D4,M\$3<=\$E4\),.*LEFT\(SUBSTITUTE\(\$A5,"-","\."\),LEN\(SUBSTITUTE\(\$A4,"-","\."\)\)\+1\)=SUBSTITUTE\(\$A4,"-","\."\)&"\."\)\)$'
+    Assert-Equal @('M4:BI9|3', 'M4:BI9|4', 'M2:BI3|4', 'M2:BI9|5') @($rules[4..7] | ForEach-Object { ($_ -split '\|')[0..1] -join '|' })
+    Assert-Equal 'M2:BI9|5|M$3=$L$1' $rules[7]
+    Assert-Match $rules[8] '^J4:J9\|'
 
     # 進捗管理票をそのまま WBS として読むと、元の WBS と同じ結果になる
     $after = @(& $ProgressTool -Path $out -AsOf '2026-10-14' -Holidays $w.Holidays 6>$null 3>$null)
@@ -574,10 +582,11 @@ Test-Case 'Measure-Progress: -OutGantt の日付の列は、期間が長けれ�
     # 9/28 から 10/30 の 4 週あと（11/27）の週まで、月曜の日付（m/d）。曜日の行は無い
     $heads = @($g.Cells.Keys | Where-Object { $_ -match '^[A-Z]+3$' -and $g.Cells[$_].Style -eq '6' })
     Assert-Equal 9 $heads.Count
-    Assert-Equal @('46293', '46300') @($g.Cells['L3'].Value, $g.Cells['M3'].Value)
-    Assert-True (-not $g.Cells.ContainsKey('L2')) '週ごとは曜日の行を書かない'
-    Assert-Equal 'L4:T9|0|AND(AND($G4<>"",$G4<=L$3+6,IF($H4<>"",$H4,$K$1)>=L$3),TRUE)' $g.Rules[0]
-    Assert-Equal 'L2:T9|5|AND($K$1>=L$3,$K$1<=L$3+6)' @($g.Rules | Where-Object { $_ -like '*|5|*' })[0]
+    Assert-Equal @('46293', '46300') @($g.Cells['M3'].Value, $g.Cells['N3'].Value)
+    Assert-True (-not $g.Cells.ContainsKey('M2')) '週ごとは曜日の行を書かない'
+    Assert-Equal 'M4:U9|0|AND(AND($G4<>"",$G4<=M$3+6,IF($H4<>"",$H4,$L$1)>=M$3),TRUE)' $g.Rules[0]
+    Assert-Equal 'M4:U9|6|AND(AND($I4<>"",$E4<>"",N($J4)<1,$H4="",M$3+6>$E4,M$3<=$I4),TRUE)' $g.Rules[2] '週ごとの見込みの延びは、予定終了より後にかかる週'
+    Assert-Equal 'M2:U9|5|AND($L$1>=M$3,$L$1<=M$3+6)' @($g.Rules | Where-Object { $_ -like '*|5|*' })[0]
 
     # 期間が 92 日より長い WBS は、Auto でも 1 週 1 列
     $long = Join-Path $dir 'long.csv'
