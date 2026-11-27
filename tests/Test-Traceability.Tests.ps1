@@ -81,6 +81,49 @@ Test-Case 'Test-Traceability: 要件一覧の要件が設計書とテスト仕�
     Assert-True (@($cover.Links | Where-Object { $_.Location -like "'ケース'!*" }).Count -gt 0) 'テストの場所へのリンク'
 }
 
+Test-Case 'Test-Traceability: 基本設計書と詳細設計書があれば、要件を 基本設計 → 詳細設計 → テスト の順に追い、設計の要素は詳細設計書から集める' {
+    $root = New-TestDir
+    $design = Join-Path $root 'design'
+    Copy-Item -LiteralPath $traceDesignDir -Destination $design -Recurse
+    # 詳細設計: 要件対応表（REQ-004 は詳細設計にだけある。REQ-009 は一覧に無い）
+    New-TraceBook (Join-Path $design 'DD00_要件対応表.xlsx') @(@{ Name = '対応表'; Header = @('要件', '画面ID'); Rows = @(
+                , @('REQ-001', 'SCR001')
+                , @('REQ-002', 'SCR002')
+                , @('REQ-004', 'SCR003')
+                , @('REQ-009', 'SCR003')) })
+    # 基本設計: 名前（先頭の BD）で見分けるものと、-BasicDesign で渡すもの。基本設計の画面一覧の画面（SCR009）は、確かめる要素にしない
+    New-TraceBook (Join-Path $design 'BD01_画面一覧.xlsx') @(@{ Name = '画面一覧'; Header = @('画面ID', '画面名', '要件'); Rows = @(
+                , @('SCR001', '受注一覧', 'REQ-001')
+                , @('SCR002', '受注登録', 'REQ-002')
+                , @('SCR009', '売上一覧', '')) })
+    $basic = Join-Path $root 'basic'
+    New-Item -ItemType Directory -Path $basic | Out-Null
+    New-TraceBook (Join-Path $basic '機能一覧.xlsx') @(@{ Name = '機能一覧'; Header = @('機能ID', '機能名', '要件'); Rows = @(, @('F01', '出荷指示', 'REQ-003')) })
+    $reqCsv = Join-Path $root '要件一覧.csv'
+    @('要件ID,要件名', 'REQ-001,受注を検索する', 'REQ-002,受注を登録する', 'REQ-003,出荷指示を送る', 'REQ-004,受注の詳細を見る') | Set-Content -LiteralPath $reqCsv -Encoding UTF8
+    $tests = Join-Path $root 'tests'
+    New-Item -ItemType Directory -Path $tests | Out-Null
+    New-TraceTests $tests
+    $out = Join-Path $root 'trace.xlsx'
+    $gaps = @(& $TraceTool -DesignPath $design -TestPath $tests -BasicDesign $basic -Requirement $reqCsv -OutXlsx $out 6>$null)
+    Assert-Equal @('REQ-001|テストなし', 'REQ-003|詳細設計・テストなし', 'REQ-004|基本設計・テストなし', 'REQ-009|要件一覧に無い要件 ID', 'REQ-010|要件一覧に無い要件 ID') @($gaps | Where-Object Kind -eq '要件' | ForEach-Object { '{0}|{1}' -f $_.Id, $_.Judgement })
+    Assert-Equal 0 @($gaps | Where-Object Kind -eq '画面').Count (@($gaps | Where-Object Kind -eq '画面' | ForEach-Object { $_.Id }) -join ', ')
+
+    $text = Get-HostText { & $TraceTool -DesignPath $design -TestPath $tests -BasicDesign $basic -Requirement $reqCsv | Out-Null }
+    Assert-Match $text '要件 4 件: 基本設計・詳細設計・テストあり 1、テストなし 1、基本設計・テストなし 1、詳細設計・テストなし 1。要件一覧に無い要件 ID 2 件'
+    Assert-Match $text '基本設計書 2 ファイル（機能一覧\.xlsx、BD01_画面一覧\.xlsx）と詳細設計書を分けて追いました'
+    Assert-Match $text 'テストの網羅: 画面 3/3（100%）'
+
+    $book = Read-XlsxSheet -Path $out -Index 3
+    Assert-Equal '要件ID|要件名|基本設計書|詳細設計書|テスト仕様書|テストの数|判定|要件一覧の場所' ((@('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H') | ForEach-Object { $book.Rows[1][$_] }) -join '|')
+    Assert-Equal 'REQ-002|BD01_画面一覧.xlsx|DD00_要件対応表.xlsx|UT_受注.xlsx|1|○' ('{0}|{1}|{2}|{3}|{4}|{5}' -f $book.Rows[3]['A'], $book.Rows[3]['C'], $book.Rows[3]['D'], $book.Rows[3]['E'], $book.Rows[3]['F'], $book.Rows[3]['G'])
+    Assert-Equal 'REQ-003|機能一覧.xlsx||詳細設計・テストなし' ('{0}|{1}|{2}|{3}' -f $book.Rows[4]['A'], $book.Rows[4]['C'], $book.Rows[4]['D'], $book.Rows[4]['G'])
+
+    # 基本設計書だけなら、これまでどおり設計書として追う
+    $gaps = @(& $TraceTool -DesignPath (Join-Path $design 'BD01_画面一覧.xlsx') -TestPath $tests -Requirement $reqCsv 6>$null)
+    Assert-Equal @('REQ-001|テストなし', 'REQ-003|設計・テストなし', 'REQ-004|設計・テストなし') @($gaps | Where-Object { $_.Kind -eq '要件' -and $_.Judgement -ne '要件一覧に無い要件 ID' } | ForEach-Object { '{0}|{1}' -f $_.Id, $_.Judgement })
+}
+
 Test-Case 'Test-Traceability: 行の機能は表の見出しの行（表の上の「テスト対象」の行ではない）の列から読み、機能名より画面ID の列を使う' {
     $dir = New-TestDir
     # 表の上に「テスト対象: 受注管理システム」の行があり、画面ID は最初の行だけに書いたシート

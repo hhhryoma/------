@@ -2991,6 +2991,25 @@ function Read-HeaderCandidates {
     return $candidates
 }
 
+function Get-DesignPhase {
+    #     設計書の工程: '基本設計' か ''（詳細設計など）。BasicRoots（-BasicDesign で指定したファイル・フォルダのフルパス）の中は基本設計。
+    #     それ以外は、ファイル名から上のフォルダへ順に、名前に「基本設計・外部設計・概要設計」か先頭の「BD」（BD01_画面一覧.xlsx）があれば基本設計、
+    #     「詳細設計・内部設計」か先頭の「DD」があれば詳細設計（先に見つかったほう）。Test-DesignConsistency.ps1・Test-Traceability.ps1 で同じに見分ける
+    param([string] $FilePath, [string[]] $BasicRoots)
+    foreach ($root in @($BasicRoots | Where-Object { $_ })) {
+        if ([string]::Equals($FilePath, $root, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $FilePath.StartsWith($root + '\', [System.StringComparison]::OrdinalIgnoreCase) -or $FilePath.StartsWith($root + '/', [System.StringComparison]::OrdinalIgnoreCase)) { return '基本設計' }
+    }
+    $segments = @($FilePath.Normalize($script:Nfkc) -split '[\\/]' | Where-Object { $_ })
+    for ($i = $segments.Count - 1; $i -ge 0; $i--) {
+        $isBasic = $segments[$i] -cmatch '基本設計|外部設計|概要設計|^BD(?=[0-9_\-\s]|$)'
+        $isDetail = $segments[$i] -cmatch '詳細設計|内部設計|^DD(?=[0-9_\-\s]|$)'
+        if ($isBasic -and -not $isDetail) { return '基本設計' }
+        if ($isDetail -and -not $isBasic) { return '' }
+    }
+    return ''
+}
+
 function Get-PathItem {
     #     引数のパスのファイル・フォルダ。その名前のものがあればそれ（「設計書[旧].xlsx」のように [ ] を含む名前のため）、
     #     無ければワイルドカード（*.xlsx など）として探す。見つからなければ空
