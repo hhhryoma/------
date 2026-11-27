@@ -1,15 +1,21 @@
 name: tests
 
+# PR のたびに実行する（main へのマージでは流さない。同じ中身を PR で確かめているため）。手動でも実行できる
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# 同じ PR に続けてプッシュしたら、前の実行は止める
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # テストが固まっても、既定の 6 時間まで流し続けない（ふだんは長くて 20 分ほど）
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -23,20 +29,13 @@ jobs:
           - name: PowerShell 7 (Linux)
             os: ubuntu-latest
             shell: pwsh
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Run tests (Windows PowerShell 5.1)
-        if: matrix.shell == 'powershell'
-        shell: powershell
-        run: |
-          $PSVersionTable.PSVersion
-          & .\tests\Invoke-Tests.ps1
-          exit $LASTEXITCODE
-
-      - name: Run tests (PowerShell 7)
-        if: matrix.shell == 'pwsh'
-        shell: pwsh
+      - name: Run tests
         run: |
           & ./tests/Invoke-Tests.ps1
           exit $LASTEXITCODE
