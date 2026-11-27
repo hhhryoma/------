@@ -9,7 +9,7 @@
 
 失敗が 1 件でもあれば終了コード 1 で終わります。
 
-GitHub Actions（`.github/workflows/tests.yml`）で、push と PR のたびに次の 3 環境で実行します。
+GitHub Actions（`.github/workflows/tests.yml`）で、PR のたびに次の 3 環境で実行します（main へのマージでは流しません。Actions の画面から手動でも実行できます）。同じ PR に続けてプッシュすると、前の実行は止めます。
 
 | 環境 | 目的 |
 | --- | --- |
