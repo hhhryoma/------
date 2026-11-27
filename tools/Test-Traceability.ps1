@@ -8,6 +8,8 @@ param(
 
     [string[]] $Requirement,
 
+    [string[]] $BasicDesign,
+
     [string[]] $BugList,
 
     [string] $Rules,
@@ -192,7 +194,14 @@ if ($Requirement) {
 # ---------------------------------------------------------------- 設計書から確かめる要素を読む
 
 
-$designBooks = Read-Books $DesignPath $requirementFiles
+$designBooks = Read-Books (@(@($DesignPath) + @($BasicDesign) | Where-Object { $_ })) $requirementFiles
+# 基本設計書（-BasicDesign の中のものと、名前で見分けたもの。Test-DesignConsistency.ps1 と同じ）。基本設計書と詳細設計書の両方があれば、
+# 要件は 基本設計 → 詳細設計 → テスト の順に追い、設計の要素（画面・イベントなど）は詳細設計書から集める
+$basicRoots = @(foreach ($p in @($BasicDesign | Where-Object { $_ })) { foreach ($item in @(Get-PathItem $p)) { $item.FullName.TrimEnd('\', '/') } })
+$phaseOf = @{}
+foreach ($bookPath in @($designBooks.Keys)) { $phaseOf[$bookPath] = Get-DesignPhase $bookPath $basicRoots }
+$basicBooks = @($designBooks.Keys | Where-Object { $phaseOf[$_] } | Sort-Object)
+$chain = $basicBooks.Count -gt 0 -and @($designBooks.Keys | Where-Object { -not $phaseOf[$_] }).Count -gt 0
 $elements = [ordered]@{}   # 種類|範囲|ID → 要素
 
 function Add-Element {
@@ -207,7 +216,7 @@ function Add-Element {
     $elements[$key] = [pscustomobject]@{ Kind = $Rule.Kind; Id = $id; Name = ([string]$Name).Trim(); Scope = $scopeText; How = $how; Place = $Place; Tests = 0; TestPlace = $null }
 }
 
-$bookPaths = [string[]]@($designBooks.Keys)
+$bookPaths = [string[]]@($designBooks.Keys | Where-Object { -not $chain -or -not $phaseOf[$_] })
 [Array]::Sort($bookPaths, [StringComparer]::Ordinal)
 foreach ($bookPath in $bookPaths) {
     $book = $designBooks[$bookPath]
@@ -360,7 +369,7 @@ $designCells = New-Object System.Collections.Generic.List[object]
 foreach ($book in $designBooks.Values) {
     foreach ($sheetName in $book.Sheets.Keys) {
         $grid = $book.Sheets[$sheetName]
-        foreach ($row in $grid.Rows) { foreach ($col in $grid.Cols[$row]) { $designCells.Add([pscustomobject]@{ Text = $grid.Cells[$row][$col].Normalize($nfkc); Place = (New-Place $book $sheetName $row $col) }) } }
+        foreach ($row in $grid.Rows) { foreach ($col in $grid.Cols[$row]) { $designCells.Add([pscustomobject]@{ Text = $grid.Cells[$row][$col].Normalize($nfkc); Place = (New-Place $book $sheetName $row $col); Basic = [bool]$phaseOf[$book.Path] }) } }
     }
 }
 $requirementResults = New-Object System.Collections.Generic.List[object]
@@ -369,13 +378,24 @@ foreach ($k in $requirements.Keys) {
     $rx = New-TokenRegex $req.Id
     $inDesign = @($designCells | Where-Object { $rx.IsMatch($_.Text) })
     $inTest = @($testCells | Where-Object { $rx.IsMatch($_.Text) })
+    $inBasic = @($inDesign | Where-Object { $_.Basic })
+    $inDetail = @($inDesign | Where-Object { -not $_.Basic })
     $judgement = '○'
-    if ($inDesign.Count -eq 0 -and $inTest.Count -eq 0) { $judgement = '設計・テストなし' }
+    if ($chain) {
+        # 基本設計 → 詳細設計 → テスト のどこで途切れたか（無いものを並べる。基本設計・テストなし など）
+        $missing = @()
+        if ($inBasic.Count -eq 0) { $missing += '基本設計' }
+        if ($inDetail.Count -eq 0) { $missing += '詳細設計' }
+        if ($inTest.Count -eq 0) { $missing += 'テスト' }
+        if ($missing.Count -gt 0) { $judgement = ($missing -join '・') + 'なし' }
+    }
+    elseif ($inDesign.Count -eq 0 -and $inTest.Count -eq 0) { $judgement = '設計・テストなし' }
     elseif ($inDesign.Count -eq 0) { $judgement = '設計なし' }
     elseif ($inTest.Count -eq 0) { $judgement = 'テストなし' }
     $requirementResults.Add([pscustomobject]@{
         Id = $req.Id; Name = $req.Name; Place = $req.Place; Judgement = $judgement
         DesignFiles = (@($inDesign | ForEach-Object { $_.Place.File } | Select-Object -Unique) -join '、'); DesignPlace = @($inDesign | ForEach-Object { $_.Place })[0]
+        BasicFiles = (@($inBasic | ForEach-Object { $_.Place.File } | Select-Object -Unique) -join '、'); DetailFiles = (@($inDetail | ForEach-Object { $_.Place.File } | Select-Object -Unique) -join '、')
         TestFiles = (@($inTest | ForEach-Object { $_.Place.File } | Select-Object -Unique) -join '、'); Tests = $inTest.Count
     })
 }
@@ -433,8 +453,9 @@ if ($OutXlsx) {
     }
     $reqRows = New-Object System.Collections.Generic.List[object]
     foreach ($r in $requirementResults) {
-        $row = @{ Values = @($r.Id, $r.Name, $r.DesignFiles, $r.TestFiles, [double]$r.Tests, $r.Judgement, (Format-Place $r.Place)) }
-        if ($r.Place.Sheet) { $row.Link = @{ Column = 6; Path = $r.Place.Path; Location = ("'{0}'!{1}" -f $r.Place.Sheet.Replace("'", "''"), $r.Place.Cell) } }
+        if ($chain) { $row = @{ Values = @($r.Id, $r.Name, $r.BasicFiles, $r.DetailFiles, $r.TestFiles, [double]$r.Tests, $r.Judgement, (Format-Place $r.Place)) }; $linkColumn = 7 }
+        else { $row = @{ Values = @($r.Id, $r.Name, $r.DesignFiles, $r.TestFiles, [double]$r.Tests, $r.Judgement, (Format-Place $r.Place)) }; $linkColumn = 6 }
+        if ($r.Place.Sheet) { $row.Link = @{ Column = $linkColumn; Path = $r.Place.Path; Location = ("'{0}'!{1}" -f $r.Place.Sheet.Replace("'", "''"), $r.Place.Cell) } }
         $reqRows.Add($row)
     }
     $gapRows = New-Object System.Collections.Generic.List[object]
@@ -447,7 +468,8 @@ if ($OutXlsx) {
         @{ Name = '抜け'; Columns = @(@{ Header = '種類'; Width = 10 }, @{ Header = '範囲'; Width = 10 }, @{ Header = 'ID'; Width = 14 }, @{ Header = '名前'; Width = 24 }, @{ Header = '判定'; Width = 26 }, @{ Header = '場所'; Width = 50 }); Rows = $gapRows },
         @{ Name = '網羅'; Columns = @(@{ Header = '種類'; Width = 10 }, @{ Header = '範囲'; Width = 10 }, @{ Header = 'ID'; Width = 14 }, @{ Header = '名前'; Width = 24 }, @{ Header = '探し方'; Width = 7 }, @{ Header = 'テストの数'; Width = 9 }, @{ Header = '最初のテストの場所'; Width = 44 }, @{ Header = '判定'; Width = 10 }, @{ Header = '設計書の場所'; Width = 50 }); Rows = $coverRows })
     if ($requirements.Count -gt 0) {
-        $sheets += @{ Name = '要件'; Columns = @(@{ Header = '要件ID'; Width = 12 }, @{ Header = '要件名'; Width = 30 }, @{ Header = '設計書'; Width = 40 }, @{ Header = 'テスト仕様書'; Width = 40 }, @{ Header = 'テストの数'; Width = 9 }, @{ Header = '判定'; Width = 14 }, @{ Header = '要件一覧の場所'; Width = 40 }); Rows = $reqRows }
+        if ($chain) { $designColumns = @(@{ Header = '基本設計書'; Width = 32 }, @{ Header = '詳細設計書'; Width = 40 }) } else { $designColumns = @(@{ Header = '設計書'; Width = 40 }) }
+        $sheets += @{ Name = '要件'; Columns = @(@(@{ Header = '要件ID'; Width = 12 }, @{ Header = '要件名'; Width = 30 }) + $designColumns + @(@{ Header = 'テスト仕様書'; Width = 40 }, @{ Header = 'テストの数'; Width = 9 }, @{ Header = '判定'; Width = 22 }, @{ Header = '要件一覧の場所'; Width = 40 })); Rows = $reqRows }
     }
     try { Export-Workbook -FilePath $OutXlsx -Sheets $sheets }
     catch {
@@ -469,7 +491,19 @@ $coverage = @(@($ruleList | ForEach-Object { $_.Kind } | Select-Object -Unique) 
 if ($coverage.Count -gt 0) { Write-Host ('テストの網羅: {0}' -f ($coverage -join '・')) }
 if ($requirements.Count -gt 0) {
     $ok = @($requirementResults | Where-Object Judgement -eq '○').Count
-    Write-Host ('要件 {0} 件: 設計とテストあり {1}・設計なし {2}・テストなし {3}・設計・テストなし {4}。要件一覧に無い要件 ID {5} 件' -f $requirements.Count, $ok, @($requirementResults | Where-Object Judgement -eq '設計なし').Count, @($requirementResults | Where-Object Judgement -eq 'テストなし').Count, @($requirementResults | Where-Object Judgement -eq '設計・テストなし').Count, $unknownRequirements.Count)
+    if ($chain) {
+        # 基本設計 → 詳細設計 → テスト: すべてあるものと、途切れ方ごとの数（ある途切れ方だけ）
+        $parts = @('基本設計・詳細設計・テストあり {0}' -f $ok)
+        foreach ($j in @('基本設計なし', '詳細設計なし', 'テストなし', '基本設計・詳細設計なし', '基本設計・テストなし', '詳細設計・テストなし', '基本設計・詳細設計・テストなし')) {
+            $n = @($requirementResults | Where-Object Judgement -eq $j).Count
+            if ($n -gt 0) { $parts += '{0} {1}' -f $j, $n }
+        }
+        Write-Host ('要件 {0} 件: {1}。要件一覧に無い要件 ID {2} 件' -f $requirements.Count, ($parts -join '、'), $unknownRequirements.Count)
+        Write-Host ('  基本設計書 {0} ファイル（{1}）と詳細設計書を分けて追いました。設計の要素（画面・イベントなど）は詳細設計書から集めます' -f $basicBooks.Count, (@($basicBooks | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Select-Object -First 5) -join '、'))
+    }
+    else {
+        Write-Host ('要件 {0} 件: 設計とテストあり {1}・設計なし {2}・テストなし {3}・設計・テストなし {4}。要件一覧に無い要件 ID {5} 件' -f $requirements.Count, $ok, @($requirementResults | Where-Object Judgement -eq '設計なし').Count, @($requirementResults | Where-Object Judgement -eq 'テストなし').Count, @($requirementResults | Where-Object Judgement -eq '設計・テストなし').Count, $unknownRequirements.Count)
+    }
 }
 Write-Host ('抜け: {0} 件' -f $gaps.Count)
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
@@ -489,6 +523,9 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     結果が削除・対象外・欠番などの行は、テストとみなしません。
 #     エビデンスの置き場所にあるブック（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）も、テストとみなしません。
 #     -Requirement で要件一覧を渡すと、要件 ID ごとに設計書とテスト仕様書に出てくるかを確かめ、一覧に無い要件 ID も知らせます。
+#     設計書に基本設計書と詳細設計書の両方があるときは、要件を 基本設計 → 詳細設計 → テスト の順に追い、どこで途切れたか
+#     （詳細設計なし・詳細設計・テストなし など）を知らせます。このとき設計の要素（画面・イベントなど）は詳細設計書から集めます。
+#     基本設計書は -BasicDesign で渡すか、ファイル名・フォルダ名（基本設計・外部設計・概要設計・先頭の BD）で見分けます（Test-DesignConsistency.ps1 と同じ）。
 #
 # .PARAMETER DesignPath
 #     設計書のフォルダまたはファイル（複数可・ワイルドカード可）。
@@ -499,6 +536,9 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .PARAMETER Requirement
 #     要件一覧のファイル（Excel・CSV。要件ID と要件名の見出しがある表）。Excel の ID が数字だけの表（改訂履歴など）は読みません。
 #     設計書・テスト仕様書のフォルダの中にあっても、そちらとしては読みません。
+#
+# .PARAMETER BasicDesign
+#     基本設計書のフォルダまたはファイル（複数可）。名前で見分けられない基本設計書を渡します（-DesignPath と同じものを含めてもかまいません）。
 #
 # .PARAMETER BugList
 #     障害管理表のファイルまたはフォルダ（複数可）。テスト仕様書のフォルダの中にあっても、テストとしては読みません
@@ -514,7 +554,7 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #     Excel を起動しません（.xls / .xlsb は読まなくなります）。
 #
 # .PARAMETER OutXlsx
-#     結果を xlsx に保存します（抜け・網羅・要件）。
+#     結果を xlsx に保存します（抜け・網羅・要件）。基本設計と詳細設計を分けて追うときは、要件のシートに基本設計書と詳細設計書の列を分けて出します。
 #
 # .EXAMPLE
 #     .\Test-Traceability.ps1 D:\設計書 D:\テスト仕様書 -OutXlsx D:\網羅.xlsx
@@ -522,6 +562,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 # .EXAMPLE
 #     # 要件一覧からのつながりも確かめる
 #     .\Test-Traceability.ps1 D:\設計書 D:\テスト仕様書 -Requirement D:\要件一覧.xlsx
+#
+# .EXAMPLE
+#     # 要件 → 基本設計 → 詳細設計 → テスト をひとつながりで追う
+#     .\Test-Traceability.ps1 D:\詳細設計 D:\テスト仕様書 -BasicDesign D:\基本設計 -Requirement D:\要件一覧.xlsx -OutXlsx D:\網羅.xlsx
 #
 # .NOTES
 #     要件: PowerShell 5.1 以降。.xlsx / .xlsm は Excel 不要。同じフォルダに ExcelTools.psm1 と Search-Excel.ps1 が必要です。
