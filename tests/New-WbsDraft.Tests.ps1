@@ -34,12 +34,14 @@ Test-Case 'New-WbsDraft: 規模の見積もりの工数を工程に配分し、�
         '1.3|SCR003 受注詳細（詳細設計）|山田|11/04|11/05|1.25',
         '1.4|M_CUSTOMER 顧客マスタ ほか 1 件（詳細設計）|佐藤|11/04|11/04|0.36') @($keys | Select-Object -First 5) '11/03（文化の日）は営業日にしない。工数の大きい機能から、手の空く担当者へ'
     Assert-True ($keys -contains '1.7|DD05_メッセージ一覧（詳細設計）|佐藤|11/05|11/06|0.67') 'メッセージ一覧は詳細設計・レビューに配分する（25:5）。種類の違うコードとはまとめない'
-    # レビューは作った人以外。製造はレビューが終わってから（SCR001 のレビューは 11/06 に終わり、製造は 11/06 から）
+    # レビューは作った人以外。製造はレビューが終わってから。画面の製造は、先に作るテーブルの製造（3.4・3.5。11/10 まで）が終わってから
     Assert-True ($keys -contains '2.1|SCR001 受注一覧（詳細設計レビュー）|佐藤|11/06|11/06|0.25')
-    Assert-True ($keys -contains '3.1|SCR001 受注一覧（製造）|山田|11/06|11/10|2')
+    Assert-True ($keys -contains '3.1|SCR001 受注一覧（製造）|山田|11/10|11/12|2')
+    $tableEnd = @($rows | Where-Object { $_.Wbs -in @('3.4', '3.5') } | Sort-Object End -Descending)[0].End
+    Assert-True (@($rows | Where-Object { $_.Wbs -match '^3\.' -and $_.Wbs -notin @('3.4', '3.5') -and $_.Start -lt $tableEnd }).Count -eq 0) 'テーブル以外の製造は、テーブルの製造の後'
     Test-WbsOrder $rows
-    Assert-Equal '|1.1|2.1|3.1|' ((@('1.1', '2.1', '3.1', '4.1', '1') | ForEach-Object { $w = $_; @($rows | Where-Object { $_.Wbs -eq $w })[0].Predecessors }) -join '|') '先行は同じ機能の前の工程の WBS 番号（工程の行は空）'
-    Assert-Equal @('4|単体テスト||11/12|11/17|5.1', '4.1|SCR001 受注一覧（単体テスト）|山田|11/12|11/16|1.5') @($keys | Where-Object { $_ -match '^4(\.1)?\|' })
+    Assert-Equal '|1.1|2.1,3.4,3.5|3.1|' ((@('1.1', '2.1', '3.1', '4.1', '1') | ForEach-Object { $w = $_; @($rows | Where-Object { $_.Wbs -eq $w })[0].Predecessors }) -join '|') '先行は同じ機能の前の工程と、先に作る種類（テーブル）のタスクの WBS 番号（工程の行は空）'
+    Assert-Equal @('4|単体テスト||11/12|11/19|5.1', '4.1|SCR001 受注一覧（単体テスト）|山田|11/16|11/17|1.5') @($keys | Where-Object { $_ -match '^4(\.1)?\|' })
     $tables = @($rows | Where-Object { $_.Task -like 'M_CUSTOMER*' })
     Assert-Equal '0.36|0.07|0.57' ((@($tables | ForEach-Object { $_.Days })) -join '|') '0.5 人日のテーブル 2 つを 1 人日のタスクにまとめ、配分を丸めた残りは最後の工程に入れる'
     Assert-Equal 'M_CUSTOMER 顧客マスタ: テーブル 簡易（カラム数 14） / M_PRODUCT 商品マスタ: テーブル 簡易（カラム数 10）' $tables[0].Basis
@@ -48,8 +50,8 @@ Test-Case 'New-WbsDraft: 規模の見積もりの工数を工程に配分し、�
     $text = Get-HostText { & $WbsTool $designDir -Start '2026-11-02' -Members '山田, 佐藤' -Holidays $holidays | Out-Null }
     Assert-Match $text '機能 10・工程 4・タスク 26。予定工数 合計 20.1 人日'
     Assert-Match $text '1 人日に満たない機能は、同じ種類をまとめて 1 つのタスクにしました: テーブル 4 件 → 2 つ'
-    Assert-Match $text '担当者 2 人: 山田 10.17 人日（2026/11/02〜2026/11/17）・佐藤 9.93 人日（2026/11/02〜2026/11/16）'
-    Assert-Match $text '完了予定: 2026/11/17（2026/11/02 から 11 営業日）'
+    Assert-Match $text '担当者 2 人: 山田 10.17 人日（2026/11/02〜2026/11/19）・佐藤 9.93 人日（2026/11/02〜2026/11/16）'
+    Assert-Match $text '完了予定: 2026/11/19（2026/11/02 から 13 営業日）'
     Assert-True ($text -notmatch '休日の CSV') '休日を指定したときは知らせない'
 }
 
@@ -81,6 +83,30 @@ Test-Case 'New-WbsDraft: 稼働率（佐藤:50%）・待ち合わせの工程・
     $failed = $false
     try { $null = & $WbsTool $designDir -Members '山田, 佐藤:150%' 6>$null } catch { $failed = $true; Assert-Match $_.Exception.Message '稼働率' }
     Assert-True $failed '稼働率は 100% まで'
+}
+
+Test-Case 'New-WbsDraft: 共通のタスク（-CommonTasks。全体・最初・最後）を最後の「共通」のまとまりにする' {
+    $dir = New-TestDir
+    $holidays = Join-Path $dir 'syukujitsu.csv'
+    @('国民の祝日・休日月日,国民の祝日・休日名称', '2026/11/3,文化の日') | Set-Content -LiteralPath $holidays -Encoding UTF8
+    $common = Join-Path $script:ToolsDir 'wbs/共通のタスク_ひな形.csv'
+    $rows = @(& $WbsTool $designDir -Start '2026-11-02' -Members '山田, 佐藤' -Holidays $holidays -CommonTasks $common 6>$null)
+    $last = @($rows | Sort-Object End -Descending)[0].End.ToString('MM/dd')
+    Assert-Equal @(
+        "5|共通||11/02|$last|2.5|",
+        "5.1|プロジェクト管理（進捗・課題の管理・会議）||11/02|$last|1|",
+        '5.2|開発環境の準備|佐藤|11/02|11/02|1|',
+        "5.3|工程の完了報告（成果物の取りまとめ）|山田|$last|$last|0.5|1,2,3,4") @($rows | Where-Object { $_.Wbs -match '^5' } | ForEach-Object { '{0}|{1}|{2}|{3:MM/dd}|{4:MM/dd}|{5}|{6}' -f $_.Wbs, $_.Task, $_.Member, $_.Start, $_.End, $_.Days, $_.Predecessors }) '全体（機能の工数の 5%。担当者なし）・最初（手の空く担当者の最初）・最後（ほかのタスクがすべて終わってから）'
+    Assert-Equal '共通のタスク（全体。機能の工数の 5%）' @($rows | Where-Object { $_.Wbs -eq '5.1' })[0].Basis
+    $text = Get-HostText { & $WbsTool $designDir -Start '2026-11-02' -Members '山田, 佐藤' -Holidays $holidays -CommonTasks $common | Out-Null }
+    Assert-Match $text '機能 10・工程 4・タスク 26。予定工数 合計 20.1 人日' '機能のタスクの数・工数には、共通のタスクを入れない'
+    Assert-Match $text '共通のタスク 3 件: プロジェクト管理（進捗・課題の管理・会議） 1 人日（全体）・開発環境の準備 1 人日（最初）・工程の完了報告（成果物の取りまとめ） 0.5 人日（最後）'
+
+    $bad = Join-Path $dir 'bad.csv'
+    @('タスク名,時期,工数', '会議,毎週,1') | Set-Content -LiteralPath $bad -Encoding UTF8
+    $failed = $false
+    try { $null = & $WbsTool $designDir -CommonTasks $bad 6>$null } catch { $failed = $true; Assert-Match $_.Exception.Message '時期' }
+    Assert-True $failed '時期は 全体・最初・最後'
 }
 
 Test-Case 'New-WbsDraft: -GroupBy Function で機能 → 工程の順にし、-Baseline で新規と変更の機能だけを変更の工数で WBS にする' {
