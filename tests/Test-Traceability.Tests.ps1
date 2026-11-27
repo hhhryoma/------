@@ -124,6 +124,42 @@ Test-Case 'Test-Traceability: 基本設計書と詳細設計書があれば、�
     Assert-Equal @('REQ-001|テストなし', 'REQ-003|設計・テストなし', 'REQ-004|設計・テストなし') @($gaps | Where-Object { $_.Kind -eq '要件' -and $_.Judgement -ne '要件一覧に無い要件 ID' } | ForEach-Object { '{0}|{1}' -f $_.Id, $_.Judgement })
 }
 
+Test-Case 'Test-Traceability: 帳票・バッチの ID と、バッチ設計書で使うメッセージ ID にテストがあるかも確かめる' {
+    $root = New-TestDir
+    $design = Join-Path $root 'design'
+    New-Item -ItemType Directory -Path $design | Out-Null
+    New-SheetsBook (Join-Path $design 'DD07_帳票設計書_RPT001_受注伝票.xlsx') ([ordered]@{ '帳票概要' = @(@('帳票ID', 'RPT001', '帳票名', '受注伝票'), @('出力', 'PDF')) })
+    New-SheetsBook (Join-Path $design 'DD07_帳票設計書_RPT002_出荷一覧.xlsx') ([ordered]@{ '帳票概要' = @(@('帳票ID', 'RPT002', '帳票名', '出荷一覧'), @('出力', 'Excel')) })
+    New-SheetsBook (Join-Path $design 'DD08_バッチ設計書_BAT001_日次集計.xlsx') ([ordered]@{
+            'バッチ概要' = @(@('バッチID', 'BAT001', 'バッチ名', '日次集計'), @('起動', '毎日'))
+            'エラー処理' = @(@('No', 'エラー', 'メッセージ'), @('1', '入力ファイルが無い', 'E1001'), @('2', '集計が 0 件', 'W1002')) })
+    # バッチ一覧にだけある BAT002（バッチ設計書がまだ無い）
+    New-TraceBook (Join-Path $design 'DD09_バッチ一覧.xlsx') @(@{ Name = 'バッチ一覧'; Header = @('バッチID', 'バッチ名', '起動'); Rows = @(
+                , @('BAT001', '日次集計', '毎日')
+                , @('BAT002', '月次締め', '毎月')) })
+    $tests = Join-Path $root 'tests'
+    New-Item -ItemType Directory -Path $tests | Out-Null
+    # バッチID の列（空なら上の行）でバッチを分ける。W1002 は RPT001 の行にあるので、BAT001 のテストではない
+    New-TraceBook (Join-Path $tests 'UT_バッチ.xlsx') @(@{ Name = 'ケース'; Header = @('No', 'バッチID', '確認内容', '結果'); Rows = @(
+                , @('1', 'BAT001', '前日の受注を集計する', 'OK')
+                , @('2', '', '入力ファイルが無いと E1001 を出して終わる', 'OK')
+                , @('3', 'RPT001', '受注伝票を出力する（集計が 0 件なら W1002）', 'OK')) })
+    $out = Join-Path $root 'trace.xlsx'
+    $gaps = @(& $TraceTool -DesignPath $design -TestPath $tests -OutXlsx $out 6>$null)
+    # E1001 は BAT001 の行（バッチID が空の行は上の行の BAT001）にある。エラー処理のシートには バッチID が無いが、ファイルの BAT001 のメッセージにする
+    Assert-Equal @('帳票||RPT002', 'メッセージ|BAT001|W1002', 'バッチ||BAT002') @($gaps | ForEach-Object { '{0}|{1}|{2}' -f $_.Kind, $_.Scope, $_.Id })
+    $rpt = @($gaps | Where-Object Id -eq 'RPT002')[0]
+    Assert-Equal '出荷一覧' $rpt.Name
+    Assert-Match $rpt.Place '^DD07_帳票設計書_RPT002_出荷一覧\.xlsx 帳票概要!B1$'
+    Assert-Equal '月次締め' @($gaps | Where-Object Id -eq 'BAT002')[0].Name
+
+    $text = Get-HostText { & $TraceTool -DesignPath $design -TestPath $tests | Out-Null }
+    Assert-Match $text 'テストの網羅: メッセージ 1/2（50%）・帳票 1/2（50%）・バッチ 1/2（50%）'
+    $cover = Read-XlsxSheet -Path $out -Index 2
+    $kinds = @($cover.Rows.Keys | Where-Object { $_ -gt 1 } | ForEach-Object { $cover.Rows[$_]['A'] })
+    Assert-Equal '2|2|2|6' ('{0}|{1}|{2}|{3}' -f @($kinds | Where-Object { $_ -eq '帳票' }).Count, @($kinds | Where-Object { $_ -eq 'バッチ' }).Count, @($kinds | Where-Object { $_ -eq 'メッセージ' }).Count, $kinds.Count)
+}
+
 Test-Case 'Test-Traceability: 行の機能は表の見出しの行（表の上の「テスト対象」の行ではない）の列から読み、機能名より画面ID の列を使う' {
     $dir = New-TestDir
     # 表の上に「テスト対象: 受注管理システム」の行があり、画面ID は最初の行だけに書いたシート

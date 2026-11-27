@@ -37,8 +37,8 @@ Update-TypeData -TypeName 'Traceability.Gap' -DefaultDisplayPropertySet Kind, Sc
 
 $nfkc = [System.Text.NormalizationForm]::FormKC
 
-# テスト仕様書で、行の機能（画面）を表す列の見出し。空の行は上の行の値を引き継ぐ。ID の列（画面ID・機能ID）があれば、名前の列より ID の列を使う
-$functionHeaders = @('機能', '機能名', '機能ID', '対象機能', 'テスト対象', '画面', '画面ID', '画面名', '対象画面', '対象画面ID')
+# テスト仕様書で、行の機能（画面・帳票・バッチ）を表す列の見出し。空の行は上の行の値を引き継ぐ。ID の列（画面ID・機能ID）があれば、名前の列より ID の列を使う
+$functionHeaders = @('機能', '機能名', '機能ID', '対象機能', 'テスト対象', '画面', '画面ID', '画面名', '対象画面', '対象画面ID', '帳票', '帳票ID', '帳票名', 'バッチ', 'バッチID', 'バッチ名')
 # テスト仕様書の表の見出し。これが 2 つ以上ある最初の行を表の見出しの行とする（表の上の「テスト対象: 受注管理システム」のような行は見出しにしない）
 $testHeaders = @('No', 'No.', '項番', 'テストID', 'テストNo', 'ケースID', 'ケースNo', '確認内容', 'テスト内容', 'テスト項目', 'テストケース', '確認項目', '確認観点', '期待結果', '期待値', '手順', 'テスト手順', '操作')
 # テスト仕様書のテストID の列の見出し（前のものほど優先。エビデンスの置き場所（UT-001\エビデンス.xlsx など）を見分けるのに使う）
@@ -223,10 +223,17 @@ foreach ($bookPath in $bookPaths) {
     $fileName = [System.IO.Path]::GetFileName($book.Path)
     foreach ($rule in $ruleList) {
         if ($rule.FileRx -and -not $rule.FileRx.IsMatch($fileName)) { continue }
+        # 範囲（@画面ID など）は 1 ファイル 1 つ。見出しの無いシート（バッチ設計書のエラー処理のシートなど）は、ファイルの最初のシートの値にする
+        $bookScope = ''
+        if ($rule.Scope) { $bookScope = @($book.Sheets.Values | ForEach-Object { Find-LabelValue $_ $rule.Scope.Label } | Where-Object { $_ })[0] }
         foreach ($sheetName in @($book.Sheets.Keys | Where-Object { -not $rule.SheetRx -or $rule.SheetRx.IsMatch($_) })) {
             $grid = $book.Sheets[$sheetName]
             $scope = ''
-            if ($rule.Scope) { $scope = Find-LabelValue $grid $rule.Scope.Label; if (-not $scope) { continue } }
+            if ($rule.Scope) {
+                $scope = Find-LabelValue $grid $rule.Scope.Label
+                if (-not $scope) { $scope = $bookScope }
+                if (-not $scope) { continue }
+            }
             if ($rule.Pattern) {
                 # 正規表現: シートのすべてのセルから ID を集める
                 foreach ($row in $grid.Rows) {
@@ -509,7 +516,7 @@ Write-Host ('抜け: {0} 件' -f $gaps.Count)
 if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 
 # .SYNOPSIS
-#     要件一覧 → 設計書 → テスト仕様書のつながりと、設計の要素（画面・イベント・メッセージ・IF）にテストがあるかを確かめます（Excel 不要）。
+#     要件一覧 → 設計書 → テスト仕様書のつながりと、設計の要素（画面・イベント・メッセージ・IF・帳票・バッチ）にテストがあるかを確かめます（Excel 不要）。
 #
 # .DESCRIPTION
 #     設計書から、網羅のルール（tools\traceability\網羅のルール.csv）に沿って確かめる要素を集め、テスト仕様書に出てくるかを調べます。
@@ -518,8 +525,10 @@ if ($OutXlsx) { Write-Host "結果を保存しました: $OutXlsx" }
 #       イベント   画面設計書のイベントの名前（検索・クリアなど）が、その画面のテストに出てくるか
 #       メッセージ 画面設計書で使うメッセージ ID（E0003 など）が、その画面のテストに出てくるか
 #       IF         IF 定義書の IF ID が、テスト仕様書に出てくるか
+#       帳票       帳票一覧・帳票設計書の帳票 ID が、テスト仕様書に出てくるか
+#       バッチ     バッチ一覧・バッチ設計書のバッチ ID が、テスト仕様書に出てくるか（バッチ設計書で使うメッセージ ID は、そのバッチのテストに）
 #
-#     「その画面のテスト」は、ファイル名・シート名・行（機能・画面の列。空なら上の行の値）に画面 ID があるテスト仕様書のセルです。
+#     「その画面のテスト」は、ファイル名・シート名・行（機能・画面・バッチ・帳票の列。空なら上の行の値）に画面 ID があるテスト仕様書のセルです（バッチも同じ）。
 #     結果が削除・対象外・欠番などの行は、テストとみなしません。
 #     エビデンスの置き場所にあるブック（フォルダかファイルの名前が、ほかのファイルのテストID のもの。UT-001\エビデンス.xlsx など）も、テストとみなしません。
 #     -Requirement で要件一覧を渡すと、要件 ID ごとに設計書とテスト仕様書に出てくるかを確かめ、一覧に無い要件 ID も知らせます。
