@@ -19,6 +19,8 @@ param(
     [ValidateRange(0, 1000)]
     [double] $BundleBelow = 1,
 
+    [string] $CommonTasks,
+
     [string] $Coefficients,
 
     [string] $Rules,
@@ -42,7 +44,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'ExcelTools.psm1') -Force -DisableNameChecking
 
 if (-not $Phases) { $Phases = Join-Path $PSScriptRoot 'wbs/工程の配分.csv' }
-foreach ($name in @('Phases', 'Holidays', 'Coefficients', 'Rules', 'OutXlsx', 'OutCsv')) {
+foreach ($name in @('Phases', 'Holidays', 'Coefficients', 'Rules', 'OutXlsx', 'OutCsv', 'CommonTasks')) {
     $v = Get-Variable -Name $name -ValueOnly
     if ($v) { Set-Variable -Name $name -Value $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($v) }
 }
@@ -92,14 +94,33 @@ foreach ($r in $phaseRows) {
     }
     $kinds = @(([string]$r.'種類') -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $optional = @{}
-    foreach ($column in @('担当', '待ち合わせ', '成果物')) { $optional[$column] = ''; if ($r.PSObject.Properties[$column]) { $optional[$column] = ([string]$r.$column).Trim() } }
+    foreach ($column in @('担当', '待ち合わせ', '先に作る種類', '成果物')) { $optional[$column] = ''; if ($r.PSObject.Properties[$column]) { $optional[$column] = ([string]$r.$column).Trim() } }
     if ($hasOwnerColumn) { $byOther = $optional['担当'] -match '別' } else { $byOther = $name -match 'レビュー' }
     $phaseList.Add([pscustomobject]@{
         Name = $name; Ratio = $ratio; Kinds = $kinds; Index = $phaseList.Count; ByOther = [bool]$byOther
         Wait = ($optional['待ち合わせ'] -match '^(する|あり|○|〇|◯|yes|true|1)$'); Deliverable = $optional['成果物']
+        # 先に作る種類: この工程では、ほかの種類のタスクは、この種類のタスクがすべて終わってから始める（製造でテーブルを先に作るなど）
+        FirstKinds = @($optional['先に作る種類'] -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     })
 }
 if ($phaseList.Count -eq 0) { throw "工程の配分に工程がありません: $Phases" }
+
+# 共通のタスク（-CommonTasks）: タスク名・時期（全体・最初・最後）・工数（人日か、機能の工数の合計に対する %）・担当・成果物
+$commonRows = New-Object System.Collections.Generic.List[object]
+if ($CommonTasks) {
+    foreach ($r in (Read-CsvFile $CommonTasks @('タスク名', '時期', '工数') '共通のタスク')) {
+        $name = ([string]$r.'タスク名').Trim()
+        if (-not $name) { continue }
+        $when = ([string]$r.'時期').Trim()
+        if (@('全体', '最初', '最後') -notcontains $when) { throw ("共通のタスクの「時期」は 全体・最初・最後 のどれかにしてください: {0}（{1}）" -f $when, $name) }
+        $text = ([string]$r.'工数').Normalize([System.Text.NormalizationForm]::FormKC).Trim()
+        $value = 0.0
+        if (-not [double]::TryParse($text.TrimEnd('%'), [System.Globalization.NumberStyles]::Float, $invariant, [ref]$value) -or $value -lt 0) { throw ("共通のタスクの「工数」は人日か % で書いてください: {0}（{1}）" -f $text, $name) }
+        $owner = ''; if ($r.PSObject.Properties['担当']) { $owner = ([string]$r.'担当').Trim() }
+        $deliverable = ''; if ($r.PSObject.Properties['成果物']) { $deliverable = ([string]$r.'成果物').Trim() }
+        $commonRows.Add([pscustomobject]@{ Name = $name; When = $when; Value = $value; Percent = $text.EndsWith('%'); Owner = $owner; Deliverable = $deliverable })
+    }
+}
 
 # ---------------------------------------------------------------- 休日・営業日
 
@@ -267,14 +288,59 @@ if ($namedMembers -eq 1 -and @($units | ForEach-Object { $_.Tasks } | Where-Obje
     Write-Warning '担当が「別の人」の工程（レビューなど）がありますが、担当者が 1 人なので、作った人に割り当てました（-Members に 2 人以上を指定してください）'
 }
 
-# 並べる順（工程ごとの WBS は工程の順、機能ごとの WBS は機能の順）。担当者は、この順で、始められるタスクから手を付ける
+# 先に作る種類: その工程のほかの種類のタスクは、先に作る種類のタスク（同じ工程）がすべて終わってから始める
+foreach ($u in $units) { foreach ($t in $u.Tasks) { $t | Add-Member -NotePropertyName Gate -NotePropertyValue (New-Object System.Collections.Generic.List[object]); $t | Add-Member -NotePropertyName GateNext -NotePropertyValue (New-Object System.Collections.Generic.List[object]); $t | Add-Member -NotePropertyName Pending -NotePropertyValue 0 } }
+foreach ($p in $phaseList) {
+    if ($p.FirstKinds.Count -eq 0) { continue }
+    $phaseTasks = @($units | ForEach-Object { $_.Tasks } | Where-Object { $_.Phase -eq $p })
+    $firstTasks = @($phaseTasks | Where-Object { $p.FirstKinds -contains $_.Unit.Kind })
+    if ($firstTasks.Count -eq 0) { continue }
+    foreach ($t in @($phaseTasks | Where-Object { $p.FirstKinds -notcontains $_.Unit.Kind })) {
+        foreach ($g in $firstTasks) { $t.Gate.Add($g); $g.GateNext.Add($t) }
+    }
+}
+
+# 共通のタスク: 全体（期間の最初から最後まで。担当者の日程は使わない）・最初（担当者の最初のタスク）・最後（ほかのタスクがすべて終わってから）。
+# 工数の % は、機能の工数の合計に対する割合。担当が空なら、最初・最後はいちばん早く手の空く担当者、全体は担当者なし
+$functionDays = [double](($units | ForEach-Object { $_.Days } | Measure-Object -Sum).Sum)
+$firstPhase = [pscustomobject]@{ Name = '共通'; Ratio = 0; Kinds = @(); Index = -1; ByOther = $false; Wait = $false; Deliverable = ''; FirstKinds = @() }
+$lastPhase = [pscustomobject]@{ Name = '共通'; Ratio = 0; Kinds = @(); Index = $phaseList.Count; ByOther = $false; Wait = $true; Deliverable = ''; FirstKinds = @() }
+$commonList = New-Object System.Collections.Generic.List[object]
+foreach ($c in $commonRows) {
+    $days = $c.Value
+    if ($c.Percent) { $days = $functionDays * $c.Value / 100 }
+    $days = [math]::Round($days, 2)
+    $basis = '共通のタスク（{0}）' -f $c.When
+    if ($c.Percent) { $basis = '共通のタスク（{0}。機能の工数の {1}%）' -f $c.When, $c.Value.ToString($invariant) }
+    $member = $c.Owner
+    if (-not $member -and $c.When -ne '全体') { $member = Select-Member $days ''; $load[$member] += $days }
+    if ($member -and -not $memberRate.ContainsKey($member)) { $memberRate[$member] = 1.0; $memberList.Add($member) }
+    $phase = $firstPhase; if ($c.When -eq '最後') { $phase = $lastPhase }
+    $unit = [pscustomobject]@{ Kind = '共通'; Name = $c.Name; Days = $days; Basis = $basis; Seq = -1; Functions = @(); Member = $member; Tasks = (New-Object System.Collections.Generic.List[object]) }
+    $task = [pscustomobject]@{
+        Unit = $unit; Phase = $phase; Name = $c.Name; Days = [double]$days; Member = $member; Previous = $null; Next = $null; Order = 0; ReadyAt = 0.0; StartAt = 0.0; EndAt = 0.0
+        Start = $null; End = $null; Wbs = ''; Gate = (New-Object System.Collections.Generic.List[object]); GateNext = (New-Object System.Collections.Generic.List[object]); Pending = 0
+        When = $c.When; CommonDeliverable = $c.Deliverable
+    }
+    $unit.Tasks.Add($task)
+    $commonList.Add($task)
+}
+
+# 並べる順（工程ごとの WBS は工程の順、機能ごとの WBS は機能の順）。担当者は、この順で、始められるタスクから手を付ける。
+# 共通のタスクの最初のものは前に、最後のものは後ろに置く
 $ordered = New-Object System.Collections.Generic.List[object]
 foreach ($u in $units) { foreach ($t in $u.Tasks) { $ordered.Add($t) } }
 if ($GroupBy -eq 'Phase') { $ordered.Sort([System.Comparison[object]] { param($a, $b) if ($a.Phase.Index -ne $b.Phase.Index) { return $a.Phase.Index.CompareTo($b.Phase.Index) }; return $a.Unit.Seq.CompareTo($b.Unit.Seq) }) }
 else { $ordered.Sort([System.Comparison[object]] { param($a, $b) if ($a.Unit.Seq -ne $b.Unit.Seq) { return $a.Unit.Seq.CompareTo($b.Unit.Seq) }; return $a.Phase.Index.CompareTo($b.Phase.Index) }) }
+foreach ($c in @($commonList | Where-Object { $_.When -eq '最初' })) { $ordered.Insert(0, $c) }
+foreach ($c in @($commonList | Where-Object { $_.When -eq '最後' })) { $ordered.Add($c) }
+# 最初のものは、CSV の順に前から並べる
+$firstCount = @($commonList | Where-Object { $_.When -eq '最初' }).Count
+if ($firstCount -gt 1) { $ordered.Reverse(0, $firstCount) }
 for ($i = 0; $i -lt $ordered.Count; $i++) { $ordered[$i].Order = $i }
 
-# 日程: 同じ機能の工程は順に（レビューが終わってから製造）、待ち合わせの工程は前の工程のタスクがすべて終わってから始める。
+# 日程: 同じ機能の工程は順に（レビューが終わってから製造）、先に作る種類のタスクの後に、ほかの種類のタスク（同じ工程）を始める。
+# 待ち合わせの工程は前の工程のタスクがすべて終わってから始める。
 # 担当者ごとに、始められるタスクのうちいちばん早く始められるもの（同じなら並べる順の早いもの）から入れていく。
 # 1 人日 = 1 営業日（稼働率 50% なら 2 営業日）。時刻は開始日からの営業日（小数）で数える
 $cursor = @{}
@@ -290,25 +356,36 @@ function Add-ReadyTask {
 }
 $remaining = @{}   # 工程 → まだ日程の決まっていないタスクの数
 $phaseEnd = @{}    # 工程 → 決まったタスクのいちばん遅い終わり
-foreach ($p in $phaseList) { $remaining[$p.Index] = 0; $phaseEnd[$p.Index] = 0.0 }
+$allPhases = $phaseList.ToArray() + @($firstPhase, $lastPhase)
+foreach ($p in $allPhases) { $remaining[$p.Index] = 0; $phaseEnd[$p.Index] = 0.0 }
 foreach ($t in $ordered) { $remaining[$t.Phase.Index]++ }
+# 先行のまだ決まっていないタスクの数（同じ機能の前の工程と、先に作る種類のタスク。待ち合わせの工程は、前の工程の分を待ち合わせで見る）
+foreach ($t in $ordered) { $t.Pending = $t.Gate.Count; if ($t.Previous -and -not $t.Phase.Wait) { $t.Pending++ } }
 $waiting = New-Object System.Collections.Generic.List[object]
 function Open-WaitingTasks {
-    #     待ち合わせの工程のタスクのうち、前の工程のタスクがすべて決まったものを始められるようにする
+    #     待ち合わせの工程のタスクのうち、前の工程のタスクがすべて決まり、先に作る種類のタスクも決まったものを始められるようにする
     for ($i = 0; $i -lt $waiting.Count; $i++) {
         $t = $waiting[$i]
-        $before = @($phaseList | Where-Object { $_.Index -lt $t.Phase.Index })
+        if ($t.Pending -gt 0) { continue }
+        $before = @($allPhases | Where-Object { $_.Index -lt $t.Phase.Index })
         if (@($before | Where-Object { $remaining[$_.Index] -gt 0 }).Count -gt 0) { continue }
-        $at = 0.0
+        $at = $t.ReadyAt
         foreach ($p in $before) { if ($phaseEnd[$p.Index] -gt $at) { $at = $phaseEnd[$p.Index] } }
         Add-ReadyTask $t $at
         $waiting.RemoveAt($i)
         $i--
     }
 }
+function Complete-Predecessor {
+    #     先行のタスク（Task）の日程が決まった: 後のタスク（Next）の待ちを減らし、待ちが無くなれば始められるようにする
+    param($Task, $Next)
+    $Next.Pending--
+    if ($Task.EndAt -gt $Next.ReadyAt) { $Next.ReadyAt = $Task.EndAt }
+    if ($Next.Pending -eq 0 -and -not $Next.Phase.Wait) { Add-ReadyTask $Next $Next.ReadyAt }
+}
 foreach ($t in $ordered) {
     if ($t.Phase.Wait) { $waiting.Add($t) }
-    elseif (-not $t.Previous) { Add-ReadyTask $t 0.0 }
+    elseif ($t.Pending -eq 0) { Add-ReadyTask $t 0.0 }
 }
 Open-WaitingTasks
 for ($n = 0; $n -lt $ordered.Count; $n++) {
@@ -322,7 +399,7 @@ for ($n = 0; $n -lt $ordered.Count; $n++) {
             if ($at -le $cursor[$m] + $eps) { break }
         }
     }
-    if ($null -eq $best) { throw '日程を決められないタスクがあります（工程の配分の待ち合わせを確かめてください）' }
+    if ($null -eq $best) { throw '日程を決められないタスクがあります（工程の配分の待ち合わせ・先に作る種類を確かめてください）' }
     $t = $best
     $ready[$t.Member].RemoveAt($bestIndex)
     $t.StartAt = $bestAt
@@ -330,13 +407,23 @@ for ($n = 0; $n -lt $ordered.Count; $n++) {
     $cursor[$t.Member] = $t.EndAt
     $remaining[$t.Phase.Index]--
     if ($t.EndAt -gt $phaseEnd[$t.Phase.Index]) { $phaseEnd[$t.Phase.Index] = $t.EndAt }
-    if ($t.Next -and -not $t.Next.Phase.Wait) { Add-ReadyTask $t.Next $t.EndAt }
-    if ($remaining[$t.Phase.Index] -eq 0 -and $waiting.Count -gt 0) { Open-WaitingTasks }
+    $openWaiting = $remaining[$t.Phase.Index] -eq 0
+    if ($t.Next -and -not $t.Next.Phase.Wait) { Complete-Predecessor $t $t.Next }
+    foreach ($g in $t.GateNext) { Complete-Predecessor $t $g; if ($g.Phase.Wait -and $g.Pending -eq 0) { $openWaiting = $true } }
+    if ($openWaiting -and $waiting.Count -gt 0) { Open-WaitingTasks }
     $first = [int][math]::Floor($t.StartAt + $eps)
     $last = $first
     if ($t.EndAt - $t.StartAt -gt $eps) { $last = [math]::Max($first, [int][math]::Ceiling($t.EndAt - $eps) - 1) }
     $t.Start = Get-BusinessDay $first
     $t.End = Get-BusinessDay $last
+}
+# 全体の共通のタスク: 期間の最初の営業日から、いちばん遅いタスクの終わりまで
+$allEnd = $null
+foreach ($t in $ordered) { if ($null -eq $allEnd -or $t.End -gt $allEnd) { $allEnd = $t.End } }
+foreach ($c in @($commonList | Where-Object { $_.When -eq '全体' })) {
+    $c.Start = Get-BusinessDay 0
+    $c.End = $allEnd
+    if (-not $c.End) { $c.End = $c.Start }
 }
 
 # ---------------------------------------------------------------- WBS の行
@@ -381,9 +468,16 @@ else {
         foreach ($t in @($u.Tasks | Sort-Object { $_.Phase.Index })) { $c++; Add-WbsRow ('{0}.{1}' -f $n, $c) $t.Name @($t) '' $false $t.Phase.Deliverable }
     }
 }
+# 共通のタスクは、最後の「共通」のまとまりにする（CSV の順）
+if ($commonList.Count -gt 0) {
+    $n++
+    Add-WbsRow ([string]$n) '共通' $commonList.ToArray() '' $true ''
+    $c = 0
+    foreach ($t in $commonList) { $c++; Add-WbsRow ('{0}.{1}' -f $n, $c) $t.Name @($t) $t.Unit.Basis $false $t.CommonDeliverable }
+}
 
-# 先行タスク（WBS 番号）: 同じ機能の前の工程。待ち合わせの工程は、前の工程のすべて（工程ごとの WBS は工程の番号、機能ごとの WBS はタスクの番号）。
-# Measure-Progress.ps1 は、この列から遅れを後のタスクに送って完了見込みを出す
+# 先行タスク（WBS 番号）: 同じ機能の前の工程と、先に作る種類のタスク（同じ工程）。待ち合わせの工程（と最後の共通のタスク）は、前の工程のすべて
+# （工程ごとの WBS は工程の番号、機能ごとの WBS はタスクの番号）。Measure-Progress.ps1 は、この列から遅れを後のタスクに送って完了見込みを出す
 foreach ($item in $taskRows) {
     $t = $item.Task
     $before = New-Object System.Collections.Generic.List[string]
@@ -392,6 +486,7 @@ foreach ($item in $taskRows) {
         else { foreach ($o in $ordered) { if ($o.Phase.Index -lt $t.Phase.Index) { $before.Add($o.Wbs) } } }
     }
     elseif ($t.Previous) { $before.Add($t.Previous.Wbs) }
+    foreach ($g in $t.Gate) { if (-not $before.Contains($g.Wbs)) { $before.Add($g.Wbs) } }
     $item.Row.Predecessors = $before -join ','
 }
 
@@ -466,8 +561,12 @@ if ($OutCsv) {
 }
 
 Write-Host ''
-$total = [math]::Round(($ordered | Measure-Object Days -Sum).Sum, 2)
-Write-Host ('機能 {0}・工程 {1}・タスク {2}。予定工数 合計 {3} 人日' -f $functions.Count, @($ordered | ForEach-Object { $_.Phase.Name } | Select-Object -Unique).Count, $ordered.Count, $total)
+$functionTasks = @($ordered | Where-Object { $_.Unit.Kind -ne '共通' })
+$total = [math]::Round(($functionTasks | Measure-Object Days -Sum).Sum, 2)
+Write-Host ('機能 {0}・工程 {1}・タスク {2}。予定工数 合計 {3} 人日' -f $functions.Count, @($functionTasks | ForEach-Object { $_.Phase.Name } | Select-Object -Unique).Count, $functionTasks.Count, $total)
+if ($commonList.Count -gt 0) {
+    Write-Host ('共通のタスク {0} 件: {1}（全体のタスクは担当者の日程に入れていません。兼務の分は稼働率で指定してください）' -f $commonList.Count, (@($commonList | ForEach-Object { '{0} {1} 人日（{2}）' -f $_.Name, $_.Days, $_.When }) -join '・'))
+}
 if ($bundleNotes.Count -gt 0) { Write-Host ('{0} 人日に満たない機能は、同じ種類をまとめて 1 つのタスクにしました: {1}（-BundleBelow 0 でまとめません）' -f $BundleBelow.ToString($invariant), ($bundleNotes -join '・')) }
 if ($memberRows.Count -gt 0) {
     $named = @($memberRows | Where-Object { $_.Member })
@@ -520,12 +619,19 @@ if ($OutCsv) { Write-Host "CSV を保存しました: $OutCsv" }
 #     前の版の設計書のフォルダ。新規と変更の機能だけを、変更の工数（Measure-DesignSize.ps1 の -Baseline）で WBS にします（改修）。
 #
 # .PARAMETER Phases
-#     工程の配分の CSV（工程・配分・種類。省けるもの: 担当・待ち合わせ・成果物）。既定は tools\wbs\工程の配分.csv。
+#     工程の配分の CSV（工程・配分・種類。省けるもの: 担当・待ち合わせ・先に作る種類・成果物）。既定は tools\wbs\工程の配分.csv。
 #     担当が「別の人」の工程は作った人以外に割り当て（担当の列が無ければ、名前にレビューのある工程）、待ち合わせが「する」の工程は
-#     前の工程のタスクがすべて終わってから始めます（結合テストなど）。成果物は WBS の成果物の列に書きます。
+#     前の工程のタスクがすべて終わってから始めます（結合テストなど）。先に作る種類（テーブルなど。| 区切り）を書いた工程は、ほかの種類の
+#     タスクを、その種類のタスクがすべて終わってから始めます（既定は、製造でテーブルを先に作る）。成果物は WBS の成果物の列に書きます。
 #
 # .PARAMETER Holidays
 #     休日の CSV（1 列目が日付）。内閣府の「国民の祝日」の CSV（syukujitsu.csv）をそのまま使えます（Measure-Progress.ps1 と同じ）。
+#
+# .PARAMETER CommonTasks
+#     共通のタスク（会議・プロジェクト管理・環境の準備など）の CSV（タスク名・時期・工数・担当・成果物）。WBS の最後の「共通」のまとまりにします。
+#     時期: 全体（期間の最初から最後まで。担当者の日程には入れない）・最初（担当者の最初のタスク）・最後（ほかのタスクがすべて終わってから）。
+#     工数は人日か、機能の工数の合計に対する %（5%）。担当が空なら、最初・最後はいちばん早く手の空く担当者、全体は担当者なし。
+#     ひな形は tools\wbs\共通のタスク_ひな形.csv。
 #
 # .PARAMETER BundleBelow
 #     工数がこの人日に満たない機能は、同じ種類のものを順に、合わせてこの人日以上になるまでまとめて 1 つのタスクにします（既定 1。0 でまとめない）。
