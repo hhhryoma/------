@@ -80,6 +80,35 @@ Test-Case 'New-QualityReport: 各ツールを実行し、指標ごとの実績�
     Assert-True (@($todoText | Where-Object { $_ -like 'レビュー|DD05_メッセージ一覧*|未レビュー*' }).Count -eq 1) ($todoText -join "`n")
 }
 
+Test-Case 'New-QualityReport: -BasicDesign で基本設計書を渡すと、要件を 基本設計 → 詳細設計 → テスト の順に追い、詳細設計に落ちた要件の割合を出す' {
+    $dir = New-TestDir
+    New-ReportData $dir
+    $design = Join-Path $dir '詳細設計'
+    Copy-Item -LiteralPath $reportDesignDir -Destination $design -Recurse
+    New-ReportBook (Join-Path $design 'DD00_要件対応表.xlsx') '対応表' @('要件', '画面ID') @(, @('REQ-001', 'SCR001'))
+    # 名前で基本設計書と分からないフォルダ。REQ-003 は基本設計書にだけある
+    $basic = Join-Path $dir '上流工程'
+    New-Item -ItemType Directory -Path $basic | Out-Null
+    New-ReportBook (Join-Path $basic '機能一覧.xlsx') '機能一覧' @('機能ID', '機能名', '要件') @(, @('F01', '受注検索', 'REQ-001'), @('F02', '出荷指示', 'REQ-003'))
+    $out = Join-Path $dir '報告'
+    $r = @(& $ReportTool -OutDir $out -DesignPath $design -BasicDesign $basic -TestPath (Join-Path $dir 'テスト') -Requirement (Join-Path $dir '要件一覧.csv') -AsOf '2026-10-20' 3>$null 6>$null)
+    $got = @{}
+    foreach ($m in $r) { $got[$m.Name] = '{0}|{1}' -f $m.Value, $m.Judgement }
+    Assert-Equal '0.5|×' $got['設計とテストのある要件の割合'] 'REQ-001 は基本設計・詳細設計・テストのすべてにある'
+    Assert-Equal '0.5|×' $got['詳細設計に落ちた要件の割合'] 'REQ-003 は詳細設計に落ちていない'
+    $reqs = Read-XlsxSheet -Path (Join-Path $out '詳細\網羅.xlsx') -Index 3
+    Assert-Equal 'REQ-003|機能一覧.xlsx||詳細設計・テストなし' ('{0}|{1}|{2}|{3}' -f $reqs.Rows[3]['A'], $reqs.Rows[3]['C'], $reqs.Rows[3]['D'], $reqs.Rows[3]['G'])
+    $metrics = Read-XlsxSheet -Path (Join-Path $out '品質評価_20261020.xlsx')
+    $row = @($metrics.Rows.Values | Where-Object { $_['B'] -eq '詳細設計に落ちた要件の割合' })[0]
+    Assert-Match $row['E'] '^基本設計書にある 2 件のうち、詳細設計書にもある 1 件。'
+    $scope = Read-XlsxSheet -Path (Join-Path $out '品質評価_20261020.xlsx') -Index 3
+    Assert-True (@($scope.Rows.Values | Where-Object { $_['A'] -eq '基本設計書' -and $_['B'] -eq $basic }).Count -eq 1) '対象のシートに基本設計書'
+
+    # 基本設計書を渡さなければ、これまでどおり（詳細設計に落ちた要件の割合は出さない）
+    $r = @(& $ReportTool -OutDir (Join-Path $dir '報告2') -DesignPath $design -TestPath (Join-Path $dir 'テスト') -Requirement (Join-Path $dir '要件一覧.csv') -AsOf '2026-10-20' 3>$null 6>$null)
+    Assert-True (@($r | Where-Object Name -eq '詳細設計に落ちた要件の割合').Count -eq 0) '基本設計書が無いとき'
+}
+
 Test-Case 'New-QualityReport: 失敗したツールがあっても、ほかのツールの結果でまとめる' {
     $dir = New-TestDir
     New-ReportData $dir

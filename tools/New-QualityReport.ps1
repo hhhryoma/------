@@ -6,6 +6,8 @@ param(
 
     [string[]] $DesignPath,
 
+    [string[]] $BasicDesign,
+
     [string[]] $Findings,
 
     [string[]] $AiReview,
@@ -469,6 +471,8 @@ try {
         $file = Join-Path $detailDir '網羅.xlsx'
         $args4 = @{ DesignPath = $DesignPath; TestPath = $TestPath; OutXlsx = $file } + $common
         if ($Requirement) { $args4['Requirement'] = $Requirement }
+        # 基本設計書（名前で見分けられないもの）。基本設計書と詳細設計書の両方があれば、要件を 基本設計 → 詳細設計 → テスト の順に追う
+        if ($BasicDesign) { $args4['BasicDesign'] = $BasicDesign }
         # テスト仕様書のフォルダに置いた障害管理表を、テストとして読まない（Measure-TestQuality と同じ）
         if ($BugList) { $args4['BugList'] = $BugList }
         $gaps = Invoke-Tool 'Test-Traceability' $args4
@@ -479,9 +483,17 @@ try {
             if ($reqs.Count -gt 0) {
                 $covered = @($reqs | Where-Object { $_['判定'] -eq '○' }).Count
                 Add-Metric '網羅' '設計とテストのある要件の割合' ([double]($covered / $reqs.Count)) ('{0} / {1} 件' -f $covered, $reqs.Count) $file -Rate
+                # 基本設計と詳細設計を分けて追ったとき（要件のシートに基本設計書・詳細設計書の列がある）: 基本設計書にある要件のうち、詳細設計書にもあるもの
+                if ($reqs[0].ContainsKey('基本設計書') -and $reqs[0].ContainsKey('詳細設計書')) {
+                    $inBasic = @($reqs | Where-Object { ([string]$_['基本設計書']).Trim() })
+                    if ($inBasic.Count -gt 0) {
+                        $carried = @($inBasic | Where-Object { ([string]$_['詳細設計書']).Trim() }).Count
+                        Add-Metric '網羅' '詳細設計に落ちた要件の割合' ([double]($carried / $inBasic.Count)) ('基本設計書にある {1} 件のうち、詳細設計書にもある {0} 件' -f $carried, $inBasic.Count) $file -Rate
+                    }
+                }
             }
         }
-        # 種類（画面・イベント・メッセージ・IF）ごとに、網羅のシートに出てきた順に並べる
+        # 種類（画面・イベント・メッセージ・IF・帳票・バッチ）ごとに、網羅のシートに出てきた順に並べる
         $coverage = Read-SheetTable $file '網羅'
         foreach ($kind in @($coverage | ForEach-Object { $_['種類'] } | Select-Object -Unique)) {
             $group = @($coverage | Where-Object { $_['種類'] -eq $kind })
@@ -496,7 +508,9 @@ try {
 
     if ($DesignPath) {
         $file = Join-Path $detailDir '設計書の整合性.xlsx'
-        $issues = Invoke-Tool 'Test-DesignConsistency' (@{ Path = $DesignPath; OutXlsx = $file } + $common)
+        $args6 = @{ Path = $DesignPath; OutXlsx = $file } + $common
+        if ($BasicDesign) { $args6['BasicDesign'] = $BasicDesign }
+        $issues = Invoke-Tool 'Test-DesignConsistency' $args6
     }
     # 設計書から定義も参照も読めなかった（定義と参照のシートが空）ときは、食い違いを 0 件として ○ にせず、失敗にする
     if ($null -ne $issues -and (Read-SheetTable $file '定義と参照').Count -eq 0) { Add-Failure 'Test-DesignConsistency' '設計書から定義も参照も読めませんでした。参照のルールのファイル名・見出しを確かめてください'; $issues = $null }
@@ -629,7 +643,7 @@ for ($i = 0; $i -lt $actions.Count; $i++) {
     $actionRows.Add(@{ Values = @($a.Area, $a.Target, $a.Content, $a.Action, $owner, $due) })
 }
 $scope = New-Object System.Collections.Generic.List[object]
-foreach ($pair in @(@('時点', $AsOf.ToString('yyyy/MM/dd', $invariant)), @('設計書', ($DesignPath -join '、')), @('レビューの指摘管理表', ($Findings -join '、')), @('レビュー記録', ($ReviewLog -join '、')), @('テスト仕様書', ($TestPath -join '、')), @('障害管理表', ($BugList -join '、')), @('要件一覧', ($Requirement -join '、')), @('実行したツール', ($ran -join '、')), @('失敗したツール', ($failed -join '、')))) {
+foreach ($pair in @(@('時点', $AsOf.ToString('yyyy/MM/dd', $invariant)), @('設計書', ($DesignPath -join '、')), @('基本設計書', ($BasicDesign -join '、')), @('レビューの指摘管理表', ($Findings -join '、')), @('レビュー記録', ($ReviewLog -join '、')), @('テスト仕様書', ($TestPath -join '、')), @('障害管理表', ($BugList -join '、')), @('要件一覧', ($Requirement -join '、')), @('実行したツール', ($ran -join '、')), @('失敗したツール', ($failed -join '、')))) {
     if ($pair[1]) { $scope.Add(@{ Values = $pair }) }
 }
 $reportSheets = @(
@@ -735,9 +749,10 @@ if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 
 #       -BugList / -Findings  Measure-DefectRemoval.ps1（摘出すべき工程までに見つかった割合・流出）
 #       -Findings と -BugList  Measure-ReviewEffectiveness.ps1（設計工程の摘出率・レビューで見逃した設計書）
 #       -AiReview と -Findings  Compare-ReviewFindings.ps1（AI と人の指摘の一致率・観点表への反映案。観点別の一致率のシート）
-#       -DesignPath と -TestPath  Test-Traceability.ps1（テストのある画面・イベント・メッセージ・IF の割合。-Requirement で要件も。
-#                                 -BugList も渡し、テスト仕様書のフォルダの障害管理表をテストとみなさない）
-#       -DesignPath      Test-DesignConsistency.ps1（設計書どうしの参照の食い違い）
+#       -DesignPath と -TestPath  Test-Traceability.ps1（テストのある画面・イベント・メッセージ・IF・帳票・バッチ の割合。-Requirement で要件も。
+#                                 -BugList も渡し、テスト仕様書のフォルダの障害管理表をテストとみなさない。
+#                                 基本設計書と詳細設計書の両方があれば、詳細設計に落ちた要件の割合も）
+#       -DesignPath      Test-DesignConsistency.ps1（設計書どうしの参照の食い違い。基本設計書と詳細設計書の違いも）
 #
 #     「要対応」のシートには、基準から外れた設計書・機能、要対応のゾーン、流出のあった工程、テストの抜け、
 #     規模が無いため全体のテスト密度・バグ密度に入れていない機能を書きます（担当・期限は空欄）。
@@ -752,6 +767,10 @@ if (@($rows | Where-Object { @('×', '△') -contains $_.Judgement }).Count -gt 
 #
 # .PARAMETER DesignPath
 #     設計書のフォルダ（整合性・網羅のチェックと、規模の分母に使う）。
+#
+# .PARAMETER BasicDesign
+#     基本設計書のフォルダ・ファイル（名前で基本設計書と見分けられないとき）。Test-Traceability.ps1・Test-DesignConsistency.ps1 に渡します。
+#     基本設計書と詳細設計書の両方があれば、要件を 基本設計 → 詳細設計 → テスト の順に追い、詳細設計に落ちた要件の割合を出します。
 #
 # .PARAMETER Findings
 #     レビューの指摘管理表のファイル・フォルダ。

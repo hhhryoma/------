@@ -231,7 +231,7 @@
         }
         @{
             Id = 'Trace'; Label = '要件・設計・テストのつながりを見る'; Group = 'テスト'; Tool = 'Test-Traceability.ps1'
-            Summary = '要件一覧 → 設計書 → テスト仕様書のつながりと、画面・イベント・メッセージ・IF にテストがあるか（テストの抜け）を確かめます。基本設計書と詳細設計書の両方があれば、要件を 基本設計 → 詳細設計 → テスト の順に追います。'
+            Summary = '要件一覧 → 設計書 → テスト仕様書のつながりと、画面・イベント・メッセージ・IF・帳票・バッチ にテストがあるか（テストの抜け）を確かめます。基本設計書と詳細設計書の両方があれば、要件を 基本設計 → 詳細設計 → テスト の順に追います。'
             Main = @('DesignPath', 'TestPath', 'Requirement', 'BasicDesign', 'OutXlsx')
             Labels = @{ DesignPath = '設計書のフォルダ'; TestPath = 'テスト仕様書のフォルダ'; Requirement = '要件一覧（無くてもよい）'; BasicDesign = '基本設計書のフォルダ（名前で基本設計書と分からないとき）'; OutXlsx = '結果の保存先' }
             Output = @('OutXlsx'); OutputName = '網羅'; Keywords = 'トレーサビリティ 網羅 抜け'
